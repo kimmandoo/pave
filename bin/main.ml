@@ -693,12 +693,13 @@ let () =
                        rows in
                      [Printf.sprintf "Total · %d input / %d output tokens"
                         total.input_tokens total.output_tokens] @
-                     List.map (fun ((provider, model), (tokens : Pave.Protocol.usage)) ->
-                       Printf.sprintf "%s · %d in / %d out"
-                         (Pave.Session_tree.first_line (provider ^ "/" ^ model))
-                         tokens.input_tokens tokens.output_tokens) rows) in
+                     List.concat_map (fun ((provider, model), (tokens : Pave.Protocol.usage)) ->
+                       [Pave.Session_tree.first_line (provider ^ "/" ^ model);
+                        Printf.sprintf "%d input · %d output"
+                          tokens.input_tokens tokens.output_tokens]) rows) in
           let lines = lines @
-            ["Only native Ollama reports tokens · context limit/cost untracked"] in
+            ["Ollama-reported only"; "Other providers untracked";
+             "Limits/cost untracked"] in
           (match !ui with
            | Some screen -> Tui.events screen lines
            | None -> List.iter on_event lines)
