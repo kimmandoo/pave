@@ -49,6 +49,17 @@ let () =
     ~model:"gpt-test" [] []) = `Bool true);
   let response = completed [ message [ text "Hello "; text "world" ] ] in
   assert (Openai_responses_wire.parse_completion response = assistant (Some "Hello world") []);
+  let reported = `Assoc [
+    "input_tokens", `Int 21; "output_tokens", `Int 9;
+    "output_tokens_details", `Assoc ["reasoning_tokens", `Int 4] ] in
+  assert (Openai_responses_wire.usage (`Assoc ["usage", reported]) =
+    Some { Protocol.input_tokens = 21; output_tokens = 9 });
+  assert (Openai_responses_wire.usage response = None);
+  assert (Openai_responses_wire.usage (`Assoc [
+    "usage", `Assoc ["input_tokens", `Int 21] ]) = None);
+  assert (Openai_responses_wire.usage (`Assoc [
+    "usage", `Assoc ["input_tokens", `Int 21;
+      "output_tokens", `Int (-1)] ]) = None);
   assert (Openai_responses_wire.parse_completion (completed [
     item "reasoning" [ "status", `String "completed" ];
     message [ text "Checking" ]; function_call "call_A" "read_file" {|{"path":"alpha.txt"}|} ])
