@@ -33,6 +33,7 @@ type t = {
   mutable previous : I.t array option;
   mutable status : string;
   mutable activity : string option;
+  mutable activity_started : float option;
   mutable usage_badge : string option;
   mutable queue : int;
   mutable last_paint : float;
@@ -180,8 +181,15 @@ let paint t =
     | None, None -> min 4 (max 1 (min (rows - 4) (Array.length editor_lines))) in
   let body_height = max 0 (rows - 4 - editor_height) in
   let activity = match t.activity with
-    | Some state -> " · " ^ single_line state
-    | None -> "" in
+    | None -> ""
+    | Some state ->
+        let elapsed = match t.activity_started with
+          | Some since -> max 0 (int_of_float (Unix.gettimeofday () -. since))
+          | None -> 0 in
+        " · " ^ single_line state ^
+        (if elapsed = 0 then "" else if elapsed < 60 then
+          Printf.sprintf " · %ds" elapsed
+        else Printf.sprintf " · %dm%02ds" (elapsed / 60) (elapsed mod 60)) in
   let queued = if t.queue = 0 then "" else
     Printf.sprintf " · %d queued" t.queue in
   let usage = match t.activity, t.usage_badge with
@@ -405,7 +413,8 @@ let create ~root ~model ~session =
     transcript = Transcript_view.create (); scroll = 0; chooser = None;
     revision = 0; body_cache = None; layout_cache = None;
     previous = None; status = idle_status; activity = None;
-    usage_badge = None; queue = 0; last_paint = 0.; paste = false } in
+    activity_started = None; usage_badge = None; queue = 0;
+    last_paint = 0.; paste = false } in
   (try paint t with exn -> Notty_unix.Term.release term; raise exn);
   t
 
@@ -436,6 +445,10 @@ let set_session t session =
 
 let set_activity t activity =
   if t.activity <> activity then (
+    (match t.activity, activity with
+     | None, Some _ -> t.activity_started <- Some (Unix.gettimeofday ())
+     | _, None -> t.activity_started <- None
+     | Some _, Some _ -> ());
     t.activity <- activity;
     paint t)
 let set_usage t = function
@@ -532,6 +545,16 @@ let repaint_after_key t =
   if (not t.paste && not (Terminal_input.pending t.input))
     || Unix.gettimeofday () -. t.last_paint >= 0.1 then paint t
 
+let rec next_input ?wake_fd t =
+  let timeout = match t.activity_started with
+    | None -> None
+    | Some since ->
+        let elapsed = Unix.gettimeofday () -. since in
+        Some (max 0. (1. -. (elapsed -. floor elapsed))) in
+  match Terminal_input.event ?wake_fd ?timeout t.input with
+  | `Tick -> paint t; next_input ?wake_fd t
+  | event -> event
+
 let read ?wake_fd ?on_wake ?on_interrupt ?on_completion t =
   let measure cluster = I.width (I.string text_attr cluster) in
   let field_width () =
@@ -545,7 +568,7 @@ let read ?wake_fd ?on_wake ?on_interrupt ?on_completion t =
     | Some _ -> Pave.Composer.search_insert t.editor value);
     changed () in
   let rec loop () =
-    match Terminal_input.event ?wake_fd t.input with
+    match next_input ?wake_fd t with
     | `End -> None
     | `Wake ->
         (match on_wake with Some callback -> callback ()
@@ -775,7 +798,7 @@ let choose ?(allow_custom = false) ?wake_fd ?on_wake ?dynamic t ~title ~choices 
     paint t) (fun () ->
     paint t;
     let rec loop () =
-      match Terminal_input.event ?wake_fd t.input with
+      match next_input ?wake_fd t with
       | `End -> None
       | `Wake ->
           (match on_wake with Some callback -> callback ()
@@ -877,7 +900,7 @@ let confirm t command =
     change_transcript t (fun () -> Transcript_view.approval t.transcript command);
     t.scroll <- 0;
     alert t "SHELL: y=yes · other=no";
-    let rec decision () = match Terminal_input.event t.input with
+    let rec decision () = match next_input t with
       | `Resize _ -> if fits () then (paint t; decision ()) else false
       | `Key (`ASCII ('y' | 'Y'), []) -> true
       | _ -> false in
