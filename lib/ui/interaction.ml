@@ -13,6 +13,7 @@ type command =
   | Fork of string
   | Tools of string option
   | Context
+  | Usage
   | Hotkeys
   | Entries
   | Prompt of string
@@ -20,7 +21,7 @@ type command =
 
 type action =
   | A_login | A_model | A_settings | A_new | A_resume | A_cancel
-  | A_entries | A_tree | A_tools | A_context | A_hotkeys | A_branch | A_fork
+  | A_entries | A_tree | A_tools | A_context | A_usage | A_hotkeys | A_branch | A_fork
   | A_compact | A_help | A_quit
 
 type shortcut = { name : string; usage : string; summary : string; action : action }
@@ -34,6 +35,7 @@ let commands = [
   { name = "/cancel"; usage = ""; summary = "Cancel the active turn"; action = A_cancel };
   { name = "/tools"; usage = "[NAME]"; summary = "List or inspect enabled tools"; action = A_tools };
   { name = "/context"; usage = ""; summary = "Inspect active model and saved context"; action = A_context };
+  { name = "/usage"; usage = ""; summary = "Inspect reported token usage by model"; action = A_usage };
   { name = "/hotkeys"; usage = ""; summary = "Show interactive terminal shortcuts"; action = A_hotkeys };
   { name = "/entries"; usage = ""; summary = "List journal entries"; action = A_entries };
   { name = "/tree"; usage = ""; summary = "Search journal ancestry and branch"; action = A_tree };
@@ -113,6 +115,7 @@ let parse line =
     | Some A_fork -> Fork (require_path name (Option.value ~default:"" argument))
     | Some A_tools -> Tools (single name argument)
     | Some A_context -> no_args (); Context
+    | Some A_usage -> no_args (); Usage
     | Some A_hotkeys -> no_args (); Hotkeys
     | Some A_entries -> no_args (); Entries
     | Some A_tree -> no_args (); Tree

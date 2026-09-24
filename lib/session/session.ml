@@ -170,6 +170,21 @@ let usage t =
          | Some previous -> Some (Protocol.add_usage previous tokens))
     | Message _ | Compaction _ | Model _ | Branch -> total)
     None (branch_entries t)
+module Usage_models = Map.Make (struct
+  type t = string * string
+  let compare = Stdlib.compare
+end)
+
+let usage_by_model t =
+  let models = List.fold_left (fun models entry -> match entry.kind with
+    | Usage { provider; model; tokens } ->
+        let key = provider, model in
+        Usage_models.update key (function
+          | None -> Some tokens
+          | Some previous -> Some (Protocol.add_usage previous tokens)) models
+    | Message _ | Compaction _ | Model _ | Branch -> models)
+    Usage_models.empty (branch_entries t) in
+  Usage_models.bindings models
 let messages entries =
   List.filter_map (fun entry -> match entry.kind with
     | Message message -> Some message
