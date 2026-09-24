@@ -104,3 +104,11 @@ let parse_completion json =
       | `String reason -> raise (Invalid_response ("unexpected finish_reason: " ^ reason))
       | _ -> raise (Invalid_response "missing finish_reason"))
   | _ -> raise (Invalid_response "missing choices")
+
+let completion_usage json =
+  let reported = member "usage" json in
+  match member "prompt_tokens" reported, member "completion_tokens" reported with
+  | `Int input_tokens, `Int output_tokens
+    when input_tokens >= 0 && output_tokens >= 0 ->
+      Some { input_tokens; output_tokens }
+  | _ -> None

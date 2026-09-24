@@ -16,6 +16,17 @@ let () =
     "finish_reason", `String "tool_calls";
     "message", message_to_json assistant ] ] ] in
   assert (parse_completion completed = assistant);
+  let counted = `Assoc [ "usage", `Assoc [
+    "prompt_tokens", `Int 19; "completion_tokens", `Int 7;
+    "prompt_tokens_details", `Assoc [ "cached_tokens", `Int 5 ];
+    "completion_tokens_details", `Assoc [ "reasoning_tokens", `Int 2 ] ] ] in
+  assert (completion_usage counted =
+    Some { input_tokens = 19; output_tokens = 7 });
+  assert (completion_usage completed = None);
+  assert (completion_usage (`Assoc [ "usage", `Assoc [
+    "prompt_tokens", `Int 5; "completion_tokens", `Int (-1) ] ]) = None);
+  assert (completion_usage (`Assoc [ "usage", `Assoc [
+    "prompt_tokens", `Int 5 ] ]) = None);
   expect_invalid (fun () -> parse_completion (`Assoc [ "choices", `List [ `Assoc [
     "finish_reason", `String "length";
     "message", message_to_json assistant ] ] ]));

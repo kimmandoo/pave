@@ -38,6 +38,27 @@ let () =
   String.iter (fun c -> Openai_stream.feed parser (String.make 1 c)) wire;
   assert (List.rev !deltas = [ "Hel"; "lo" ]);
   assert ((Openai_stream.finish parser).content = Some "Hello");
+  let counted = Openai_stream.create ~on_text:(fun _ -> ()) in
+  let usage = `Assoc [
+    "prompt_tokens", `Int 19; "completion_tokens", `Int 7 ] in
+  let usage_only = event (Yojson.Basic.to_string (`Assoc [
+    "choices", `List []; "usage", usage ])) in
+  Openai_stream.feed counted
+    (usage_only ^ event (chunk (text "metered")) ^
+     event (chunk ~finish:(`String "stop") (`Assoc [])) ^
+     usage_only ^ done_event);
+  ignore (Openai_stream.finish counted);
+  assert (Openai_stream.usage counted =
+    Some { Protocol.input_tokens = 19; output_tokens = 7 });
+  invalid (fun () -> stream
+    (event (chunk (text "metered")) ^
+     event (chunk ~finish:(`String "stop") (`Assoc [])) ^
+     usage_only ^ usage_only ^ done_event));
+  let incomplete = Openai_stream.create ~on_text:(fun _ -> ()) in
+  Openai_stream.feed incomplete
+    (usage_only ^ event (chunk (text "no final usage")) ^ done_event);
+  ignore (Openai_stream.finish incomplete);
+  assert (Openai_stream.usage incomplete = None);
   let wire =
     event (chunk (calls [
       call 1 ~id:"call-" ~name:"wri" ~arguments:"{\"value\":" ();

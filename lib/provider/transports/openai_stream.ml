@@ -16,6 +16,7 @@ type t = {
   mutable done_seen : bool;
   mutable finish_reason : string option;
   mutable content_seen : bool;
+  mutable usage : Protocol.usage option;
   content : Buffer.t;
   calls : (int, call) Hashtbl.t;
   mutable response_bytes : int;
@@ -114,10 +115,16 @@ let parse_chunk t json =
   (match field "error" json with
    | `Null -> ()
    | _ -> invalid (error_text json));
-  match field "choices" json with
-  | `List [] -> () (* Optional usage-only chunk after the final choice. *)
-  | `List [ choice ] -> parse_choice t choice
-  | _ -> invalid "missing or ambiguous completion choices"
+  (match field "choices" json with
+   | `List [] -> () (* Optional usage-only chunk after the final choice. *)
+   | `List [ choice ] -> parse_choice t choice
+   | _ -> invalid "missing or ambiguous completion choices");
+  if t.finish_reason <> None then
+    match Protocol.completion_usage json with
+    | None -> ()
+    | Some usage ->
+        if t.usage <> None then invalid "duplicate completion usage";
+        t.usage <- Some usage
 
 let handle_event t event data =
   if event = Some "error" then (
@@ -135,7 +142,7 @@ let handle_event t event data =
 
 let create ~on_text =
   let t = { on_text; done_seen = false; finish_reason = None;
-    content_seen = false; content = Buffer.create 256;
+    content_seen = false; usage = None; content = Buffer.create 256;
     calls = Hashtbl.create 4; response_bytes = 0; parser = None } in
   t.parser <- Some (Sse.create ~on_event:(handle_event t));
   t
@@ -146,6 +153,7 @@ let feed t bytes =
   | None -> invalid "SSE parser was not initialized"
 let is_done t = t.done_seen
 let is_finished t = t.finish_reason <> None
+let usage t = if t.finish_reason <> None then t.usage else None
 
 
 let finish t =
