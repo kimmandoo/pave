@@ -30,6 +30,10 @@ let summary (entry : Session.entry) =
   | Session.Compaction _ -> "compacted context"
   | Session.Model { provider; model } ->
       "model · " ^ first_line (provider ^ "/" ^ model)
+  | Session.Usage { provider; model; tokens } ->
+      Printf.sprintf "usage · %s · %d in / %d out"
+        (first_line (provider ^ "/" ^ model))
+        tokens.input_tokens tokens.output_tokens
   | Session.Message message ->
       let content = match message.content with
         | None | Some "" when message.tool_calls <> [] -> "tool calls"

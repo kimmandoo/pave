@@ -24,13 +24,14 @@ type t = {
   calls : call list ref;
   indexed : (int, call) Hashtbl.t;
   mutable result : Protocol.message option;
+  mutable usage : Protocol.usage option;
 }
 
 let create ~on_text =
   { on_text; line = Buffer.create 256; content = Buffer.create 256;
     content_seen = false; after_cr = false; done_seen = false;
     response_bytes = 0; next_call = 0; calls = ref [];
-    indexed = Hashtbl.create 4; result = None }
+    indexed = Hashtbl.create 4; result = None; usage = None }
 
 let reserve t length =
   if length > max_response_bytes - t.response_bytes then invalid "response exceeds 16 MiB";
@@ -135,6 +136,7 @@ let handle_frame t line =
         let content = if t.content_seen then Some (Buffer.contents t.content) else None in
         if tool_calls = [] && (content = None || content = Some "") then
           invalid "empty assistant response";
+        t.usage <- Ollama_wire.usage json;
         t.result <- Some { Protocol.role = "assistant"; content;
           tool_calls; tool_call_id = None; provider_state = None };
         t.done_seen <- true
@@ -160,6 +162,7 @@ let feed t bytes =
 let is_done t = t.done_seen
 let is_finished t = t.done_seen
 
+let usage t = t.usage
 let finish t =
   if Buffer.length t.line <> 0 then process_line t;
   match t.result with

@@ -60,9 +60,15 @@ let () =
     let first = Pave.Session.append metadata (message "first") in
     Pave.Session.set_model metadata ~provider:"ollama" ~model:"local";
     let second = Pave.Session.append metadata (message "second") in
+    let counted : Pave.Protocol.usage =
+      { input_tokens = 18; output_tokens = 7 } in
+    Pave.Session.append_usage metadata ~provider:"ollama" ~model:"local" counted;
+    let measured_tip = Option.get (Pave.Session.leaf_id metadata) in
+    assert (Pave.Session.usage metadata = Some counted);
     assert (Pave.Session.model metadata = Some ("ollama", "local"));
     Pave.Session.branch metadata first;
     assert (Pave.Session.model metadata = Some ("openai", "gpt-6-sol"));
+    assert (Pave.Session.usage metadata = None);
     assert (Pave.Session.history metadata = [message "first"]);
     let branch_marker = (List.hd (List.rev (Pave.Session.entries metadata))).id in
     let branched = Pave.Session.open_file metadata_path in
@@ -70,10 +76,18 @@ let () =
     assert (Pave.Session.model_at branched (Some second) =
       Some ("ollama", "local"));
     Pave.Session.branch branched branch_marker;
+    Pave.Session.branch branched measured_tip;
+    assert (Pave.Session.usage branched = Some counted);
+    assert (Pave.Session.history branched = [message "first"; message "second"]);
+    let copy = Pave.Session.fork branched metadata_fork in
+    assert (Pave.Session.usage copy = Some counted);
+    assert (Pave.Session.history copy = [message "first"; message "second"]);
+    Pave.Session.branch copy first;
+    assert (Pave.Session.usage copy = None);
+    Pave.Session.branch branched branch_marker;
     assert (Pave.Session.model branched = Some ("openai", "gpt-6-sol"));
     assert (Pave.Session.history (Pave.Session.open_file metadata_path) =
       [message "first"]);
-    let copy = Pave.Session.fork branched metadata_fork in
     assert (Pave.Session.model copy = Some ("openai", "gpt-6-sol"));
     assert (Pave.Session.history copy = [message "first"]);
     (match Pave.Session.set_model copy ~provider:"openai" ~model:"invalid name" with

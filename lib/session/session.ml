@@ -2,6 +2,7 @@ type kind =
   | Message of Protocol.message
   | Compaction of { summary : string; first_kept_id : string }
   | Model of { provider : string; model : string }
+  | Usage of { provider : string; model : string; tokens : Protocol.usage }
   | Branch
 type entry = { id : string; parent_id : string option; timestamp : string; kind : kind }
 
@@ -51,7 +52,7 @@ let new_header cwd =
 let entry_json entry =
   let fields = [ "type", `String (match entry.kind with
     | Message _ -> "message" | Compaction _ -> "compaction"
-    | Model _ -> "model" | Branch -> "branch");
+    | Model _ -> "model" | Usage _ -> "usage" | Branch -> "branch");
     "id", `String entry.id; "parentId", option_json entry.parent_id;
     "timestamp", `String entry.timestamp ] in
   match entry.kind with
@@ -62,6 +63,10 @@ let entry_json entry =
                          "firstKeptEntryId", `String first_kept_id ])
   | Model { provider; model } ->
       `Assoc (fields @ ["provider", `String provider; "model", `String model])
+  | Usage { provider; model; tokens } ->
+      `Assoc (fields @ ["provider", `String provider; "model", `String model;
+        "inputTokens", `Int tokens.input_tokens;
+        "outputTokens", `Int tokens.output_tokens])
   | Branch -> `Assoc fields
 
 let write_all fd text =
@@ -122,6 +127,14 @@ let parse_entry json =
            when valid_model_field provider && valid_model_field model ->
              Model { provider; model }
          | _ -> invalid "invalid model selection")
+    | `String "usage" ->
+        (match get "provider", get "model",
+          get "inputTokens", get "outputTokens" with
+         | `String provider, `String model, `Int input_tokens, `Int output_tokens
+           when valid_model_field provider && valid_model_field model &&
+             input_tokens >= 0 && output_tokens >= 0 ->
+             Usage { provider; model; tokens = { input_tokens; output_tokens } }
+         | _ -> invalid "invalid provider token usage")
     | `String "branch" -> Branch
     | _ -> invalid "unsupported journal entry type" in
   { id; parent_id; timestamp; kind }
@@ -146,13 +159,21 @@ let model_at t leaf =
           with Not_found -> invalid ("missing parent entry: " ^ id) in
         match entry.kind with
         | Model { provider; model } -> Some (provider, model)
-        | Message _ | Compaction _ | Branch -> find entry.parent_id in
+        | Message _ | Compaction _ | Usage _ | Branch -> find entry.parent_id in
   find leaf
 let model t = model_at t t.leaf
+let usage t =
+  List.fold_left (fun total entry -> match entry.kind with
+    | Usage { tokens; _ } ->
+        (match total with
+         | None -> Some tokens
+         | Some previous -> Some (Protocol.add_usage previous tokens))
+    | Message _ | Compaction _ | Model _ | Branch -> total)
+    None (branch_entries t)
 let messages entries =
   List.filter_map (fun entry -> match entry.kind with
     | Message message -> Some message
-    | Compaction _ | Model _ | Branch -> None) entries
+    | Compaction _ | Model _ | Usage _ | Branch -> None) entries
 
 let history t = messages (branch_entries t)
 
@@ -160,7 +181,7 @@ let context t =
   let path = branch_entries t in
   let latest = List.fold_left (fun found entry -> match entry.kind with
     | Compaction { summary; first_kept_id } -> Some (entry.id, summary, first_kept_id)
-    | Message _ | Model _ | Branch -> found) None path in
+    | Message _ | Model _ | Usage _ | Branch -> found) None path in
   match latest with
   | None -> messages path
   | Some (marker_id, summary, first_kept_id) ->
@@ -248,6 +269,17 @@ let set_model t ~provider ~model:selected =
     Hashtbl.add t.by_id entry.id entry;
     t.leaf <- Some entry.id)
 
+let append_usage t ~provider ~model (tokens : Protocol.usage) =
+  if not (valid_model_field provider && valid_model_field model) ||
+    tokens.input_tokens < 0 || tokens.output_tokens < 0 then
+    invalid "invalid provider token usage";
+  let entry = { id = fresh_id (); parent_id = t.leaf;
+    timestamp = timestamp (); kind = Usage { provider; model; tokens } } in
+  append_line t (entry_json entry);
+  t.records_rev <- entry :: t.records_rev;
+  Hashtbl.add t.by_id entry.id entry;
+  t.leaf <- Some entry.id
+
 let branch t id =
   if not (Hashtbl.mem t.by_id id) then invalid ("entry not found: " ^ id);
   let marker = { id = fresh_id (); parent_id = Some id; timestamp = timestamp ();
@@ -290,7 +322,7 @@ let load_journal path =
            invalid ("entry has missing parent: " ^ parent)
        | _ -> ());
       (match entry.kind with
-       | Message _ | Model _ ->
+       | Message _ | Model _ | Usage _ ->
            Hashtbl.add by_id entry.id entry; leaf := Some entry.id
        | Compaction { first_kept_id; _ } ->
            let rec ancestor = function

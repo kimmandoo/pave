@@ -59,6 +59,14 @@ let () =
   let message = native_message "assistant" "こんにちは" [] in
   assert (Pave.Ollama_wire.parse_completion (completion message) =
     assistant (Some "こんにちは") []);
+  let reported = `Assoc [ "prompt_eval_count", `Int 18;
+    "eval_count", `Int 7 ] in
+  assert (Pave.Ollama_wire.usage reported =
+    Some { input_tokens = 18; output_tokens = 7 });
+  assert (Pave.Ollama_wire.usage (completion message) = None);
+  assert (Pave.Ollama_wire.usage (`Assoc [ "prompt_eval_count", `Int 18 ]) = None);
+  assert (Pave.Ollama_wire.usage (`Assoc [ "prompt_eval_count", `Int (-1);
+    "eval_count", `Int 7 ]) = None);
   let calls = native_message "assistant" "" [ "tool_calls", `List [
     native_call "search" first.arguments; native_call "search" second.arguments ] ] in
   assert (Pave.Ollama_wire.parse_completion (completion calls) =

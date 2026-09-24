@@ -12,15 +12,16 @@ type t = {
   on_event : string -> unit;
   on_delta : string -> unit;
   on_change : Protocol.message -> unit;
+  on_usage : (Protocol.usage -> unit) option;
 }
 
 let create ~provider ~root ~system ?(authentication = Provider.Api_key)
     ?resolve_credential ?(allow_shell = false) ?(stream = false)
     ?(approve_command = fun _ -> false) ?(history = [])
-    ?(on_change = fun _ -> ()) ?(on_delta = fun _ -> ()) ~on_event () =
+    ?on_usage ?(on_change = fun _ -> ()) ?(on_delta = fun _ -> ()) ~on_event () =
   { provider; authentication; resolve_credential; root; system; allow_shell; stream;
     approve_command; history_rev = List.rev history; scoped_pending = [];
-    on_change; on_delta; on_event }
+    on_change; on_delta; on_event; on_usage }
 
 let messages t = List.rev t.history_rev
 let append t message =
@@ -79,10 +80,11 @@ let run ?(max_turns = 20) ?cancel t text =
     let transcript = system :: messages t in
     let reply =
       if t.stream then Provider.complete ~authentication:t.authentication
-        ?resolve_credential:t.resolve_credential ~on_text:t.on_delta ?cancel t.provider
-        transcript definitions
+        ?resolve_credential:t.resolve_credential ~on_text:t.on_delta
+        ?on_usage:t.on_usage ?cancel t.provider transcript definitions
       else Provider.complete ~authentication:t.authentication
-        ?resolve_credential:t.resolve_credential ?cancel t.provider transcript definitions in
+        ?resolve_credential:t.resolve_credential ?on_usage:t.on_usage
+        ?cancel t.provider transcript definitions in
     Provider.check_cancel cancel;
     t.scoped_pending <- [];
     (match reply.content with
