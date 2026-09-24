@@ -2,6 +2,8 @@
 
 ## 2026-09-24
 
+- chore(license): identified Pave as the MIT copyright holder and preserved earlier MIT notices verbatim in the distributed third-party notice file.
+- docs(provider): listed only the two working wire protocols and API-key authentication methods; marked OAuth and additional transports as pending.
 - docs(project): redesigned the public README around install, use, feature status and contribution paths; replaced the rounded logo with a two-dimensional pixel-art mark.
 - docs(project): scheduled a responsibility-based directory and file restructuring after the planned product capabilities were completed.
 - chore(project): removed legacy branding from published files, replaced the private repository's commit lineage with a clean root, and made the repository public while retaining MIT notices.

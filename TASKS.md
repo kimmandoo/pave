@@ -9,6 +9,7 @@ The full planned feature set is still in progress. Tests must establish behavior
 - [x] Implemented the OCaml CLI, bounded tool loop, session recovery and initial mobile workspace tools.
 - [x] Implemented OpenAI-compatible Chat Completions and Anthropic Messages, buffered and SSE-streaming, with local HTTP/tool-call verification.
 - [ ] Implement the model catalog, provider credentials/configuration, OpenAI Responses/Codex, Gemini, and additional provider adapters; preserve provider-specific thinking, usage, errors and multimodal content.
+- [ ] Implement every auth-policy provider and its matching transport; prioritize OAuth authorization-code/PKCE and device-code login, token refresh, protected inference and secure credential storage. Adding a provider should change one focused registry descriptor plus a transport only when its wire protocol differs.
 
 ### Phase 2 — Session and interactive runtime (in progress)
 
@@ -35,6 +36,6 @@ The full planned feature set is still in progress. Tests must establish behavior
 ### Product completion requirements
 
 - [ ] Profile and bound idle CPU, memory growth, subprocess lifetime and redraws during long sessions; keep keyboard interactions responsive without polling loops or unnecessary allocations.
-- [ ] Remove remaining legacy brand mentions from published files and local commit history while retaining required MIT copyright and permission notices in `LICENSE`.
+- [ ] Remove remaining legacy brand mentions from published files and local commit history while retaining required MIT copyright and permission notices in `THIRD_PARTY_NOTICES`.
 
 Do not mark a phase complete merely because its module compiles. The full product plan has not been achieved.

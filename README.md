@@ -11,7 +11,7 @@
   <a href="CONTRIBUTING.md"><img src="https://img.shields.io/badge/contributions-welcome-9af0d3" alt="Contributions welcome"></a>
 </p>
 
-<p align="center"><a href="#install">Install</a> · <a href="#use">Use</a> · <a href="#features">Features</a> · <a href="#contribute">Contribute</a></p>
+<p align="center"><a href="#install">Install</a> · <a href="#use">Use</a> · <a href="#providers">Providers</a> · <a href="#features">Features</a> · <a href="#contribute">Contribute</a></p>
 
 > [!NOTE]
 > Pave is in active development. The provider/agent core, session journal and interactive terminal work; cancellation, LSP/DAP, subagents, plugins and a model catalog are not yet implemented. See [TASKS.md](TASKS.md) before relying on a planned feature.
@@ -84,6 +84,15 @@ pave --provider anthropic --model "$MODEL_ID" --root /path/to/mobile/repo
 
 Sessions are private append-only JSONL journals on creation, **not encrypted**. Keep them outside version control. Reopening a session marks interrupted tool calls as failed rather than rerunning them. `/compact` preserves the full journal; model summarization may fail if the provider's context limit is exceeded.
 
+## Providers
+
+| Provider / protocol | Authentication | Usage |
+| --- | --- | --- |
+| OpenAI-compatible Chat Completions | `OPENAI_API_KEY` | `--provider openai` (default); `--endpoint` supports compatible servers |
+| Anthropic Messages | `ANTHROPIC_API_KEY` | `--provider anthropic --model MODEL_ID` |
+
+Both protocols support buffered and SSE-streamed replies. **OAuth is not available yet**: provider login, token refresh, OpenAI Responses/Codex, Gemini-native and additional API protocols are being implemented. A compatible endpoint is not proof that all models/features of that service work.
+
 ## Features
 
 | Available | Not yet available |
@@ -106,4 +115,4 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md) for the full checklist and [CODE_OF_COND
 
 ## License
 
-[MIT](LICENSE). Required copyright and permission notices remain in `LICENSE`; linked-library licenses accompany binaries in [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES).
+[MIT](LICENSE), with Pave as the copyright holder. Earlier MIT copyright and permission notices and linked-library terms remain in [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES); both files accompany release binaries.
