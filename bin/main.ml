@@ -180,6 +180,11 @@ let () =
           ephemeral_usage := Some (match !ephemeral_usage with
             | None -> tokens
             | Some previous -> Pave.Protocol.add_usage previous tokens) in
+    let refresh_usage screen =
+      let tokens = match !journal with
+        | Some current -> Pave.Session.usage current
+        | None -> !ephemeral_usage in
+      Tui.set_usage screen tokens in
     let resolve_provider () =
       if !active_model = "" then
         failwith ("Select a model with /model " ^ !active_descriptor.id
@@ -260,6 +265,7 @@ let () =
        | Some screen ->
            Tui.set_session screen true;
            Tui.show_history screen (Pave.Session.history next);
+           refresh_usage screen;
            Tui.alert screen ("Journal: " ^ Filename.basename next.Pave.Session.path)
        | None ->
            on_event ("Journal: " ^ next.Pave.Session.path)) in
@@ -479,6 +485,7 @@ let () =
         match !ui with
         | Some screen ->
             Tui.show_history screen (Pave.Session.history current);
+            refresh_usage screen;
             Tui.alert screen ("Branch: " ^ target)
         | None -> on_event ("Branch: " ^ target) in
       let complete_command ?wake_fd ?on_wake screen prefix =
@@ -648,6 +655,7 @@ let () =
                   | Some screen ->
                       Tui.set_session screen true;
                       Tui.show_history screen (Pave.Session.history next);
+                      refresh_usage screen;
                       Tui.alert screen ("Fork: " ^ next.Pave.Session.path)
                   | None -> on_event ("Fork: " ^ next.Pave.Session.path))
                 with exn -> report_error exn))
@@ -803,6 +811,7 @@ let () =
         (match !journal with
          | Some current -> Tui.show_history screen (Pave.Session.history current)
          | None -> ());
+        refresh_usage screen;
         List.iter (fun diagnostic ->
           Tui.event screen ("Settings: " ^ diagnostic)) settings.diagnostics;
         List.iter (fun diagnostic ->
@@ -819,6 +828,7 @@ let () =
             Tui.set_activity screen (Some "Working");
             Tui.sent screen text)
           ~on_finish:(fun outcome ->
+            refresh_usage screen;
             Tui.set_activity screen None;
             match outcome with
             | Pave.Turn_runner.Completed -> Tui.finish_live screen
