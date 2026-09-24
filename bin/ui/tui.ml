@@ -49,6 +49,18 @@ let error = if no_color then A.empty else A.(fg lightred)
 let idle_status =
   "Alt+O tool details · PgUp/Dn scroll · Enter send · Ctrl+R search"
 
+let hotkeys = [
+  "Keys · Enter send · Shift+Enter newline";
+  "/ then Tab · search commands; Enter inserts";
+  "Ctrl+R reverse search · Esc cancel search";
+  "↑/↓ move in draft · Ctrl+P/N or Alt+↑/↓ prompt history";
+  "Ctrl+A/E line ends · Alt+B/F move by word · Ctrl+W erase word";
+  "Ctrl+Z/Y undo/redo · Ctrl+K/U kill line · Alt+Y yank";
+  "Alt+O tool details · PgUp/Dn scroll · Ctrl+Home/End transcript";
+  "Ctrl+C clear draft or interrupt if empty · Ctrl+D exit if empty";
+  "Bracketed paste inserts atomically; pasted Enter does not send";
+]
+
 (* Two ASCII columns per 8px SVG pixel keep the mark square in a terminal. *)
 let startup_logo =
   let mint = I.string accent "##" and shadow = I.string muted "++"

@@ -519,14 +519,13 @@ let () =
              else (
                let lines = "Commands · type / then Tab to search" ::
                  Pave.Interaction.help () in
-               let keys = [
-                 "Keys · Enter send · Shift+Enter newline · Ctrl+R search";
-                 "Ctrl+P/N history · Ctrl+Z/Y undo/redo · Ctrl+K/U kill";
-                 "Alt+Y yank · Alt+O tool details · PgUp/Dn scroll";
-                 "Ctrl+C clear draft or cancel active turn" ] in
                match !ui with
-               | Some screen -> Tui.events screen (lines @ keys)
-               | None -> List.iter on_event (lines @ keys))
+               | Some screen -> Tui.events screen (lines @ Tui.hotkeys)
+               | None -> List.iter on_event lines)
+         | Pave.Interaction.Hotkeys ->
+             (match !ui with
+              | Some screen -> Tui.events screen Tui.hotkeys
+              | None -> on_event "Hotkeys require the interactive terminal; use /help for commands")
          | _ when busy && (match command with
              | Pave.Interaction.Prompt _ -> false
              | _ -> true) ->
@@ -627,6 +626,30 @@ let () =
                      (if name = "run_command" then
                        ["Requires per-command approval; shell is not sandboxed"]
                       else [])) in
+          (match !ui with
+           | Some screen -> Tui.events screen lines
+           | None -> List.iter on_event lines)
+        | Pave.Interaction.Context ->
+          let model = !active_descriptor.id ^ "/" ^
+            (if !active_model = "" then "(not selected)" else !active_model) in
+          let lines = ["Context · " ^ model ^ " · " ^ !active_route.name] @
+            (match !journal with
+             | Some current ->
+                 let saved = Pave.Session.history current in
+                 let retained = Pave.Session.context current in
+                 ["Journal · " ^ Filename.basename current.path;
+                  Printf.sprintf "Conversation: %d messages · retained: %d"
+                    (List.length saved) (List.length retained);
+                  "Branch tip · " ^
+                    Option.value ~default:"(empty)" (Pave.Session.leaf_id current)]
+             | None ->
+                 let messages = match !agent with
+                   | Some current -> Pave.Agent.messages current
+                   | None -> !retained_history in
+                 ["Ephemeral conversation · use /new to save";
+                  Printf.sprintf "Conversation: %d messages"
+                    (List.length messages)]) @
+            ["Token usage/context limit/cost · not tracked"] in
           (match !ui with
            | Some screen -> Tui.events screen lines
            | None -> List.iter on_event lines)
