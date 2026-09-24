@@ -99,6 +99,8 @@ For a remote browser, use `pave --login-manual PROVIDER` for browser-based provi
 
 `--api NAME` selects an explicit registered route; `--endpoint URL` overrides an API-key provider's completion endpoint. `--model ID` overrides the OpenAI default (`gpt-4.1-mini`) and is required for one-shot prompts with providers that have no default. Interactive sessions may select it later with `/model`. Redirected input/output uses a plain line-oriented CLI with the same slash commands instead of the full-screen interface.
 
+The full-screen TUI initially shows the existing pixel-art Pave mark as colored ASCII art. It is an empty-transcript placeholder, not a journal entry; the first message replaces it. Small terminals show a compact `PAVE` label, while redirected output remains plain text.
+
 | In the TUI | Action |
 | --- | --- |
 | `Enter` · `Shift+Enter` | Send a prompt · insert a newline (bracketed paste also supports multiline) |
