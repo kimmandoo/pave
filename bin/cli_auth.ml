@@ -16,7 +16,7 @@ let handle_action ~login ~login_manual ~logout =
     let actions = List.filter ((<>) "") [ login; login_manual; logout ] in
     if List.length actions > 1 then failwith "choose only one OAuth action";
     (match actions with
-     | [] -> ()
+     | [] -> false
      | [ id ] ->
          let descriptor = match Pave.Provider_catalog.find id with
            | Some entry -> entry
@@ -58,7 +58,7 @@ let handle_action ~login ~login_manual ~logout =
                    (code ^ "#" ^ authorization.state))) in
            Pave.Oauth_store.put ~path ~provider:id credential;
            Printf.printf "OAuth credential stored for %s.\n" id);
-         exit 0
+         true
      | _ -> assert false)
 
 let resolve_authentication ~(descriptor : Pave.Provider_catalog.descriptor)

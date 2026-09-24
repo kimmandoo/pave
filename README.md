@@ -58,7 +58,7 @@ The switch belongs to the checkout; prefix commands with `opam exec --` without 
 
 ## Use
 
-The default provider reads `OPENAI_API_KEY`. Choose another registered provider with `--provider ID`; `pave --providers` shows IDs, routes and required key variables. Keep API keys out of checked-in config and session files.
+The default provider uses `OPENAI_API_KEY` when making a request. You can enter the interactive terminal **before** configuring a credential, then use `/login` and `/model`; one-shot prompts still require a usable provider. Choose another registered provider with `--provider ID`; `pave --providers` shows IDs, routes and required key variables. Keep API keys out of checked-in config and session files.
 
 ```sh
 # Interactive: resize-aware TUI, prompt history and a persistent session.
@@ -83,15 +83,18 @@ pave --provider openrouter --model "$ROUTER_MODEL" --prompt 'Inspect this projec
 pave --provider ollama --model "$LOCAL_MODEL" --prompt 'Inspect this project'
 ```
 
+Inside a running Pave terminal, `/login` lists browser sign-in providers and accepts a provider ID; `/login openrouter` selects one directly. The browser URL is printed on the regular terminal while the full-screen UI is temporarily suspended, then the previous transcript/editor returns after sign-in. `/model` lists registered providers and prompts for `PROVIDER/MODEL_ID`; `/model openrouter/openai/gpt-4o` selects one directly. Namespaced model IDs keep everything after the first slash, and a bare model ID uses the current provider. These are provider routes, **not** a complete or live-validated model catalog. Authentication and provider/model selection are separate; choose a model after login. Switching models retains the visible conversation and drops opaque Codex reasoning when crossing its model or protocol boundary.
+
 For a remote browser, use `pave --login-manual PROVIDER` and paste the full callback URL; OpenRouter also accepts the authorization code alone because that provider does not echo state. Standard OAuth providers require the correct callback state. `pave --logout PROVIDER` removes a stored credential. The private store is **unencrypted** at `${XDG_CONFIG_HOME:-~/.config}/pave/oauth.json` (0700 directory, 0600 file); OpenRouter's browser exchange stores an API key there. An environment API key takes precedence where available. OAuth refresh is locked across processes; browser-derived tokens/keys cannot be sent to a custom `--endpoint`.
 
-`--api NAME` selects an explicit registered route; `--endpoint URL` overrides an API-key provider's completion endpoint. `--model ID` overrides the OpenAI default (`gpt-4.1-mini`) and is required by the other providers. Redirected input/output uses a plain line-oriented CLI instead of the full-screen interface.
+`--api NAME` selects an explicit registered route; `--endpoint URL` overrides an API-key provider's completion endpoint. `--model ID` overrides the OpenAI default (`gpt-4.1-mini`) and is required for one-shot prompts with providers that have no default. Interactive sessions may select it later with `/model`. Redirected input/output uses a plain line-oriented CLI with the same slash commands instead of the full-screen interface.
 
 | In the TUI | Action |
 | --- | --- |
 | `Enter` · `Shift+Enter` | Send a prompt · insert a newline (bracketed paste also supports multiline) |
 | `←` `→` · `↑` `↓` | Move by Unicode grapheme · browse prompt history |
 | `Ctrl+C` · `Ctrl+D` | Clear the draft · exit when the draft is empty |
+| `/login [PROVIDER]` · `/model [PROVIDER/MODEL_ID]` | Sign in via browser · choose the next turn's provider/model |
 | `/help` · `/entries` | Show commands · list journal message IDs |
 | `/branch ID` · `/fork /path/new.jsonl` | Continue from an earlier message · copy the selected conversation |
 | `/compact` · `/quit` | Summarize older turns manually · exit |

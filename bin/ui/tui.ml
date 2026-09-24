@@ -5,10 +5,10 @@ let max_line_bytes = 4096
 
 type row = { text : string; attr : A.t }
 type t = {
-  term : Notty_unix.Term.t;
-  input : Terminal_input.t;
+  mutable term : Notty_unix.Term.t;
+  mutable input : Terminal_input.t;
   root : string;
-  model : string;
+  mutable model : string;
   session : bool;
   editor : Pave.Composer.t;
   lines : row Queue.t;
@@ -26,6 +26,9 @@ let accent = A.(fg lightcyan ++ st bold)
 let muted = A.(fg lightblack)
 let warning = A.(fg lightyellow)
 let error = A.(fg lightred)
+
+let idle_status =
+  "Enter send   ·   Shift+Enter newline   ·   ↑↓ history   ·   /login /model /help"
 
 let sanitize text =
   let buffer = Buffer.create (min max_line_bytes (String.length text)) in
@@ -140,12 +143,31 @@ let create ~root ~model ~session =
     root; model; session; editor = Pave.Composer.create ();
     lines = Queue.create (); live = ""; revision = 0; body_cache = None;
     previous = None;
-    status = "Enter send   ·   Shift+Enter newline   ·   ↑↓ history   ·   /entries /branch /fork /compact /quit";
+    status = idle_status;
     last_paint = 0.; paste = false } in
   (try paint t with exn -> Notty_unix.Term.release term; raise exn);
   t
 
 let close t = Notty_unix.Term.release t.term
+
+let suspend t callback =
+  Notty_unix.Term.release t.term;
+  Fun.protect callback ~finally:(fun () ->
+    let term = Notty_unix.Term.create ~mouse:false ~bpaste:true () in
+    t.term <- term;
+    t.input <- Terminal_input.create term;
+    t.previous <- None;
+    t.body_cache <- None;
+    t.paste <- false;
+    paint t)
+
+let reset_status t =
+  t.status <- idle_status;
+  paint t
+
+let set_model t model =
+  t.model <- model;
+  reset_status t
 
 let event t text =
   if t.live <> "" then (add_lines t text_attr ("PAVE › " ^ t.live); t.live <- "");

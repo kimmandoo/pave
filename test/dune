@@ -45,6 +45,10 @@
  (libraries pave unix yojson))
 
 (test
+ (name test_interaction)
+ (libraries pave unix yojson))
+
+(test
  (name test_openai_responses_wire)
  (libraries pave unix yojson))
 

@@ -6,8 +6,8 @@ Pave targets iOS, Android, Flutter, and React Native repositories. The port is i
 
 | Area | Source | Test |
 | --- | --- | --- |
-| Executable and credentials | `bin/main.ml`, `bin/cli_auth.ml` | provider/auth tests below |
-| Terminal rendering and input | `bin/ui/`, `lib/ui/` | `test/ui/` |
+| Executable and credentials | `bin/main.ml`, `bin/cli_auth.ml` | `test/auth/`, CLI transport fixtures |
+| Terminal rendering, slash routing and input | `bin/ui/`, `lib/ui/interaction.ml`, `lib/ui/composer.ml` | `test/ui/` |
 | Conversation contracts and stream frames | `lib/core/` | `test/core/` |
 | Provider registry and HTTP dispatch | `lib/provider/` | `test/provider/` |
 | Provider-specific wire encoders/decoders | `lib/provider/transports/` | `test/provider/transports/` |
@@ -17,6 +17,8 @@ Pave targets iOS, Android, Flutter, and React Native repositories. The port is i
 | Workspace and shell tools | `lib/tools/` | `test/tools/` |
 
 `lib/dune`, `bin/dune` and `test/dune` use unqualified subdirectories: **moving a file does not change its OCaml module name** (`lib/auth/oauth_flow.ml` remains `Pave.Oauth_flow`). Module names must be unique within a Dune stanza. For an OpenAI-compatible endpoint, add a descriptor in `lib/provider/provider_catalog.ml`; for a distinct protocol, put an encoder/decoder in `lib/provider/transports/` and route it explicitly in `lib/provider/provider.ml`. Provider-specific browser grants belong in `lib/auth/`, with CLI actions in `bin/cli_auth.ml`. Exercise authentication **and** completion/tool turns against an isolated transport fixture before listing a route as working. Keep tests beside the corresponding responsibility, not in a duplicate top-level module hierarchy.
+
+In-session `/login` reuses `bin/cli_auth.ml` and temporarily releases the full-screen terminal in `bin/ui/tui.ml`; never print an authorization URL into the alternate-screen renderer or put tokens in a journal. `/model` parsing and provider-route lookup live in `lib/ui/interaction.ml`, with selector boundaries in `test/ui/test_interaction.ml`. Switching a provider/model rebuilds the agent from the current journal (or retained in-memory messages) and must not forward Codex opaque state across models or protocols. An uncredentialed user must be able to enter the UI to sign in before the first model request.
 
 ## Report an issue
 

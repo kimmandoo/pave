@@ -16,6 +16,7 @@ The full planned feature set is still in progress. Tests must establish behavior
 
 - [x] Replaced flat session JSON with an append-only parent-linked JSONL journal, migrated existing transcripts, added branch/fork commands and resumed interrupted tool calls with explicit failure results.
 - [x] Added manual model-generated compaction with a durable summary boundary; preserved full journal history and recovered incomplete tool results.
+- [x] Added in-session `/login` with real browser callback and private-store grant, and `/model` provider/model selection with preserved conversation; the terminal temporarily leaves alternate-screen mode for browser URLs and restores the transcript afterward. Interactive startup no longer requires credentials before sign-in.
 - [ ] Implement automatic context budgeting, provider-native compaction, session metadata and full resume semantics beyond the current message journal.
 - [ ] Implement cancellable event-driven turns, queued steering and tool-call lifecycle events, then finish the terminal's component model, transcript, composer, overlays and accessibility behavior. Verify real interactive UX with keyboard and resize flows.
 

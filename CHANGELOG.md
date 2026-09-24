@@ -2,6 +2,10 @@
 
 ## 2026-09-24
 
+- feat(tui): added in-session `/login [PROVIDER]` with a browser callback and terminal suspend/resume that retains the transcript; added `/model [PROVIDER/MODEL_ID]` with route recomputation and preserved conversation across model changes.
+- fix(cli): deferred credential resolution until the first model request so users can sign in from an otherwise uncredentialed terminal; prevented unknown slash commands from becoming model prompts and cleared stale custom endpoints on model switches.
+- test(tui): exercised the native PTY through slash provider/model selection, browser callback, private key exchange, authenticated turns on two models with shared history, and terminal restoration using isolated fake HTTPS responses; no live vendor account was used.
+
 - refactor(project): grouped library, executable UI and tests by responsibility while preserving public OCaml module names; moved CLI authentication commands and credential selection into a dedicated module.
 - docs(project): mapped source/test ownership and provider contribution paths so new transports and browser grants have a single obvious home.
 

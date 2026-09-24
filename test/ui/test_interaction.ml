@@ -1,0 +1,55 @@
+let fail label = failwith label
+let invalid label f =
+  try ignore (f ()); fail (label ^ ": accepted invalid selector")
+  with Invalid_argument _ -> ()
+
+let () =
+  let open Pave.Interaction in
+  (match parse "/login" with Login None -> () | _ -> fail "login selector missing");
+  (match parse "/login openrouter" with
+   | Login (Some "openrouter") -> () | _ -> fail "login provider parsing");
+  (match parse "/model" with Model None -> () | _ -> fail "model selector missing");
+  (match parse "/model openrouter/openai/gpt-4o" with
+   | Model (Some "openrouter/openai/gpt-4o") -> ()
+   | _ -> fail "namespaced model parsing");
+  (match parse "/models" with Other -> () | _ -> fail "command prefix confused");
+  (match parse "/model/foo" with Other -> () | _ -> fail "slash form confused");
+  invalid "multiple model arguments" (fun () -> parse "/model openai/gpt-5 extra");
+  invalid "control in login provider" (fun () -> parse "/login openrouter\tother");
+  let descriptor, model, route = resolve_model ~current_provider:"openai" ~input:"gpt-5" in
+  if descriptor.id <> "openai" || model <> "gpt-5" || route.name <> "responses" then
+    fail "model-specific Responses route was not selected";
+  let descriptor, model, route = resolve_model ~current_provider:"openai"
+    ~input:"openrouter/openai/gpt-4o" in
+  if descriptor.id <> "openrouter" || model <> "openai/gpt-4o" || route.name <> "chat" then
+    fail "provider-prefix selector lost namespaced model ID";
+  let descriptor, _, route = resolve_model ~current_provider:"ollama"
+    ~input:"anthropic/claude-sonnet-4-5" in
+  if descriptor.id <> "anthropic" || route.name <> "messages" then
+    fail "explicit provider was not routed to native Messages";
+  invalid "unknown provider" (fun () -> resolve_model ~current_provider:"openai" ~input:"missing/foo");
+  invalid "empty model" (fun () -> resolve_model ~current_provider:"openai" ~input:"openrouter/");
+  invalid "control in model ID" (fun () -> resolve_model ~current_provider:"openai" ~input:"gpt-5\nother");
+  let native = `Assoc [
+    "provider", `String "openai-codex";
+    "model", `String "codex-model-a";
+    "output", `List [] ] in
+  let assistant : Pave.Protocol.message = {
+    role = "assistant"; content = Some "visible answer"; tool_calls = [];
+    tool_call_id = None; provider_state = Some native } in
+  let history = [ Pave.Protocol.user "original prompt"; assistant ] in
+  let same = history_for_model ~wire:Pave.Provider.Codex_responses
+    ~model:"codex-model-a" history in
+  let other_model = history_for_model ~wire:Pave.Provider.Codex_responses
+    ~model:"codex-model-b" history in
+  let other_protocol = history_for_model ~wire:Pave.Provider.Openai_completions
+    ~model:"codex-model-a" history in
+  let state = function
+    | [ _; (message : Pave.Protocol.message) ] ->
+        if message.content <> Some "visible answer" then fail "visible history lost";
+        message.provider_state
+    | _ -> fail "conversation history changed length" in
+  if state same <> Some native || state other_model <> None ||
+     state other_protocol <> None || state history <> Some native then
+    fail "opaque Codex state crossed the model or protocol boundary";
+  print_endline "interactive login and model routing: ok"
