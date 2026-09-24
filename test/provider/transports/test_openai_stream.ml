@@ -57,8 +57,7 @@ let () =
   let incomplete = Openai_stream.create ~on_text:(fun _ -> ()) in
   Openai_stream.feed incomplete
     (usage_only ^ event (chunk (text "no final usage")) ^ done_event);
-  ignore (Openai_stream.finish incomplete);
-  assert (Openai_stream.usage incomplete = None);
+  invalid (fun () -> Openai_stream.finish incomplete);
   let wire =
     event (chunk (calls [
       call 1 ~id:"call-" ~name:"wri" ~arguments:"{\"value\":" ();
@@ -78,12 +77,10 @@ let () =
   invalid (fun () -> stream (event (chunk (text "partial"))));
   assert ((stream (event (chunk ~finish:(`String "stop") (text "complete")))).content
     = Some "complete");
-  assert ((stream (event (chunk (text "done only")) ^ done_event)).content
-    = Some "done only");
-  assert ((stream
+  invalid (fun () -> stream (event (chunk (text "done only")) ^ done_event));
+  invalid (fun () -> stream
     (event (chunk (calls [ call 0 ~id:"call" ~name:"read" ~arguments:"{}" () ]))
-     ^ event (chunk ~finish:(`String "stop") (`Assoc [])))).tool_calls
-    = [ { Protocol.id = "call"; name = "read"; arguments = `Assoc [] } ]);
+     ^ event (chunk ~finish:(`String "stop") (`Assoc []))));
   invalid (fun () -> stream (event (chunk ~finish:(`String "length") (text "short")) ^ done_event));
   invalid (fun () -> stream
     (event "{\"error\":{\"message\":\"rate limited\"}}" ^ done_event));
