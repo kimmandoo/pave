@@ -696,7 +696,7 @@ let () =
                    | None -> "in ephemeral session" in
                  [Printf.sprintf "Provider-reported %s: %d in · %d out tokens"
                     source usage.input_tokens usage.output_tokens;
-                  "Other providers/context limit/cost · not tracked"]) in
+                  "Other routes/context limit/cost · not tracked"]) in
           (match !ui with
            | Some screen -> Tui.events screen lines
            | None -> List.iter on_event lines)
@@ -726,7 +726,7 @@ let () =
                         Printf.sprintf "%d input · %d output"
                           tokens.input_tokens tokens.output_tokens]) rows) in
           let lines = lines @
-            ["OpenAI Responses / Ollama"; "Others untracked";
+            ["Responses/Claude/Ollama"; "Other routes untracked";
              "Limits/cost untracked"] in
           (match !ui with
            | Some screen -> Tui.events screen lines

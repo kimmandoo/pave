@@ -418,7 +418,13 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage 
       (match on_text with
       | None ->
           let json = post_json ?cancel ~endpoint:config.endpoint ~headers ~secret:api_key body in
-          parse (fun () -> Anthropic_wire.parse_response json)
+          let reply = parse (fun () -> Anthropic_wire.parse_response json) in
+          (match on_usage with
+           | None -> ()
+           | Some report ->
+               check_cancel cancel;
+               Option.iter report (Anthropic_wire.usage json));
+          reply
       | Some emit ->
           let stream = Anthropic_stream.create ~on_text:emit in
           let body = match body with
@@ -429,7 +435,13 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage 
               body ~on_chunk:(Anthropic_stream.feed stream)
               ~is_done:(fun () -> Anthropic_stream.is_done stream)
               ~is_finished:(fun () -> Anthropic_stream.is_finished stream);
-            Anthropic_stream.finish stream))
+            let reply = Anthropic_stream.finish stream in
+            (match on_usage with
+             | None -> ()
+             | Some report ->
+                 check_cancel cancel;
+                 Option.iter report (Anthropic_stream.usage stream));
+            reply))
   | Openai_responses ->
       let body = parse (fun () ->
         Openai_responses_wire.request ~model:config.model messages tools) in
