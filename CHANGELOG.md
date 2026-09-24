@@ -6,6 +6,7 @@
 - feat(tui): added bounded atomic undo/redo for grapheme editing and bracketed paste, kill/yank and line movement; matched Meta shortcuts to the terminal's actual lower-case escape sequences.
 - feat(session): added opt-in `/new` private per-workspace journals and searchable `/resume` with explicit safe-discard confirmation for unsaved conversations; restored visible conversation on reopen without clearing an unsent editor draft.
 - test(tui): rendered real 80×24, 30×10 and `NO_COLOR` 40×12 PTYs with local streamed Ollama turns; observed real `read_file` tool result expansion/collapse, Unicode draft undo/redo, private journal permissions, `/resume` history restoration and clean `/quit`.
+- test(distribution): published `v0.1.8` on all four native targets; upgraded an isolated real `v0.1.7` installation over HTTPS, confirmed current version and expanded a real `read_file` tool result in the shipped 60×16 PTY.
 - test(distribution): published `v0.1.7` on all four native targets and upgraded an isolated public-installed `v0.1.6` binary to `v0.1.7` over HTTPS; checked its native PTY verified-model picker.
 
 - feat(update): added `pave update` for installer-owned macOS/Linux binaries with an embedded local installer, ownership marker and the existing checksum/archive validation; kept custom install directories and rejected unmanaged executables or inherited version/destination overrides.
