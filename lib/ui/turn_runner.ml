@@ -9,6 +9,7 @@ type approval = {
 type notice =
   | Message of string
   | Delta of string
+  | Phase of Agent.phase
   | Approve of string * approval * (unit -> bool)
   | Finished of completion
 
@@ -27,6 +28,7 @@ type t = {
   run : cancel:(unit -> bool) -> string -> unit;
   on_message : string -> unit;
   on_delta : string -> unit;
+  on_phase : Agent.phase -> unit;
   on_approve : string -> bool;
   on_start : string -> unit;
   on_finish : completion -> unit;
@@ -38,7 +40,7 @@ let with_guard t callback =
   Fun.protect ~finally:(fun () -> Mutex.unlock t.guard) callback
 
 let create ~run ~on_message ~on_delta ~on_approve ~on_start ~on_finish
-    ~on_queued () =
+    ?(on_phase = fun _ -> ()) ~on_queued () =
   let read_fd, write_fd = Unix.pipe () in
   Unix.set_close_on_exec read_fd;
   Unix.set_close_on_exec write_fd;
@@ -48,7 +50,7 @@ let create ~run ~on_message ~on_delta ~on_approve ~on_start ~on_finish
     drain_bytes = Bytes.create 256;
     guard = Mutex.create (); notices = Queue.create (); approvals = [];
     pending = Queue.create (); worker = None; cancel_flag = None; closed = false;
-    run; on_message; on_delta; on_approve; on_start; on_finish; on_queued }
+    run; on_message; on_delta; on_phase; on_approve; on_start; on_finish; on_queued }
 
 let fd t = t.read_fd
 let busy t = t.worker <> None
@@ -70,6 +72,7 @@ let notify t notice =
 let message t text = notify t (Message text)
 let delta t text = notify t (Delta text)
 
+let phase t value = notify t (Phase value)
 let answer request result =
   Mutex.lock request.mutex;
   (match request.answer with
@@ -141,6 +144,7 @@ let drain t =
     | None -> ()
     | Some (Message text) -> t.on_message text; handle ()
     | Some (Delta text) -> t.on_delta text; handle ()
+    | Some (Phase phase) -> t.on_phase phase; handle ()
     | Some (Approve (command, request, cancelled)) ->
         if cancelled () then answer request false
         else (try answer request (t.on_approve command)
