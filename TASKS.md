@@ -28,6 +28,10 @@ The full planned feature set is still in progress. Tests must establish behavior
 - [ ] Implement persistent JS/Python eval kernels, tool bridge, browser/CDP, MCP, skills and extension hooks.
 - [ ] Inventory and implement the remaining catalog, native services, TUI widgets, statistics, collaboration, snapshot/compaction and utility features required for the planned product.
 
+### Phase 5 — Maintainability pass (after product capabilities)
+
+- [ ] Review the final dependency graph and group provider, session, agent, tool, terminal and CLI code into clearly owned directories/files. Keep public contracts narrow, remove superseded code paths and update callers, tests, build rules and contributor docs together. Verify CLI, PTY and provider behavior after the move.
+
 ### Product completion requirements
 
 - [ ] Profile and bound idle CPU, memory growth, subprocess lifetime and redraws during long sessions; keep keyboard interactions responsive without polling loops or unnecessary allocations.

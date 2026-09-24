@@ -2,6 +2,9 @@
 
 ## 2026-09-24
 
+- docs(project): redesigned the public README around install, use, feature status and contribution paths; replaced the rounded logo with a two-dimensional pixel-art mark.
+- docs(project): scheduled a responsibility-based directory and file restructuring after the planned product capabilities were completed.
+- chore(project): removed legacy branding from published files, replaced the private repository's commit lineage with a clean root, and made the repository public while retaining MIT notices.
 - feat(distribution): added a one-command, checksum-verified native installer and four-platform GitHub Release workflow with bundled license notices.
 - feat(tui): added a differential full-screen terminal interface with bounded transcript rows, live text, shell approvals, prompt history and non-TTY fallback.
 - fix(tui): preserved fragmented CJK keystrokes, replaced malformed UTF-8, handled interrupted escape sequences and edited grapheme clusters correctly.
