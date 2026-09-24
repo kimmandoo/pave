@@ -121,13 +121,11 @@ let preview ~root path =
     invalid_arg "session belongs to a different workspace";
   let title =
     let text = if valid_utf8 raw_title then raw_title else "(untitled)" in
-    let text = String.map (fun c -> if Char.code c < 32 || Char.code c = 127 then ' ' else c) text in
-    if String.length text <= 96 then text
-    else (
-      let length = ref 96 in
-      while !length > 0 && Char.code text.[!length] land 0xc0 = 0x80 do decr length done;
-      String.sub text 0 !length ^ "…") in
-  { path; started; title; modified = stat.Unix.st_mtime }
+    match Session_tree.first_line text with
+    | "" -> "(untitled)"
+    | safe -> safe in
+  { path; started = Session_tree.first_line started; title;
+    modified = stat.Unix.st_mtime }
 
 let recent ~root =
   let path = directory ~root in

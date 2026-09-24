@@ -2,6 +2,8 @@
 
 ## 2026-09-25
 
+- fix(session): strip terminal and bidirectional controls from private saved-session titles and timestamps and from `/entries` previews before rendering either the native TUI or redirected CLI. A real headless `/resume` and `/entries` on a saved ESC/bidi prompt displayed literal safe text; the original journal message remained intact.
+- test(distribution): published `v0.1.10` on all four native targets; a public-installed `v0.1.9` binary in an isolated directory upgraded over HTTPS, reported `v0.1.10` current, and in a real 90×24 PTY inserted a filtered `/tools` command without running it, listed enabled tools, then searched `/tree` for a divergent saved turn and checked out its exact branch.
 - feat(session): added a bounded, searchable `/tree` journal ancestry picker with parent-linked previews and active-tip highlighting; selection checks out exactly that branch, while Escape preserves the current transcript. A native PTY followed two divergent turns, filtered the abandoned branch, selected it and verified the alternative disappeared; redirected CLI selection also worked.
 - test(distribution): published `v0.1.9` on all four native targets; installed public `v0.1.8` into an isolated directory, upgraded it to `v0.1.9` over HTTPS, then verified branch changes repaint authoritative saved history in the shipped PTY.
 - fix(tui): reconcile visible transcript with the journal after `/branch` and `/fork`; navigating to an earlier branch no longer leaves abandoned turns and stale `/entries` notices on-screen. Reproduced the stale display before the fix, then navigated both directions and forked in a real saved-session PTY.
