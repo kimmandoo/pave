@@ -153,3 +153,7 @@
  (name test_transcript_view)
  (modules test_transcript_view transcript_view)
  (libraries pave unix notty-community uutf uuseg))
+
+(test
+ (name test_session_tree)
+ (libraries pave))

@@ -8,6 +8,7 @@ type command =
   | New
   | Resume of string option
   | Compact
+  | Tree
   | Branch of string
   | Fork of string
   | Tools of string option
@@ -17,7 +18,7 @@ type command =
 
 type action =
   | A_login | A_model | A_settings | A_new | A_resume | A_cancel
-  | A_entries | A_tools | A_branch | A_fork | A_compact | A_help | A_quit
+  | A_entries | A_tree | A_tools | A_branch | A_fork | A_compact | A_help | A_quit
 
 type shortcut = { name : string; usage : string; summary : string; action : action }
 
@@ -30,6 +31,7 @@ let commands = [
   { name = "/cancel"; usage = ""; summary = "Cancel the active turn"; action = A_cancel };
   { name = "/tools"; usage = "[NAME]"; summary = "List or inspect enabled tools"; action = A_tools };
   { name = "/entries"; usage = ""; summary = "List journal entries"; action = A_entries };
+  { name = "/tree"; usage = ""; summary = "Search journal ancestry and branch"; action = A_tree };
   { name = "/branch"; usage = "ID"; summary = "Continue from an earlier entry"; action = A_branch };
   { name = "/fork"; usage = "PATH"; summary = "Copy the selected journal branch"; action = A_fork };
   { name = "/compact"; usage = ""; summary = "Summarize older turns"; action = A_compact };
@@ -106,6 +108,7 @@ let parse line =
     | Some A_fork -> Fork (require_path name (Option.value ~default:"" argument))
     | Some A_tools -> Tools (single name argument)
     | Some A_entries -> no_args (); Entries
+    | Some A_tree -> no_args (); Tree
     | None -> Unknown line
 
 let selectable_providers () = Provider_catalog.all ()
