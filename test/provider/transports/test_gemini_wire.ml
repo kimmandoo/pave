@@ -70,6 +70,18 @@ let () =
       `Assoc [ "functionCall", `Assoc [ "id", `String first.id;
         "name", `String first.name; "args", first.arguments ] ] ] "STOP") in
   assert (reply = assistant (Some "こんにちは 世界 🌍") [ first ]);
+  let counts = `Assoc [
+    "usageMetadata", `Assoc [
+      "promptTokenCount", `Int 12; "cachedContentTokenCount", `Int 7;
+      "candidatesTokenCount", `Int 5; "thoughtsTokenCount", `Int 3 ] ] in
+  assert (Pave.Gemini_wire.usage counts =
+    Some { input_tokens = 12; output_tokens = 8 });
+  assert (Pave.Gemini_wire.usage (response [text "ok"] "STOP") = None);
+  assert (Pave.Gemini_wire.usage (`Assoc [
+    "usageMetadata", `Assoc [
+      "promptTokenCount", `Int 12; "candidatesTokenCount", `Int (-1)] ]) = None);
+  assert (Pave.Gemini_wire.usage (`Assoc [
+    "usageMetadata", `Assoc ["promptTokenCount", `Int 12] ]) = None);
   let generated = Pave.Gemini_wire.parse_completion ~model:"gemini-2.5-flash"
     (response [ fn "read_file" second.arguments ] "STOP") in
   (match generated.tool_calls with

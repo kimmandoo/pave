@@ -5,6 +5,20 @@ let field = member
 let required_string key json = match field key json with
   | `String value -> value
   | _ -> invalid ("missing or invalid " ^ key)
+let usage json =
+  let reported = field "usageMetadata" json in
+  let thoughts = match field "thoughtsTokenCount" reported with
+    | `Null -> Some 0
+    | `Int count when count >= 0 -> Some count
+    | _ -> None in
+  match field "promptTokenCount" reported,
+    field "candidatesTokenCount" reported, thoughts with
+  | `Int input_tokens, `Int candidates, Some thoughts
+    when input_tokens >= 0 && candidates >= 0 ->
+      if thoughts > max_int - candidates then
+        invalid "output token total exceeds host integer";
+      Some { input_tokens; output_tokens = candidates + thoughts }
+  | _ -> None
 
 let call_sequence = ref 0
 let next_call_id () =
