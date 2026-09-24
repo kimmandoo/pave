@@ -98,12 +98,12 @@ For a remote browser, use `pave --login-manual PROVIDER` for browser-based provi
 | `Enter` · `Shift+Enter` | Send a prompt · insert a newline (bracketed paste also supports multiline) |
 | `←` `→` · `↑` `↓` | Move by Unicode grapheme · browse prompt history |
 | `Ctrl+C` · `Ctrl+D` | Clear the draft · exit when the draft is empty |
-| `/login [PROVIDER]` · `/model [PROVIDER/MODEL_ID]` | Sign in via browser · choose the next turn's provider/model |
+| `/login [PROVIDER]` · `/model [PROVIDER/MODEL_ID]` | Sign in via browser or device code · choose the next turn's provider/model |
 | `/help` · `/entries` | Show commands · list journal message IDs |
 | `/branch ID` · `/fork /path/new.jsonl` | Continue from an earlier message · copy the selected conversation |
 | `/compact` · `/quit` | Summarize older turns manually · exit |
 
-Sessions are private append-only JSONL journals on creation, **not encrypted**. Keep them outside version control. Reopening a session marks interrupted tool calls as failed rather than rerunning them. `/compact` preserves the full journal; model summarization may fail if the provider's context limit is exceeded.
+Sessions are private append-only JSONL journals on creation, **not encrypted**. Keep them outside version control: Gemini 3 native replay may persist model-issued thought text and signatures alongside visible conversation content. Reopening a session marks interrupted tool calls as failed rather than rerunning them. `/compact` preserves the full journal; model summarization may fail if the provider's context limit is exceeded.
 
 ## Providers
 
