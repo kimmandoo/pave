@@ -2,6 +2,7 @@
 
 ## 2026-09-25
 
+- test(distribution): published `v0.1.13` across all four native targets; an explicitly isolated public-installed `v0.1.12` upgraded over HTTPS and reported current. A real shipped 70×18 PTY showed `/resume`'s journal footer first, then confirmed `/context` and `/hotkeys` each restored normal shortcut hints without losing the saved conversation.
 - fix(tui): clear an obsolete `/resume` journal footer alert when a new informational command such as `/context` or `/hotkeys` opens, restoring the normal shortcut hints. Reproduced the stale footer in a shipped 70×18 PTY and verified the corrected native PTY after both commands.
 - test(distribution): published `v0.1.12` on all four native targets; isolated public-installed `v0.1.11` upgraded over HTTPS to current `v0.1.12`. The shipped 70×18 PTY reopened a private journal, displayed accurate two-message `/context` and the compact `/hotkeys` guide before clean exit.
 - feat(tui): add `/context` for the actual selected model/route, private branch tip and durable versus retained conversation sizes, explicitly marking token usage, context limit and cost untracked. Add `/hotkeys` from one terminal-owned shortcut guide shared with interactive `/help`; redirected CLI help no longer claims terminal keys. A real 70×18 PTY showed safe context before/after a streamed local Ollama turn and a compact keyboard guide without broken wrapping.
