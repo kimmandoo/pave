@@ -100,7 +100,7 @@ For a remote browser, use `pave --login-manual PROVIDER` for browser-based provi
 
 `--api NAME` selects an explicit registered route; `--endpoint URL` overrides an API-key provider's completion endpoint. OpenAI defaults to [`gpt-6-sol`](https://developers.openai.com/api/docs/models/gpt-6-sol), the current coding-focused GPT-6 model, on the Responses route; [`gpt-6-astra`](https://developers.openai.com/api/docs/models/gpt-6-astra) is a higher-cost flagship selectable with `--model`. `--model ID` overrides the default and is required for one-shot prompts with providers that have no default. Interactive sessions may select a provider/model later with `/model`. Personal Copilot still accepts only its explicitly supported older Chat models and is **not** the OpenAI default. `--models` refuses a custom `--endpoint` to avoid sending a private gateway key to a public listing endpoint. Redirected input/output uses a plain line-oriented CLI with the same slash commands instead of the full-screen interface.
 
-The full-screen TUI initially shows the existing pixel-art Pave mark as colored ASCII art. It is an empty-transcript placeholder, not a journal entry; the first message replaces it. Small terminals show a compact `PAVE` label, while redirected output remains plain text.
+The full-screen TUI initially shows the existing pixel-art Pave mark as colored ASCII art. It is an empty-transcript placeholder, not a journal entry; the first message replaces it. Conversation roles, Markdown headings/lists/code, tool progress and folded tool results use distinct blocks; `Alt+O` expands the latest visible tool result. Small terminals show a compact `PAVE` label, `NO_COLOR=1` removes colored text, and redirected output remains plain text.
 
 Typed settings live in `${XDG_CONFIG_HOME:-~/.config}/pave/settings.json` and `<workspace>/.pave/settings.json`. Supported keys: `default_provider`, `default_model` (requires its provider), `max_turns` (1–100), `disable_shell` (boolean). Explicit CLI flags override project defaults, then user defaults; `disable_shell: true` in **either** scope denies `--allow-shell`. Invalid, duplicate, oversized or symlinked files are reported and skipped. `/settings` edits project defaults with atomic private-file replacement for the **next** launch.
 
@@ -114,17 +114,19 @@ For optional prompt customization, use `<workspace>/.pave/SYSTEM.md`, `SYSTEM_TE
 | `←` `→` · `↑` `↓` | Move by Unicode grapheme or wrapped visual row; history at first/last row |
 | `Ctrl+P`/`Ctrl+N` · `Ctrl+R` | Explicit older/newer history · incremental reverse search (Enter recalls, Escape cancels) |
 | `Ctrl/Alt+←/→` · `Ctrl+W` | Move or delete by word; editor draft stays intact during model output |
-| `PgUp`/`PgDn` · `Ctrl+Home`/`Ctrl+End` | Scroll the transcript by page or jump to its beginning/end |
+| `Ctrl+Z`/`Ctrl+Y` · `Ctrl+K`/`Ctrl+U` · `Alt+Y` | Undo/redo a draft edit · kill after/before the cursor · yank killed text; bracketed paste is one undo step |
+| `PgUp`/`PgDn` · `Ctrl+Home`/`Ctrl+End` · `Alt+O` | Scroll the transcript, jump to its beginning/end, or expand/collapse the latest visible tool result |
 | `Ctrl+C` · `Ctrl+D` | Clear a nonempty draft; with an empty draft cancel the active turn · exit when empty |
 | `/login [PROVIDER]` · `/model [PROVIDER/MODEL_ID]` | Search sign-in/model choices (Esc cancels) or select directly |
 | `/cancel` · `/settings` | Stop the active request/command; edit typed project defaults for the next launch |
+| `/new` · `/resume [PATH]` | Create a private, persistent workspace journal; search recent journals or reopen an explicit workspace journal |
 | `/help` · `/entries` | Show commands · list journal message IDs |
 | `/branch ID` · `/fork /path/new.jsonl` | Continue from an earlier message · copy the selected conversation |
 | `/compact` · `/quit` | Summarize older turns manually · exit |
 
-The input remains responsive during network calls and approved commands. Prompts submitted while a turn runs are queued and appear in the transcript only when their own turn begins; `/cancel` stops the active turn without discarding queued prompts or an unsent draft. Transient streamed text from a cancelled or failed turn is removed. In-memory scrollback keeps the latest 10,000 rows; `--session` journals the full durable conversation.
+The input remains responsive during network calls and approved commands. Prompts submitted while a turn runs are queued and appear in the transcript only when their own turn begins; `/cancel` stops the active turn without discarding queued prompts or an unsent draft. Transient streamed text from a cancelled or failed turn is removed. In-memory scrollback keeps the latest 10,000 logical rows; a saved journal retains the full durable conversation and `/resume` restores its visible history without replacing the current editor draft. Plain startup conversations are ephemeral; `/new` asks before discarding an unsaved one.
 
-Sessions are private append-only JSONL journals on creation, **not encrypted**. Keep them outside version control: Gemini 3 native replay may persist model-issued thought text and signatures alongside visible conversation content. Reopening a session marks interrupted tool calls as failed rather than rerunning them. `/compact` preserves the full journal; model summarization may fail if the provider's context limit is exceeded.
+Sessions are private append-only JSONL journals on creation, **not encrypted**. `/new` opts into storage at `${XDG_STATE_HOME:-~/.local/state}/pave/sessions/<SHA-256 of canonical workspace path>/<random>.jsonl` (0700 directories, 0600 files). `/resume` lists up to 100 recent journals from the current workspace only, skipping symlinks, foreign owners and permissive files; an explicit path is subject to the same checks. `--session PATH` continues to support an explicitly chosen journal and shows its restored transcript at startup. Keep journals outside version control: Gemini 3 native replay may persist model-issued thought text and signatures alongside visible conversation content. Reopening a session marks interrupted tool calls as failed rather than rerunning them. `/compact` preserves the full journal; model summarization may fail if the provider's context limit is exceeded.
 
 ## Providers
 

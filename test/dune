@@ -134,12 +134,22 @@
 
 (copy_files ../bin/ui/tui.ml)
 (copy_files ../bin/ui/terminal_input.ml)
+(copy_files ../bin/ui/transcript_view.ml)
 
 (test
  (name test_chooser_dynamic)
- (modules test_chooser_dynamic tui terminal_input)
+ (modules test_chooser_dynamic tui terminal_input transcript_view)
  (libraries pave unix notty-community notty-community.unix uutf))
 
 (test
  (name test_model_discovery_cancel)
  (libraries pave unix threads))
+
+(test
+ (name test_session_store)
+ (libraries pave unix))
+
+(test
+ (name test_transcript_view)
+ (modules test_transcript_view transcript_view)
+ (libraries pave unix notty-community uutf uuseg))

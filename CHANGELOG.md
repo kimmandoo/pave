@@ -2,6 +2,12 @@
 
 ## 2026-09-25
 
+- feat(tui): separated semantic transcript state from painting, with restrained role/tool colors, readable Markdown/code and tool lifecycle blocks, lazy grapheme-safe wrapping, bounded scrollback, accurate interrupted states and `Alt+O` expandable tool results; kept narrow and `NO_COLOR` layouts usable.
+- feat(tui): added bounded atomic undo/redo for grapheme editing and bracketed paste, kill/yank and line movement; matched Meta shortcuts to the terminal's actual lower-case escape sequences.
+- feat(session): added opt-in `/new` private per-workspace journals and searchable `/resume` with explicit safe-discard confirmation for unsaved conversations; restored visible conversation on reopen without clearing an unsent editor draft.
+- test(tui): rendered real 80×24, 30×10 and `NO_COLOR` 40×12 PTYs with local streamed Ollama turns; observed real `read_file` tool result expansion/collapse, Unicode draft undo/redo, private journal permissions, `/resume` history restoration and clean `/quit`.
+- test(distribution): published `v0.1.7` on all four native targets and upgraded an isolated public-installed `v0.1.6` binary to `v0.1.7` over HTTPS; checked its native PTY verified-model picker.
+
 - feat(update): added `pave update` for installer-owned macOS/Linux binaries with an embedded local installer, ownership marker and the existing checksum/archive validation; kept custom install directories and rejected unmanaged executables or inherited version/destination overrides.
 - docs(project): inventoried reference capabilities as individually actionable, source-indexed tasks across providers, auth, agent/session, tools, terminal, extensibility and distribution without claiming implemented parity.
 - test(update): exercised a native installed binary upgrading from a different executable using fake HTTPS release assets; corrupted archive checksum left the previous executable intact, and source-built binaries refused self-update.

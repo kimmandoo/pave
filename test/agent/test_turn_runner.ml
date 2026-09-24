@@ -44,7 +44,7 @@ let () =
     until "completed";
     let chronological = List.rev !events in
     assert (chronological = ["start:hang"; "message:working";
-      "queued:1"; "cancelled"; "start:approve";
+      "queued:1"; "cancelled"; "start:approve"; "queued:0";
       "approved-request"; "delta:approved"; "completed"]);
     assert (not (Pave.Turn_runner.busy runner)));
   print_endline "turn runner: ok"
