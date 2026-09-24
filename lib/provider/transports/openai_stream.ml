@@ -159,8 +159,7 @@ let usage t = if t.finish_reason <> None then t.usage else None
 let finish t =
   (match t.parser with Some parser -> Sse.finish parser
     | None -> invalid "SSE parser was not initialized");
-  if not t.done_seen && t.finish_reason = None then
-    invalid "missing finish_reason or [DONE] event";
+  if t.finish_reason = None then invalid "missing finish_reason";
   let calls = Hashtbl.fold (fun _ call acc -> call :: acc) t.calls []
     |> List.sort (fun a b -> Int.compare a.index b.index) in
   let ids = Hashtbl.create (List.length calls) in
@@ -175,6 +174,7 @@ let finish t =
     { Protocol.id = id; name; arguments }) calls in
   (match t.finish_reason, calls with
    | Some "tool_calls", [] -> invalid "finish_reason tool_calls without tool calls"
+   | Some "stop", _ :: _ -> invalid "finish_reason stop with tool calls"
    | _ -> ());
   { Protocol.role = "assistant";
     content = (if t.content_seen then Some (Buffer.contents t.content) else None);
