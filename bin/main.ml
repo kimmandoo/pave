@@ -1,3 +1,13 @@
+let error_message = function
+  | Pave.Provider.Provider_error text
+  | Pave.Protocol.Invalid_response text
+  | Pave.Tools.Tool_error text
+  | Pave.Oauth_flow.OAuth_error text
+  | Pave.Oauth_device.OAuth_error text
+  | Pave.Oauth_store.Storage_error text
+  | Failure text | Sys_error text | Invalid_argument text -> text
+  | exn -> Printexc.to_string exn
+
 let () =
   let root = ref "." and model = ref "" in
   let endpoint = ref "" and provider_name = ref "" and api_name = ref "" in
@@ -317,7 +327,7 @@ let () =
                  agent := None;
                  on_event "Compacted conversation; full journal preserved."
              | _ -> failwith "model returned no compaction summary")
-           with exn -> on_event ("Error: " ^ Printexc.to_string exn)) in
+           with exn -> on_event ("Error: " ^ error_message exn)) in
     let choose_login selected =
       let id = match selected, !ui with
         | Some id, _ -> id
@@ -453,7 +463,7 @@ let () =
       ) else match !ui with
         | Some screen -> Tui.reset_status screen
         | None -> () in
-    let report_error exn = on_event ("Error: " ^ Printexc.to_string exn) in
+    let report_error exn = on_event ("Error: " ^ error_message exn) in
     let interact () =
       let checkout_branch current target =
         let selected = session_selection
@@ -817,7 +827,7 @@ let () =
                 Tui.event screen "Turn cancelled."
             | Pave.Turn_runner.Failed exn ->
                 Tui.clear_live screen;
-                Tui.event screen ("Error: " ^ Printexc.to_string exn))
+                Tui.event screen ("Error: " ^ error_message exn))
           ~on_queued:(fun count ->
             Tui.set_queue screen count;
             if count > 0 then
@@ -833,5 +843,5 @@ let () =
         instruction_diagnostics;
       interact ())
   with exn ->
-    prerr_endline ("Error: " ^ Printexc.to_string exn);
+    prerr_endline ("Error: " ^ error_message exn);
     exit 1
