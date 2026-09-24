@@ -92,9 +92,12 @@ let () =
   let signed_part = `Assoc [ "functionCall", `Assoc [
     "name", `String "read_file"; "args", first.arguments ];
     "thoughtSignature", `String "c2ln" ] in
-  let native_parts = [ text "Opening file"; signed_part ] in
+  let native_parts = [ `Assoc [
+    "thought", `Bool true; "text", `String "model-internal thought" ];
+    text "Opening file"; signed_part ] in
   let signed = Pave.Gemini_wire.parse_completion ~model:"gemini-3-pro"
     (response native_parts "STOP") in
+  assert (signed.content = Some "Opening file");
   (match signed.tool_calls with
    | [ invocation ] ->
        let followup = Pave.Gemini_wire.request ~model:"gemini-3-pro"
