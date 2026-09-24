@@ -62,6 +62,18 @@ let () =
   let answer = Pave.Anthropic_wire.parse_response
     (response "end_turn" [ text "Hello "; text "world" ]) in
   assert (answer = assistant (Some "Hello world") []);
+  let counted = `Assoc [
+    "usage", `Assoc [
+      "input_tokens", `Int 2; "cache_creation_input_tokens", `Int 3;
+      "cache_read_input_tokens", `Int 4; "output_tokens", `Int 7 ] ] in
+  assert (Pave.Anthropic_wire.usage counted =
+    Some { input_tokens = 9; output_tokens = 7 });
+  assert (Pave.Anthropic_wire.usage (response "end_turn" [text "Hello"]) = None);
+  assert (Pave.Anthropic_wire.usage (`Assoc [
+    "usage", `Assoc ["input_tokens", `Int 2; "output_tokens", `Int 7;
+      "cache_read_input_tokens", `Int (-1)] ]) = None);
+  assert (Pave.Anthropic_wire.usage (`Assoc [
+    "usage", `Assoc ["input_tokens", `Int 2] ]) = None);
   let reply = Pave.Anthropic_wire.parse_response
     (response "tool_use" [ text "Checking.";
       use first.id first.name first.arguments; use second.id second.name second.arguments ]) in

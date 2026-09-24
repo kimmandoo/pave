@@ -121,7 +121,7 @@ For optional prompt customization, use `<workspace>/.pave/SYSTEM.md`, `SYSTEM_TE
 | `/login [PROVIDER]` · `/model [PROVIDER/MODEL_ID]` | Search sign-in/model choices (Esc cancels) or select directly |
 | `/cancel` · `/settings` | Stop the active request/command; edit typed project defaults for the next launch |
 | `/tools [NAME]` | List the tools actually offered to the model, or inspect one tool's description; shell availability follows `--allow-shell` and still requires per-command approval |
-| `/context` | Inspect the actual model/route, saved branch and retained conversation count; show only provider-reported input/output tokens from OpenAI Responses or Ollama on the selected ancestry (or cumulative ephemeral usage), with other routes, context limit and cost untracked |
+| `/context` | Inspect the actual model/route, saved branch and retained conversation count; show only provider-reported input/output tokens from OpenAI Responses, Anthropic Messages or Ollama on the selected ancestry (or cumulative ephemeral usage), with other routes, context limit and cost untracked |
 | `/usage` | Inspect only recorded provider-reported tokens; private journals group the selected branch's input/output totals by model, while ephemeral conversations show the combined measured total without claiming per-model provenance |
 | `/retry` | Reissue the last user turn only if it made no tool calls; saved sessions retain the prior answer on an abandoned branch, while ephemeral answers are replaced; both requests may incur usage |
 | `/hotkeys` | Display actual interactive keyboard shortcuts (including search, word editing, paste and tool expansion); headless CLI does not claim terminal keys work |

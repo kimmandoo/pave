@@ -33,6 +33,22 @@ let () =
   assert (message.content = Some "Hi there");
   assert (message.tool_calls = [ { Pave.Protocol.id = "toolu_1"; name = "read_file";
     arguments = `Assoc [ "path", `String "App.swift" ] } ]);
+  assert (Pave.Anthropic_stream.usage parser = None);
+  let start_metered = event "message_start"
+    {|{"type":"message_start","message":{"role":"assistant","usage":{"input_tokens":2,"cache_creation_input_tokens":3,"cache_read_input_tokens":4}}}|} in
+  let finish_metered = event "message_delta"
+    {|{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":7}}|} in
+  let measured = Pave.Anthropic_stream.create ~on_text:(fun _ -> ()) in
+  Pave.Anthropic_stream.feed measured
+    (start_metered ^ text_start ^ text_stop ^ finish_metered ^ stop);
+  ignore (Pave.Anthropic_stream.finish measured);
+  assert (Pave.Anthropic_stream.usage measured =
+    Some { Pave.Protocol.input_tokens = 9; output_tokens = 7 });
+  let interrupted = Pave.Anthropic_stream.create ~on_text:(fun _ -> ()) in
+  Pave.Anthropic_stream.feed interrupted
+    (start_metered ^ text_start ^ text_stop ^ finish_metered);
+  ignore (Pave.Anthropic_stream.finish interrupted);
+  assert (Pave.Anthropic_stream.usage interrupted = None);
   let text_only = start ^ text_start ^ text_delta ^ text_stop ^ ending "end_turn" ^ stop in
   let parser = Pave.Anthropic_stream.create ~on_text:(fun _ -> ()) in
   Pave.Anthropic_stream.feed parser text_only;

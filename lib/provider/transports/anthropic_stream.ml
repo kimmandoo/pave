@@ -10,6 +10,8 @@ type t = {
   mutable stopped : bool;
   mutable reason : string option;
   mutable response_bytes : int;
+  mutable input_tokens : int option;
+  mutable output_tokens : int option;
   mutable parser : Sse.t option;
 }
 
@@ -75,6 +77,9 @@ let handle_block_delta t json =
    | _ -> invalid "delta type does not match content block")
 
 let handle_message_delta t json =
+  (match field "usage" json with
+   | `Null -> ()
+   | reported -> t.output_tokens <- Anthropic_wire.output_usage reported);
   match field "stop_reason" (field "delta" json) with
   | `Null -> ()
   | `String reason ->
@@ -99,6 +104,8 @@ let handle_event t event data =
       if t.started then invalid "duplicate message_start";
       if field "role" (field "message" json) <> `String "assistant" then
         invalid "unexpected message role";
+      t.input_tokens <- Anthropic_wire.input_usage
+        (field "usage" (field "message" json));
       t.started <- true
   | "content_block_start" ->
       if not t.started || t.reason <> None then invalid "block outside active message";
@@ -122,7 +129,8 @@ let handle_event t event data =
 
 let create ~on_text =
   let t = { on_text; blocks = Hashtbl.create 4; started = false; stopped = false;
-    reason = None; response_bytes = 0; parser = None } in
+    reason = None; input_tokens = None; output_tokens = None;
+    response_bytes = 0; parser = None } in
   t.parser <- Some (Sse.create ~on_event:(handle_event t));
   t
 
@@ -133,6 +141,10 @@ let feed t bytes = match t.parser with
 let is_done t = t.stopped
 let is_finished t = t.reason <> None
 
+let usage t = match t.stopped, t.input_tokens, t.output_tokens with
+  | true, Some input_tokens, Some output_tokens ->
+      Some { Protocol.input_tokens; output_tokens }
+  | _ -> None
 let finish t =
   (match t.parser with Some parser -> Sse.finish parser | None -> invalid "missing parser");
   if not t.started || t.reason = None then invalid "incomplete message";

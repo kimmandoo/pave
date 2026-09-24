@@ -6,6 +6,32 @@ let required_string name json =
   match member name json with
   | `String value -> value
   | _ -> invalid ("missing or invalid " ^ name)
+let input_usage reported =
+  let cache key = match member key reported with
+    | `Null -> Some 0
+    | `Int count when count >= 0 -> Some count
+    | _ -> None in
+  match member "input_tokens" reported,
+    cache "cache_creation_input_tokens",
+    cache "cache_read_input_tokens" with
+  | `Int input, Some created, Some read when input >= 0 ->
+      if created > max_int - input || read > max_int - input - created then
+        invalid "input token total exceeds host integer";
+      Some (input + created + read)
+  | _ -> None
+
+let output_usage reported =
+  match member "output_tokens" reported with
+  | `Int count when count >= 0 -> Some count
+  | _ -> None
+
+let usage json =
+  let reported = member "usage" json in
+  match input_usage reported, output_usage reported with
+  | Some input_tokens, Some output_tokens ->
+      Some { input_tokens; output_tokens }
+  | _ -> None
+
 
 let text_block text = `Assoc [ "type", `String "text"; "text", `String text ]
 
