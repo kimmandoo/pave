@@ -78,7 +78,8 @@ let builtins = [
 let all () = builtins
 let find id = List.find_opt (fun provider -> provider.id = id) builtins
 let route provider ~model name =
-  if provider.id = "github-copilot" &&
+  (* Interactive startup may defer model selection; inference never may. *)
+  if provider.id = "github-copilot" && model <> "" &&
      not (Github_copilot_wire.supported_model model) then None else
   let name = if name <> "" then name else
     match List.find_opt (fun (prefix, _) ->
