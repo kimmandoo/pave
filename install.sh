@@ -68,10 +68,12 @@ temp_dir=$(mktemp -d "${TMPDIR:-/tmp}/pave-install.XXXXXXXX") || fail 'cannot cr
 staged_binary=
 staged_license=
 staged_notices=
+staged_marker=
 cleanup() {
     [ -z "$staged_binary" ] || rm -f "$staged_binary"
     [ -z "$staged_license" ] || rm -f "$staged_license"
     [ -z "$staged_notices" ] || rm -f "$staged_notices"
+    [ -z "$staged_marker" ] || rm -f "$staged_marker"
     rm -rf "$temp_dir"
 }
 trap cleanup 0
@@ -133,23 +135,28 @@ for file in pave LICENSE THIRD_PARTY_NOTICES; do
 done
 
 # Stage all files first; publish the executable last, by a rename in its own directory.
+# A marker distinguishes native installs from opam-managed binaries for `pave update`.
 license_dir=${install_dir%/*}/share/licenses/pave
 mkdir -p "$install_dir" "$license_dir" || fail 'cannot create install or license directories; set PAVE_INSTALL_DIR to a writable location'
 staged_binary=$(mktemp "$install_dir/.pave.XXXXXXXX") || fail "cannot stage executable in $install_dir"
 staged_license=$(mktemp "$license_dir/.LICENSE.XXXXXXXX") || fail "cannot stage LICENSE in $license_dir"
 staged_notices=$(mktemp "$license_dir/.THIRD_PARTY_NOTICES.XXXXXXXX") || fail "cannot stage THIRD_PARTY_NOTICES in $license_dir"
+staged_marker=$(mktemp "$license_dir/.native-install.XXXXXXXX") || fail 'cannot stage native-install marker'
+printf 'pave-native-v1\n' > "$staged_marker" || fail 'cannot write native-install marker'
 cp "$temp_dir/extracted/pave" "$staged_binary" || fail 'cannot copy executable'
 cp "$temp_dir/extracted/LICENSE" "$staged_license" || fail 'cannot copy LICENSE'
 cp "$temp_dir/extracted/THIRD_PARTY_NOTICES" "$staged_notices" || fail 'cannot copy THIRD_PARTY_NOTICES'
 chmod 755 "$staged_binary" || fail 'cannot make executable runnable'
 chmod 644 "$staged_license" "$staged_notices" || fail 'cannot set license file permissions'
-for target in "$install_dir/pave" "$license_dir/LICENSE" "$license_dir/THIRD_PARTY_NOTICES"; do
+for target in "$install_dir/pave" "$license_dir/LICENSE" "$license_dir/THIRD_PARTY_NOTICES" "$license_dir/.native-install"; do
     [ ! -d "$target" ] || fail "cannot replace directory $target"
 done
 mv -f "$staged_license" "$license_dir/LICENSE" || fail 'cannot install LICENSE'
 staged_license=
 mv -f "$staged_notices" "$license_dir/THIRD_PARTY_NOTICES" || fail 'cannot install THIRD_PARTY_NOTICES'
 staged_notices=
+mv -f "$staged_marker" "$license_dir/.native-install" || fail 'cannot install native-install marker'
+staged_marker=
 mv -f "$staged_binary" "$install_dir/pave" || fail 'cannot install pave executable'
 staged_binary=
 printf 'Installed pave to %s/pave\n' "$install_dir"

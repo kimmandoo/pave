@@ -22,8 +22,12 @@ let () =
     "--max-turns", Arg.Set_int max_turns, "Maximum model turns per prompt (default: 20)";
   ] in
   try
+    if Array.length Sys.argv > 1 && Sys.argv.(1) = "update" then (
+      if Array.length Sys.argv <> 2 then failwith "usage: pave update";
+      Update.run ();
+      exit 0);
     Arg.parse options (fun arg -> raise (Arg.Bad ("unexpected argument: " ^ arg)))
-      "pave [--providers] [--provider ID] [--api NAME] [--model ID] [--stream] [--root DIRECTORY] [--prompt TEXT]";
+      "pave [update | --providers | --provider ID --model ID --prompt TEXT | --root DIRECTORY --session FILE]";
     if !list_providers then (
       List.iter (fun (entry : Pave.Provider_catalog.descriptor) ->
         Printf.printf "%s\t%s\t%s\t%s\n" entry.id entry.display_name
