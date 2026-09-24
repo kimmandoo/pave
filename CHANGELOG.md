@@ -2,6 +2,7 @@
 
 ## 2026-09-25
 
+- test(distribution): published `v0.1.11` across all four native targets. An explicitly isolated public-installed `v0.1.10` upgraded over HTTPS, reported `v0.1.11` current, and the shipped 90×24 PTY restored a saved model on startup, selected a real branch-point in `/tree`, and reopened the workspace journal through `/resume` with its saved provider/model header.
 - feat(session): persist provider/model selection as branch-local journal metadata, resolve it on `/resume`, `--session` and branch checkout without recording credentials/endpoints, and keep the model status/header accurate. Real 90×24 PTYs switched, reopened, selected two ancestry branches and resumed from the searchable journal picker; a local HTTP Ollama turn verified explicit CLI overrides append a model marker before the durable user/assistant messages.
 - fix(session): index durable branch-point markers as selectable ancestry entries; previously `/tree` showed their labels but `/branch ID` rejected them. A saved-session 90×24 PTY filtered two branch points, selected one and restored its model/status and transcript.
 - fix(session): strip terminal and bidirectional controls from private saved-session titles and timestamps and from `/entries` previews before rendering either the native TUI or redirected CLI. A real headless `/resume` and `/entries` on a saved ESC/bidi prompt displayed literal safe text; the original journal message remained intact.
