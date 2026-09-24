@@ -11,6 +11,7 @@ type t = {
   native_calls : (Yojson.Basic.t, unit) Hashtbl.t;
   ids : (string, unit) Hashtbl.t;
   mutable finished : bool;
+  mutable usage : Protocol.usage option;
   mutable wire_bytes : int;
   mutable response_bytes : int;
   mutable parser : Sse.t option;
@@ -90,7 +91,6 @@ let handle_chunk t json =
   | _ -> invalid "missing or ambiguous candidates"
 
 let handle_event t event data =
-  if t.finished then invalid "event after finish reason";
   (match event with
    | None | Some "message" -> ()
    | Some "error" ->
@@ -107,7 +107,18 @@ let handle_event t event data =
   if length > max_response_bytes - t.wire_bytes then
     invalid "response exceeds 16 MiB";
   t.wire_bytes <- t.wire_bytes + length;
-  handle_chunk t (parse_json data)
+  let json = parse_json data in
+  if t.finished then (
+    (match field "candidates" json with
+     | `Null | `List [] -> ()
+     | _ -> invalid "event after finish reason");
+    if field "usageMetadata" json = `Null ||
+       field "error" json <> `Null || t.usage <> None then
+      invalid "event after finish reason";
+    t.usage <- Gemini_wire.usage json)
+  else (
+    handle_chunk t json;
+    if t.finished then t.usage <- Gemini_wire.usage json)
 
 let create ~model ~on_text =
   if model = "" then invalid_arg "empty Gemini model";
@@ -115,7 +126,8 @@ let create ~model ~on_text =
     signature_seen = false; parts = []; native_calls = Hashtbl.create 4;
     signatures = Hashtbl.create 4;
     calls = []; call_count = 0; ids = Hashtbl.create 4;
-    finished = false; response_bytes = 0; wire_bytes = 0; parser = None } in
+    finished = false; usage = None;
+    response_bytes = 0; wire_bytes = 0; parser = None } in
   t.parser <- Some (Sse.create ~on_event:(handle_event t));
   t
 
@@ -124,9 +136,10 @@ let feed t bytes =
   | Some parser -> Sse.feed parser bytes
   | None -> invalid "SSE parser was not initialized"
 
-let is_done t = t.finished
+let is_done t = t.finished && t.usage <> None
 let is_finished t = t.finished
 
+let usage t = if t.finished then t.usage else None
 let finish t =
   (match t.parser with
    | Some parser -> Sse.finish parser

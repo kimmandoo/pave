@@ -726,7 +726,7 @@ let () =
                         Printf.sprintf "%d input · %d output"
                           tokens.input_tokens tokens.output_tokens]) rows) in
           let lines = lines @
-            ["Responses/Claude/Ollama"; "Other routes untracked";
+            ["Reported routes only"; "Others untracked";
              "Limits/cost untracked"] in
           (match !ui with
            | Some screen -> Tui.events screen lines

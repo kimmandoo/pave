@@ -517,7 +517,13 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage 
       | None ->
           let endpoint = base ^ "/" ^ model_path ^ ":generateContent" in
           let json = post_json ?cancel ~endpoint ~headers ~secret:api_key body in
-          parse (fun () -> Gemini_wire.parse_completion ~model:config.model json)
+          let reply = parse (fun () -> Gemini_wire.parse_completion ~model:config.model json) in
+          (match on_usage with
+           | None -> ()
+           | Some report ->
+               check_cancel cancel;
+               Option.iter report (Gemini_wire.usage json));
+          reply
       | Some emit ->
           let stream = Gemini_stream.create ~model:config.model ~on_text:emit in
           let endpoint = base ^ "/" ^ model_path ^ ":streamGenerateContent?alt=sse" in
@@ -526,7 +532,13 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage 
               body ~on_chunk:(Gemini_stream.feed stream)
               ~is_done:(fun () -> Gemini_stream.is_done stream)
               ~is_finished:(fun () -> Gemini_stream.is_finished stream);
-            Gemini_stream.finish stream))
+            let reply = Gemini_stream.finish stream in
+            (match on_usage with
+             | None -> ()
+             | Some report ->
+                 check_cancel cancel;
+                 Option.iter report (Gemini_stream.usage stream));
+            reply))
   | Codex_responses ->
       let account_id = match credential.account_id with
         | Some id when id <> "" -> id

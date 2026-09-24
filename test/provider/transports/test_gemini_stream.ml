@@ -23,13 +23,37 @@ let () =
     chunk [ text "世界 🌍"; tool "fc-1" "read_file" args ] false ^
     chunk [ text "!" ] false ^ chunk [] true in
   String.iter (fun char -> Pave.Gemini_stream.feed stream (String.make 1 char)) wire;
-  assert (Pave.Gemini_stream.is_done stream);
   assert (Pave.Gemini_stream.is_finished stream);
   let result = Pave.Gemini_stream.finish stream in
   assert (List.rev !deltas = [ "你好，"; "世界 🌍"; "!" ]);
   assert (result.content = Some "你好，世界 🌍!");
   assert (result.tool_calls = [ { Pave.Protocol.id = "fc-1";
     name = "read_file"; arguments = args } ]);
+  assert (Pave.Gemini_stream.usage stream = None);
+  let reported = `Assoc [
+    "promptTokenCount", `Int 12; "candidatesTokenCount", `Int 5;
+    "thoughtsTokenCount", `Int 3 ] in
+  let final_with_usage = event (Yojson.Basic.to_string (`Assoc [
+    "candidates", `List [ `Assoc [
+      "finishReason", `String "STOP";
+      "content", `Assoc ["parts", `List [text "metered"]] ] ];
+    "usageMetadata", reported ])) in
+  let measured = Pave.Gemini_stream.create ~model:"gemini-2.5-flash"
+    ~on_text:(fun _ -> ()) in
+  Pave.Gemini_stream.feed measured final_with_usage;
+  ignore (Pave.Gemini_stream.finish measured);
+  assert (Pave.Gemini_stream.is_done measured);
+  assert (Pave.Gemini_stream.usage measured =
+    Some { Pave.Protocol.input_tokens = 12; output_tokens = 8 });
+  let trailing = Pave.Gemini_stream.create ~model:"gemini-2.5-flash"
+    ~on_text:(fun _ -> ()) in
+  Pave.Gemini_stream.feed trailing
+    (chunk [text "metered"] true ^
+     event (Yojson.Basic.to_string (`Assoc [
+       "usageMetadata", reported ])));
+  ignore (Pave.Gemini_stream.finish trailing);
+  assert (Pave.Gemini_stream.usage trailing =
+    Some { Pave.Protocol.input_tokens = 12; output_tokens = 8 });
   let result_without_id = Pave.Gemini_stream.create ~model:"gemini-2.5-flash" ~on_text:(fun _ -> ()) in
   Pave.Gemini_stream.feed result_without_id
     (chunk [ `Assoc [ "functionCall", `Assoc [ "name", `String "read_file";
