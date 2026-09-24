@@ -24,17 +24,23 @@
 curl -fsSL https://raw.githubusercontent.com/kimmandoo/pave/main/install.sh | sh
 ```
 
-The [installer](install.sh) verifies the release archive against its published SHA-256 manifest, then installs the binary to `~/.local/bin/pave` and its notices to `~/.local/share/licenses/pave`. If prompted, add `~/.local/bin` to your `PATH`. Inspect the script before running it if you prefer not to pipe downloads into a shell.
-
-<details>
-<summary>Version pinning, custom destination, upgrade and removal</summary>
+The [installer](install.sh) verifies the release archive against its published SHA-256 manifest, then installs the binary to `~/.local/bin/pave` and its notices and native-install marker to `~/.local/share/licenses/pave`. If prompted, add `~/.local/bin` to your `PATH`. Inspect the script before running it if you prefer not to pipe downloads into a shell. To upgrade an installer-owned binary to the latest published release:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/kimmandoo/pave/main/install.sh | PAVE_VERSION=v0.1.4 sh
-curl -fsSL https://raw.githubusercontent.com/kimmandoo/pave/main/install.sh | PAVE_INSTALL_DIR=/absolute/path/bin sh
+pave update
 ```
 
-Rerun the installer to upgrade. To uninstall, remove `~/.local/bin/pave` and `~/.local/share/licenses/pave` (or your custom paths).
+The native binary executes its **embedded** copy of the verified installer; it does not fetch a new shell script. Updates reinstall the latest release, including when you are already up to date. This command preserves a custom install directory, but intentionally ignores `PAVE_VERSION` and `PAVE_INSTALL_DIR` overrides from your environment. A binary installed before the native-install marker was introduced (through `v0.1.4`) needs the one-command installer run **once more** before `pave update` is available. Source/opam installs do not self-update; use the package-manager steps below.
+
+<details>
+<summary>Version pinning, custom destination and removal</summary>
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/kimmandoo/pave/main/install.sh | PAVE_VERSION=v0.1.5 sh
+curl -fsSL https://raw.githubusercontent.com/kimmandoo/pave/main/install.sh | PAVE_INSTALL_DIR="$HOME/tools/bin" sh
+```
+
+Use the installer directly to install a **specific published** tag or change destinations; `pave update` always targets the latest release at the binary's current location. To uninstall, remove `~/.local/bin/pave` and `~/.local/share/licenses/pave` (or the equivalent locations under your custom destination).
 
 </details>
 

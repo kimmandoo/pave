@@ -1,7 +1,16 @@
 (include_subdirs unqualified)
 
 (executable
+ (name embed_installer)
+ (modules embed_installer))
+
+(rule
+ (target embedded_installer.ml)
+ (deps ../install.sh)
+ (action (run %{exe:embed_installer.exe} %{dep:../install.sh} %{target})))
+
+(executable
  (name main)
  (public_name pave)
- (modules main cli_auth tui terminal_input)
+ (modules main cli_auth tui terminal_input update embedded_installer)
  (libraries pave unix notty-community notty-community.unix uutf))

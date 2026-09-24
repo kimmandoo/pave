@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-09-25
+
+- feat(update): added `pave update` for installer-owned macOS/Linux binaries with an embedded local installer, ownership marker and the existing checksum/archive validation; kept custom install directories and rejected unmanaged executables or inherited version/destination overrides.
+- docs(project): inventoried reference capabilities as individually actionable, source-indexed tasks across providers, auth, agent/session, tools, terminal, extensibility and distribution without claiming implemented parity.
+- test(update): exercised a native installed binary upgrading from a different executable using fake HTTPS release assets; corrupted archive checksum left the previous executable intact, and source-built binaries refused self-update.
+
 ## 2026-09-24
 
 - feat(provider): preserved Gemini 3 model-issued thought signatures in buffered and streamed tool calls, native function-result replay and reopened session journals; rejected missing signatures and mismatched native state rather than fabricating continuation.
