@@ -45,6 +45,7 @@ type t = {
   mutable bytes : int;
   mutable response_id : string option;
   mutable completed : Protocol.message option;
+  mutable usage : Protocol.usage option;
   mutable done_seen : bool;
   mutable parser : Sse.t option;
 }
@@ -293,6 +294,7 @@ let handle_completed t json =
         let text = message_text output in
         if text <> "" then t.on_text text) outputs;
   t.completed <- Some result;
+  t.usage <- Openai_responses_wire.usage response;
   t.done_seen <- true
 
 let handle_event t event data =
@@ -335,8 +337,8 @@ let handle_event t event data =
 let create ~model ~on_text =
   if model = "" then invalid_arg "empty Codex model";
   let t = { model; on_text; items = Hashtbl.create 4; ids = Hashtbl.create 4;
-    bytes = 0; response_id = None; completed = None; done_seen = false;
-    parser = None } in
+    bytes = 0; response_id = None; completed = None; usage = None;
+    done_seen = false; parser = None } in
   t.parser <- Some (Sse.create ~on_event:(handle_event t));
   t
 
@@ -346,6 +348,7 @@ let parser t = match t.parser with
 let feed t bytes = Sse.feed (parser t) bytes
 let is_done t = t.done_seen
 let is_finished t = t.completed <> None
+let usage t = if t.completed <> None then t.usage else None
 let finish t =
   Sse.finish (parser t);
   match t.completed with

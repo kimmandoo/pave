@@ -9,10 +9,11 @@ let done_item ?index output = event "response.output_item.done"
   ((match index with None -> [] | Some n -> ["output_index", `Int n]) @ ["item", output])
 let indexed kind index id fields = event kind
   (["output_index", `Int index; "item_id", `String id] @ fields)
-let completed ?(status = "completed") ?output () =
+let completed ?(status = "completed") ?output
+    ?(usage = Some (`Assoc ["input_tokens", `Int 5; "output_tokens", `Int 3])) () =
   event "response.completed" ["response", `Assoc (
-    (["id", `String "resp_1"; "status", `String status;
-      "usage", `Assoc ["input_tokens", `Int 5; "output_tokens", `Int 3]] @
+    (["id", `String "resp_1"; "status", `String status] @
+     (match usage with None -> [] | Some reported -> ["usage", reported]) @
      (match output with None -> [] | Some output -> ["output", `List output])))]
 let text value = item "output_text" ["text", `String value]
 let message id value = item "message" ["id", `String id;
@@ -71,6 +72,8 @@ let () =
   String.iter (fun char -> Codex_stream.feed t (String.make 1 char)) sse;
   assert (Codex_stream.is_done t && Codex_stream.is_finished t);
   let result = Codex_stream.finish t in
+  assert (Codex_stream.usage t =
+    Some { Protocol.input_tokens = 5; output_tokens = 3 });
   assert (List.rev !chunks = ["Reading "; "file"]);
   assert (result.content = Some "Reading file");
   assert (result.tool_calls = [{ Protocol.id = "call_1"; name = "read_file";
@@ -97,6 +100,16 @@ let () =
   Codex_stream.feed t final_only;
   assert ((Codex_stream.finish t).content = Some "Reading file");
   assert (List.rev !chunks = ["Reading file"]);
+  let unmetered = Codex_stream.create ~model ~on_text:(fun _ -> ()) in
+  Codex_stream.feed unmetered (completed ~output:[final_message] ~usage:None ());
+  ignore (Codex_stream.finish unmetered);
+  assert (Codex_stream.usage unmetered = None);
+  let malformed = Codex_stream.create ~model ~on_text:(fun _ -> ()) in
+  Codex_stream.feed malformed (completed ~output:[final_message]
+    ~usage:(Some (`Assoc ["input_tokens", `Int 5;
+      "output_tokens", `Int (-1)])) ());
+  ignore (Codex_stream.finish malformed);
+  assert (Codex_stream.usage malformed = None);
   let indexed_call = added ~index:0 initial_call
     ^ indexed "response.function_call_arguments.delta" 0 "fc_1" [
         "delta", `String {|{"path":"README.md"}|}]

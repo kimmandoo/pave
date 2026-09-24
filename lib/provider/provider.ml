@@ -584,7 +584,13 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage 
           body ~on_chunk:(Codex_stream.feed stream)
           ~is_done:(fun () -> Codex_stream.is_done stream)
           ~is_finished:(fun () -> Codex_stream.is_finished stream);
-        Codex_stream.finish stream)
+        let reply = Codex_stream.finish stream in
+        (match on_usage with
+         | None -> ()
+         | Some report ->
+             check_cancel cancel;
+             Option.iter report (Codex_stream.usage stream));
+        reply)
   in
   check_cancel cancel;
   result
