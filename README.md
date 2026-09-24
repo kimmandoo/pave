@@ -122,13 +122,15 @@ For optional prompt customization, use `<workspace>/.pave/SYSTEM.md`, `SYSTEM_TE
 | `/cancel` · `/settings` | Stop the active request/command; edit typed project defaults for the next launch |
 | `/tools [NAME]` | List the tools actually offered to the model, or inspect one tool's description; shell availability follows `--allow-shell` and still requires per-command approval |
 | `/new` · `/resume [PATH]` | Create a private, persistent workspace journal; search recent journals or reopen an explicit workspace journal |
-| `/help` · `/entries` | Show commands · list journal message IDs |
-| `/branch ID` · `/fork /path/new.jsonl` | Continue from an earlier message · copy the selected conversation |
+| `/help` · `/entries` | Show descriptive commands · list journal message IDs |
+| `/tree` · `/branch ID` · `/fork /path/new.jsonl` | Search recent journal ancestry and select a branch · choose an exact entry ID · copy the selected conversation |
 | `/compact` · `/quit` | Summarize older turns manually · exit |
 
 The input remains responsive during network calls and approved commands. Prompts submitted while a turn runs are queued and appear in the transcript only when their own turn begins; `/cancel` stops the active turn without discarding queued prompts or an unsent draft. Transient streamed text from a cancelled or failed turn is removed. In-memory scrollback keeps the latest 10,000 logical rows; a saved journal retains the full durable conversation and `/resume` restores its visible history without replacing the current editor draft. Plain startup conversations are ephemeral; `/new` asks before discarding an unsaved one.
 
 Sessions are private append-only JSONL journals on creation, **not encrypted**. `/new` opts into storage at `${XDG_STATE_HOME:-~/.local/state}/pave/sessions/<SHA-256 of canonical workspace path>/<random>.jsonl` (0700 directories, 0600 files). `/resume` lists up to 100 recent journals from the current workspace only, skipping symlinks, foreign owners and permissive files; an explicit path is subject to the same checks. `--session PATH` continues to support an explicitly chosen journal and shows its restored transcript at startup. Keep journals outside version control: Gemini 3 native replay may persist model-issued thought text and signatures alongside visible conversation content. Reopening a session marks interrupted tool calls as failed rather than rerunning them. `/compact` preserves the full journal; model summarization may fail if the provider's context limit is exceeded.
+
+The `/tree` picker displays parent-linked entries, highlights the active tip and searches both preview text and IDs. It bounds the list to the most recent 1,024 entries; `/branch ID` remains available for older entries. Selecting an entry restores only that branch's visible history; Escape keeps the current branch and draft.
 
 ## Providers
 

@@ -399,6 +399,14 @@ let () =
         | None -> () in
     let report_error exn = on_event ("Error: " ^ Printexc.to_string exn) in
     let interact () =
+      let checkout_branch current target =
+        Pave.Session.branch current target;
+        agent := None;
+        match !ui with
+        | Some screen ->
+            Tui.show_history screen (Pave.Session.history current);
+            Tui.alert screen ("Branch: " ^ target)
+        | None -> on_event ("Branch: " ^ target) in
       let complete_command ?wake_fd ?on_wake screen prefix =
         let choices = Pave.Interaction.suggestions prefix in
         if choices = [] then (
@@ -493,14 +501,42 @@ let () =
           (match !journal with
            | None -> on_event "Error: --session is required to branch"
            | Some current ->
+               (try checkout_branch current target
+                with exn -> report_error exn))
+        | Pave.Interaction.Tree ->
+          (match !journal with
+           | None -> on_event "Error: --session is required to browse branches"
+           | Some current ->
                (try
-                 Pave.Session.branch current target;
-                 agent := None;
-                 (match !ui with
-                  | Some screen ->
-                      Tui.show_history screen (Pave.Session.history current);
-                      Tui.alert screen ("Branch: " ^ target)
-                  | None -> on_event ("Branch: " ^ target))
+                 let choices, truncated = Pave.Session_tree.choices
+                   ~leaf:(Pave.Session.leaf_id current)
+                   (Pave.Session.entries current) in
+                 if choices = [] then on_event "Journal has no entries"
+                 else (
+                   let selected = match !ui with
+                     | Some screen ->
+                         let title = if truncated then
+                           "Recent 1024 entries · older: /branch ID"
+                         else "Journal tree · search and select branch" in
+                         let selected_label = Tui.choose screen ~title
+                           ~choices:(List.map (fun (item : Pave.Session_tree.choice) ->
+                             item.label) choices) in
+                         Option.bind selected_label (fun label ->
+                           List.find_opt (fun (item : Pave.Session_tree.choice) ->
+                             item.label = label) choices)
+                         |> Option.map (fun (item : Pave.Session_tree.choice) ->
+                           item.id)
+                     | None ->
+                         List.iter (fun (item : Pave.Session_tree.choice) ->
+                           on_event item.label) choices;
+                         if truncated then on_event "Older entries: /branch ID";
+                         print_string "Branch ID (blank cancels): ";
+                         flush stdout;
+                         let answer = try String.trim (read_line ())
+                           with End_of_file -> "" in
+                         if List.exists (fun (item : Pave.Session_tree.choice) ->
+                           item.id = answer) choices then Some answer else None in
+                   Option.iter (checkout_branch current) selected)
                 with exn -> report_error exn))
         | Pave.Interaction.Fork path ->
           (match !journal with

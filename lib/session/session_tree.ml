@@ -1,0 +1,56 @@
+type choice = { label : string; id : string }
+
+let max_choices = 1_024
+
+let first_line text =
+  let limit = min 96 (String.length text) in
+  let stop = ref 0 in
+  while !stop < limit && text.[!stop] <> '\n' do incr stop done;
+  let bytes = !stop in
+  while !stop > 0 && !stop < String.length text &&
+    Char.code text.[!stop] land 0xc0 = 0x80 do decr stop done;
+  let buffer = Buffer.create (!stop + 4) in
+  ignore (Uutf.String.fold_utf_8 (fun () _ -> function
+    | `Malformed _ -> Buffer.add_utf_8_uchar buffer Uutf.u_rep
+    | `Uchar uchar ->
+        let code = Uchar.to_int uchar in
+        if code < 32 || (code >= 127 && code <= 159) ||
+          code = 0x61c || code = 0x200e || code = 0x200f ||
+          (code >= 0x202a && code <= 0x202e) ||
+          (code >= 0x2066 && code <= 0x2069) then
+          Buffer.add_char buffer ' '
+        else Buffer.add_utf_8_uchar buffer uchar) ()
+    (String.sub text 0 !stop));
+  String.trim (Buffer.contents buffer) ^
+    (if bytes = limit && limit < String.length text then "…" else "")
+
+let summary (entry : Session.entry) =
+  match entry.kind with
+  | Session.Branch -> "branch point"
+  | Session.Compaction _ -> "compacted context"
+  | Session.Message message ->
+      let content = match message.content with
+        | None | Some "" when message.tool_calls <> [] -> "tool calls"
+        | None -> ""
+        | Some text -> first_line text in
+      message.role ^ (if content = "" then "" else " · " ^ content)
+
+let choices ~leaf entries =
+  let total = List.length entries in
+  let depth_by_id = Hashtbl.create (min 2048 total) in
+  let first = max 0 (total - max_choices) in
+  let index = ref 0 and selected = ref [] in
+  List.iter (fun (entry : Session.entry) ->
+    let depth = match entry.parent_id with
+      | None -> 0
+      | Some parent -> 1 + Option.value (Hashtbl.find_opt depth_by_id parent) ~default:0 in
+    Hashtbl.replace depth_by_id entry.id depth;
+    if !index >= first then (
+      let indent = String.make (2 * min depth 4) ' ' in
+      let marker = if leaf = Some entry.id then "◆" else " " in
+      let label = Printf.sprintf "%s %s%s%s · %s" marker indent
+        (if depth = 0 then "• " else if depth > 4 then "… " else "↳ ")
+        (summary entry) entry.id in
+      selected := { label; id = entry.id } :: !selected);
+    incr index) entries;
+  List.rev !selected, first > 0

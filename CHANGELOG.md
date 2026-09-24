@@ -2,6 +2,8 @@
 
 ## 2026-09-25
 
+- feat(session): added a bounded, searchable `/tree` journal ancestry picker with parent-linked previews and active-tip highlighting; selection checks out exactly that branch, while Escape preserves the current transcript. A native PTY followed two divergent turns, filtered the abandoned branch, selected it and verified the alternative disappeared; redirected CLI selection also worked.
+- test(distribution): published `v0.1.9` on all four native targets; installed public `v0.1.8` into an isolated directory, upgraded it to `v0.1.9` over HTTPS, then verified branch changes repaint authoritative saved history in the shipped PTY.
 - fix(tui): reconcile visible transcript with the journal after `/branch` and `/fork`; navigating to an earlier branch no longer leaves abandoned turns and stale `/entries` notices on-screen. Reproduced the stale display before the fix, then navigated both directions and forked in a real saved-session PTY.
 - feat(tui): typed slash-command parsing from one command catalog, a prefix-filtered searchable `/` + Tab chooser that inserts without executing or discarding a draft, and descriptive `/help`; retained responsive worker wakeups behind the static palette. Exercised prefix selection, Escape preservation, insertion, full catalog and help in a native PTY.
 - feat(tui): `/tools [NAME]` now shows the exact agent-advertised tool set and focused descriptions, reflecting shell enablement without implying sandboxing or bypassing per-command approval. A compact tool list fit the actual 70×18 terminal; redirected CLI confirmed disabled shell tools stay unavailable.

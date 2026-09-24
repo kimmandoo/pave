@@ -42,7 +42,10 @@ let sanitize text =
         let code = Uchar.to_int uchar in
         if code = 10 then Buffer.add_char buffer '\n'
         else if code = 9 then Buffer.add_char buffer ' '
-        else if code < 32 || (code >= 127 && code <= 159) then Buffer.add_char buffer ' '
+        else if code < 32 || (code >= 127 && code <= 159) ||
+          code = 0x61c || code = 0x200e || code = 0x200f ||
+          (code >= 0x202a && code <= 0x202e) ||
+          (code >= 0x2066 && code <= 0x2069) then Buffer.add_char buffer ' '
         else Buffer.add_utf_8_uchar buffer uchar in
   ignore (Uutf.String.fold_utf_8 append () text);
   Buffer.contents buffer

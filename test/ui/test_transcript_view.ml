@@ -103,9 +103,9 @@ let () =
   let approval_block = create () in
   approval approval_block "pwd";
   let malicious = create () in
-  sent malicious "safe\027[31m\194\155unsafe";
-  expect "transcript strips C0 and C1 terminal controls while preserving prose"
-    (has "safe [31m unsafe" (lines malicious 64));
+  sent malicious "safe\027[31m\194\155unsafe\226\128\174rtl";
+  expect "transcript strips C0, C1 and bidi display controls while preserving prose"
+    (has "safe [31m unsafe rtl" (lines malicious 64));
   expect "approval retains exact reviewable command"
     (heading_count approval_block Approval = 1 &&
       has "pwd" (lines approval_block 60));
