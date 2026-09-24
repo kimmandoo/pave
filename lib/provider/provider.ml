@@ -438,7 +438,13 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage 
       (match on_text with
       | None ->
           let json = post_json ?cancel ~endpoint:config.endpoint ~headers ~secret:api_key body in
-          parse (fun () -> Openai_responses_wire.parse_completion json)
+          let reply = parse (fun () -> Openai_responses_wire.parse_completion json) in
+          (match on_usage with
+           | None -> ()
+           | Some report ->
+               check_cancel cancel;
+               Option.iter report (Openai_responses_wire.usage json));
+          reply
       | Some emit ->
           let stream = Openai_responses_stream.create ~on_text:emit in
           let body = parse (fun () ->
@@ -449,7 +455,13 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage 
               body ~on_chunk:(Openai_responses_stream.feed stream)
               ~is_done:(fun () -> Openai_responses_stream.is_done stream)
               ~is_finished:(fun () -> Openai_responses_stream.is_finished stream);
-            Openai_responses_stream.finish stream))
+            let reply = Openai_responses_stream.finish stream in
+            (match on_usage with
+             | None -> ()
+             | Some report ->
+                 check_cancel cancel;
+                 Option.iter report (Openai_responses_stream.usage stream));
+            reply))
   | Ollama_chat ->
       let body = parse (fun () ->
         Ollama_wire.request ~model:config.model messages tools) in

@@ -694,7 +694,7 @@ let () =
                  let source = match !journal with
                    | Some _ -> "on branch"
                    | None -> "in ephemeral session" in
-                 [Printf.sprintf "Ollama-reported %s: %d in · %d out tokens"
+                 [Printf.sprintf "Provider-reported %s: %d in · %d out tokens"
                     source usage.input_tokens usage.output_tokens;
                   "Other providers/context limit/cost · not tracked"]) in
           (match !ui with
@@ -707,7 +707,7 @@ let () =
                 (match !ephemeral_usage with
                  | None -> ["No provider-reported tokens yet"]
                  | Some tokens ->
-                     [Printf.sprintf "Ollama · %d input / %d output tokens"
+                     [Printf.sprintf "Reported · %d input / %d output tokens"
                         tokens.input_tokens tokens.output_tokens])
             | Some current ->
                 let by_model = Pave.Session.usage_by_model current in
@@ -726,7 +726,7 @@ let () =
                         Printf.sprintf "%d input · %d output"
                           tokens.input_tokens tokens.output_tokens]) rows) in
           let lines = lines @
-            ["Ollama-reported only"; "Other providers untracked";
+            ["OpenAI Responses / Ollama"; "Others untracked";
              "Limits/cost untracked"] in
           (match !ui with
            | Some screen -> Tui.events screen lines

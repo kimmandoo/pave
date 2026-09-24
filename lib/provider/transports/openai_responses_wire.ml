@@ -5,6 +5,13 @@ let invalid detail = raise (Invalid_response ("invalid Responses API response: "
 let required_string name json = match member name json with
   | `String value when value <> "" -> value
   | _ -> invalid ("missing or invalid " ^ name)
+let usage json =
+  let reported = member "usage" json in
+  match member "input_tokens" reported, member "output_tokens" reported with
+  | `Int input_tokens, `Int output_tokens
+    when input_tokens >= 0 && output_tokens >= 0 ->
+      Some { input_tokens; output_tokens }
+  | _ -> None
 
 let tool_schema json =
   let fn = member "function" json in

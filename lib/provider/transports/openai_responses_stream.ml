@@ -15,6 +15,7 @@ type t = {
   items : (int, item) Hashtbl.t;
   mutable response_bytes : int;
   mutable completed : Protocol.message option;
+  mutable usage : Protocol.usage option;
   mutable done_seen : bool;
   mutable parser : Sse.t option;
 }
@@ -178,6 +179,7 @@ let handle_completed t json =
     if not (Hashtbl.mem t.items index) && field "type" output = `String "message" then (
       let text = message_text output in
       if text <> "" then (reserve t (String.length text); t.on_text text))) outputs;
+  t.usage <- Openai_responses_wire.usage response;
   t.completed <- Some result;
   t.done_seen <- true
 
@@ -206,7 +208,7 @@ let handle_event t event data =
 
 let create ~on_text =
   let t = { on_text; items = Hashtbl.create 4; response_bytes = 0;
-    completed = None; done_seen = false; parser = None } in
+    completed = None; usage = None; done_seen = false; parser = None } in
   t.parser <- Some (Sse.create ~on_event:(handle_event t));
   t
 
@@ -216,6 +218,7 @@ let feed t bytes = match t.parser with
 let is_done t = t.done_seen
 let is_finished t = t.completed <> None
 
+let usage t = t.usage
 let finish t =
   (match t.parser with Some parser -> Sse.finish parser
    | None -> invalid "SSE parser not initialized");

@@ -68,6 +68,15 @@ let () =
     tool_calls = [ { Protocol.id = "call_1"; name = "read_file";
       arguments = `Assoc [ "path", `String "a.txt" ] } ];
     tool_call_id = None; provider_state = None });
+  assert (Openai_responses_stream.usage t = None);
+  let metered = Openai_responses_stream.create ~on_text:(fun _ -> ()) in
+  let measured = event "response.completed" [ "response", `Assoc [
+    "status", `String "completed"; "output", `List [final_message];
+    "usage", `Assoc ["input_tokens", `Int 21; "output_tokens", `Int 9] ] ] in
+  Openai_responses_stream.feed metered measured;
+  ignore (Openai_responses_stream.finish metered);
+  assert (Openai_responses_stream.usage metered =
+    Some { Protocol.input_tokens = 21; output_tokens = 9 });
   let without_deltas = added 0 initial_message ^ done_item 0 final_message
     ^ completion [ final_message ] in
   let deltas = ref [] in
