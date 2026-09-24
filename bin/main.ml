@@ -399,10 +399,29 @@ let () =
         | None -> () in
     let report_error exn = on_event ("Error: " ^ Printexc.to_string exn) in
     let interact () =
+      let complete_command ?wake_fd ?on_wake screen prefix =
+        let choices = Pave.Interaction.suggestions prefix in
+        if choices = [] then (
+          Tui.alert screen "No matching command";
+          None)
+        else
+          let names = List.map (fun (item : Pave.Interaction.shortcut) ->
+            item.name) choices in
+          match Tui.choose ?wake_fd ?on_wake ~dynamic:false screen
+            ~title:"Commands · search, Enter insert, Esc keep draft"
+            ~choices:names with
+          | None -> None
+          | Some name ->
+              Option.map (fun (item : Pave.Interaction.shortcut) ->
+                item.name ^ (if item.usage = "" then "" else " "))
+                (List.find_opt (fun (item : Pave.Interaction.shortcut) ->
+                  item.name = name) choices) in
       let input () = match !ui, !runner with
         | Some screen, Some active ->
-            (match Tui.read screen ~wake_fd:(Pave.Turn_runner.fd active)
-              ~on_wake:(fun () -> Pave.Turn_runner.drain active)
+            let wake_fd = Pave.Turn_runner.fd active in
+            let on_wake () = Pave.Turn_runner.drain active in
+            (match Tui.read screen ~wake_fd ~on_wake
+              ~on_completion:(complete_command ~wake_fd ~on_wake screen)
               ~on_interrupt:(fun () ->
                 if Pave.Turn_runner.busy active then (
                   Pave.Turn_runner.cancel active;
@@ -410,43 +429,51 @@ let () =
              | Some text -> text
              | None -> raise End_of_file)
         | Some screen, None ->
-            (match Tui.read screen with Some text -> text | None -> raise End_of_file)
+            (match Tui.read screen
+              ~on_completion:(complete_command screen) with
+             | Some text -> text | None -> raise End_of_file)
         | None, _ ->
             print_string "pave> "; flush stdout;
             read_line () in
       try while true do
         let line = input () in
-        if line = "/exit" || line = "/quit" then raise End_of_file;
         (try
+         let command = Pave.Interaction.parse line in
          let busy = match !runner with
            | Some active -> Pave.Turn_runner.busy active
            | None -> false in
          let feedback message = match busy, !ui with
            | true, Some screen -> Tui.alert screen message
            | _ -> on_event message in
-         if line = "/cancel" then (
-           match !runner with
-           | Some active when busy ->
-               Pave.Turn_runner.cancel active;
-               feedback "Cancelling current turn; queued prompts will run next."
-           | _ -> on_event "No active turn to cancel.")
-         else if busy && String.starts_with ~prefix:"/" (String.trim line)
-           && line <> "/help" then
-           feedback "Wait for the current turn or /cancel it before changing session or model."
-         else match Pave.Interaction.parse line with
+         match command with
+         | Pave.Interaction.Quit -> raise End_of_file
+         | Pave.Interaction.Cancel ->
+             (match !runner with
+              | Some active when busy ->
+                  Pave.Turn_runner.cancel active;
+                  feedback "Cancelling current turn; queued prompts will run next."
+              | _ -> on_event "No active turn to cancel.")
+         | Pave.Interaction.Help ->
+             if busy then
+               feedback "Commands: /cancel · /quit · type to queue a follow-up; /help when idle shows the rest"
+             else (
+               let lines = "Commands · type / then Tab to search" ::
+                 Pave.Interaction.help () in
+               let keys = [
+                 "Keys · Enter send · Shift+Enter newline · Ctrl+R search";
+                 "Ctrl+P/N history · Ctrl+Z/Y undo/redo · Ctrl+K/U kill";
+                 "Alt+Y yank · Alt+O tool details · PgUp/Dn scroll";
+                 "Ctrl+C clear draft or cancel active turn" ] in
+               match !ui with
+               | Some screen -> Tui.events screen (lines @ keys)
+               | None -> List.iter on_event (lines @ keys))
+         | _ when busy && (match command with
+             | Pave.Interaction.Prompt _ -> false
+             | _ -> true) ->
+             feedback "Wait for the current turn or /cancel it before changing session or model."
          | Pave.Interaction.Login selected -> choose_login selected
          | Pave.Interaction.Model selected -> choose_model selected
-         | Pave.Interaction.Other ->
-        if line = "/help" then (
-          if busy then
-            feedback "Commands: /cancel · /quit · type to queue a follow-up; /help when idle shows the rest"
-          else (
-            on_event "Commands: /login [PROVIDER] · /model [PROVIDER/MODEL] · /settings · /new · /resume [PATH] · /cancel · /entries · /branch ID · /fork PATH · /compact · /quit";
-            (match !ui with
-             | Some _ ->
-                 on_event "Edit: Shift+Enter newline · Ctrl+R search · Ctrl+P/N history · Ctrl+Z/Y undo/redo · Ctrl+K/U kill · Alt+Y yank · Alt+O tool details · PgUp/PgDn scroll · Ctrl+C clear/cancel"
-             | None -> ())))
-        else if line = "/settings" then
+         | Pave.Interaction.Settings ->
           (match !ui with
            | Some screen -> Settings_view.open_view screen ~root
            | None ->
@@ -459,18 +486,14 @@ let () =
                  string_of_bool values.disable_shell);
                on_event ("Maximum turns: " ^
                  string_of_int (Option.value ~default:20 values.max_turns)))
-        else if line = "/new" then start_session ()
-        else if line = "/resume" then resume_session None
-        else if String.starts_with ~prefix:"/resume " line then
-          let path = String.trim (String.sub line 8 (String.length line - 8)) in
-          resume_session (if path = "" then None else Some path)
-        else if line = "/compact" then compact ()
-        else if String.starts_with ~prefix:"/branch " line then
+        | Pave.Interaction.New -> start_session ()
+        | Pave.Interaction.Resume path -> resume_session path
+        | Pave.Interaction.Compact -> compact ()
+        | Pave.Interaction.Branch target ->
           (match !journal with
            | None -> on_event "Error: --session is required to branch"
            | Some current ->
                (try
-                 let target = String.trim (String.sub line 8 (String.length line - 8)) in
                  Pave.Session.branch current target;
                  agent := None;
                  (match !ui with
@@ -479,13 +502,12 @@ let () =
                       Tui.alert screen ("Branch: " ^ target)
                   | None -> on_event ("Branch: " ^ target))
                 with exn -> report_error exn))
-        else if String.starts_with ~prefix:"/fork " line then
+        | Pave.Interaction.Fork path ->
           (match !journal with
            | None -> on_event "Error: --session is required to fork"
            | Some current ->
                (try
-                 let next = Pave.Session.fork current
-                   (String.trim (String.sub line 6 (String.length line - 6))) in
+                 let next = Pave.Session.fork current path in
                  journal := Some next;
                  agent := None;
                  (match !ui with
@@ -495,7 +517,7 @@ let () =
                       Tui.alert screen ("Fork: " ^ next.Pave.Session.path)
                   | None -> on_event ("Fork: " ^ next.Pave.Session.path))
                 with exn -> report_error exn))
-        else if line = "/entries" then
+        | Pave.Interaction.Entries ->
           (match !journal with
            | None -> on_event "Error: --session is required to list entries"
            | Some current ->
@@ -512,12 +534,13 @@ let () =
                (match !ui with
                 | Some screen -> Tui.events screen lines
                 | None -> List.iter on_event lines))
-        else if String.starts_with ~prefix:"/" (String.trim line) then
-          on_event "Unknown command; use /help to list available commands"
-        else if String.trim line <> "" then (
-          match !runner with
-          | Some active -> Pave.Turn_runner.submit active line
-          | None -> send line)
+        | Pave.Interaction.Unknown _ ->
+            on_event "Unknown command; use /help to list available commands"
+        | Pave.Interaction.Prompt text when text <> "" ->
+            (match !runner with
+             | Some active -> Pave.Turn_runner.submit active line
+             | None -> send line)
+        | Pave.Interaction.Prompt _ -> ()
         with End_of_file -> raise End_of_file
            | exn -> report_error exn)
       done with End_of_file -> () in

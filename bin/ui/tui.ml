@@ -505,7 +505,7 @@ let repaint_after_key t =
   if (not t.paste && not (Terminal_input.pending t.input))
     || Unix.gettimeofday () -. t.last_paint >= 0.1 then paint t
 
-let read ?wake_fd ?on_wake ?on_interrupt t =
+let read ?wake_fd ?on_wake ?on_interrupt ?on_completion t =
   let measure cluster = I.width (I.string text_attr cluster) in
   let field_width () =
     let cols, _ = Notty_unix.Term.size t.term in
@@ -561,6 +561,23 @@ let read ?wake_fd ?on_wake ?on_interrupt t =
             Pave.Composer.search_insert t.editor (utf8 uchar)
         | _ -> ());
         changed (); loop ()
+    | `Key (`Tab, _) ->
+        (match on_completion with
+        | None -> ()
+        | Some complete ->
+            let draft = Pave.Composer.text t.editor in
+            if String.starts_with ~prefix:"/" draft &&
+              not (String.exists (fun char ->
+                char = ' ' || char = '\n' || char = '\t') draft) then
+              (match complete draft with
+               | Some selected when String.starts_with ~prefix:draft selected ->
+                   Pave.Composer.finish t.editor;
+                   Pave.Composer.insert t.editor
+                     (String.sub selected (String.length draft)
+                       (String.length selected - String.length draft));
+                   changed ()
+               | _ -> ()));
+        loop ()
     | `Key (`Enter, mods) ->
         if t.paste || List.mem `Shift mods then
           (Pave.Composer.insert t.editor "\n"; changed (); loop ())
@@ -703,7 +720,7 @@ let update_choices t ~verified ?status () =
       paint t
   | _ -> invalid_arg "Tui.update_choices: no dynamic chooser is open"
 
-let choose ?(allow_custom = false) ?wake_fd ?on_wake t ~title ~choices =
+let choose ?(allow_custom = false) ?wake_fd ?on_wake ?dynamic t ~title ~choices =
   let cols, rows = Notty_unix.Term.size t.term in
   if cols < 9 || rows < 2 then (
     alert t "Resize terminal (at least 9 columns × 2 rows) to select";
@@ -713,7 +730,8 @@ let choose ?(allow_custom = false) ?wake_fd ?on_wake t ~title ~choices =
   let chooser = { title = sanitize title; suggestions;
     choices = Array.map (fun value ->
       { value; custom = false; verified = false }) suggestions;
-    allow_custom; dynamic = Option.is_some wake_fd; status = None;
+    allow_custom; dynamic = Option.value dynamic
+      ~default:(Option.is_some wake_fd); status = None;
     filter = ""; selected = 0; offset = 0 } in
   let old_scroll = t.scroll in
   let selected () =
