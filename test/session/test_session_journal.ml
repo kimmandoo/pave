@@ -5,8 +5,12 @@ let () =
   Sys.remove dir; Unix.mkdir dir 0o700;
   let path = Filename.concat dir "session.jsonl" in
   let fork_path = Filename.concat dir "fork.jsonl" in
+  let metadata_path = Filename.concat dir "metadata.jsonl" in
+  let metadata_fork = Filename.concat dir "metadata-fork.jsonl" in
   Fun.protect ~finally:(fun () ->
     (try Sys.remove fork_path with Sys_error _ -> ());
+    (try Sys.remove metadata_fork with Sys_error _ -> ());
+    (try Sys.remove metadata_path with Sys_error _ -> ());
     (try Sys.remove path with Sys_error _ -> ());
     Unix.rmdir dir) (fun () ->
     let journal = Pave.Session.open_file path in
@@ -48,5 +52,31 @@ let () =
     Pave.Session.branch recovered pending_id;
     assert (List.length (Pave.Session.history recovered) = 4);
     assert (Pave.Session.history (Pave.Session.open_file path) =
-      Pave.Session.history recovered));
+      Pave.Session.history recovered);
+    let metadata = Pave.Session.open_file metadata_path in
+    Pave.Session.set_model metadata ~provider:"openai" ~model:"gpt-6-sol";
+    Pave.Session.set_model metadata ~provider:"openai" ~model:"gpt-6-sol";
+    assert (List.length (Pave.Session.entries metadata) = 1);
+    let first = Pave.Session.append metadata (message "first") in
+    Pave.Session.set_model metadata ~provider:"ollama" ~model:"local";
+    let second = Pave.Session.append metadata (message "second") in
+    assert (Pave.Session.model metadata = Some ("ollama", "local"));
+    Pave.Session.branch metadata first;
+    assert (Pave.Session.model metadata = Some ("openai", "gpt-6-sol"));
+    assert (Pave.Session.history metadata = [message "first"]);
+    let branch_marker = (List.hd (List.rev (Pave.Session.entries metadata))).id in
+    let branched = Pave.Session.open_file metadata_path in
+    assert (Pave.Session.model branched = Some ("openai", "gpt-6-sol"));
+    assert (Pave.Session.model_at branched (Some second) =
+      Some ("ollama", "local"));
+    Pave.Session.branch branched branch_marker;
+    assert (Pave.Session.model branched = Some ("openai", "gpt-6-sol"));
+    assert (Pave.Session.history (Pave.Session.open_file metadata_path) =
+      [message "first"]);
+    let copy = Pave.Session.fork branched metadata_fork in
+    assert (Pave.Session.model copy = Some ("openai", "gpt-6-sol"));
+    assert (Pave.Session.history copy = [message "first"]);
+    (match Pave.Session.set_model copy ~provider:"openai" ~model:"invalid name" with
+     | exception Pave.Protocol.Invalid_response _ -> ()
+     | _ -> failwith "invalid model marker was accepted"));
   print_endline "session journal branches: ok"
