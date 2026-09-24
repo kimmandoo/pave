@@ -393,16 +393,33 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage 
       | None ->
           let json = post_json ?cancel ~endpoint:config.endpoint ~headers ~secret:api_key
             (`Assoc fields) in
-          parse (fun () -> Protocol.parse_completion json)
+          let reply = parse (fun () -> Protocol.parse_completion json) in
+          (match on_usage with
+           | None -> ()
+           | Some report ->
+               check_cancel cancel;
+               Option.iter report (Protocol.completion_usage json));
+          reply
       | Some emit ->
           let stream = Openai_stream.create ~on_text:emit in
-          let body = `Assoc (fields @ [ "stream", `Bool true ]) in
+          let fields = fields @ [ "stream", `Bool true ] in
+          let fields = if config.api = Openai_completions &&
+            config.endpoint = "https://api.openai.com/v1/chat/completions" then
+              fields @ [ "stream_options", `Assoc [ "include_usage", `Bool true ] ]
+            else fields in
+          let body = `Assoc fields in
           parse (fun () ->
             post_stream ?cancel ~endpoint:config.endpoint ~headers ~secret:api_key
               body ~on_chunk:(Openai_stream.feed stream)
               ~is_done:(fun () -> Openai_stream.is_done stream)
               ~is_finished:(fun () -> Openai_stream.is_finished stream);
-            Openai_stream.finish stream))
+            let reply = Openai_stream.finish stream in
+            (match on_usage with
+             | None -> ()
+             | Some report ->
+                 check_cancel cancel;
+                 Option.iter report (Openai_stream.usage stream));
+            reply))
   | Anthropic_messages ->
       let body = parse (fun () ->
         Anthropic_wire.request ~model:config.model ~max_tokens:4096 messages tools) in
