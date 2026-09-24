@@ -52,7 +52,7 @@ let read_request ic =
 
 let has_header prefix headers = List.exists (String.starts_with ~prefix) headers
 
-let serve client step =
+let serve client step signal_write closed_write =
   let ic = Unix.in_channel_of_descr client in
   let oc = Unix.out_channel_of_descr client in
   let headers, request = read_request ic in
@@ -77,14 +77,33 @@ let serve client step =
         assert (has_header "x-api-key: mock-anthropic" headers);
         assert (member "stream" request = `Bool true);
         200, "text/event-stream", anthropic_stream
-    | _ ->
+    | 5 ->
         assert (has_header "authorization: bearer mock-openai" headers);
-        200, "text/event-stream", stream_body in
+        200, "text/event-stream", stream_body
+    | 6 | 7 ->
+        assert (has_header "authorization: bearer mock-openai" headers);
+        assert (member "stream" request =
+          (if step = 7 then `Bool true else `Null));
+        200, (if step = 7 then "text/event-stream" else "application/json"),
+        (if step = 7 then
+           "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}]}\n\n"
+         else {|{"choices":[{"message":{"role":"assistant","content":"partial|})
+    | _ -> failwith "unexpected request" in
   if step = 5 then (
     Printf.fprintf oc "HTTP/1.1 %d Mock\r\nContent-Type: %s\r\nConnection: keep-alive\r\n\r\n%s"
       status content_type body;
     flush oc;
     ignore (Unix.select [] [] [] 3.))
+  else if step = 6 || step = 7 then (
+    Printf.fprintf oc "HTTP/1.1 %d OK\r\nContent-Type: %s\r\nContent-Length: 4096\r\nConnection: keep-alive\r\n\r\n%s"
+      status content_type body;
+    flush oc;
+    if step = 6 then ignore (Unix.write_substring signal_write "r" 0 1);
+    let readable, _, _ = Unix.select [client] [] [] 2. in
+    assert (readable <> []);
+    let byte = Bytes.create 1 in
+    assert (Unix.read client byte 0 1 = 0);
+    ignore (Unix.write_substring closed_write "c" 0 1))
   else (
     Printf.fprintf oc "HTTP/1.1 %d Mock\r\nContent-Type: %s\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s"
       status content_type (String.length body) body;
@@ -94,18 +113,26 @@ let serve client step =
 let () =
   let socket = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
   Unix.bind socket (Unix.ADDR_INET (Unix.inet_addr_loopback, 0));
-  Unix.listen socket 6;
+  Unix.listen socket 8;
   let port = match Unix.getsockname socket with Unix.ADDR_INET (_, p) -> p | _ -> assert false in
+  let signal_read, signal_write = Unix.pipe () in
+  let closed_read, closed_write = Unix.pipe () in
   let child = Unix.fork () in
   if child = 0 then (
-    (try for step = 0 to 5 do
-       let client, _ = Unix.accept socket in serve client step
+    Unix.close signal_read;
+    Unix.close closed_read;
+    (try for step = 0 to 7 do
+       let client, _ = Unix.accept socket in serve client step signal_write closed_write
      done with exn -> prerr_endline (Printexc.to_string exn); exit 2);
     exit 0);
+  Unix.close signal_write;
+  Unix.close closed_write;
   Unix.close socket;
   Fun.protect ~finally:(fun () ->
     (try Unix.kill child Sys.sigkill with Unix.Unix_error _ -> ());
-    ignore (Unix.waitpid [] child)) (fun () ->
+    ignore (Unix.waitpid [] child);
+    Unix.close signal_read;
+    Unix.close closed_read) (fun () ->
     let endpoint = Printf.sprintf "http://127.0.0.1:%d/complete" port in
     let openai : Pave.Provider.config = { endpoint; api_key = "mock-openai";
       model = "mock"; api = Pave.Provider.Openai_completions } in
@@ -185,5 +212,41 @@ let () =
     let answer = Pave.Provider.complete ~on_text:(fun _ -> ())
       openai [ system; user ] [] in
     assert (answer.content = Some "Hello ");
-    assert (Unix.gettimeofday () -. started < 2.5));
+    assert (Unix.gettimeofday () -. started < 2.5);
+    let cancelled = ref false in
+    let signalled_at = ref None in
+    let cancel () =
+      if !cancelled then true
+      else
+        let readable, _, _ = Unix.select [signal_read] [] [] 0. in
+        if readable = [] then false else (
+          let byte = Bytes.create 1 in
+          assert (Unix.read signal_read byte 0 1 = 1);
+          signalled_at := Some (Unix.gettimeofday ());
+          cancelled := true;
+          true) in
+    (match Pave.Provider.complete ~cancel openai [ system; user ] [] with
+     | exception Pave.Provider.Cancelled -> ()
+     | _ -> failwith "buffered request returned despite cancellation");
+    (match !signalled_at with
+     | Some started -> assert (Unix.gettimeofday () -. started < 1.)
+     | None -> failwith "buffered request was not cancelled after reaching server");
+    let expect_disconnect () =
+      let readable, _, _ = Unix.select [closed_read] [] [] 1. in
+      assert (readable <> []);
+      let byte = Bytes.create 1 in
+      assert (Unix.read closed_read byte 0 1 = 1) in
+    expect_disconnect ();
+    let streamed_text = ref [] in
+    let streamed_cancelled = ref false in
+    (match Pave.Provider.complete
+      ~on_text:(fun text ->
+        streamed_text := text :: !streamed_text;
+        streamed_cancelled := true)
+      ~cancel:(fun () -> !streamed_cancelled)
+      openai [ system; user ] [] with
+     | exception Pave.Provider.Cancelled -> ()
+     | _ -> failwith "streamed request returned despite cancellation");
+    assert (!streamed_text = [ "partial" ]);
+    expect_disconnect ());
   print_endline "provider HTTP: ok"

@@ -21,10 +21,11 @@ let builtins = [
       { name = "responses"; wire = Provider.Openai_responses;
         endpoint = "https://api.openai.com/v1/responses" } ];
     default_route = "chat";
-    model_routes = [ "gpt-5", "responses"; "o1", "responses";
-      "o3", "responses"; "o4", "responses"; "daybreak-", "responses" ];
+    model_routes = [ "gpt-6", "responses"; "gpt-5", "responses";
+      "o1", "responses"; "o3", "responses"; "o4", "responses";
+      "daybreak-", "responses" ];
     api_key_env = Some "OPENAI_API_KEY";
-    oauth = None; default_model = Some "gpt-4.1-mini" };
+    oauth = None; default_model = Some "gpt-6-sol" };
   { id = "openai-codex"; display_name = "OpenAI Codex subscription";
     routes = [ { name = "responses"; wire = Provider.Codex_responses;
       endpoint = "https://chatgpt.com/backend-api/codex/responses" } ];
@@ -77,6 +78,15 @@ let builtins = [
 
 let all () = builtins
 let find id = List.find_opt (fun provider -> provider.id = id) builtins
+
+(* These IDs have documented wire routes, not verified account entitlements.
+   Other providers require explicit IDs until credentialed discovery exists. *)
+let known_models provider = match provider.id with
+  | "openai" ->
+      [ "gpt-6-sol"; "gpt-6-astra"; "gpt-6-luna";
+        "gpt-5.6-sol"; "gpt-5.6-terra"; "gpt-5.6-luna" ]
+  | "github-copilot" -> Github_copilot_wire.supported_models
+  | _ -> []
 let route provider ~model name =
   (* Interactive startup may defer model selection; inference never may. *)
   if provider.id = "github-copilot" && model <> "" &&

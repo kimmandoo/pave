@@ -1,15 +1,18 @@
 let () =
   let root = ref "." and model = ref "" in
-  let endpoint = ref "" and provider_name = ref "openai" and api_name = ref "" in
+  let endpoint = ref "" and provider_name = ref "" and api_name = ref "" in
   let stream = ref false in
   let session = ref "" and prompt = ref "" and allow_shell = ref false in
-  let max_turns = ref 20 and list_providers = ref false in
+  let max_turns = ref None and list_providers = ref false
+    and list_models = ref false in
   let login = ref "" and login_manual = ref "" and logout = ref "" in
   let options = [
     "--root", Arg.Set_string root, "Workspace directory (default: current directory)";
     "--model", Arg.Set_string model, "Model ID (required unless the provider has a default)";
     "--provider", Arg.Set_string provider_name, "Provider ID (see --providers)";
     "--providers", Arg.Set list_providers, "List registered inference providers and exit";
+    "--models", Arg.Set list_models,
+      "List models reported by the selected provider (authenticated; not an offline catalog)";
     "--api", Arg.Set_string api_name, "Provider wire API (see --providers)";
     "--login", Arg.Set_string login, "Log in using the provider's OAuth browser callback";
     "--login-manual", Arg.Set_string login_manual, "Log in by pasting the full redirect URL from another browser";
@@ -19,15 +22,18 @@ let () =
     "--session", Arg.Set_string session, "Save and restore conversation at this file";
     "--prompt", Arg.Set_string prompt, "Send one prompt, then exit";
     "--allow-shell", Arg.Set allow_shell, "Offer model-requested shell commands for individual interactive approval (NOT sandboxed)";
-    "--max-turns", Arg.Set_int max_turns, "Maximum model turns per prompt (default: 20)";
+    "--max-turns", Arg.Int (fun count -> max_turns := Some count),
+      "Maximum model turns per prompt (default: 20)";
   ] in
   try
     if Array.length Sys.argv > 1 && Sys.argv.(1) = "update" then (
-      if Array.length Sys.argv <> 2 then failwith "usage: pave update";
-      Update.run ();
+      (match Array.length Sys.argv with
+       | 2 -> Update.run ()
+       | 3 when Sys.argv.(2) = "--check" -> Update.check ()
+       | _ -> failwith "usage: pave update [--check]");
       exit 0);
     Arg.parse options (fun arg -> raise (Arg.Bad ("unexpected argument: " ^ arg)))
-      "pave [update | --providers | --provider ID --model ID --prompt TEXT | --root DIRECTORY --session FILE]";
+      "pave [update [--check] | --providers | --provider ID --model ID --prompt TEXT | --root DIRECTORY --session FILE]";
     if !list_providers then (
       List.iter (fun (entry : Pave.Provider_catalog.descriptor) ->
         Printf.printf "%s\t%s\t%s\t%s\n" entry.id entry.display_name
@@ -43,12 +49,58 @@ let () =
          ~logout:!logout then exit 0;
     let root = Unix.realpath !root in
     if not (Sys.is_directory root) then failwith "workspace root must be a directory";
-    if !max_turns <= 0 then failwith "--max-turns must be positive";
-    let descriptor = match Pave.Provider_catalog.find !provider_name with
+    if !list_models && !endpoint <> "" then
+      failwith "--models uses a provider's pinned listing endpoint; remove --endpoint";
+    let settings = Pave.Settings.load ~root in
+    let configured = settings.values in
+    if !allow_shell && configured.disable_shell then
+      failwith "shell tools are disabled in user or project settings";
+    let max_turns = Option.value ~default:(Option.value ~default:20
+      configured.max_turns) !max_turns in
+    if max_turns <= 0 then failwith "--max-turns must be positive";
+    let provider_name = if !provider_name <> "" then !provider_name
+      else Option.value ~default:"openai" configured.default_provider in
+    let descriptor = match Pave.Provider_catalog.find provider_name with
       | Some value -> value
-      | None -> failwith ("unsupported provider: " ^ !provider_name) in
-    let model = if !model <> "" then !model else
-      Option.value ~default:"" descriptor.default_model in
+      | None -> failwith ("unsupported provider: " ^ provider_name) in
+    if !list_models then (
+      let credential : Pave.Model_discovery.credential option =
+        match descriptor.id with
+        | "openai" | "google" ->
+            Option.bind descriptor.api_key_env (fun name ->
+              match Sys.getenv_opt name with
+              | Some key when key <> "" ->
+                  Some (Pave.Model_discovery.Api_key key)
+              | _ -> None)
+        | "github-copilot" ->
+            Option.map (fun (stored : Pave.Oauth_store.credential) ->
+              Pave.Model_discovery.Copilot_oauth stored.access)
+              (Pave.Oauth_store.get ~path:(Pave.Oauth_store.default_path ())
+                ~provider:descriptor.id)
+        | _ -> None in
+      (match Pave.Model_discovery.discover ~provider:descriptor.id
+        ?credential () with
+       | Error error -> failwith (Pave.Model_discovery.message error)
+       | Ok models ->
+           List.iter (fun id ->
+             Printf.printf "%s\t%s\n" id
+               (if Pave.Provider_catalog.route descriptor ~model:id "" = None
+                then "discovered; no supported inference route"
+                else "selectable")) models;
+           if models = [] then
+             Printf.printf "No models reported by %s.\n" descriptor.id);
+      exit 0);
+    let project_context = Pave.Project_context.load ~root () in
+    let system = Pave.Mobile_prompt.text ^
+      (if project_context.text = "" then "" else
+        "\n\nProject instructions (lower priority than mobile safety):\n" ^
+        project_context.text) in
+    let model = if !model <> "" then !model
+      else match configured.default_provider with
+        | Some configured_provider when configured_provider = descriptor.id ->
+            Option.value ~default:(Option.value ~default:"" descriptor.default_model)
+              configured.default_model
+        | _ -> Option.value ~default:"" descriptor.default_model in
     let route = match Pave.Provider_catalog.route descriptor ~model !api_name with
       | Some value -> value
       | None -> failwith ("unsupported API for " ^ descriptor.id ^ ": " ^ !api_name) in
@@ -57,6 +109,7 @@ let () =
     let journal = ref (if !session = "" then None else
       Some (Pave.Session.open_file ~cwd:root !session)) in
     let ui = ref None in
+    let runner : Pave.Turn_runner.t option ref = ref None in
     let on_event message = match !ui with
       | Some screen -> Tui.event screen message
       | None -> print_endline message; flush stdout in
@@ -70,6 +123,15 @@ let () =
         | None ->
             Printf.eprintf "\nShell command in %s:\n%s\nApprove? [y/N] %!" root command;
             (match read_line () with "y" | "Y" | "yes" -> true | _ -> false) in
+    let worker_event message = match !runner with
+      | Some current -> Pave.Turn_runner.message current message
+      | None -> on_event message in
+    let worker_delta delta = match !runner with
+      | Some current -> Pave.Turn_runner.delta current delta
+      | None -> on_delta delta in
+    let worker_approval command = match !runner with
+      | Some current -> Pave.Turn_runner.approve current command
+      | None -> approve_command command in
     let agent : Pave.Agent.t option ref = ref None in
     let retained_history : Pave.Protocol.message list ref = ref [] in
     let resolve_provider () =
@@ -96,13 +158,14 @@ let () =
         | Some session -> ignore (Pave.Session.append session message)
         | None -> () in
       Pave.Agent.create ~provider ~authentication ?resolve_credential
-        ~root ~system:Pave.Mobile_prompt.text
-        ~allow_shell:!allow_shell ~stream:!stream ~approve_command
-        ~history ~on_change ~on_event ~on_delta () in
+        ~root ~system
+        ~allow_shell:!allow_shell ~stream:(!stream || Option.is_some !ui)
+        ~approve_command:worker_approval
+        ~history ~on_change ~on_event:worker_event ~on_delta:worker_delta () in
     let get_agent () = match !agent with
       | Some current -> current
       | None -> let current = make_agent () in agent := Some current; current in
-    let send text = ignore (Pave.Agent.run ~max_turns:!max_turns (get_agent ()) text) in
+    let send text = ignore (Pave.Agent.run ~max_turns (get_agent ()) text) in
     let compact () = match !journal with
       | None -> on_event "Error: --session is required to compact"
       | Some current ->
@@ -128,52 +191,62 @@ let () =
              | _ -> failwith "model returned no compaction summary")
            with exn -> on_event ("Error: " ^ Printexc.to_string exn)) in
     let choose_login selected =
-      let run () =
-        let id = match selected with
-          | Some id -> id
-          | None ->
-              print_endline "Browser sign-in providers:";
-              List.iter (fun (entry : Pave.Provider_catalog.descriptor) ->
-                if entry.oauth <> None then
-                  Printf.printf "  %s  %s\n" entry.id entry.display_name)
-                (Pave.Interaction.selectable_providers ());
-              print_string "Provider ID (blank cancels): "; flush stdout;
-              (try String.trim (read_line ()) with End_of_file -> "") in
-        if id <> "" then (
-          let descriptor = match Pave.Provider_catalog.find id with
-            | Some value when value.oauth <> None -> value
-            | _ -> failwith ("browser login unavailable for " ^ id) in
-          ignore (Cli_auth.handle_action ~login:descriptor.id
-            ~login_manual:"" ~logout:""));
-        id in
-      let id = match !ui with
-        | Some screen -> Tui.suspend screen run
-        | None -> run () in
-      if id <> "" then on_event ("Signed in to " ^ id ^
-        ". Select a model with /model " ^ id ^ "/MODEL_ID.") in
+      let id = match selected, !ui with
+        | Some id, _ -> id
+        | None, Some screen ->
+            let options = List.filter_map (fun (entry : Pave.Provider_catalog.descriptor) ->
+              match entry.oauth with
+              | None -> None
+              | Some _ -> Some (entry.id ^ "  " ^ entry.display_name, entry.id))
+              (Pave.Interaction.selectable_providers ()) in
+            (match Tui.choose screen ~title:"Sign in · select provider"
+              ~choices:(List.map fst options) with
+             | Some choice -> List.assoc choice options
+             | None -> "")
+        | None, None ->
+            print_endline "Browser sign-in providers:";
+            List.iter (fun (entry : Pave.Provider_catalog.descriptor) ->
+              if entry.oauth <> None then
+                Printf.printf "  %s  %s\n" entry.id entry.display_name)
+              (Pave.Interaction.selectable_providers ());
+            print_string "Provider ID (blank cancels): "; flush stdout;
+            (try String.trim (read_line ()) with End_of_file -> "") in
+      if id <> "" then (
+        let descriptor = match Pave.Provider_catalog.find id with
+          | Some value when value.oauth <> None -> value
+          | _ -> failwith ("browser login unavailable for " ^ id) in
+        (match !ui with
+         | Some screen -> Tui.suspend screen (fun () ->
+             ignore (Cli_auth.handle_action ~login:descriptor.id
+               ~login_manual:"" ~logout:""))
+         | None -> ignore (Cli_auth.handle_action ~login:descriptor.id
+             ~login_manual:"" ~logout:""));
+        on_event ("Signed in to " ^ id ^
+          ". Select a model with /model " ^ id ^ "/MODEL_ID.")) in
     let choose_model selected =
       let selector = match selected with
         | Some selector -> selector
         | None ->
-            on_event ("Current model: " ^ !active_descriptor.id ^ "/" ^
-              (if !active_model = "" then "(none)" else !active_model));
-            let entries = List.map (fun (entry : Pave.Provider_catalog.descriptor) ->
-              entry.id ^ "  " ^ entry.display_name ^
-              (match entry.default_model with
-               | Some model -> "  (default: " ^ model ^ ")"
-               | None -> "")) (Pave.Interaction.selectable_providers ()) in
+            let providers = Pave.Interaction.selectable_providers () in
             (match !ui with
              | Some screen ->
-                 Tui.events screen entries;
-                 Tui.alert screen "Enter PROVIDER/MODEL_ID (blank cancels)"
+                 let choices = List.concat_map
+                   (fun (entry : Pave.Provider_catalog.descriptor) ->
+                     List.map (fun model -> entry.id ^ "/" ^ model)
+                       (Pave.Provider_catalog.known_models entry)) providers in
+                 (match Tui.choose screen ~allow_custom:true
+                   ~title:"Model · type PROVIDER/MODEL_ID for custom"
+                   ~choices with Some value -> value | None -> "")
              | None ->
-                 List.iter on_event entries;
-                 print_string "Provider/model ID (blank cancels): "; flush stdout);
-            (match !ui with
-             | Some screen -> (match Tui.read screen with
-                 | Some text -> String.trim text
-                 | None -> raise End_of_file)
-             | None -> (try String.trim (read_line ()) with End_of_file -> "")) in
+                 on_event ("Current model: " ^ !active_descriptor.id ^ "/" ^
+                   (if !active_model = "" then "(none)" else !active_model));
+                 List.iter (fun (entry : Pave.Provider_catalog.descriptor) ->
+                   on_event (entry.id ^ "  " ^ entry.display_name ^
+                     (match entry.default_model with
+                      | Some model -> "  (default: " ^ model ^ ")"
+                      | None -> ""))) providers;
+                 print_string "Provider/model ID (blank cancels): "; flush stdout;
+                 (try String.trim (read_line ()) with End_of_file -> "")) in
       if selector <> "" then (
         let descriptor, model, route =
           try Pave.Interaction.resolve_model
@@ -199,25 +272,66 @@ let () =
         | None -> () in
     let report_error exn = on_event ("Error: " ^ Printexc.to_string exn) in
     let interact () =
-      let input () = match !ui with
-        | Some screen ->
+      let input () = match !ui, !runner with
+        | Some screen, Some active ->
+            (match Tui.read screen ~wake_fd:(Pave.Turn_runner.fd active)
+              ~on_wake:(fun () -> Pave.Turn_runner.drain active)
+              ~on_interrupt:(fun () ->
+                if Pave.Turn_runner.busy active then (
+                  Pave.Turn_runner.cancel active;
+                  Tui.alert screen "Cancelling current turn…")) with
+             | Some text -> text
+             | None -> raise End_of_file)
+        | Some screen, None ->
             (match Tui.read screen with Some text -> text | None -> raise End_of_file)
-        | None ->
+        | None, _ ->
             print_string "pave> "; flush stdout;
             read_line () in
       try while true do
         let line = input () in
         if line = "/exit" || line = "/quit" then raise End_of_file;
-        (try match Pave.Interaction.parse line with
+        (try
+         let busy = match !runner with
+           | Some active -> Pave.Turn_runner.busy active
+           | None -> false in
+         let feedback message = match busy, !ui with
+           | true, Some screen -> Tui.alert screen message
+           | _ -> on_event message in
+         if line = "/cancel" then (
+           match !runner with
+           | Some active when busy ->
+               Pave.Turn_runner.cancel active;
+               feedback "Cancelling current turn; queued prompts will run next."
+           | _ -> on_event "No active turn to cancel.")
+         else if busy && String.starts_with ~prefix:"/" (String.trim line)
+           && line <> "/help" then
+           feedback "Wait for the current turn or /cancel it before changing session or model."
+         else match Pave.Interaction.parse line with
          | Pave.Interaction.Login selected -> choose_login selected
          | Pave.Interaction.Model selected -> choose_model selected
          | Pave.Interaction.Other ->
         if line = "/help" then (
-          on_event "Commands: /login [PROVIDER] · /model [PROVIDER/MODEL] · /entries · /branch ID · /fork PATH · /compact · /quit";
+          if busy then
+            feedback "Commands: /cancel · /quit · type to queue a follow-up; /help when idle shows the rest"
+          else (
+            on_event "Commands: /login [PROVIDER] · /model [PROVIDER/MODEL] · /settings · /cancel · /entries · /branch ID · /fork PATH · /compact · /quit";
+            (match !ui with
+             | Some _ ->
+                 on_event "Edit: Shift+Enter newline · Ctrl+R search · Ctrl+P/N history · Alt+←/→ words · PgUp/PgDn scroll · Ctrl+C clear draft/cancel turn"
+             | None -> ())))
+        else if line = "/settings" then
           (match !ui with
-           | Some _ ->
-               on_event "Edit: ←→ cursor · ↑↓ history · Shift+Enter newline · Ctrl+C clear · Ctrl+D exit"
-           | None -> ()))
+           | Some screen -> Settings_view.open_view screen ~root
+           | None ->
+               let values = (Pave.Settings.load ~root).values in
+               on_event ("Default provider: " ^
+                 Option.value ~default:"openai" values.default_provider);
+               on_event ("Default model: " ^
+                 Option.value ~default:"(provider default)" values.default_model);
+               on_event ("Disable shell tools: " ^
+                 string_of_bool values.disable_shell);
+               on_event ("Maximum turns: " ^
+                 string_of_int (Option.value ~default:20 values.max_turns)))
         else if line = "/compact" then compact ()
         else if String.starts_with ~prefix:"/branch " line then
           (match !journal with
@@ -254,21 +368,70 @@ let () =
                 | None -> List.iter on_event lines))
         else if String.starts_with ~prefix:"/" (String.trim line) then
           on_event "Unknown command; use /help to list available commands"
-        else if String.trim line <> "" then send line
+        else if String.trim line <> "" then (
+          match !runner with
+          | Some active -> Pave.Turn_runner.submit active line
+          | None -> send line)
         with End_of_file -> raise End_of_file
            | exn -> report_error exn)
       done with End_of_file -> () in
-    if !prompt <> "" then send !prompt
+    let instruction_diagnostics =
+      List.map (fun (issue : Pave.Project_context.diagnostic) ->
+        Printf.sprintf "%S [%s]: %s" issue.path issue.code issue.message)
+        project_context.diagnostics in
+    if !prompt <> "" then (
+      List.iter (fun diagnostic -> prerr_endline ("Settings: " ^ diagnostic))
+        settings.diagnostics;
+      List.iter (fun diagnostic -> prerr_endline ("Instructions: " ^ diagnostic))
+        instruction_diagnostics;
+      send !prompt)
     else if Unix.isatty Unix.stdin && Unix.isatty Unix.stdout
       && Sys.getenv_opt "TERM" <> Some "dumb" then (
       let screen = Tui.create ~root
         ~model:(descriptor.id ^ "/" ^
           (if model = "" then "(select with /model)" else model))
         ~session:(!session <> "") in
-      Fun.protect ~finally:(fun () -> ui := None; Tui.close screen) (fun () ->
+      Fun.protect ~finally:(fun () ->
+        (match !runner with
+         | Some current -> Pave.Turn_runner.close current
+         | None -> ());
+        runner := None;
+        ui := None;
+        Tui.close screen) (fun () ->
         ui := Some screen;
+        List.iter (fun diagnostic ->
+          Tui.event screen ("Settings: " ^ diagnostic)) settings.diagnostics;
+        List.iter (fun diagnostic ->
+          Tui.event screen ("Instructions: " ^ diagnostic))
+          instruction_diagnostics;
+        let active = Pave.Turn_runner.create
+          ~run:(fun ~cancel text ->
+            ignore (Pave.Agent.run ~cancel ~max_turns
+              (get_agent ()) text))
+          ~on_message:(Tui.event screen)
+          ~on_delta:(Tui.delta screen)
+          ~on_approve:(Tui.confirm screen)
+          ~on_start:(fun text -> Tui.sent screen text)
+          ~on_finish:(function
+            | Pave.Turn_runner.Completed -> Tui.finish_live screen
+            | Pave.Turn_runner.Cancelled ->
+                Tui.clear_live screen;
+                Tui.event screen "Turn cancelled."
+            | Pave.Turn_runner.Failed exn ->
+                Tui.clear_live screen;
+                Tui.event screen ("Error: " ^ Printexc.to_string exn))
+          ~on_queued:(fun count ->
+            Tui.alert screen (Printf.sprintf
+              "Queued %d follow-up%s · /cancel stops the current turn"
+              count (if count = 1 then "" else "s"))) () in
+        runner := Some active;
         interact ()))
-    else interact ()
+    else (
+      List.iter (fun diagnostic -> prerr_endline ("Settings: " ^ diagnostic))
+        settings.diagnostics;
+      List.iter (fun diagnostic -> prerr_endline ("Instructions: " ^ diagnostic))
+        instruction_diagnostics;
+      interact ())
   with exn ->
     prerr_endline ("Error: " ^ Printexc.to_string exn);
     exit 1

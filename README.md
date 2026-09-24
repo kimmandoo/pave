@@ -24,13 +24,14 @@
 curl -fsSL https://raw.githubusercontent.com/kimmandoo/pave/main/install.sh | sh
 ```
 
-The [installer](install.sh) verifies the release archive against its published SHA-256 manifest, then installs the binary to `~/.local/bin/pave` and its notices and native-install marker to `~/.local/share/licenses/pave`. If prompted, add `~/.local/bin` to your `PATH`. Inspect the script before running it if you prefer not to pipe downloads into a shell. To upgrade an installer-owned binary to the latest published release:
+The [installer](install.sh) verifies the release archive against its published SHA-256 manifest, then installs the binary to `~/.local/bin/pave` and its notices and native-install marker to `~/.local/share/licenses/pave`. If prompted, add `~/.local/bin` to your `PATH`. Inspect the script before running it if you prefer not to pipe downloads into a shell. For installer-owned binaries:
 
 ```sh
-pave update
+pave update --check  # Compare embedded release version against GitHub's latest published tag; no files changed.
+pave update          # Upgrade to the latest release.
 ```
 
-The native binary executes its **embedded** copy of the verified installer; it does not fetch a new shell script. Updates reinstall the latest release, including when you are already up to date. This command preserves a custom install directory, but intentionally ignores `PAVE_VERSION` and `PAVE_INSTALL_DIR` overrides from your environment. A binary installed before the native-install marker was introduced (through `v0.1.4`) needs the one-command installer run **once more** before `pave update` is available. Source/opam installs do not self-update; use the package-manager steps below.
+The native binary executes its **embedded** copy of the checksum-verifying installer; it does not fetch a new shell script. `--check` requires a release built with embedded version metadata (`v0.1.6` or later); an unavailable/rate-limited GitHub API fails with an error rather than guessing. Updates reinstall the latest release, including when you are already up to date. This command preserves a custom install directory, but intentionally ignores `PAVE_VERSION` and `PAVE_INSTALL_DIR` overrides from your environment. A binary installed before the native-install marker was introduced (through `v0.1.4`) needs the one-command installer run **once more** before `pave update` is available. Source/opam installs do not self-update; use the package-manager steps below.
 
 <details>
 <summary>Version pinning, custom destination and removal</summary>
@@ -64,14 +65,14 @@ The switch belongs to the checkout; prefix commands with `opam exec --` without 
 
 ## Use
 
-The default provider uses `OPENAI_API_KEY` when making a request. You can enter the interactive terminal **before** configuring a credential, then use `/login` and `/model`; one-shot prompts still require a usable provider. Choose another registered provider with `--provider ID`; `pave --providers` shows IDs, routes and required key variables. Keep API keys out of checked-in config and session files.
+The default provider uses `OPENAI_API_KEY` when making a request. You can enter the interactive terminal **before** configuring a credential, then use `/login` and `/model`; one-shot prompts still require a usable provider. Choose another registered provider with `--provider ID`; `pave --providers` shows configured routes and key variables. `pave --provider ollama --models` queries local model tags; the same `--models` option queries pinned, authenticated listings for OpenAI, Google Gemini and personal Copilot. These are live listing results, not proof that Pave supports every listed inference route: unsupported Copilot routes are labeled. Discovery does not cache results and may fail offline; the `/model` picker uses a separate, limited offline suggestion list and also accepts a typed `PROVIDER/MODEL_ID`. Keep API keys out of checked-in config and session files.
 
 ```sh
 # Interactive: resize-aware TUI, prompt history and a persistent session.
 pave --root /path/to/mobile/repo --session /private/path/pave.jsonl
 
-# One-shot, streaming reply; GPT-5/o-series models select the Responses route.
-pave --provider openai --model gpt-5 --prompt 'Inspect the Android build failure' --stream
+# One-shot streaming reply; OpenAI defaults to GPT-6 Sol on Responses.
+pave --provider openai --prompt 'Inspect the Android build failure' --stream
 
 # Anthropic: API key, or explicit browser-based OAuth login for a subscription.
 pave --login anthropic
@@ -93,23 +94,31 @@ pave --provider github-copilot --model gpt-4.1 --prompt 'Inspect this project'
 pave --provider ollama --model "$LOCAL_MODEL" --prompt 'Inspect this project'
 ```
 
-Inside a running Pave terminal, `/login` lists sign-in providers and accepts a provider ID; `/login github-copilot` starts the device-code flow directly. The browser URL or verification code is printed on the regular terminal while the full-screen UI is temporarily suspended, then the previous transcript/editor returns after sign-in. `/model` lists registered providers and prompts for `PROVIDER/MODEL_ID`; `/model github-copilot/gpt-4.1` selects one directly. Namespaced model IDs keep everything after the first slash, and a bare model ID uses the current provider. These are provider routes, **not** a complete or live-validated model catalog. Authentication and provider/model selection are separate; choose a model after login. Switching models retains the visible conversation and drops opaque Codex/Gemini state if the provider or model changes.
+Inside a running Pave terminal, `/login` opens a searchable, keyboard-accessible sign-in-provider picker; `/login github-copilot` starts device authorization directly. The browser URL or verification code is printed on the regular terminal while the full-screen UI is suspended, then the previous transcript/editor returns. `/model` opens a searchable suggested-model picker; type any complete `PROVIDER/MODEL_ID` there to select a custom model after route validation, or run `/model github-copilot/gpt-4.1` directly. Escape cancels a picker without sending the draft. Namespaced model IDs keep everything after the first slash, and a bare model ID uses the current provider. Suggestions are **not** live-validated entitlements; `--models` queries supported provider listings separately. Switching models retains visible conversation and drops opaque Codex/Gemini state when the provider or model changes.
 
 For a remote browser, use `pave --login-manual PROVIDER` for browser-based providers and paste the full callback URL; OpenRouter also accepts the authorization code alone because that provider does not echo state. Standard OAuth providers require the correct callback state. **Copilot uses a device code instead:** `--login-manual github-copilot` is unsupported; enter the displayed code at the displayed GitHub verification URL. `pave --logout PROVIDER` removes a stored credential. The private store is **unencrypted** at `${XDG_CONFIG_HOME:-~/.config}/pave/oauth.json` (0700 directory, 0600 file); OpenRouter's browser exchange stores an API key there. An environment API key takes precedence where available. OAuth refresh is locked across processes; browser/device-derived tokens and keys cannot be sent to a custom `--endpoint`.
 
-`--api NAME` selects an explicit registered route; `--endpoint URL` overrides an API-key provider's completion endpoint. `--model ID` overrides the OpenAI default (`gpt-4.1-mini`) and is required for one-shot prompts with providers that have no default. Interactive sessions may select it later with `/model`. Redirected input/output uses a plain line-oriented CLI with the same slash commands instead of the full-screen interface.
+`--api NAME` selects an explicit registered route; `--endpoint URL` overrides an API-key provider's completion endpoint. OpenAI defaults to [`gpt-6-sol`](https://developers.openai.com/api/docs/models/gpt-6-sol), the current coding-focused GPT-6 model, on the Responses route; [`gpt-6-astra`](https://developers.openai.com/api/docs/models/gpt-6-astra) is a higher-cost flagship selectable with `--model`. `--model ID` overrides the default and is required for one-shot prompts with providers that have no default. Interactive sessions may select a provider/model later with `/model`. Personal Copilot still accepts only its explicitly supported older Chat models and is **not** the OpenAI default. `--models` refuses a custom `--endpoint` to avoid sending a private gateway key to a public listing endpoint. Redirected input/output uses a plain line-oriented CLI with the same slash commands instead of the full-screen interface.
 
 The full-screen TUI initially shows the existing pixel-art Pave mark as colored ASCII art. It is an empty-transcript placeholder, not a journal entry; the first message replaces it. Small terminals show a compact `PAVE` label, while redirected output remains plain text.
 
+Typed settings may be placed in `${XDG_CONFIG_HOME:-~/.config}/pave/settings.json` and `<workspace>/.pave/settings.json`. Supported JSON keys are `default_provider`, `default_model` (requires the matching provider), `max_turns` (1–100) and `disable_shell` (boolean). Explicit CLI defaults override project settings, which override user defaults; `disable_shell: true` in **either** scope prevents `--allow-shell` from granting execution. Invalid, duplicate, oversized or symlinked settings are reported and skipped. `/settings` edits project settings with searchable choices and atomic private-file replacement; changes take effect on the next launch, not midway through an active turn. User and ancestor `AGENTS.md` instructions are appended **after** Pave's mobile safety prompt; bounded relative `@file.md` imports are supported. Path-scoped `.pave/rules/*.md` matching exists in the loader but is **not yet applied** to per-file tool operations. Project instructions are guidance, not a security boundary.
+
 | In the TUI | Action |
 | --- | --- |
-| `Enter` · `Shift+Enter` | Send a prompt · insert a newline (bracketed paste also supports multiline) |
-| `←` `→` · `↑` `↓` | Move by Unicode grapheme · browse prompt history |
-| `Ctrl+C` · `Ctrl+D` | Clear the draft · exit when the draft is empty |
-| `/login [PROVIDER]` · `/model [PROVIDER/MODEL_ID]` | Sign in via browser or device code · choose the next turn's provider/model |
+| `Enter` · `Shift+Enter` | Send a prompt · insert a newline; pasted Enter never submits |
+| `←` `→` · `↑` `↓` | Move by Unicode grapheme or wrapped visual row; history at first/last row |
+| `Ctrl+P`/`Ctrl+N` · `Ctrl+R` | Explicit older/newer history · incremental reverse search (Enter recalls, Escape cancels) |
+| `Ctrl/Alt+←/→` · `Ctrl+W` | Move or delete by word; editor draft stays intact during model output |
+| `PgUp`/`PgDn` · `Ctrl+Home`/`Ctrl+End` | Scroll the transcript by page or jump to its beginning/end |
+| `Ctrl+C` · `Ctrl+D` | Clear a nonempty draft; with an empty draft cancel the active turn · exit when empty |
+| `/login [PROVIDER]` · `/model [PROVIDER/MODEL_ID]` | Search sign-in/model choices (Esc cancels) or select directly |
+| `/cancel` · `/settings` | Stop the active request/command; edit typed project defaults for the next launch |
 | `/help` · `/entries` | Show commands · list journal message IDs |
 | `/branch ID` · `/fork /path/new.jsonl` | Continue from an earlier message · copy the selected conversation |
 | `/compact` · `/quit` | Summarize older turns manually · exit |
+
+The input remains responsive during network calls and approved commands. Prompts submitted while a turn runs are queued and appear in the transcript only when their own turn begins; `/cancel` stops the active turn without discarding queued prompts or an unsent draft. Transient streamed text from a cancelled or failed turn is removed. In-memory scrollback keeps the latest 10,000 rows; `--session` journals the full durable conversation.
 
 Sessions are private append-only JSONL journals on creation, **not encrypted**. Keep them outside version control: Gemini 3 native replay may persist model-issued thought text and signatures alongside visible conversation content. Reopening a session marks interrupted tool calls as failed rather than rerunning them. `/compact` preserves the full journal; model summarization may fail if the provider's context limit is exceeded.
 
@@ -117,7 +126,7 @@ Sessions are private append-only JSONL journals on creation, **not encrypted**. 
 
 | Provider | Transport | Authentication | CLI selection |
 | --- | --- | --- | --- |
-| OpenAI | Chat Completions, Responses | `OPENAI_API_KEY` | `--provider openai`; `--api responses` or GPT-5/o-series auto-route |
+| OpenAI | Chat Completions, Responses | `OPENAI_API_KEY` | `--provider openai`; GPT-6/GPT-5/o-series auto-route to Responses |
 | OpenAI Codex subscription | account-scoped Codex Responses | `--login openai-codex` (PKCE; refresh) | `--provider openai-codex --model MODEL_ID` |
 | Anthropic | Messages | `ANTHROPIC_API_KEY` or `--login anthropic` | `--provider anthropic --model MODEL_ID` |
 | Ollama | native `/api/chat` | none (local server) | `--provider ollama --model MODEL_ID` |

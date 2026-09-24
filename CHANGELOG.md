@@ -7,6 +7,15 @@
 - test(update): exercised a native installed binary upgrading from a different executable using fake HTTPS release assets; corrupted archive checksum left the previous executable intact, and source-built binaries refused self-update.
 - feat(tui): rendered the existing Pave pixel mark as a centered, colored ASCII startup illustration in an empty interactive transcript, with a compact narrow-terminal fallback; removed it on the first message without persisting it.
 - test(tui): opened the native terminal in a PTY, observed the ASCII silhouette, resized to a narrow screen, submitted `/help` and verified the startup illustration gave way to the transcript before exiting with `/quit`.
+- feat(model): replaced the OpenAI `gpt-4.1-mini` default with the documented coding-focused `gpt-6-sol` and routed GPT-6 models through Responses; kept the separate personal Copilot Chat model guard rather than pretending it supports newer inference routes.
+- feat(update): added read-only `pave update --check` with a release-tag version embedded during native packaging, a bounded HTTPS latest-release lookup and explicit rate-limit/metadata failures; source and foreign-managed installs remain ineligible.
+- feat(tui): moved interactive model turns to a cancellable event-driven worker, queued follow-up prompts without prematurely submitting them, cleared provisional output on cancellation and kept the editor responsive while streaming.
+- feat(tui): added transcript scrollback, wrapped grapheme-aware multiline movement, word editing and reverse history search; replaced text entry for `/login` and `/model` with searchable keyboard pickers, and added a project settings overlay.
+- feat(config): loaded typed user/project provider, model, turn and shell-disable settings with precedence and diagnostics; persisted explicit project changes atomically and loaded bounded ancestor/user `AGENTS.md` instructions below the mobile safety prompt.
+- feat(provider): added pinned, credential-isolated `--models` discovery for OpenAI, Gemini, personal Copilot and local Ollama without treating discovered model IDs as automatically supported transports.
+- feat(tools): added gitignore-aware glob and regex grep plus paginated file reads; made approved foreground shell commands cancellable with process-group cleanup and journal-safe interrupted results.
+- test(tui): exercised native PTY logo, model/settings overlays, actual settings persistence and denial, live SSE cancellation with a queued follow-up and removal of provisional rows.
+- test(provider): exercised GPT-6 Sol default routing through a local Responses server, four provider model-listing fixtures, live loopback Ollama listing, and an installed tagged update-check fixture with newer/current/older metadata and no writes.
 
 ## 2026-09-24
 

@@ -84,22 +84,25 @@ let pending t =
       readable <> []
     with Unix.Unix_error (Unix.EINTR, _, _) -> true)
 
-let event t =
-  let rec next () : [ Notty.Unescape.event | `Resize of int * int | `End ] =
+let event ?wake_fd t =
+  let rec next () : [ Notty.Unescape.event | `Resize of int * int | `End | `Wake ] =
     if Notty_unix.Term.pending t.term then
       (match Notty_unix.Term.event t.term with
        | `Resize _ as resized -> resized
        | `End -> `End
        | #Notty.Unescape.event as key -> key)
     else if not (Queue.is_empty t.events) then
-      (Queue.take t.events :> [ Notty.Unescape.event | `Resize of int * int | `End ])
+      (Queue.take t.events :> [ Notty.Unescape.event | `Resize of int * int | `End | `Wake ])
     else (
       let timeout = if t.mode = Escape then 0.04 else -1. in
-      let ready = try
-        let readable, _, _ = Unix.select [ t.fd ] [] [] timeout in
-        readable <> []
-      with Unix.Unix_error (Unix.EINTR, _, _) -> false in
-      if ready then (
+      let watched = match wake_fd with None -> [ t.fd ] | Some fd -> [ fd; t.fd ] in
+      let readable = try
+        let ready, _, _ = Unix.select watched [] [] timeout in
+        ready
+      with Unix.Unix_error (Unix.EINTR, _, _) -> [] in
+      if (match wake_fd with None -> false | Some fd -> List.mem fd readable) then
+        `Wake
+      else if List.mem t.fd readable then (
         let count = try Unix.read t.fd t.input 0 (Bytes.length t.input)
           with Unix.Unix_error (Unix.EINTR, _, _) -> -1 in
         if count = 0 then `End
