@@ -2,6 +2,7 @@
 
 ## 2026-09-25
 
+- fix(tui): reconcile visible transcript with the journal after `/branch` and `/fork`; navigating to an earlier branch no longer leaves abandoned turns and stale `/entries` notices on-screen. Reproduced the stale display before the fix, then navigated both directions and forked in a real saved-session PTY.
 - feat(tui): separated semantic transcript state from painting, with restrained role/tool colors, readable Markdown/code and tool lifecycle blocks, lazy grapheme-safe wrapping, bounded scrollback, accurate interrupted states and `Alt+O` expandable tool results; kept narrow and `NO_COLOR` layouts usable.
 - feat(tui): added bounded atomic undo/redo for grapheme editing and bracketed paste, kill/yank and line movement; matched Meta shortcuts to the terminal's actual lower-case escape sequences.
 - feat(session): added opt-in `/new` private per-workspace journals and searchable `/resume` with explicit safe-discard confirmation for unsaved conversations; restored visible conversation on reopen without clearing an unsent editor draft.

@@ -469,17 +469,31 @@ let () =
           (match !journal with
            | None -> on_event "Error: --session is required to branch"
            | Some current ->
-               (try Pave.Session.branch current
-                 (String.trim (String.sub line 8 (String.length line - 8)));
-                 agent := None
+               (try
+                 let target = String.trim (String.sub line 8 (String.length line - 8)) in
+                 Pave.Session.branch current target;
+                 agent := None;
+                 (match !ui with
+                  | Some screen ->
+                      Tui.show_history screen (Pave.Session.history current);
+                      Tui.alert screen ("Branch: " ^ target)
+                  | None -> on_event ("Branch: " ^ target))
                 with exn -> report_error exn))
         else if String.starts_with ~prefix:"/fork " line then
           (match !journal with
            | None -> on_event "Error: --session is required to fork"
            | Some current ->
-               (try journal := Some (Pave.Session.fork current
-                 (String.trim (String.sub line 6 (String.length line - 6))));
-                 agent := None
+               (try
+                 let next = Pave.Session.fork current
+                   (String.trim (String.sub line 6 (String.length line - 6))) in
+                 journal := Some next;
+                 agent := None;
+                 (match !ui with
+                  | Some screen ->
+                      Tui.set_session screen true;
+                      Tui.show_history screen (Pave.Session.history next);
+                      Tui.alert screen ("Fork: " ^ next.Pave.Session.path)
+                  | None -> on_event ("Fork: " ^ next.Pave.Session.path))
                 with exn -> report_error exn))
         else if line = "/entries" then
           (match !journal with
