@@ -10,10 +10,10 @@ let call_chunk calls =
   frame (Yojson.Basic.to_string (`Assoc [ "message", `Assoc [
     "role", `String "assistant"; "content", `String "";
     "tool_calls", `List calls ]; "done", `Bool false ]))
-let done_frame ?(reason="stop") () =
-  frame (Yojson.Basic.to_string (`Assoc [ "message", `Assoc [
+let done_frame ?(reason="stop") ?(counts=[]) () =
+  frame (Yojson.Basic.to_string (`Assoc ([ "message", `Assoc [
     "role", `String "assistant"; "content", `String "" ];
-    "done_reason", `String reason; "done", `Bool true ]))
+    "done_reason", `String reason; "done", `Bool true ] @ counts)))
 let parse wire =
   let t = Pave.Ollama_stream.create ~on_text:(fun _ -> ()) in
   Pave.Ollama_stream.feed t wire;
@@ -35,6 +35,14 @@ let () =
   assert (result.content = Some "你好、東京");
   assert (result.tool_calls = [ { Pave.Protocol.id = "ollama:0:search";
     name = "search"; arguments = args } ]);
+  assert (Pave.Ollama_stream.usage t = None);
+  let measured = Pave.Ollama_stream.create ~on_text:(fun _ -> ()) in
+  Pave.Ollama_stream.feed measured (chunk "ok" ^
+    done_frame ~counts:["prompt_eval_count", `Int 18;
+      "eval_count", `Int 7] ());
+  ignore (Pave.Ollama_stream.finish measured);
+  assert (Pave.Ollama_stream.usage measured =
+    Some { Pave.Protocol.input_tokens = 18; output_tokens = 7 });
   let fragments =
     call_chunk [ tool ~index:0 "search" (`String {|{"query":"東|}) ] ^
     call_chunk [ tool ~index:0 "search" (`String {|京"}|}) ] ^

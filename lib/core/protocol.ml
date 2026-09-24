@@ -1,5 +1,7 @@
 type tool_call = { id : string; name : string; arguments : Yojson.Basic.t }
 
+type usage = { input_tokens : int; output_tokens : int }
+
 type message = {
   role : string;
   content : string option;
@@ -9,6 +11,12 @@ type message = {
 }
 
 exception Invalid_response of string
+let add_usage left right =
+  if right.input_tokens > max_int - left.input_tokens ||
+    right.output_tokens > max_int - left.output_tokens then
+    raise (Invalid_response "provider token totals exceed host integer");
+  { input_tokens = left.input_tokens + right.input_tokens;
+    output_tokens = left.output_tokens + right.output_tokens }
 
 let user content =
   { role = "user"; content = Some content; tool_calls = [];

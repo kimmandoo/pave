@@ -349,7 +349,8 @@ let post_stream ?cancel ~endpoint ~headers ~secret body_json ~on_chunk ~is_done 
         raise (Provider_error (Printf.sprintf "HTTP %d%s" code suffix)));
       if Buffer.length pending <> 0 then on_chunk (Buffer.contents pending)))
 
-let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?cancel config messages tools =
+let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage ?cancel
+    config messages tools =
   check_cancel cancel;
   if authentication = OAuth &&
      not (match config.api, config.endpoint with
@@ -455,7 +456,13 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?cancel co
       (match on_text with
       | None ->
           let json = post_json ?cancel ~endpoint:config.endpoint ~headers:[] ~secret:"" body in
-          parse (fun () -> Ollama_wire.parse_completion json)
+          let reply = parse (fun () -> Ollama_wire.parse_completion json) in
+          (match on_usage with
+           | None -> ()
+           | Some report ->
+               check_cancel cancel;
+               Option.iter report (Ollama_wire.usage json));
+          reply
       | Some emit ->
           let stream = Ollama_stream.create ~on_text:emit in
           let body = match body with
@@ -467,7 +474,13 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?cancel co
               body ~on_chunk:(Ollama_stream.feed stream)
               ~is_done:(fun () -> Ollama_stream.is_done stream)
               ~is_finished:(fun () -> Ollama_stream.is_finished stream);
-            Ollama_stream.finish stream))
+            let reply = Ollama_stream.finish stream in
+            (match on_usage with
+             | None -> ()
+             | Some report ->
+                 check_cancel cancel;
+                 Option.iter report (Ollama_stream.usage stream));
+            reply))
   | Gemini_direct ->
       let body = parse (fun () ->
         Gemini_wire.request ~model:config.model messages tools) in

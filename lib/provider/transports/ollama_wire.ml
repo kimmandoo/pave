@@ -118,6 +118,13 @@ let check_error json = match field "error" json with
   | `String text -> invalid ("model error: " ^ text)
   | _ -> invalid "invalid model error"
 
+let usage json =
+  match field "prompt_eval_count" json, field "eval_count" json with
+  | `Int input_tokens, `Int output_tokens
+    when input_tokens >= 0 && output_tokens >= 0 ->
+      Some { Protocol.input_tokens; output_tokens }
+  | _ -> None
+
 let parse_completion json =
   check_error json;
   if field "done" json <> `Bool true then invalid "missing done marker";

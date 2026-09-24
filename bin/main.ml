@@ -160,6 +160,16 @@ let () =
       | None -> approve_command command in
     let agent : Pave.Agent.t option ref = ref None in
     let retained_history : Pave.Protocol.message list ref = ref [] in
+    let ephemeral_usage : Pave.Protocol.usage option ref = ref None in
+    let record_usage tokens =
+      match !journal with
+      | Some current ->
+          Pave.Session.append_usage current ~provider:!active_descriptor.id
+            ~model:!active_model tokens
+      | None ->
+          ephemeral_usage := Some (match !ephemeral_usage with
+            | None -> tokens
+            | Some previous -> Pave.Protocol.add_usage previous tokens) in
     let resolve_provider () =
       if !active_model = "" then
         failwith ("Select a model with /model " ^ !active_descriptor.id
@@ -191,7 +201,7 @@ let () =
       Pave.Agent.create ~provider ~authentication ?resolve_credential
         ~root ~system
         ~allow_shell:!allow_shell ~stream:(!stream || Option.is_some !ui)
-        ~approve_command:worker_approval
+        ~approve_command:worker_approval ~on_usage:record_usage
         ~history ~on_change ~on_event:worker_event ~on_delta:worker_delta () in
     let get_agent () = match !agent with
       | Some current -> current
@@ -235,6 +245,7 @@ let () =
       journal := Some next;
       (match selected with Some choice -> use_selection choice | None -> agent := None);
       retained_history := [];
+      ephemeral_usage := None;
       (match !ui with
        | Some screen ->
            Tui.set_session screen true;
@@ -297,7 +308,8 @@ let () =
                 ^ "Do not claim tools ran unless their results confirm it.");
               tool_calls = []; tool_call_id = None; provider_state = None } in
             let provider, authentication, resolve_credential = resolve_provider () in
-            let reply = Pave.Provider.complete ~authentication ?resolve_credential provider
+            let reply = Pave.Provider.complete ~authentication ?resolve_credential
+              ~on_usage:record_usage provider
               [ instruction; Pave.Protocol.user transcript ] [] in
             (match reply.content, reply.tool_calls with
              | Some summary, [] when String.trim summary <> "" ->
@@ -649,7 +661,14 @@ let () =
                  ["Ephemeral conversation · use /new to save";
                   Printf.sprintf "Conversation: %d messages"
                     (List.length messages)]) @
-            ["Token usage/context limit/cost · not tracked"] in
+            (match (match !journal with
+              | Some current -> Pave.Session.usage current
+              | None -> !ephemeral_usage) with
+             | None -> ["Token usage/context limit/cost · not tracked"]
+             | Some usage ->
+                 [Printf.sprintf "Ollama-reported on branch: %d in · %d out tokens"
+                    usage.input_tokens usage.output_tokens;
+                  "Other providers/context limit/cost · not tracked"]) in
           (match !ui with
            | Some screen -> Tui.events screen lines
            | None -> List.iter on_event lines)
@@ -669,6 +688,11 @@ let () =
                  | Pave.Session.Model { provider; model } ->
                      Some (entry.id ^ " model " ^
                        Pave.Session_tree.first_line (provider ^ "/" ^ model))
+                 | Pave.Session.Usage { provider; model; tokens } ->
+                     Some (Printf.sprintf "%s usage %s · %d in / %d out"
+                       entry.id (Pave.Session_tree.first_line
+                         (provider ^ "/" ^ model))
+                       tokens.input_tokens tokens.output_tokens)
                  | Pave.Session.Branch -> None) (Pave.Session.entries current) in
                (match !ui with
                 | Some screen -> Tui.events screen lines
