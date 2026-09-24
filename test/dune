@@ -123,3 +123,23 @@
 (test
  (name test_model_discovery)
  (libraries pave unix yojson))
+
+(test
+ (name test_system_prompt)
+ (libraries pave unix))
+
+(test
+ (name test_scoped_rules)
+ (libraries pave unix yojson))
+
+(copy_files ../bin/ui/tui.ml)
+(copy_files ../bin/ui/terminal_input.ml)
+
+(test
+ (name test_chooser_dynamic)
+ (modules test_chooser_dynamic tui terminal_input)
+ (libraries pave unix notty-community notty-community.unix uutf))
+
+(test
+ (name test_model_discovery_cancel)
+ (libraries pave unix threads))

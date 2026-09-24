@@ -4,12 +4,15 @@ let max_line_bytes = 4096
 let max_transcript_rows = 10_000
 let prompt = "  ❯ "
 
-type candidate = { value : string; custom : bool }
+type candidate = { value : string; custom : bool; verified : bool }
 
 type chooser = {
   title : string;
-  choices : string array;
+  suggestions : string array;
+  mutable choices : candidate array;
   allow_custom : bool;
+  dynamic : bool;
+  mutable status : string option;
   mutable filter : string;
   mutable selected : int;
   mutable offset : int;
@@ -108,21 +111,26 @@ let styled_line width attr text =
 let matches chooser =
   let query = String.lowercase_ascii chooser.filter in
   let found = ref [] in
-  Array.iter (fun value ->
+  Array.iter (fun item ->
+    let value = item.value in
     let n = String.length value and m = String.length query in
     let rec at pos j =
       j = m || (Char.lowercase_ascii value.[pos + j] = query.[j]
         && at pos (j + 1)) in
     let rec find pos =
       pos + m <= n && (at pos 0 || find (pos + 1)) in
-    if find 0 then found := { value; custom = false } :: !found) chooser.choices;
+    if find 0 then found := item :: !found) chooser.choices;
   match !found with
   | [] when chooser.allow_custom && String.contains chooser.filter '/' ->
-      [| { value = chooser.filter; custom = true } |]
+      [| { value = chooser.filter; custom = true; verified = false } |]
   | _ -> Array.of_list (List.rev !found)
 
-let candidate_label item =
-  (if item.custom then "Use: " else "") ^ sanitize item.value
+let candidate_label chooser item =
+  let source =
+    if item.custom then "Use: "
+    else if not chooser.dynamic then ""
+    else if item.verified then "[verified] " else "[suggested] " in
+  source ^ sanitize item.value
 
 let view_height t =
   let _, rows = Notty_unix.Term.size t.term in
@@ -145,8 +153,9 @@ let paint t =
   let body_height = max 0 (rows - 4 - editor_height) in
   let header = styled_line cols accent "  ◆  PAVE  /  mobile workspace" in
   let location = styled_line cols muted
-    ("  " ^ sanitize t.root ^ "   ·   " ^ sanitize t.model
-      ^ (if t.session then "   ·   session on" else "   ·   session off")) in
+    ("  " ^ sanitize t.model ^
+      (if t.session then "   ·   journal on" else "   ·   journal off") ^
+      "   ·   " ^ sanitize t.root) in
   let divider = I.uchar A.(fg lightblack) (Uchar.of_int 0x2500) cols 1 in
   let total = t.line_count + if t.live = "" then 0 else 1 in
   t.scroll <- min t.scroll (max 0 (total - body_height));
@@ -171,7 +180,7 @@ let paint t =
               styled_line cols
                 (if index = chooser.selected then accent else text_attr)
                 ((if index = chooser.selected then "  ❯ " else "    ")
-                 ^ candidate_label choice)))
+                 ^ candidate_label chooser choice)))
     | None ->
         (match t.body_cache with
         | Some (width, height, revision, body)
@@ -204,14 +213,15 @@ let paint t =
     | Some chooser ->
         let found = matches chooser in
         let number = if Array.length found = 0 then 0 else chooser.selected + 1 in
+        let status = match chooser.status with None -> "" | Some text -> text ^ " · " in
         if body_height < 2 then
-          Printf.sprintf "  %d/%d %s · Enter select · Esc cancel" number
+          Printf.sprintf "  %s%d/%d %s · Enter select · Esc cancel" status number
             (Array.length found)
             (if Array.length found = 0 then "(no match)"
-             else candidate_label found.(chooser.selected))
+             else candidate_label chooser found.(chooser.selected))
         else
-          Printf.sprintf "  %s · %d/%d · ↑↓/PgUp/PgDn move · Enter select · Esc cancel"
-            chooser.title number (Array.length found)
+          Printf.sprintf "  %s%d/%d · ↑↓/PgUp/PgDn move · Enter select · Esc cancel"
+            status number (Array.length found)
     | None ->
         let status = match Pave.Composer.search_query t.editor with
           | None -> t.status
@@ -512,14 +522,54 @@ let read ?wake_fd ?on_wake ?on_interrupt t =
     | _ -> loop () in
   loop ()
 
-let choose ?(allow_custom = false) t ~title ~choices =
+(* The chooser is updated only on the UI thread (typically from on_wake). The
+   initial offline suggestions remain available when verified IDs arrive. *)
+let update_chooser chooser ~verified ~status =
+  let previous = matches chooser in
+  let selected = if chooser.selected < Array.length previous then
+      Some previous.(chooser.selected).value else None in
+  let confirmed = Hashtbl.create (List.length verified) in
+  List.iter (fun value -> Hashtbl.replace confirmed value ()) verified;
+  let seen = Hashtbl.create (Array.length chooser.suggestions + List.length verified) in
+  let choices = ref [] in
+  let add value =
+    if not (Hashtbl.mem seen value) then (
+      Hashtbl.add seen value ();
+      choices := { value; custom = false;
+        verified = Hashtbl.mem confirmed value } :: !choices) in
+  Array.iter add chooser.suggestions;
+  List.iter add verified;
+  chooser.choices <- Array.of_list (List.rev !choices);
+  chooser.status <- Option.map sanitize status;
+  let found = matches chooser in
+  chooser.selected <- (match selected with
+    | Some value ->
+        let rec locate i =
+          if i = Array.length found then 0
+          else if found.(i).value = value then i else locate (i + 1) in
+        locate 0
+    | None -> 0);
+  chooser.offset <- min chooser.offset chooser.selected
+
+let update_choices t ~verified ?status () =
+  match t.chooser with
+  | Some chooser when chooser.dynamic ->
+      update_chooser chooser ~verified ~status;
+      paint t
+  | _ -> invalid_arg "Tui.update_choices: no dynamic chooser is open"
+
+let choose ?(allow_custom = false) ?wake_fd ?on_wake t ~title ~choices =
   let cols, rows = Notty_unix.Term.size t.term in
   if cols < 9 || rows < 2 then (
     alert t "Resize terminal (at least 9 columns × 2 rows) to select";
     None)
   else
-  let chooser = { title = sanitize title; choices = Array.of_list choices;
-    allow_custom; filter = ""; selected = 0; offset = 0 } in
+  let suggestions = Array.of_list choices in
+  let chooser = { title = sanitize title; suggestions;
+    choices = Array.map (fun value ->
+      { value; custom = false; verified = false }) suggestions;
+    allow_custom; dynamic = Option.is_some wake_fd; status = None;
+    filter = ""; selected = 0; offset = 0 } in
   let old_scroll = t.scroll in
   let selected () =
     let found = matches chooser in
@@ -535,8 +585,12 @@ let choose ?(allow_custom = false) t ~title ~choices =
     paint t) (fun () ->
     paint t;
     let rec loop () =
-      match Terminal_input.event t.input with
+      match Terminal_input.event ?wake_fd t.input with
       | `End -> None
+      | `Wake ->
+          (match on_wake with Some callback -> callback ()
+           | None -> invalid_arg "Tui.choose: wake_fd requires on_wake");
+          loop ()
       | `Resize _ ->
           let cols, rows = Notty_unix.Term.size t.term in
           if cols < 9 || rows < 2 then (

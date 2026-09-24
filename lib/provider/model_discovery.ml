@@ -32,7 +32,7 @@ let ollama_url = "http://127.0.0.1:11434/api/tags"
 let copilot_url = "https://api.githubcopilot.com/models"
 let max_response_bytes = 1_048_576
 
-let default_http ~url ~headers =
+let default_http ?cancel ~url ~headers () =
   (* This transport is private. The public callback is for isolated fixtures;
      the production callsites below never accept a URL or redirect from JSON. *)
   Provider.with_temp_file (fun path output ->
@@ -51,7 +51,7 @@ let default_http ~url ~headers =
       ^ option "proxy" ""
       ^ String.concat "" (List.map (fun (name, value) ->
           option "header" (name ^ ": " ^ value)) headers) in
-    let status = try Ok (Provider.run_curl config)
+    let status = try Ok (Provider.run_curl ?cancel config)
       with Provider.Provider_error _ -> Error (Transport_error "request failed or timed out") in
     match status with
     | Error _ as failure -> failure
@@ -124,7 +124,7 @@ let add_unique seen result ids =
   List.iter (fun id -> if not (Hashtbl.mem seen id) then (
     Hashtbl.add seen id (); result := id :: !result)) ids
 
-let discover ?(http = default_http) ~provider ?credential () =
+let discover ?http ?cancel ~provider ?credential () =
   let target = match provider with
     | "openai" -> Some (openai_url, "data", "id", include_all)
     | "google" -> Some (google_url, "models", "name", include_gemini)
@@ -157,12 +157,18 @@ let discover ?(http = default_http) ~provider ?credential () =
             | _ -> [] in
           let seen = Hashtbl.create 32 and result = ref [] in
           let visited = Hashtbl.create 8 in
+          let http = match http with
+            | Some http -> http
+            | None -> fun ~url ~headers -> default_http ?cancel ~url ~headers () in
           let rec pages page token =
+            Provider.check_cancel cancel;
             if page >= 50 then invalid "too many model listing pages"
             else let page_url = match token with
               | None -> url
               | Some token -> url ^ "?pageToken=" ^ Oauth_flow.url_encode token in
-            match http ~url:page_url ~headers with
+            let response = http ~url:page_url ~headers in
+            Provider.check_cancel cancel;
+            match response with
             | Error _ as failure -> failure
             | Ok (status, _) when status < 200 || status >= 300 ->
                 Error (Http_error status)

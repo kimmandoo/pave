@@ -16,6 +16,11 @@
 - feat(tools): added gitignore-aware glob and regex grep plus paginated file reads; made approved foreground shell commands cancellable with process-group cleanup and journal-safe interrupted results.
 - test(tui): exercised native PTY logo, model/settings overlays, actual settings persistence and denial, live SSE cancellation with a queued follow-up and removal of provisional rows.
 - test(provider): exercised GPT-6 Sol default routing through a local Responses server, four provider model-listing fixtures, live loopback Ollama listing, and an installed tagged update-check fixture with newer/current/older metadata and no writes.
+- test(distribution): published `v0.1.6` on all four native targets; upgraded an isolated publicly installed `v0.1.5` binary over real HTTPS, confirmed `pave update --check` reported current and observed its ASCII launch logo in a PTY.
+- feat(config): applied path-scoped `.pave/rules` as model-visible system guidance before guarded file mutations and added bounded `SYSTEM.md`/`SYSTEM_TEMPLATE.md`/`APPEND_SYSTEM.md` precedence with explicit CLI overrides; mobile safety and ancestor instructions remain.
+- feat(tui): discovered account-listed routable model IDs asynchronously when opening `/model`, kept searchable offline suggestions visible during network waits, cancelled listing on Escape, and moved the model ahead of long workspace paths in the status header.
+- fix(provider): recognized service-prefixed `models/gemini-3-*` IDs as signed Gemini 3 tool calls, preserving native thought-signature replay after choosing a discovered ID.
+- test(agent): verified withheld scoped writes, replay after instruction exposure, cancellation/journal isolation, real CLI prompt precedence, delayed PTY model-list updates and Gemini signed-call replay with service-prefixed model IDs.
 
 ## 2026-09-24
 
