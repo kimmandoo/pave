@@ -37,20 +37,21 @@ let () =
     let first = Store.create ~root in
     let second = Store.create ~root in
     assert (first.Pave.Session.path <> second.Pave.Session.path);
-    ignore (Pave.Session.append first (Pave.Protocol.user "Fix SwiftUI navigation"));
+    let prompt = "Fix SwiftUI navigation\027[31m\226\128\174spoof" in
+    ignore (Pave.Session.append first (Pave.Protocol.user prompt));
     ignore (Pave.Session.append second (Pave.Protocol.user "Inspect Android lifecycle"));
     assert ((Unix.stat first.path).Unix.st_perm land 0o077 = 0);
     assert ((Unix.stat (Filename.dirname first.path)).Unix.st_perm land 0o077 = 0);
     let recent = Store.recent ~root in
     assert (List.length recent = 2);
     assert (List.exists (fun (item : Pave.Session_store.recent) ->
-      item.path = first.path && item.title = "Fix SwiftUI navigation") recent);
+      item.path = first.path && item.title = "Fix SwiftUI navigation [31m spoof") recent);
     assert (List.exists (fun (item : Pave.Session_store.recent) ->
       item.path = second.path && item.title = "Inspect Android lifecycle") recent);
     assert (Store.recent ~root:other = []);
     invalid (fun () -> Store.open_existing ~root:other first.path);
     let reopened = Store.open_existing ~root first.path in
-    assert (Pave.Session.history reopened = [Pave.Protocol.user "Fix SwiftUI navigation"]);
+    assert (Pave.Session.history reopened = [Pave.Protocol.user prompt]);
     let link = child base "alias" in
     Unix.symlink root link;
     assert (Store.directory ~root:link = Store.directory ~root);

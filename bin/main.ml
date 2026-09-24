@@ -587,7 +587,7 @@ let () =
                  | Pave.Session.Message message ->
                      Some (Printf.sprintf "%s %s %s" entry.id message.role
                        (match message.content with Some text ->
-                         String.sub text 0 (min 80 (String.length text))
+                         Pave.Session_tree.first_line text
                        | None -> "<tool calls>"))
                  | Pave.Session.Compaction _ ->
                      Some (entry.id ^ " compaction <summary>")
