@@ -176,6 +176,72 @@ let () =
       | Some current -> current
       | None -> let current = make_agent () in agent := Some current; current in
     let send text = ignore (Pave.Agent.run ~max_turns (get_agent ()) text) in
+    let unsaved_messages () =
+      match !journal, !agent with
+      | None, Some current -> Pave.Agent.messages current <> []
+      | _ -> !journal = None && !retained_history <> [] in
+    let confirm_session_switch () =
+      if not (unsaved_messages ()) then true
+      else match !ui with
+        | Some screen ->
+            Tui.choose screen
+              ~title:"Discard the unsaved conversation? This cannot be undone"
+              ~choices:["Keep current conversation"; "Discard and switch"] =
+              Some "Discard and switch"
+        | None ->
+            on_event "Error: current conversation is unsaved; start with --session to preserve it";
+            false in
+    let switch_session next =
+      journal := Some next;
+      agent := None;
+      retained_history := [];
+      (match !ui with
+       | Some screen ->
+           Tui.set_session screen true;
+           Tui.show_history screen (Pave.Session.history next);
+           Tui.alert screen ("Journal: " ^ Filename.basename next.Pave.Session.path)
+       | None ->
+           on_event ("Journal: " ^ next.Pave.Session.path)) in
+    let start_session () =
+      if confirm_session_switch () then
+        switch_session (Pave.Session_store.create ~root) in
+    let resume_session chosen =
+      let chosen = match chosen, !ui with
+        | Some path, _ -> Some (if Filename.is_relative path then
+            Filename.concat root path else path)
+        | None, Some screen ->
+            let items = Pave.Session_store.recent ~root in
+            if items = [] then (
+              Tui.alert screen "No private journals for this workspace; use /new";
+              None)
+            else
+              let labels = List.map (fun (item : Pave.Session_store.recent) ->
+                let label = item.title ^ "  ·  " ^ item.started ^
+                  "  ·  " ^ Filename.basename item.path in
+                label, item.path) items in
+              Option.map (fun label -> List.assoc label labels)
+                (Tui.choose screen ~title:"Resume · search private workspace journals"
+                  ~choices:(List.map fst labels))
+        | None, None ->
+            let items = Pave.Session_store.recent ~root in
+            List.iteri (fun index (item : Pave.Session_store.recent) ->
+              Printf.printf "%d. %s — %s (%s)\n" (index + 1)
+                item.title item.started item.path) items;
+            if items = [] then on_event "No private journals for this workspace; use /new";
+            print_string "Session number or path (blank cancels): ";
+            flush stdout;
+            let answer = try String.trim (read_line ()) with End_of_file -> "" in
+            if answer = "" then None
+            else match int_of_string_opt answer with
+              | Some index when index > 0 && index <= List.length items ->
+                  Some (List.nth items (index - 1)).path
+              | _ -> Some (if Filename.is_relative answer then
+                  Filename.concat root answer else answer) in
+      match chosen with
+      | None -> ()
+      | Some path ->
+          if confirm_session_switch () then
+            switch_session (Pave.Session_store.open_existing ~root path) in
     let compact () = match !journal with
       | None -> on_event "Error: --session is required to compact"
       | Some current ->
@@ -375,10 +441,10 @@ let () =
           if busy then
             feedback "Commands: /cancel · /quit · type to queue a follow-up; /help when idle shows the rest"
           else (
-            on_event "Commands: /login [PROVIDER] · /model [PROVIDER/MODEL] · /settings · /cancel · /entries · /branch ID · /fork PATH · /compact · /quit";
+            on_event "Commands: /login [PROVIDER] · /model [PROVIDER/MODEL] · /settings · /new · /resume [PATH] · /cancel · /entries · /branch ID · /fork PATH · /compact · /quit";
             (match !ui with
              | Some _ ->
-                 on_event "Edit: Shift+Enter newline · Ctrl+R search · Ctrl+P/N history · Alt+←/→ words · PgUp/PgDn scroll · Ctrl+C clear draft/cancel turn"
+                 on_event "Edit: Shift+Enter newline · Ctrl+R search · Ctrl+P/N history · Ctrl+Z/Y undo/redo · Ctrl+K/U kill · Alt+Y yank · Alt+O tool details · PgUp/PgDn scroll · Ctrl+C clear/cancel"
              | None -> ())))
         else if line = "/settings" then
           (match !ui with
@@ -393,6 +459,11 @@ let () =
                  string_of_bool values.disable_shell);
                on_event ("Maximum turns: " ^
                  string_of_int (Option.value ~default:20 values.max_turns)))
+        else if line = "/new" then start_session ()
+        else if line = "/resume" then resume_session None
+        else if String.starts_with ~prefix:"/resume " line then
+          let path = String.trim (String.sub line 8 (String.length line - 8)) in
+          resume_session (if path = "" then None else Some path)
         else if line = "/compact" then compact ()
         else if String.starts_with ~prefix:"/branch " line then
           (match !journal with
@@ -460,6 +531,9 @@ let () =
         ui := None;
         Tui.close screen) (fun () ->
         ui := Some screen;
+        (match !journal with
+         | Some current -> Tui.show_history screen (Pave.Session.history current)
+         | None -> ());
         List.iter (fun diagnostic ->
           Tui.event screen ("Settings: " ^ diagnostic)) settings.diagnostics;
         List.iter (fun diagnostic ->
@@ -472,8 +546,12 @@ let () =
           ~on_message:(Tui.event screen)
           ~on_delta:(Tui.delta screen)
           ~on_approve:(Tui.confirm screen)
-          ~on_start:(fun text -> Tui.sent screen text)
-          ~on_finish:(function
+          ~on_start:(fun text ->
+            Tui.set_activity screen (Some "Working");
+            Tui.sent screen text)
+          ~on_finish:(fun outcome ->
+            Tui.set_activity screen None;
+            match outcome with
             | Pave.Turn_runner.Completed -> Tui.finish_live screen
             | Pave.Turn_runner.Cancelled ->
                 Tui.clear_live screen;
@@ -482,9 +560,11 @@ let () =
                 Tui.clear_live screen;
                 Tui.event screen ("Error: " ^ Printexc.to_string exn))
           ~on_queued:(fun count ->
-            Tui.alert screen (Printf.sprintf
-              "Queued %d follow-up%s · /cancel stops the current turn"
-              count (if count = 1 then "" else "s"))) () in
+            Tui.set_queue screen count;
+            if count > 0 then
+              Tui.alert screen (Printf.sprintf
+                "Queued %d follow-up%s · /cancel stops the current turn"
+                count (if count = 1 then "" else "s"))) () in
         runner := Some active;
         interact ()))
     else (

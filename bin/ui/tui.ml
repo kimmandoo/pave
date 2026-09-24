@@ -1,7 +1,6 @@
 open Notty
 
-let max_line_bytes = 4096
-let max_transcript_rows = 10_000
+(* Transcript limits live in Transcript_view; no duplicate storage here. *)
 let prompt = "  ❯ "
 
 type candidate = { value : string; custom : bool; verified : bool }
@@ -18,36 +17,37 @@ type chooser = {
   mutable offset : int;
 }
 
-type row = { text : string; attr : A.t; mutable provisional : bool }
 type t = {
   mutable term : Notty_unix.Term.t;
   mutable input : Terminal_input.t;
   root : string;
   mutable model : string;
-  session : bool;
+  mutable session : bool;
   editor : Pave.Composer.t;
-  mutable lines : row array;
-  mutable line_count : int;
+  transcript : Transcript_view.t;
   mutable scroll : int;
   mutable chooser : chooser option;
-  mutable live : string;
-  mutable stream_start : int option;
   mutable revision : int;
   mutable body_cache : (int * int * int * I.t) option;
+  mutable layout_cache : (int * int * Transcript_view.snapshot) option;
   mutable previous : I.t array option;
   mutable status : string;
+  mutable activity : string option;
+  mutable queue : int;
   mutable last_paint : float;
   mutable paste : bool;
 }
 
-let text_attr = A.(fg lightwhite)
-let accent = A.(fg lightcyan ++ st bold)
-let muted = A.(fg lightblack)
-let warning = A.(fg lightyellow)
-let error = A.(fg lightred)
+let no_color = match Sys.getenv_opt "NO_COLOR" with Some s -> s <> "" | None -> false
+let text_attr = if no_color then A.empty else A.(fg lightwhite)
+let accent = if no_color then A.empty else A.(fg lightcyan ++ st bold)
+let user_attr = if no_color then A.empty else A.(fg lightblue ++ st bold)
+let muted = if no_color then A.empty else A.(fg lightblack)
+let warning = if no_color then A.empty else A.(fg lightyellow)
+let error = if no_color then A.empty else A.(fg lightred)
 
 let idle_status =
-  "Enter send · Shift+Enter newline · ↑↓ edit/history · Ctrl+R search · PgUp/Dn scroll"
+  "Alt+O tool details · PgUp/Dn scroll · Enter send · Ctrl+R search"
 
 (* Two ASCII columns per 8px SVG pixel keep the mark square in a terminal. *)
 let startup_logo =
@@ -62,51 +62,66 @@ let startup_logo =
       "##++++++"; "##+"; "##+     *"; " ++" ]) in
   I.(mark <-> void 1 1 <-> string accent "      P A V E")
 
-let sanitize text =
-  let buffer = Buffer.create (min max_line_bytes (String.length text)) in
-  let append () _ = function
-    | `Malformed _ -> Buffer.add_utf_8_uchar buffer Uutf.u_rep
-    | `Uchar uchar ->
-        let code = Uchar.to_int uchar in
-        if code = 10 then Buffer.add_char buffer '\n'
-        else if code = 9 then Buffer.add_char buffer ' '
-        else if code < 32 || code = 127 then Buffer.add_char buffer ' '
-        else Buffer.add_utf_8_uchar buffer uchar in
-  ignore (Uutf.String.fold_utf_8 append () text);
-  Buffer.contents buffer
+let sanitize = Transcript_view.sanitize
+let single_line = Transcript_view.single_line
 
-let fit_bytes text =
-  if String.length text <= max_line_bytes then text
-  else (
-    let size = ref max_line_bytes in
-    while !size > 0 && Char.code text.[!size] land 0xc0 = 0x80 do decr size done;
-    String.sub text 0 !size ^ "…")
+let transcript_changed t =
+  t.revision <- t.revision + 1;
+  t.layout_cache <- None
 
-let add_row ?(provisional = false) t attr text =
-  if t.line_count = max_transcript_rows then (
-    let removed = 1_000 in
-    let remaining = t.line_count - removed in
-    Array.blit t.lines removed t.lines 0 remaining;
-    Array.fill t.lines remaining removed
-      { attr = A.empty; text = ""; provisional = false };
-    t.line_count <- remaining;
-    t.stream_start <- Option.map (fun index -> max 0 (index - removed))
-      t.stream_start);
-  if t.line_count = Array.length t.lines then (
-    let grown = Array.make (max 128 (2 * t.line_count))
-      { attr = A.empty; text = ""; provisional = false } in
-    Array.blit t.lines 0 grown 0 t.line_count;
-    t.lines <- grown);
-  t.lines.(t.line_count) <- { attr; text = fit_bytes text; provisional };
-  t.line_count <- t.line_count + 1;
-  if t.scroll > 0 then t.scroll <- t.scroll + 1;
-  t.revision <- t.revision + 1
+let change_transcript t action =
+  let before, cols = if t.scroll = 0 then 0, 0 else (
+    let cols, _ = Notty_unix.Term.size t.term in
+    let content_cols = if cols <= 6 then max 1 cols else cols - 5 in
+    let measure chunk = I.width (I.string text_attr chunk) in
+    let layout = match t.layout_cache with
+      | Some (width, revision, layout)
+        when width = cols && revision = t.transcript.revision -> layout
+      | _ -> Transcript_view.snapshot t.transcript ~columns:content_cols ~measure in
+    layout.total, content_cols) in
+  action ();
+  transcript_changed t;
+  if t.scroll > 0 then (
+    let after = (Transcript_view.snapshot t.transcript ~columns:cols
+      ~measure:(fun chunk -> I.width (I.string text_attr chunk))).total in
+    t.scroll <- max 0 (t.scroll + after - before))
 
-let add_lines t attr text =
-  List.iter (add_row t attr) (String.split_on_char '\n' (sanitize text))
+let style_attr (row : Transcript_view.row) =
+  match row.kind, row.style with
+  | Transcript_view.Error, _ -> error
+  | Transcript_view.Approval, _ -> warning
+  | Transcript_view.User, Transcript_view.Heading -> user_attr
+  | Transcript_view.Assistant, Transcript_view.Heading -> accent
+  | Transcript_view.Tool, Transcript_view.Heading -> warning
+  | _, (Transcript_view.Heading | Transcript_view.Subheading) -> accent
+  | _, Transcript_view.Code -> text_attr
+  | _, Transcript_view.Quote -> text_attr
+  | _, Transcript_view.Tool_state -> warning
+  | _, _ -> text_attr
+
+let styled_visual cols (visual : Transcript_view.visual) =
+  let row = visual.row in
+  let prefix = match row.style with
+    | Transcript_view.Heading -> "  ╭─ "
+    | Transcript_view.Divider -> ""
+    | Transcript_view.Tool_state -> "  ├─ "
+    | Transcript_view.Code -> "  │  "
+    | Transcript_view.Quote -> "  │ › "
+    | Transcript_view.List_item -> "  │ • "
+    | _ -> if visual.continuation then "  │  " else "  │ "
+  in
+  let attr = style_attr row in
+  let prefix = if cols <= I.width (I.string attr prefix) then "" else prefix in
+  I.hsnap ~align:`Left cols (I.string attr (prefix ^ visual.text))
 
 let styled_line width attr text =
   I.hsnap ~align:`Left width (I.string attr text)
+
+let shorten_width width text =
+  if width < 2 then "" else
+  let measure cluster = I.width (I.string text_attr cluster) in
+  if measure text <= width then text
+  else (Transcript_view.wrap ~columns:(width - 1) ~measure text).(0) ^ "…"
 
 let matches chooser =
   let query = String.lowercase_ascii chooser.filter in
@@ -151,13 +166,39 @@ let paint t =
     | Some _, _ | None, Some _ -> 1
     | None, None -> min 4 (max 1 (min (rows - 4) (Array.length editor_lines))) in
   let body_height = max 0 (rows - 4 - editor_height) in
-  let header = styled_line cols accent "  ◆  PAVE  /  mobile workspace" in
-  let location = styled_line cols muted
-    ("  " ^ sanitize t.model ^
-      (if t.session then "   ·   journal on" else "   ·   journal off") ^
-      "   ·   " ^ sanitize t.root) in
-  let divider = I.uchar A.(fg lightblack) (Uchar.of_int 0x2500) cols 1 in
-  let total = t.line_count + if t.live = "" then 0 else 1 in
+  let activity = match t.activity with
+    | Some state -> " · " ^ single_line state
+    | None -> "" in
+  let queued = if t.queue = 0 then "" else
+    Printf.sprintf " · %d queued" t.queue in
+  let header = styled_line cols accent
+    ("  ◆  PAVE" ^ activity ^ (if cols >= 48 then queued else "")) in
+  let model = single_line t.model in
+  let model =
+    if cols < 60 then match String.rindex_opt model '/' with
+      | None -> model
+      | Some split ->
+          shorten_width 6 (String.sub model 0 split) ^ "/" ^
+          String.sub model (split + 1) (String.length model - split - 1)
+    else model in
+  let journal = if t.session then "on" else "off" in
+  let location = styled_line cols text_attr
+    (if cols < 22 then " " ^ shorten_width (max 2 (cols - 1)) model
+    else if cols < 60 then
+      " " ^ shorten_width (cols - 15) model ^ " · journal " ^ journal
+    else "  " ^ model ^ "   ·   journal " ^ journal ^
+      "   ·   " ^ single_line t.root) in
+  let divider = I.uchar muted (Uchar.of_int 0x2500) cols 1 in
+  let layout = match t.layout_cache with
+    | Some (width, revision, layout)
+      when width = cols && revision = t.transcript.revision -> layout
+    | _ ->
+        let content_cols = if cols <= 6 then cols else cols - 5 in
+        let layout = Transcript_view.snapshot t.transcript ~columns:content_cols
+          ~measure in
+        t.layout_cache <- Some (cols, t.transcript.revision, layout);
+        layout in
+  let total = layout.total in
   t.scroll <- min t.scroll (max 0 (total - body_height));
   let first = max 0 (total - body_height - t.scroll) in
   let last = min total (first + body_height) in
@@ -187,7 +228,7 @@ let paint t =
           when width = cols && height = body_height && revision = t.revision -> body
         | _ ->
             let body =
-              if t.line_count = 0 && t.live = "" then (
+              if total = 0 then (
                 let logo_width = I.width startup_logo
                 and logo_height = I.height startup_logo in
                 if cols < logo_width || body_height < logo_height then
@@ -202,11 +243,8 @@ let paint t =
               else
                 I.vsnap ~align:`Bottom body_height
                   (I.vcat (List.init (last - first) (fun index ->
-                    let index = first + index in
-                    let row = if index < t.line_count then t.lines.(index)
-                      else { text = "PAVE › " ^ fit_bytes t.live;
-                        attr = text_attr; provisional = true } in
-                    styled_line cols row.attr row.text))) in
+                    styled_visual cols
+                      (Transcript_view.visual_at layout (first + index))))) in
             t.body_cache <- Some (cols, body_height, t.revision, body);
             body) in
   let footer_text = match t.chooser with
@@ -231,10 +269,16 @@ let paint t =
               | None -> "(no match)"
               | Some value -> sanitize (String.split_on_char '\n' value |> List.hd)) ^
               " · Ctrl+R older · Enter recall · Esc cancel" in
-        (if total = 0 then "  "
-         else if body_height = 0 then Printf.sprintf "  [0/%d] " total
-         else Printf.sprintf "  [%d-%d/%d] " (first + 1) last total) ^ status in
-  let footer = styled_line cols muted footer_text in
+        if cols < 45 then
+          (if status = idle_status then
+            (if t.queue > 0 then Printf.sprintf "q%d · " t.queue else "") ^
+            "Alt+O details · PgUp/Dn scroll"
+           else status)
+        else
+          (if total = 0 then "  "
+           else if body_height = 0 then Printf.sprintf "  [0/%d] " total
+           else Printf.sprintf "  [%d-%d/%d] " (first + 1) last total) ^ status in
+  let footer = styled_line cols text_attr footer_text in
   let first_line = max 0 (min (editor_row - editor_height + 1)
     (Array.length editor_lines - editor_height)) in
   let prompt_rows, cursor_row, cursor_col =
@@ -298,6 +342,40 @@ let paint t =
   flush stdout;
   t.last_paint <- Unix.gettimeofday ()
 
+let paint_resized t =
+  (match t.layout_cache, t.body_cache with
+  | Some (_, _, old_layout), Some (_, old_height, _, _)
+    when t.scroll > 0 && old_height > 0 && old_layout.total > 0 ->
+      let first = max 0 (old_layout.total - old_height - t.scroll) in
+      let old_entry = Transcript_view.visual_at old_layout first in
+      let cols, rows = Notty_unix.Term.size t.term in
+      let cols = max 1 cols and rows = max 1 rows in
+      let measure chunk = I.width (I.string text_attr chunk) in
+      let content_cols = if cols <= 6 then cols else cols - 5 in
+      let next = Transcript_view.snapshot t.transcript
+        ~columns:content_cols ~measure in
+      let prefix_width = I.width (I.string accent prompt) in
+      let field_width = if cols <= prefix_width then cols
+        else cols - prefix_width in
+      let editor_height = match t.chooser, Pave.Composer.search_query t.editor with
+        | Some _, _ | None, Some _ -> 1
+        | None, None ->
+            let editor_lines = Pave.Composer.layout ~columns:field_width
+              ~measure t.editor in
+            min 4 (max 1 (min (rows - 4) (Array.length editor_lines))) in
+      let height = max 0 (rows - 4 - editor_height) in
+      let anchor = ref None in
+      Array.iter (fun (entry : Transcript_view.entry) ->
+        if entry.source = old_entry.source then anchor := Some entry.start)
+        next.entries;
+      Option.iter (fun position ->
+        t.scroll <- max 0 (next.total - height - position))
+        !anchor;
+      t.layout_cache <- Some (cols, t.transcript.revision, next);
+      t.revision <- t.revision + 1
+  | _ -> ());
+  paint t
+
 let scroll_by t delta =
   t.scroll <- max 0 (t.scroll + delta);
   t.revision <- t.revision + 1;
@@ -307,9 +385,10 @@ let create ~root ~model ~session =
   let term = Notty_unix.Term.create ~mouse:false ~bpaste:true () in
   let t = { term; input = Terminal_input.create term;
     root; model; session; editor = Pave.Composer.create ();
-    lines = [||]; line_count = 0; scroll = 0; chooser = None;
-    live = ""; stream_start = None; revision = 0; body_cache = None;
-    previous = None; status = idle_status; last_paint = 0.; paste = false } in
+    transcript = Transcript_view.create (); scroll = 0; chooser = None;
+    revision = 0; body_cache = None; layout_cache = None;
+    previous = None; status = idle_status; activity = None; queue = 0;
+    last_paint = 0.; paste = false } in
   (try paint t with exn -> Notty_unix.Term.release term; raise exn);
   t
 
@@ -334,80 +413,87 @@ let set_model t model =
   t.model <- model;
   reset_status t
 
-let settle_live t =
-  if t.live <> "" then (
-    add_lines t text_attr ("PAVE › " ^ t.live);
-    t.live <- "";
-    if t.scroll > 0 then t.scroll <- t.scroll - 1);
-  (match t.stream_start with
-  | None -> ()
-  | Some start ->
-      for i = start to t.line_count - 1 do
-        t.lines.(i).provisional <- false
-      done);
-  t.stream_start <- None
+let set_session t session =
+  t.session <- session;
+  paint t
+
+let set_activity t activity =
+  t.activity <- activity;
+  paint t
+
+let set_queue t count =
+  t.queue <- max 0 count;
+  paint t
+
+let show_history t (messages : Pave.Protocol.message list) =
+  let names = Hashtbl.create 32 in
+  Transcript_view.clear t.transcript;
+  List.iter (fun (message : Pave.Protocol.message) ->
+    match message.role with
+    | "user" ->
+        Option.iter (Transcript_view.sent t.transcript) message.content
+    | "assistant" ->
+        (match message.content with
+        | Some content when content <> "" ->
+            Transcript_view.assistant t.transcript content
+        | _ -> ());
+        List.iter (fun (call : Pave.Protocol.tool_call) ->
+          let group = Transcript_view.start_tool t.transcript call.name in
+          Hashtbl.replace names call.id (call.name, group))
+          message.tool_calls
+    | "tool" ->
+        let name, group = match message.tool_call_id with
+          | Some id -> (match Hashtbl.find_opt names id with
+            | Some (name, group) -> name, Some group
+            | None -> "tool", None)
+          | None -> "tool", None in
+        Option.iter (fun result ->
+          Transcript_view.tool_result ?group t.transcript name result;
+          Option.iter (Hashtbl.remove names) message.tool_call_id)
+          message.content
+    | _ -> ()) messages;
+  Hashtbl.iter (fun _ (name, group) ->
+    Transcript_view.interrupt_tool t.transcript name group) names;
+  t.transcript.pending_tool <- None;
+  transcript_changed t;
+  t.scroll <- 0;
+  t.status <- idle_status;
+  paint t
 
 let finish_live t =
-  settle_live t;
+  change_transcript t (fun () -> Transcript_view.finish t.transcript);
+  t.status <- idle_status;
   paint t
 
 let sent t text =
-  add_lines t accent ("YOU › " ^ text);
+  change_transcript t (fun () -> Transcript_view.sent t.transcript text);
   t.scroll <- 0;
+  t.status <- idle_status;
   paint t
 
 let event t text =
-  settle_live t;
-  let attr = if String.starts_with ~prefix:"Error:" text then error
-    else if String.starts_with ~prefix:"[" text then warning else text_attr in
-  add_lines t attr text;
+  change_transcript t (fun () -> Transcript_view.event t.transcript text);
   paint t
 
 let events t lines =
-  List.iter (add_lines t text_attr) lines;
-  paint t
+  (match lines with
+  | [] -> ()
+  | _ ->
+      change_transcript t (fun () ->
+        Transcript_view.notice t.transcript (String.concat "\n" lines));
+      paint t)
 
 let delta t chunk =
-  if t.stream_start = None then t.stream_start <- Some t.line_count;
-  let old_lines = t.line_count in
-  let old_total = old_lines + if t.live = "" then 0 else 1 in
-  let anchored = t.scroll > 0 in
-  let parts = String.split_on_char '\n' (sanitize chunk) in
-  (match parts with
-   | [] -> ()
-   | first :: rest ->
-       t.live <- fit_bytes (t.live ^ first);
-       List.iter (fun part ->
-         add_row ~provisional:true t text_attr ("PAVE › " ^ t.live);
-         t.live <- fit_bytes part) rest);
-  if anchored then (
-    let total = t.line_count + if t.live = "" then 0 else 1 in
-    t.scroll <- max 0 (t.scroll + total - old_total - (t.line_count - old_lines)));
-  t.revision <- t.revision + 1;
+  change_transcript t (fun () -> Transcript_view.delta t.transcript chunk);
   if chunk = "\n" || Unix.gettimeofday () -. t.last_paint > 0.033 then paint t
 
 let clear_live t =
-  let start = Option.value t.stream_start ~default:t.line_count in
-  let write = ref start in
-  for i = start to t.line_count - 1 do
-    if not t.lines.(i).provisional then (
-      t.lines.(!write) <- t.lines.(i);
-      incr write)
-  done;
-  let removed = t.line_count - !write + if t.live = "" then 0 else 1 in
-  for i = !write to t.line_count - 1 do
-    t.lines.(i) <- { attr = A.empty; text = ""; provisional = false }
-  done;
-  t.line_count <- !write;
-  t.live <- "";
-  t.stream_start <- None;
-  if removed > 0 then (
-    if t.scroll > 0 then t.scroll <- max 0 (t.scroll - removed);
-    t.revision <- t.revision + 1;
-    paint t)
+  change_transcript t (fun () -> Transcript_view.rollback t.transcript);
+  t.status <- idle_status;
+  paint t
 
 let alert t message =
-  t.status <- sanitize message;
+  t.status <- single_line message;
   paint t
 
 let utf8 uchar =
@@ -438,9 +524,16 @@ let read ?wake_fd ?on_wake ?on_interrupt t =
         (match on_wake with Some callback -> callback ()
          | None -> invalid_arg "Tui.read: wake_fd requires on_wake");
         loop ()
-    | `Resize _ -> paint t; loop ()
-    | `Paste `Start -> t.paste <- true; loop ()
-    | `Paste `End -> t.paste <- false; paint t; loop ()
+    | `Resize _ -> paint_resized t; loop ()
+    | `Paste `Start ->
+        t.paste <- true;
+        if Pave.Composer.search_query t.editor = None then
+          Pave.Composer.begin_paste t.editor;
+        loop ()
+    | `Paste `End ->
+        t.paste <- false;
+        Pave.Composer.end_paste t.editor;
+        paint t; loop ()
     | `Key (`Enter, _) when t.paste ->
         if Pave.Composer.search_query t.editor = None then paste_insert "\n";
         loop ()
@@ -476,8 +569,45 @@ let read ?wake_fd ?on_wake ?on_interrupt t =
           | Some value -> paint t; Some value)
     | `Key (`Page `Up, _) -> scroll_by t (view_height t); loop ()
     | `Key (`Page `Down, _) -> scroll_by t (-view_height t); loop ()
+    | `Key (`ASCII 'o', [ `Meta ]) ->
+        let cols, rows = Notty_unix.Term.size t.term in
+        let measure chunk = I.width (I.string text_attr chunk) in
+        let layout = match t.layout_cache with
+          | Some (width, revision, layout)
+            when width = cols && revision = t.transcript.revision -> layout
+          | _ -> Transcript_view.snapshot t.transcript
+              ~columns:(if cols <= 6 then max 1 cols else cols - 5)
+              ~measure in
+        let visible = layout.total in
+        let height = max 1 (rows - 5) in
+        let first = max 0 (visible - height - t.scroll) in
+        let last = min visible (first + height) in
+        let source_first = if first < visible then
+          (Transcript_view.visual_at layout first).source else 0 in
+        let source_last = if last > 0 then
+          (Transcript_view.visual_at layout (last - 1)).source else 0 in
+        let selected = ref None in
+        change_transcript t (fun () ->
+          selected := Transcript_view.toggle t.transcript ~first:source_first
+            ~last:source_last);
+        (match !selected with
+        | None -> ()
+        | Some group ->
+            let expanded = Transcript_view.snapshot t.transcript
+              ~columns:(if cols <= 6 then max 1 cols else cols - 5)
+              ~measure in
+            let target = ref None in
+            Array.iter (fun (entry : Transcript_view.entry) ->
+              if entry.row.group = group &&
+                entry.row.style = Transcript_view.Heading &&
+                !target = None then target := Some entry.start)
+              expanded.entries;
+            Option.iter (fun start ->
+              t.scroll <- max 0 (expanded.total - height - start))
+              !target);
+        paint t; loop ()
     | `Key (`Home, [ `Ctrl ]) ->
-        t.scroll <- t.line_count + 1; t.revision <- t.revision + 1; paint t; loop ()
+        t.scroll <- max_int; t.revision <- t.revision + 1; paint t; loop ()
     | `Key (`End, [ `Ctrl ]) ->
         t.scroll <- 0; t.revision <- t.revision + 1; paint t; loop ()
     | `Key (`Arrow `Up, [ `Meta ]) | `Key (`ASCII 'P', [ `Ctrl ]) ->
@@ -500,18 +630,30 @@ let read ?wake_fd ?on_wake ?on_interrupt t =
         (if List.mem `Meta mods || List.mem `Ctrl mods then
           Pave.Composer.word_right t.editor else Pave.Composer.right t.editor);
         changed (); loop ()
-    | `Key (`ASCII 'B', [ `Meta ]) ->
+    | `Key (`ASCII 'b', [ `Meta ]) ->
         Pave.Composer.word_left t.editor; changed (); loop ()
-    | `Key (`ASCII 'F', [ `Meta ]) ->
+    | `Key (`ASCII 'f', [ `Meta ]) ->
         Pave.Composer.word_right t.editor; changed (); loop ()
     | `Key (`ASCII 'W', [ `Ctrl ]) | `Key (`Backspace, [ `Meta ]) ->
         Pave.Composer.erase_word t.editor; changed (); loop ()
     | `Key (`Backspace, _) -> Pave.Composer.erase t.editor; changed (); loop ()
     | `Key (`Delete, _) -> Pave.Composer.delete t.editor; changed (); loop ()
-    | `Key (`Home, _) | `Key (`ASCII 'A', [ `Ctrl ]) ->
-        Pave.Composer.home t.editor; changed (); loop ()
-    | `Key (`End, _) | `Key (`ASCII 'E', [ `Ctrl ]) ->
-        Pave.Composer.finish t.editor; changed (); loop ()
+    | `Key (`ASCII 'Z', [ `Ctrl ]) ->
+        Pave.Composer.undo t.editor; changed (); loop ()
+    | `Key (`ASCII 'Y', [ `Ctrl ]) ->
+        Pave.Composer.redo t.editor; changed (); loop ()
+    | `Key (`ASCII 'K', [ `Ctrl ]) ->
+        Pave.Composer.kill_to_end t.editor; changed (); loop ()
+    | `Key (`ASCII 'U', [ `Ctrl ]) ->
+        Pave.Composer.kill_before t.editor; changed (); loop ()
+    | `Key (`ASCII 'y', [ `Meta ]) ->
+        Pave.Composer.yank t.editor; changed (); loop ()
+    | `Key (`Home, _) -> Pave.Composer.home t.editor; changed (); loop ()
+    | `Key (`End, _) -> Pave.Composer.finish t.editor; changed (); loop ()
+    | `Key (`ASCII 'A', [ `Ctrl ]) ->
+        Pave.Composer.beginning_of_line t.editor; changed (); loop ()
+    | `Key (`ASCII 'E', [ `Ctrl ]) ->
+        Pave.Composer.end_of_line t.editor; changed (); loop ()
     | `Key (`ASCII 'R', [ `Ctrl ]) ->
         Pave.Composer.search_older t.editor; paint t; loop ()
     | `Key (`ASCII 'D', [ `Ctrl ]) when Pave.Composer.text t.editor = "" -> None
@@ -520,7 +662,10 @@ let read ?wake_fd ?on_wake ?on_interrupt t =
     | `Key (`Uchar uchar, []) ->
         Pave.Composer.insert t.editor (utf8 uchar); changed (); loop ()
     | _ -> loop () in
-  loop ()
+  Fun.protect ~finally:(fun () ->
+    if t.paste then (
+      t.paste <- false;
+      Pave.Composer.end_paste t.editor)) loop
 
 (* The chooser is updated only on the UI thread (typically from on_wake). The
    initial offline suggestions remain available when verified IDs arrive. *)
@@ -640,19 +785,53 @@ let choose ?(allow_custom = false) ?wake_fd ?on_wake t ~title ~choices =
       | _ -> loop () in
     loop ())
 
+let reviewable_command command =
+  String.length command <= 4096 && sanitize command = command &&
+  Uutf.String.fold_utf_8 (fun valid _ -> function
+    | `Malformed _ -> false
+    | `Uchar uchar ->
+        let code = Uchar.to_int uchar in
+        valid && (code = 10 || code >= 32) && code <> 127 &&
+        not (code >= 0x80 && code <= 0x9f) &&
+        not (code >= 0x200b && code <= 0x200f) &&
+        not (code >= 0x202a && code <= 0x202e) &&
+        not (code >= 0x2066 && code <= 0x2069) &&
+        code <> 0x61c && code <> 0xad &&
+        code <> 0x2060 && code <> 0xfeff) true command
+
 let confirm t command =
-  let command_lines = String.split_on_char '\n' (sanitize command) in
+  let command_lines = if String.length command > 4096 then []
+    else String.split_on_char '\n' (sanitize command) in
   let fits () =
     let cols, rows = Notty_unix.Term.size t.term in
-    List.length command_lines <= max 1 (rows - 7)
-      && List.for_all (fun line ->
-        I.width (I.string text_attr line) <= max 1 (cols - 22)) command_lines in
-  if not (fits ()) then (
+    let content_cols = max 1 (cols - 5) in
+    let measure text = I.width (I.string text_attr text) in
+    let editor_height = match Pave.Composer.search_query t.editor with
+      | Some _ -> 1
+      | None ->
+          let prompt_cols = max 1 (cols - I.width (I.string accent prompt)) in
+          let draft = Pave.Composer.layout ~columns:prompt_cols ~measure t.editor in
+          min 4 (max 1 (min (rows - 4) (Array.length draft))) in
+    let header_height = Transcript_view.wrapped_count ~columns:content_cols
+      ~measure "SHELL APPROVAL · review before deciding" in
+    t.chooser = None && String.length command <= 4096 &&
+    cols >= 25 && rows >= 10 &&
+    rows - 4 - editor_height >=
+      header_height + 1 + List.length command_lines &&
+    List.for_all (fun line -> measure line <= content_cols) command_lines in
+  if String.length command > 4096 then (
+    alert t "Shell command denied: too large to review on screen";
+    false)
+  else if not (reviewable_command command) then (
+    alert t "Shell command denied: hidden/control text cannot be reviewed";
+    false)
+  else if not (fits ()) then (
     alert t "Shell command denied: too large to review on screen";
     false)
   else (
-    add_lines t warning ("SHELL APPROVAL  ·  " ^ command);
-    alert t "Run the command above without a sandbox?  y approve   ·   any other key deny";
+    change_transcript t (fun () -> Transcript_view.approval t.transcript command);
+    t.scroll <- 0;
+    alert t "SHELL: y=yes · other=no";
     let rec decision () = match Terminal_input.event t.input with
       | `Resize _ -> if fits () then (paint t; decision ()) else false
       | `Key (`ASCII ('y' | 'Y'), []) -> true

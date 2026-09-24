@@ -153,8 +153,9 @@ let drain t =
         t.worker <- None;
         t.cancel_flag <- None;
         t.on_finish outcome;
-        if not t.closed && not (Queue.is_empty t.pending) then
+        if not t.closed && not (Queue.is_empty t.pending) then (
           start t (Queue.take t.pending);
+          t.on_queued (Queue.length t.pending));
         handle () in
   handle ()
 
