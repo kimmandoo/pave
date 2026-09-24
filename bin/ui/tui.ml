@@ -493,6 +493,7 @@ let events t lines =
   | _ ->
       change_transcript t (fun () ->
         Transcript_view.notice t.transcript (String.concat "\n" lines));
+      t.status <- idle_status;
       paint t)
 
 let delta t chunk =
