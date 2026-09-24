@@ -102,7 +102,10 @@ For a remote browser, use `pave --login-manual PROVIDER` for browser-based provi
 
 The full-screen TUI initially shows the existing pixel-art Pave mark as colored ASCII art. It is an empty-transcript placeholder, not a journal entry; the first message replaces it. Conversation roles, Markdown headings/lists/code, tool progress and folded tool results use distinct blocks; `Alt+O` expands the latest visible tool result. Type `/` then `Tab` for a searchable command palette; a partial command such as `/re` filters the choices, Enter inserts the selected command without executing it, and Escape retains the draft. `/help` shows the same command catalog with descriptions. Small terminals show a compact `PAVE` label, `NO_COLOR=1` removes colored text, and redirected output remains plain text.
 
+The header switches from `Working` to the current tool name during an actual tool call, then back to model work for the next request; shell approvals still require a visible command and a separate `y` decision. Idle measured usage replaces the activity label only after the turn finishes.
+
 Known provider, authentication and tool failures display their message in a readable TUI error block; incomplete streaming answers are removed instead of staying in the transcript as successful turns. Unknown exceptions retain their diagnostic text.
+
 The idle header shows measured cumulative input/output tokens for the selected journal branch, or the current unsaved conversation. It hides the badge while a turn is active and when usage is unavailable; `/usage` gives provider/model details and the untracked-cost caveat.
 
 Typed settings live in `${XDG_CONFIG_HOME:-~/.config}/pave/settings.json` and `<workspace>/.pave/settings.json`. Supported keys: `default_provider`, `default_model` (requires its provider), `max_turns` (1–100), `disable_shell` (boolean). Explicit CLI flags override project defaults, then user defaults; `disable_shell: true` in **either** scope denies `--allow-shell`. Invalid, duplicate, oversized or symlinked files are reported and skipped. `/settings` edits project defaults with atomic private-file replacement for the **next** launch.

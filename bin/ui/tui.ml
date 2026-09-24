@@ -435,8 +435,9 @@ let set_session t session =
   paint t
 
 let set_activity t activity =
-  t.activity <- activity;
-  paint t
+  if t.activity <> activity then (
+    t.activity <- activity;
+    paint t)
 let set_usage t = function
   | None ->
       t.usage_badge <- None;

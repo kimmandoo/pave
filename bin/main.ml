@@ -165,6 +165,9 @@ let () =
     let worker_delta delta = match !runner with
       | Some current -> Pave.Turn_runner.delta current delta
       | None -> on_delta delta in
+    let worker_phase phase = match !runner with
+      | Some current -> Pave.Turn_runner.phase current phase
+      | None -> () in
     let worker_approval command = match !runner with
       | Some current -> Pave.Turn_runner.approve current command
       | None -> approve_command command in
@@ -217,6 +220,7 @@ let () =
         ~root ~system
         ~allow_shell:!allow_shell ~stream:(!stream || Option.is_some !ui)
         ~approve_command:worker_approval ~on_usage:record_usage
+        ?on_phase:(if Option.is_some !ui then Some worker_phase else None)
         ~history ~on_change ~on_event:worker_event ~on_delta:worker_delta () in
     let get_agent () = match !agent with
       | Some current -> current
@@ -823,6 +827,10 @@ let () =
               (get_agent ()) text))
           ~on_message:(Tui.event screen)
           ~on_delta:(Tui.delta screen)
+          ~on_phase:(function
+            | Pave.Agent.Model -> Tui.set_activity screen (Some "Working")
+            | Pave.Agent.Tool name ->
+                Tui.set_activity screen (Some ("Tool: " ^ name)))
           ~on_approve:(Tui.confirm screen)
           ~on_start:(fun text ->
             Tui.set_activity screen (Some "Working");

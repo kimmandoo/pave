@@ -1,3 +1,5 @@
+type phase = Model | Tool of string
+
 type t = {
   provider : Provider.config;
   authentication : Provider.authentication;
@@ -13,15 +15,17 @@ type t = {
   on_delta : string -> unit;
   on_change : Protocol.message -> unit;
   on_usage : (Protocol.usage -> unit) option;
+  on_phase : (phase -> unit) option;
 }
 
 let create ~provider ~root ~system ?(authentication = Provider.Api_key)
     ?resolve_credential ?(allow_shell = false) ?(stream = false)
     ?(approve_command = fun _ -> false) ?(history = [])
-    ?on_usage ?(on_change = fun _ -> ()) ?(on_delta = fun _ -> ()) ~on_event () =
+    ?on_usage ?on_phase ?(on_change = fun _ -> ()) ?(on_delta = fun _ -> ())
+    ~on_event () =
   { provider; authentication; resolve_credential; root; system; allow_shell; stream;
     approve_command; history_rev = List.rev history; scoped_pending = [];
-    on_change; on_delta; on_event; on_usage }
+    on_change; on_delta; on_event; on_usage; on_phase }
 
 let messages t = List.rev t.history_rev
 let append t message =
@@ -77,6 +81,7 @@ let run ?(max_turns = 20) ?cancel t text =
       { role = "system"; content = Some system_text; tool_calls = [];
         tool_call_id = None; provider_state = None } in
     let definitions = Tools.available ~allow_shell:t.allow_shell in
+    (match t.on_phase with None -> () | Some notify -> notify Model);
     let transcript = system :: messages t in
     let reply =
       if t.stream then Provider.complete ~authentication:t.authentication
@@ -111,6 +116,9 @@ let run ?(max_turns = 20) ?cancel t text =
                    raise Provider.Cancelled
                | _ -> ());
               if first then append t reply;
+              (match t.on_phase with
+               | None -> ()
+               | Some notify -> notify (Tool call.name));
               let result =
                 try
                   Provider.check_cancel cancel;
