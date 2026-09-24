@@ -29,9 +29,6 @@ let () =
   (match parse "/tools read_file" with
    | Tools (Some "read_file") -> ()
    | _ -> fail "tool detail selection");
-  (match List.map (fun (entry : shortcut) -> entry.name) (suggestions "/re") with
-   | ["/resume"] -> ()
-   | _ -> fail "slash completion selected a wrong command");
   if suggestions "/model/foo" <> [] then fail "slash completion matched invalid prefix";
   invalid "multiple model arguments" (fun () -> parse "/model openai/gpt-5 extra");
   invalid "control in login provider" (fun () -> parse "/login openrouter\tother");

@@ -15,6 +15,7 @@ let () =
     Unix.rmdir dir) (fun () ->
     let journal = Pave.Session.open_file path in
     let base = Pave.Session.append journal (message "base") in
+    assert (Pave.Session.retry_candidate journal = None);
     let abandoned = Pave.Session.append journal (message "abandoned") in
     Pave.Session.branch journal base;
     assert (Pave.Session.history journal = [ message "base" ]);
@@ -98,6 +99,35 @@ let () =
       [message "first"]);
     assert (Pave.Session.model copy = Some ("openai", "gpt-6-sol"));
     assert (Pave.Session.history copy = [message "first"]);
+    let assistant text : Pave.Protocol.message = {
+      role = "assistant"; content = Some text; tool_calls = [];
+      tool_call_id = None; provider_state = None } in
+    let before = [message "first"; assistant "old"; message "retry me"] in
+    assert (Pave.Session.retryable_history (before @ [assistant "answer"]) =
+      Some ([message "first"; assistant "old"], "retry me"));
+    assert (Pave.Session.retryable_history
+      (before @ [assistant "answer"; Pave.Protocol.tool_result "call-1" "done"]) =
+      None);
+    let prior = Pave.Session.append copy (assistant "old answer") in
+    ignore (Pave.Session.append copy (message "retry me"));
+    ignore (Pave.Session.append copy (assistant "first answer"));
+    assert (Pave.Session.retry_candidate copy = Some (prior, "retry me"));
+    Pave.Session.branch copy prior;
+    ignore (Pave.Session.append copy (message "retry me"));
+    ignore (Pave.Session.append copy (assistant "new answer"));
+    assert (Pave.Session.history copy =
+      [message "first"; assistant "old answer";
+       message "retry me"; assistant "new answer"]);
+    ignore (Pave.Session.append copy (message "tool turn"));
+    ignore (Pave.Session.append copy {
+      role = "assistant"; content = None; tool_calls = [ call ];
+      tool_call_id = None; provider_state = None });
+    ignore (Pave.Session.append copy (Pave.Protocol.tool_result "call-1" "done"));
+    assert (Pave.Session.retry_candidate copy = None);
+    Pave.Session.branch copy prior;
+    ignore (Pave.Session.append copy (message "switch model"));
+    Pave.Session.set_model copy ~provider:"ollama" ~model:"local";
+    assert (Pave.Session.retry_candidate copy = None);
     (match Pave.Session.set_model copy ~provider:"openai" ~model:"invalid name" with
      | exception Pave.Protocol.Invalid_response _ -> ()
      | _ -> failwith "invalid model marker was accepted"));

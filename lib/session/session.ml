@@ -191,6 +191,28 @@ let messages entries =
     | Compaction _ | Model _ | Usage _ | Branch -> None) entries
 
 let history t = messages (branch_entries t)
+let retryable_history history =
+  let rec find safe = function
+    | [] -> None
+    | (message : Protocol.message) :: earlier ->
+        (match message.role, message.content, message.tool_calls with
+         | "user", Some text, [] when safe && String.trim text <> "" ->
+             Some (List.rev earlier, text)
+         | "user", _, _ -> None
+         | "assistant", _, [] -> find safe earlier
+         | _ -> find false earlier) in
+  find true (List.rev history)
+
+let retry_candidate t =
+  let rec find = function
+    | [] -> None
+    | { kind = Message { role = "user"; content = Some text; _ };
+        parent_id = Some parent; _ } :: _ when String.trim text <> "" ->
+        Some (parent, text)
+    | { kind = Message { role = "assistant"; tool_calls = []; _ }; _ } :: rest
+    | { kind = Usage _; _ } :: rest -> find rest
+    | _ -> None in
+  find (List.rev (branch_entries t))
 
 let context t =
   let path = branch_entries t in
