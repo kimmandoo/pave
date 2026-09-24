@@ -683,6 +683,13 @@ let definitions = [
      "timeout_seconds", integer_field "Deadline in seconds (default 60, maximum 300)" 1 300] ["command"]
 ]
 
+let definitions_without_shell = List.filter (fun json ->
+  Protocol.member "name" (Protocol.member "function" json)
+    <> `String "run_command") definitions
+
+let available ~allow_shell =
+  if allow_shell then definitions else definitions_without_shell
+
 let execute ?cancel ~root ~name ~args () =
   try
     let root = root_path root in

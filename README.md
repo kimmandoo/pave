@@ -120,6 +120,7 @@ For optional prompt customization, use `<workspace>/.pave/SYSTEM.md`, `SYSTEM_TE
 | `/` then `Tab` | Search available slash commands; Enter inserts a choice, Escape returns to the unchanged draft |
 | `/login [PROVIDER]` · `/model [PROVIDER/MODEL_ID]` | Search sign-in/model choices (Esc cancels) or select directly |
 | `/cancel` · `/settings` | Stop the active request/command; edit typed project defaults for the next launch |
+| `/tools [NAME]` | List the tools actually offered to the model, or inspect one tool's description; shell availability follows `--allow-shell` and still requires per-command approval |
 | `/new` · `/resume [PATH]` | Create a private, persistent workspace journal; search recent journals or reopen an explicit workspace journal |
 | `/help` · `/entries` | Show commands · list journal message IDs |
 | `/branch ID` · `/fork /path/new.jsonl` | Continue from an earlier message · copy the selected conversation |

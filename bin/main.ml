@@ -517,6 +517,31 @@ let () =
                       Tui.alert screen ("Fork: " ^ next.Pave.Session.path)
                   | None -> on_event ("Fork: " ^ next.Pave.Session.path))
                 with exn -> report_error exn))
+        | Pave.Interaction.Tools selected ->
+          let definitions = Pave.Tools.available ~allow_shell:!allow_shell in
+          let entries = List.filter_map (fun json ->
+            let function_json = Pave.Protocol.member "function" json in
+            match Pave.Protocol.member "name" function_json,
+              Pave.Protocol.member "description" function_json with
+            | `String name, `String description -> Some (name, description)
+            | _ -> None) definitions in
+          let lines = match selected with
+            | None ->
+                ["Enabled tools · /tools NAME for details"] @
+                List.map fst entries @
+                [if !allow_shell then "Shell requires approval; not sandboxed"
+                 else "Shell disabled; restart with --allow-shell to enable"]
+            | Some name ->
+                (match List.assoc_opt name entries with
+                 | None -> ["Unavailable tool: " ^ name]
+                 | Some description ->
+                     ["Tool: " ^ name; description] @
+                     (if name = "run_command" then
+                       ["Requires per-command approval; shell is not sandboxed"]
+                      else [])) in
+          (match !ui with
+           | Some screen -> Tui.events screen lines
+           | None -> List.iter on_event lines)
         | Pave.Interaction.Entries ->
           (match !journal with
            | None -> on_event "Error: --session is required to list entries"

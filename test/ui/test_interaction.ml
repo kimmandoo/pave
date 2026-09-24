@@ -22,9 +22,13 @@ let () =
   (match parse "/fork /tmp/saved session.jsonl" with
    | Fork "/tmp/saved session.jsonl" -> ()
    | _ -> fail "fork path with spaces");
-  (match parse "/new", parse "/entries", parse "/quit", parse "mobile task" with
-   | New, Entries, Quit, Prompt "mobile task" -> ()
+  (match parse "/new", parse "/entries", parse "/tools", parse "/quit",
+    parse "mobile task" with
+   | New, Entries, Tools None, Quit, Prompt "mobile task" -> ()
    | _ -> fail "slash commands versus model prompt");
+  (match parse "/tools read_file" with
+   | Tools (Some "read_file") -> ()
+   | _ -> fail "tool detail selection");
   (match List.map (fun (entry : shortcut) -> entry.name) (suggestions "/re") with
    | ["/resume"] -> ()
    | _ -> fail "slash completion selected a wrong command");
@@ -34,6 +38,7 @@ let () =
   invalid "missing branch ID" (fun () -> parse "/branch");
   invalid "missing fork path" (fun () -> parse "/fork");
   invalid "trailing command arguments" (fun () -> parse "/new accidental");
+  invalid "multiple tool arguments" (fun () -> parse "/tools read_file write_file");
   let descriptor, model, route = resolve_model ~current_provider:"openai" ~input:"gpt-5" in
   if descriptor.id <> "openai" || model <> "gpt-5" || route.name <> "responses" then
     fail "model-specific Responses route was not selected";
