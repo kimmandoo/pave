@@ -33,6 +33,7 @@ type t = {
   mutable previous : I.t array option;
   mutable status : string;
   mutable activity : string option;
+  mutable usage_badge : string option;
   mutable queue : int;
   mutable last_paint : float;
   mutable paste : bool;
@@ -183,8 +184,12 @@ let paint t =
     | None -> "" in
   let queued = if t.queue = 0 then "" else
     Printf.sprintf " · %d queued" t.queue in
+  let usage = match t.activity, t.usage_badge with
+    | None, Some badge when cols >= 28 && cols >= 9 + String.length badge ->
+        badge
+    | _ -> "" in
   let header = styled_line cols accent
-    ("  ◆  PAVE" ^ activity ^ (if cols >= 48 then queued else "")) in
+    ("  ◆  PAVE" ^ activity ^ (if cols >= 48 then queued else "") ^ usage) in
   let model = single_line t.model in
   let model =
     if cols < 60 then match String.rindex_opt model '/' with
@@ -399,8 +404,8 @@ let create ~root ~model ~session =
     root; model; session; editor = Pave.Composer.create ();
     transcript = Transcript_view.create (); scroll = 0; chooser = None;
     revision = 0; body_cache = None; layout_cache = None;
-    previous = None; status = idle_status; activity = None; queue = 0;
-    last_paint = 0.; paste = false } in
+    previous = None; status = idle_status; activity = None;
+    usage_badge = None; queue = 0; last_paint = 0.; paste = false } in
   (try paint t with exn -> Notty_unix.Term.release term; raise exn);
   t
 
@@ -432,6 +437,14 @@ let set_session t session =
 let set_activity t activity =
   t.activity <- activity;
   paint t
+let set_usage t = function
+  | None ->
+      t.usage_badge <- None;
+      paint t
+  | Some (tokens : Pave.Protocol.usage) ->
+      t.usage_badge <- Some (Printf.sprintf " · %d in/%d out"
+        tokens.input_tokens tokens.output_tokens);
+      paint t
 
 let set_queue t count =
   t.queue <- max 0 count;
