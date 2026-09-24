@@ -55,8 +55,6 @@ let () =
     item "model" [ text "All done" ] ]);
   expect_invalid (fun () -> Pave.Gemini_wire.request ~model:"gemini-3-pro"
     [ user "Inspect"; assistant None [ first ]; tool_result first.id "ok" ] []);
-  expect_invalid (fun () -> Pave.Gemini_wire.request ~model:"gemini-3-pro"
-    [ user "Inspect" ] [ tool ]);
   assert (field "contents" (Pave.Gemini_wire.request ~model:"gemini-3-pro"
     [ user "Text only" ] []) = `List [ item "user" [ text "Text only" ] ]);
   expect_invalid (fun () -> Pave.Gemini_wire.request ~model:"gemini-2.5-flash"
@@ -67,12 +65,13 @@ let () =
     [ user "hello" ] [ `Assoc [ "type", `String "function";
       "function", `Assoc [ "name", `String "bad";
         "parameters", `Assoc [ "type", `String "string" ] ] ] ]);
-  let reply = Pave.Gemini_wire.parse_completion
+  let reply = Pave.Gemini_wire.parse_completion ~model:"gemini-2.5-flash"
     (response [ text "こんにちは "; text "世界 🌍";
       `Assoc [ "functionCall", `Assoc [ "id", `String first.id;
         "name", `String first.name; "args", first.arguments ] ] ] "STOP") in
   assert (reply = assistant (Some "こんにちは 世界 🌍") [ first ]);
-  let generated = Pave.Gemini_wire.parse_completion (response [ fn "read_file" second.arguments ] "STOP") in
+  let generated = Pave.Gemini_wire.parse_completion ~model:"gemini-2.5-flash"
+    (response [ fn "read_file" second.arguments ] "STOP") in
   (match generated.tool_calls with
    | [ invocation ] ->
        assert (invocation.id <> "");
@@ -90,16 +89,87 @@ let () =
                 "response", `Assoc [ "output", `String "read result" ] ] ] ])
         | _ -> failwith "missing recovered tool response")
    | _ -> failwith "missing generated call");
-  expect_invalid (fun () -> Pave.Gemini_wire.parse_completion
-    (response [ `Assoc [ "thoughtSignature", `String "c2ln";
-      "functionCall", `Assoc [ "name", `String "read_file"; "args", first.arguments ] ] ] "STOP"));
-  expect_invalid (fun () -> Pave.Gemini_wire.parse_completion (response [] "STOP"));
-  expect_invalid (fun () -> Pave.Gemini_wire.parse_completion (response [ text "partial" ] "MAX_TOKENS"));
-  expect_invalid (fun () -> Pave.Gemini_wire.parse_completion
+  let signed_part = `Assoc [ "functionCall", `Assoc [
+    "name", `String "read_file"; "args", first.arguments ];
+    "thoughtSignature", `String "c2ln" ] in
+  let native_parts = [ text "Opening file"; signed_part ] in
+  let signed = Pave.Gemini_wire.parse_completion ~model:"gemini-3-pro"
+    (response native_parts "STOP") in
+  (match signed.tool_calls with
+   | [ invocation ] ->
+       let followup = Pave.Gemini_wire.request ~model:"gemini-3-pro"
+         [ user "Read"; signed; tool_result invocation.id "file contents" ] [ tool ] in
+       assert (field "contents" followup = `List [
+         item "user" [ text "Read" ]; item "model" native_parts;
+         item "user" [ `Assoc [ "functionResponse", `Assoc [
+           "name", `String "read_file";
+           "response", `Assoc [ "output", `String "file contents" ] ] ] ] ]);
+       assert (field "tools" followup <> `Null);
+       let replay altered = Pave.Gemini_wire.request ~model:"gemini-3-pro"
+         [ user "Read"; altered; tool_result invocation.id "file contents" ] [ tool ] in
+       expect_invalid (fun () -> replay { signed with content = Some "Different text" });
+       expect_invalid (fun () -> replay { signed with tool_calls =
+         [ { invocation with name = "other" } ] });
+       expect_invalid (fun () -> replay { signed with tool_calls =
+         [ { invocation with arguments = `Assoc [] } ] });
+       expect_invalid (fun () -> Pave.Gemini_wire.request ~model:"gemini-3-flash"
+         [ user "Read"; signed; tool_result invocation.id "file contents" ] [ tool ]);
+       expect_invalid (fun () -> replay { signed with provider_state = Some (`Assoc [
+         "provider", `String "other"; "model", `String "gemini-3-pro";
+         "parts", `List native_parts ]) });
+       expect_invalid (fun () -> replay { signed with provider_state = Some (`Assoc [
+         "provider", `String "google"; "model", `String "gemini-3-pro";
+         "parts", `List [ `Assoc [ "functionCall", `Assoc [
+           "name", `String "read_file"; "args", first.arguments ];
+           "thoughtSignature", `String "c2ln"; "inlineData", `Assoc [] ] ] ]) });
+       expect_invalid (fun () -> replay { signed with provider_state = None })
+   | _ -> failwith "signed call was not parsed");
+  let parallel_parts = [ signed_part; fn "read_file" second.arguments ] in
+  let parallel = Pave.Gemini_wire.parse_completion ~model:"gemini-3-pro"
+    (response parallel_parts "STOP") in
+  (match parallel.tool_calls with
+   | [ left; right ] ->
+       let followup = Pave.Gemini_wire.request ~model:"gemini-3-pro"
+         [ user "Read both"; parallel; tool_result right.id "second";
+           tool_result left.id "first" ] [ tool ] in
+       (match field "contents" followup with
+        | `List [ _; model_turn; result_turn ] ->
+            assert (field "parts" model_turn = `List parallel_parts);
+            assert (field "parts" result_turn = `List [
+              `Assoc [ "functionResponse", `Assoc [
+                "name", `String "read_file";
+                "response", `Assoc [ "output", `String "first" ] ] ];
+              `Assoc [ "functionResponse", `Assoc [
+                "name", `String "read_file";
+                "response", `Assoc [ "output", `String "second" ] ] ] ]);
+        | _ -> failwith "missing parallel tool results");
+       expect_invalid (fun () -> Pave.Gemini_wire.request ~model:"gemini-3-pro"
+         [ user "Read both"; { parallel with tool_calls = [ right; left ] };
+           tool_result right.id "second"; tool_result left.id "first" ] [ tool ])
+   | _ -> failwith "missing parallel calls");
+  let explicit_part = `Assoc [ "functionCall", `Assoc [
+    "id", `String "native-id"; "name", `String "read_file"; "args", first.arguments ];
+    "thoughtSignature", `String "c2ln" ] in
+  let explicit = Pave.Gemini_wire.parse_completion ~model:"gemini-3-pro"
+    (response [ explicit_part ] "STOP") in
+  (match explicit.tool_calls with
+   | [ invocation ] ->
+       expect_invalid (fun () -> Pave.Gemini_wire.request ~model:"gemini-3-pro"
+         [ user "Read"; { explicit with tool_calls =
+           [ { invocation with id = "changed-id" } ] };
+           tool_result "changed-id" "contents" ] [ tool ])
+   | _ -> failwith "missing native call id");
+  expect_invalid (fun () -> Pave.Gemini_wire.parse_completion ~model:"gemini-3-pro"
+    (response [ fn "read_file" first.arguments ] "STOP"));
+  expect_invalid (fun () -> Pave.Gemini_wire.parse_completion ~model:"gemini-2.5-flash"
+    (response [] "STOP"));
+  expect_invalid (fun () -> Pave.Gemini_wire.parse_completion ~model:"gemini-2.5-flash"
+    (response [ text "partial" ] "MAX_TOKENS"));
+  expect_invalid (fun () -> Pave.Gemini_wire.parse_completion ~model:"gemini-2.5-flash"
     (`Assoc [ "error", `Assoc [ "message", `String "denied" ] ]));
-  expect_invalid (fun () -> Pave.Gemini_wire.parse_completion
+  expect_invalid (fun () -> Pave.Gemini_wire.parse_completion ~model:"gemini-2.5-flash"
     (`Assoc [ "promptFeedback", `Assoc [ "blockReason", `String "SAFETY" ];
       "candidates", `List [] ]));
-  expect_invalid (fun () -> Pave.Gemini_wire.parse_completion
+  expect_invalid (fun () -> Pave.Gemini_wire.parse_completion ~model:"gemini-2.5-flash"
     (response [ `Assoc [ "inlineData", `Assoc [] ] ] "STOP"));
   print_endline "Gemini request/response wire: ok"

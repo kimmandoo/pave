@@ -42,6 +42,13 @@ let handle_action ~login ~login_manual ~logout =
                    authorization.url;
                  let code = Pave.Openrouter_oauth.await_callback authorization listener in
                  Pave.Openrouter_oauth.exchange authorization ~response:code))
+             else if service = "github-copilot" then (
+               if login_manual <> "" then
+                 failwith "GitHub Copilot uses a device code; run --login instead of --login-manual";
+               Pave.Github_copilot_oauth.login
+                 ~on_authorization:(fun (auth : Pave.Oauth_device.authorization) ->
+                   Printf.printf "Open this verification URL:\n%s\nEnter code: %s\nWaiting for authorization...\n%!"
+                     auth.verification_uri auth.user_code) ())
              else (
                let policy = oauth_policy service in
                if login_manual <> "" then (
@@ -83,8 +90,8 @@ let resolve_authentication ~(descriptor : Pave.Provider_catalog.descriptor)
             failwith ("run pave --login " ^ provider_id ^
               (match descriptor.api_key_env with
                | Some name -> " or set " ^ name | None -> ""));
-          let policy = if service = "openrouter" then None
-            else Some (oauth_policy service) in
+          let policy = if service = "openrouter" || service = "github-copilot"
+            then None else Some (oauth_policy service) in
           let resolve_credential () = Pave.Oauth_store.with_lock ~path (fun () ->
             let credential = match Pave.Oauth_store.get ~path ~provider:provider_id with
               | Some credential -> credential
@@ -93,7 +100,7 @@ let resolve_authentication ~(descriptor : Pave.Provider_catalog.descriptor)
               | Some expires when Unix.gettimeofday () >= expires -. 60. ->
                   let policy = match policy with
                     | Some policy -> policy
-                    | None -> failwith "OpenRouter OAuth key unexpectedly has an expiry" in
+                    | None -> failwith "nonrefreshable provider credential unexpectedly has an expiry" in
                   let updated = oauth_refresh service policy credential in
                   Pave.Oauth_store.put ~path ~provider:provider_id updated;
                   updated
@@ -102,6 +109,10 @@ let resolve_authentication ~(descriptor : Pave.Provider_catalog.descriptor)
                (credential.refresh <> None || credential.expires_at <> None ||
                 not (String.starts_with ~prefix:"sk-or-" credential.access)) then
               failwith "OpenRouter stored API key is invalid";
+            if service = "github-copilot" &&
+               (credential.access = "" || credential.refresh <> None ||
+                credential.expires_at <> None) then
+              failwith "GitHub Copilot stored credential is invalid";
             let account_id, residency =
               if service = "openai-codex" then
                 let id, residency = Pave.Codex_oauth.identity credential in

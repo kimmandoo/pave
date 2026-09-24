@@ -14,6 +14,20 @@ let next_call_id () =
 let gemini_three model = String.starts_with ~prefix:"gemini-3" model
 let part text = `Assoc [ "text", `String text ]
 let content role parts = `Assoc [ "role", `String role; "parts", `List parts ]
+let native_state ~model parts = `Assoc [
+  "provider", `String "google"; "model", `String model; "parts", `List parts ]
+
+let unique_fields fields =
+  let names = List.map fst fields in
+  if List.length names <> List.length (List.sort_uniq String.compare names) then
+    invalid "duplicate native part field"
+
+let has_signature parts =
+  List.exists (function
+    | `Assoc fields -> (match List.assoc_opt "thoughtSignature" fields with
+        | Some (`String signature) -> signature <> ""
+        | _ -> false)
+    | _ -> false) parts
 
 (* Google's function declarations reject several ordinary JSON Schema keywords.
    Local tool validation still applies the original schema; preserve numeric
@@ -68,10 +82,89 @@ let tool_schema json =
                "parametersJsonSchema", google_schema schema ]
   | _ -> invalid "unsupported tool definition"
 
+let parse_parts parts =
+  let texts = ref [] and calls = ref [] and ids = Hashtbl.create 4 in
+  List.iter (fun json ->
+    match json with
+    | `Assoc fields ->
+        unique_fields fields;
+        List.iter (fun (name, _) ->
+          if not (List.mem name [ "text"; "functionCall"; "thought"; "thoughtSignature" ]) then
+            invalid ("unsupported content part field: " ^ name)) fields;
+        if List.mem_assoc "text" fields && List.mem_assoc "functionCall" fields then
+          invalid "ambiguous content part";
+        (match field "thoughtSignature" json with
+         | `Null | `String _ -> ()
+         | _ -> invalid "invalid thought signature");
+        if List.mem_assoc "thought" fields && field "thought" json <> `Bool false &&
+           field "thought" json <> `Bool true then invalid "invalid thought flag";
+        let thought = field "thought" json = `Bool true in
+        (match List.assoc_opt "text" fields with
+         | Some (`String text) when not thought -> texts := text :: !texts
+         | Some (`String _) when thought -> ()
+         | None -> ()
+         | _ -> invalid "invalid text part");
+        (match List.assoc_opt "functionCall" fields with
+         | None -> ()
+         | Some (`Assoc _ as fn) when not thought ->
+             let name = required_string "name" fn in
+             if name = "" then invalid "empty function name";
+             (match fn with
+              | `Assoc fields ->
+                  unique_fields fields;
+                  List.iter (fun (key, _) ->
+                    if not (List.mem key [ "name"; "args"; "id" ]) then
+                      invalid ("unsupported function call field: " ^ key)) fields
+              | _ -> ());
+             let arguments = match field "args" fn with
+               | `Assoc _ as args -> args
+               | `Null -> `Assoc []
+               | _ -> invalid "function arguments must be an object" in
+             let id = match field "id" fn with
+               | `Null -> next_call_id ()
+               | `String id when id <> "" -> id
+               | _ -> invalid "invalid function call id" in
+             if Hashtbl.mem ids id then invalid "duplicate function call id";
+             Hashtbl.add ids id ();
+             calls := { id; name; arguments } :: !calls
+         | _ -> invalid "invalid function call part");
+        if not (List.mem_assoc "text" fields || List.mem_assoc "functionCall" fields) then
+          invalid "unsupported or empty content part"
+    | _ -> invalid "invalid content part") parts;
+  let content = match List.rev !texts with [] -> None | texts -> Some (String.concat "" texts) in
+  content, List.rev !calls
+
+let replay_parts ~model (msg : message) state =
+  let parts = match state with
+    | `Assoc fields ->
+        unique_fields fields;
+        if List.length fields <> 3 ||
+           List.assoc_opt "provider" fields <> Some (`String "google") ||
+           List.assoc_opt "model" fields <> Some (`String model) then
+          invalid "foreign or malformed native state";
+        (match List.assoc_opt "parts" fields with
+         | Some (`List parts) -> parts
+         | _ -> invalid "missing native parts")
+    | _ -> invalid "invalid native state" in
+  if not (has_signature parts) then invalid "native state lacks thought signature";
+  let text, parsed_calls = parse_parts parts in
+  if text <> msg.content then invalid "native text differs from assistant message";
+  let native_calls = List.filter_map (fun part ->
+    match field "functionCall" part with
+    | `Assoc _ as fn ->
+        Some (match field "id" fn with `String id -> Some id | _ -> None)
+    | _ -> None) parts in
+  if List.length parsed_calls <> List.length msg.tool_calls then
+    invalid "native function calls differ from assistant message";
+  List.iter2 (fun ((parsed : tool_call), native_id) (call : tool_call) ->
+    if parsed.name <> call.name || parsed.arguments <> call.arguments ||
+       (match native_id with Some id -> id <> call.id | None -> false) then
+      invalid "native function calls differ from assistant message")
+    (List.combine parsed_calls native_calls) msg.tool_calls;
+  parts
+
 let request ~model messages tools =
   if model = "" then invalid_arg "empty Gemini model";
-  if gemini_three model && tools <> [] then
-    invalid "Gemini 3 tools require retained thought signatures";
   let systems = ref [] and contents = ref [] and pending = ref [] in
   let add message = contents := message :: !contents in
   let rec convert = function
@@ -95,8 +188,11 @@ let request ~model messages tools =
          | "assistant" ->
              if !pending <> [] || msg.tool_call_id <> None then
                invalid "assistant message during tool results";
-             if gemini_three model && msg.tool_calls <> [] then
-               invalid "Gemini 3 tool turns require retained thought signatures";
+             let native_parts = match msg.provider_state with
+               | Some state -> Some (replay_parts ~model msg state)
+               | None -> None in
+             if gemini_three model && msg.tool_calls <> [] && native_parts = None then
+               invalid "Gemini 3 tool turns require native thought signatures";
              let ids = List.map (fun (call : tool_call) ->
                if call.id = "" || call.name = "" then invalid "empty function call id or name";
                (match call.arguments with `Assoc _ -> () | _ -> invalid "function arguments must be an object");
@@ -109,8 +205,11 @@ let request ~model messages tools =
              let calls = List.map (fun (call : tool_call) ->
                `Assoc [ "functionCall", `Assoc [
                  "name", `String call.name; "args", call.arguments ] ]) msg.tool_calls in
-             if text_parts = [] && calls = [] then invalid "empty assistant message";
-             add (content "model" (text_parts @ calls));
+             let parts = match native_parts with
+               | Some parts -> parts
+               | None -> text_parts @ calls in
+             if parts = [] then invalid "empty assistant message";
+             add (content "model" parts);
              pending := List.map (fun (call : tool_call) -> call.id, call.name) msg.tool_calls;
              convert rest
          | "tool" ->
@@ -148,60 +247,7 @@ let request ~model messages tools =
         "functionDeclarations", `List (List.map tool_schema definitions) ] ] ] in
   `Assoc fields
 
-let parse_parts parts =
-  let texts = ref [] and calls = ref [] and ids = Hashtbl.create 4 in
-  let signature_seen = ref false in
-  List.iter (fun json ->
-    match json with
-    | `Assoc fields ->
-        List.iter (fun (name, _) ->
-          if not (List.mem name [ "text"; "functionCall"; "thought"; "thoughtSignature" ]) then
-            invalid ("unsupported content part field: " ^ name)) fields;
-        if List.mem_assoc "text" fields && List.mem_assoc "functionCall" fields then
-          invalid "ambiguous content part";
-        (match field "thoughtSignature" json with
-         | `Null | `String "" -> ()
-         | `String _ -> signature_seen := true
-         | _ -> invalid "invalid thought signature");
-        if List.mem_assoc "thought" fields && field "thought" json <> `Bool false &&
-           field "thought" json <> `Bool true then invalid "invalid thought flag";
-        let thought = field "thought" json = `Bool true in
-        (match List.assoc_opt "text" fields with
-         | Some (`String text) when not thought -> texts := text :: !texts
-         | Some (`String _) when thought -> ()
-         | None -> ()
-         | _ -> invalid "invalid text part");
-        (match List.assoc_opt "functionCall" fields with
-         | None -> ()
-         | Some (`Assoc _ as fn) when not thought ->
-             let name = required_string "name" fn in
-             if name = "" then invalid "empty function name";
-             (match fn with
-              | `Assoc fields -> List.iter (fun (key, _) ->
-                  if not (List.mem key [ "name"; "args"; "id" ]) then
-                    invalid ("unsupported function call field: " ^ key)) fields
-              | _ -> ());
-             let arguments = match field "args" fn with
-               | `Assoc _ as args -> args
-               | `Null -> `Assoc []
-               | _ -> invalid "function arguments must be an object" in
-             let id = match field "id" fn with
-               | `Null -> next_call_id ()
-               | `String id when id <> "" -> id
-               | _ -> invalid "invalid function call id" in
-             if Hashtbl.mem ids id then invalid "duplicate function call id";
-             Hashtbl.add ids id ();
-             calls := { id; name; arguments } :: !calls
-         | _ -> invalid "invalid function call part");
-        if not (List.mem_assoc "text" fields || List.mem_assoc "functionCall" fields) then
-          invalid "unsupported or empty content part"
-    | _ -> invalid "invalid content part") parts;
-  let content = match List.rev !texts with [] -> None | texts -> Some (String.concat "" texts) in
-  if !signature_seen && !calls <> [] then
-    invalid "tool turns with thought signatures cannot be replayed";
-  content, List.rev !calls
-
-let parse_candidate candidate =
+let parse_candidate ~model candidate =
   let finish = required_string "finishReason" candidate in
   if finish <> "STOP" then invalid ("generation finished with " ^ finish);
   (match field "index" candidate with
@@ -218,10 +264,13 @@ let parse_candidate candidate =
     | _ -> invalid "missing candidate content" in
   let content, tool_calls = parse_parts parts in
   if (content = None || content = Some "") && tool_calls = [] then invalid "empty candidate";
+  let signed = has_signature parts in
+  if gemini_three model && tool_calls <> [] && not signed then
+    invalid "Gemini 3 tool turn lacks native thought signature";
   { role = "assistant"; content; tool_calls; tool_call_id = None;
-    provider_state = None }
+    provider_state = (if signed then Some (native_state ~model parts) else None) }
 
-let parse_completion json =
+let parse_completion ~model json =
   (match field "error" json with
    | `Null -> ()
    | error ->
@@ -231,5 +280,5 @@ let parse_completion json =
    | `Assoc _ as feedback when field "blockReason" feedback <> `Null -> invalid "prompt blocked"
    | _ -> ());
   match field "candidates" json with
-  | `List [ candidate ] -> parse_candidate candidate
+  | `List [ candidate ] -> parse_candidate ~model candidate
   | _ -> invalid "missing or ambiguous candidates"

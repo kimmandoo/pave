@@ -1,5 +1,5 @@
 type api = Openai_completions | Anthropic_messages | Openai_responses
-  | Ollama_chat | Gemini_direct | Codex_responses
+  | Ollama_chat | Gemini_direct | Codex_responses | Copilot_chat
 type authentication = Api_key | OAuth
 type config = { endpoint : string; api_key : string; model : string; api : api }
 type credentials = {
@@ -328,10 +328,16 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text config mes
      not (match config.api, config.endpoint with
        | Anthropic_messages, "https://api.anthropic.com/v1/messages"
        | Codex_responses, "https://chatgpt.com/backend-api/codex/responses" -> true
+       | Copilot_chat, endpoint when endpoint = Github_copilot_wire.endpoint -> true
        | _ -> false) then
     raise (Provider_error "OAuth inference requires a registered provider endpoint");
   if config.api = Codex_responses && authentication <> OAuth then
     raise (Provider_error "Codex subscription inference requires OAuth");
+  if config.api = Copilot_chat && authentication <> OAuth then
+    raise (Provider_error "GitHub Copilot inference requires a device grant");
+  if config.api = Copilot_chat &&
+     not (Github_copilot_wire.supported_model config.model) then
+    raise (Provider_error "unsupported GitHub Copilot Chat model");
   let credential = match resolve_credential with
     | Some get -> get ()
     | None -> { access = config.api_key; account_id = None; residency = None } in
@@ -344,12 +350,17 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text config mes
     | Protocol.Invalid_response message ->
         raise (Provider_error ("invalid completion response: " ^ redact api_key message)) in
   match config.api with
-  | Openai_completions ->
+  | Openai_completions | Copilot_chat ->
       let fields = [ "model", `String config.model;
                      "messages", `List (List.map Protocol.message_to_json messages) ] in
       let fields = if tools = [] then fields else fields @ [ "tools", `List tools ] in
-      let headers = if api_key = "" then [] else
-        [ "Authorization: Bearer " ^ api_key ] in
+      let headers = match config.api with
+        | Copilot_chat ->
+            (try Github_copilot_wire.headers ~endpoint:config.endpoint
+               ~model:config.model ~token:api_key ~messages
+             with Invalid_argument message -> raise (Provider_error message))
+        | _ -> if api_key = "" then [] else
+            [ "Authorization: Bearer " ^ api_key ] in
       (match on_text with
       | None ->
           let json = post_json ~endpoint:config.endpoint ~headers ~secret:api_key
@@ -442,9 +453,9 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text config mes
       | None ->
           let endpoint = base ^ "/" ^ model_path ^ ":generateContent" in
           let json = post_json ~endpoint ~headers ~secret:api_key body in
-          parse (fun () -> Gemini_wire.parse_completion json)
+          parse (fun () -> Gemini_wire.parse_completion ~model:config.model json)
       | Some emit ->
-          let stream = Gemini_stream.create ~on_text:emit in
+          let stream = Gemini_stream.create ~model:config.model ~on_text:emit in
           let endpoint = base ^ "/" ^ model_path ^ ":streamGenerateContent?alt=sse" in
           parse (fun () ->
             post_stream ~endpoint ~headers ~secret:api_key

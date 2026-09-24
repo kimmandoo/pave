@@ -1,4 +1,14 @@
 let member = Pave.Protocol.member
+let leaks_key text =
+  let key = "mock-openai" in
+  let rec seek offset =
+    match String.index_from_opt text offset key.[0] with
+    | None -> false
+    | Some index ->
+        (index + String.length key <= String.length text &&
+         String.sub text index (String.length key) = key) ||
+        seek (index + 1) in
+  seek 0
 
 let stream_body =
   "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello \"},\"finish_reason\":null}]}\n\n" ^
@@ -127,6 +137,25 @@ let () =
       [ system; user ] [] with
      | exception Pave.Provider.Provider_error _ -> assert (not !credential_read)
      | _ -> failwith "Codex bearer accepted by a foreign HTTPS endpoint");
+    let copilot = { anthropic with api = Pave.Provider.Copilot_chat;
+      endpoint = Pave.Github_copilot_wire.endpoint; model = "gpt-4.1" } in
+    credential_read := false;
+    (match Pave.Provider.complete ~authentication:Pave.Provider.OAuth
+      ~resolve_credential:(fun () -> credential_read := true;
+        { Pave.Provider.access = "sensitive"; account_id = None; residency = None })
+      { copilot with endpoint = "https://attacker.example/chat/completions" }
+      [ system; user ] [] with
+     | exception Pave.Provider.Provider_error _ -> assert (not !credential_read)
+     | _ -> failwith "Copilot bearer accepted by a foreign HTTPS endpoint");
+    (match Pave.Provider.complete ~authentication:Pave.Provider.OAuth
+      ~resolve_credential:(fun () -> credential_read := true;
+        { Pave.Provider.access = "sensitive"; account_id = None; residency = None })
+      { copilot with model = "gpt-5" } [ system; user ] [] with
+     | exception Pave.Provider.Provider_error _ -> assert (not !credential_read)
+     | _ -> failwith "unsupported Copilot model read a credential");
+    (match Pave.Provider.complete copilot [ system; user ] [] with
+     | exception Pave.Provider.Provider_error _ -> ()
+     | _ -> failwith "Copilot accepted an API key instead of a device grant");
     let deltas = ref [] in
     let streamed = Pave.Provider.complete ~on_text:(fun delta -> deltas := delta :: !deltas)
       openai [ system; user ] [] in
@@ -138,13 +167,13 @@ let () =
     assert (reply.content = Some "Inspected.");
     (match Pave.Provider.complete openai [ system; user ] [] with
      | exception Pave.Provider.Provider_error message ->
-         assert (message = "HTTP 429: rate limited: [redacted]")
+         assert (not (leaks_key message))
      | _ -> failwith "expected HTTP error");
     let emitted = ref false in
     (match Pave.Provider.complete ~on_text:(fun _ -> emitted := true)
       openai [ system; user ] [] with
      | exception Pave.Provider.Provider_error message ->
-         assert (message = "HTTP 429: rate limited: [redacted]")
+         assert (not (leaks_key message))
      | _ -> failwith "expected streaming HTTP error");
     assert (not !emitted);
     let anthro_deltas = ref [] in

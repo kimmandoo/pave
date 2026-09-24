@@ -14,7 +14,7 @@
 <p align="center"><a href="#install">Install</a> · <a href="#use">Use</a> · <a href="#providers">Providers</a> · <a href="#features">Features</a> · <a href="#contribute">Contribute</a></p>
 
 > [!NOTE]
-> Pave is in active development. Nine provider descriptors and six wire transports, the agent loop, three browser login paths, session journal and interactive terminal work in local fixtures. Live credentialed inference, cancellation, LSP/DAP, subagents, plugins and a full model catalog are not yet verified or implemented. See [TASKS.md](TASKS.md) for the remaining work.
+> Pave is in active development. Ten provider descriptors and six wire payload formats, the agent loop, four sign-in paths (three browser flows and one device-code flow), session journal and interactive terminal work in local fixtures. Live credentialed inference, cancellation, LSP/DAP, subagents, plugins and a full model catalog are not yet verified or implemented. See [TASKS.md](TASKS.md) for the remaining work.
 
 ## Install
 
@@ -79,13 +79,17 @@ pave --provider openai-codex --model "$CODEX_MODEL" --prompt 'Inspect this proje
 pave --login openrouter
 pave --provider openrouter --model "$ROUTER_MODEL" --prompt 'Inspect this project'
 
+# GitHub Copilot personal account: device-code login; public Chat route only.
+pave --login github-copilot
+pave --provider github-copilot --model gpt-4.1 --prompt 'Inspect this project'
+
 # Local Ollama; pull a model with Ollama before invoking Pave.
 pave --provider ollama --model "$LOCAL_MODEL" --prompt 'Inspect this project'
 ```
 
-Inside a running Pave terminal, `/login` lists browser sign-in providers and accepts a provider ID; `/login openrouter` selects one directly. The browser URL is printed on the regular terminal while the full-screen UI is temporarily suspended, then the previous transcript/editor returns after sign-in. `/model` lists registered providers and prompts for `PROVIDER/MODEL_ID`; `/model openrouter/openai/gpt-4o` selects one directly. Namespaced model IDs keep everything after the first slash, and a bare model ID uses the current provider. These are provider routes, **not** a complete or live-validated model catalog. Authentication and provider/model selection are separate; choose a model after login. Switching models retains the visible conversation and drops opaque Codex reasoning when crossing its model or protocol boundary.
+Inside a running Pave terminal, `/login` lists sign-in providers and accepts a provider ID; `/login github-copilot` starts the device-code flow directly. The browser URL or verification code is printed on the regular terminal while the full-screen UI is temporarily suspended, then the previous transcript/editor returns after sign-in. `/model` lists registered providers and prompts for `PROVIDER/MODEL_ID`; `/model github-copilot/gpt-4.1` selects one directly. Namespaced model IDs keep everything after the first slash, and a bare model ID uses the current provider. These are provider routes, **not** a complete or live-validated model catalog. Authentication and provider/model selection are separate; choose a model after login. Switching models retains the visible conversation and drops opaque Codex/Gemini state if the provider or model changes.
 
-For a remote browser, use `pave --login-manual PROVIDER` and paste the full callback URL; OpenRouter also accepts the authorization code alone because that provider does not echo state. Standard OAuth providers require the correct callback state. `pave --logout PROVIDER` removes a stored credential. The private store is **unencrypted** at `${XDG_CONFIG_HOME:-~/.config}/pave/oauth.json` (0700 directory, 0600 file); OpenRouter's browser exchange stores an API key there. An environment API key takes precedence where available. OAuth refresh is locked across processes; browser-derived tokens/keys cannot be sent to a custom `--endpoint`.
+For a remote browser, use `pave --login-manual PROVIDER` for browser-based providers and paste the full callback URL; OpenRouter also accepts the authorization code alone because that provider does not echo state. Standard OAuth providers require the correct callback state. **Copilot uses a device code instead:** `--login-manual github-copilot` is unsupported; enter the displayed code at the displayed GitHub verification URL. `pave --logout PROVIDER` removes a stored credential. The private store is **unencrypted** at `${XDG_CONFIG_HOME:-~/.config}/pave/oauth.json` (0700 directory, 0600 file); OpenRouter's browser exchange stores an API key there. An environment API key takes precedence where available. OAuth refresh is locked across processes; browser/device-derived tokens and keys cannot be sent to a custom `--endpoint`.
 
 `--api NAME` selects an explicit registered route; `--endpoint URL` overrides an API-key provider's completion endpoint. `--model ID` overrides the OpenAI default (`gpt-4.1-mini`) and is required for one-shot prompts with providers that have no default. Interactive sessions may select it later with `/model`. Redirected input/output uses a plain line-oriented CLI with the same slash commands instead of the full-screen interface.
 
@@ -114,14 +118,15 @@ Sessions are private append-only JSONL journals on creation, **not encrypted**. 
 | Groq | Chat Completions | `GROQ_API_KEY` | `--provider groq --model MODEL_ID` |
 | Mistral | Chat Completions | `MISTRAL_API_KEY` | `--provider mistral --model MODEL_ID` |
 | OpenRouter | Chat Completions | `OPENROUTER_API_KEY` or `--login openrouter` (PKCE exchanges for API key) | `--provider openrouter --model MODEL_ID` |
+| GitHub Copilot (personal github.com) | official Chat Completions endpoint only | `--login github-copilot` (device code, `read:user`) | `--provider github-copilot --model gpt-4.1` or `gpt-4o` |
 
-All nine entries completed **isolated CLI fixtures**, not live vendor calls. The Codex scenario exercised a real loopback callback, JWT account routing, refresh, SSE tool turns, encrypted reasoning replay through a reopened session and enterprise residency headers; OpenRouter exercised its state-less PKCE exception, key exchange, stored-key inference and logout. Auth fixtures intercepted HTTPS with a local subprocess, so client registration, live account entitlement, model support and actual vendor responses remain **unverified**. Gemini 3 tool requests fail closed because thought signatures are not yet preserved; text-only Gemini 3 requests are not blocked. Other reference auth policies, proprietary gateway transports and full model semantics are still missing. A compatible endpoint does not imply every model feature works.
+All ten entries completed **isolated CLI fixtures**, not live vendor calls. The Codex scenario exercised a real loopback callback, JWT account routing, refresh, SSE tool turns, encrypted reasoning replay through a reopened session and enterprise residency headers; OpenRouter exercised its state-less PKCE exception, key exchange, stored-key inference and logout. Gemini 3 buffered and SSE scenarios exercised signed tool calls, function-result replay and reopened journals; unsigned Gemini 3 tool calls fail closed. Copilot's GitHub device-code grant exercised private token storage, endpoint/model isolation, Chat tool turns, in-session `/login` and `/model`, and logout with fake HTTPS responses. Auth fixtures intercepted HTTPS with a local subprocess, so public OAuth client registration, live account entitlement, model support and actual vendor responses remain **unverified**. Copilot currently accepts only the personal `https://api.githubcopilot.com/chat/completions` route with `gpt-4.1` or `gpt-4o`; Enterprise, Responses, Anthropic and dynamic model discovery are **not** supported. Other reference auth policies, proprietary gateway transports and full model semantics are still missing. A compatible endpoint does not imply every model feature works.
 
 ## Features
 
 | Available | Not yet available |
 | --- | --- |
-| Six wire transports with distinct provider routes; bounded buffered and incremental-stream decoders; Codex native reasoning replay | Most provider-specific thinking/usage/multimodal parity and full model catalog |
+| Six wire payload formats with distinct provider routes; bounded buffered and incremental-stream decoders; model-bound Codex/Gemini native state replay | Most provider-specific thinking/usage/multimodal parity and full model catalog |
 | Mobile manifest detection, workspace file read/search/edit/write, bounded agent turns | LSP/DAP, subagents, extensions and full tool catalog |
 | Grapheme-aware CJK input, live transcript, branching sessions and manual compaction | Cancellation/queued typing during an active model turn; automatic compaction |
 

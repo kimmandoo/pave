@@ -1,11 +1,17 @@
 type t = {
+  model : string;
   on_text : string -> unit;
   content : Buffer.t;
   mutable text_seen : bool;
   mutable calls : Protocol.tool_call list;
+  mutable call_count : int;
+  mutable parts : Yojson.Basic.t list;
   mutable signature_seen : bool;
+  signatures : (string, unit) Hashtbl.t;
+  native_calls : (Yojson.Basic.t, unit) Hashtbl.t;
   ids : (string, unit) Hashtbl.t;
   mutable finished : bool;
+  mutable wire_bytes : int;
   mutable response_bytes : int;
   mutable parser : Sse.t option;
 }
@@ -52,21 +58,28 @@ let handle_chunk t json =
            (match field "parts" content with
             | `List parts ->
                 List.iter (fun part ->
-                  (match field "thoughtSignature" part with
-                   | `String signature when signature <> "" ->
-                       if t.calls <> [] then invalid "tool turn requires retained thought signature";
-                       t.signature_seen <- true
-                   | _ -> ());
-                  if t.signature_seen && field "functionCall" part <> `Null then
-                    invalid "tool turn requires retained thought signature") parts;
-                List.iter (fun part ->
                   let text, calls = Gemini_wire.parse_parts [ part ] in
                   (match text with Some text -> append t text | None -> ());
+                  (match field "thoughtSignature" part with
+                   | `String signature when signature <> "" ->
+                       if Hashtbl.mem t.signatures signature then
+                         invalid "repeated native thought signature";
+                       Hashtbl.add t.signatures signature ();
+                       t.signature_seen <- true
+                   | _ -> ());
+                  (match field "functionCall" part with
+                   | `Assoc _ as fn when Gemini_wire.gemini_three t.model ->
+                       if Hashtbl.mem t.native_calls fn then
+                         invalid "repeated native function call";
+                       Hashtbl.add t.native_calls fn ()
+                   | _ -> ());
                   List.iter (fun (call : Protocol.tool_call) ->
-                    if List.length t.calls >= max_tool_calls then invalid "too many tool calls";
+                    if t.call_count >= max_tool_calls then invalid "too many tool calls";
                     if Hashtbl.mem t.ids call.id then invalid "duplicate function call id";
                     Hashtbl.add t.ids call.id ();
-                    t.calls <- call :: t.calls) calls) parts
+                    t.call_count <- t.call_count + 1;
+                    t.calls <- call :: t.calls) calls;
+                  t.parts <- part :: t.parts) parts
             | _ -> invalid "missing candidate parts")
        | _ -> invalid "invalid candidate content");
       (match field "finishReason" candidate with
@@ -90,12 +103,19 @@ let handle_event t event data =
              | _ -> "API error") in
        invalid detail
    | Some kind -> invalid ("unsupported SSE event: " ^ kind));
+  let length = String.length data in
+  if length > max_response_bytes - t.wire_bytes then
+    invalid "response exceeds 16 MiB";
+  t.wire_bytes <- t.wire_bytes + length;
   handle_chunk t (parse_json data)
 
-let create ~on_text =
-  let t = { on_text; content = Buffer.create 256; text_seen = false;
-    signature_seen = false; calls = []; ids = Hashtbl.create 4;
-    finished = false; response_bytes = 0; parser = None } in
+let create ~model ~on_text =
+  if model = "" then invalid_arg "empty Gemini model";
+  let t = { model; on_text; content = Buffer.create 256; text_seen = false;
+    signature_seen = false; parts = []; native_calls = Hashtbl.create 4;
+    signatures = Hashtbl.create 4;
+    calls = []; call_count = 0; ids = Hashtbl.create 4;
+    finished = false; response_bytes = 0; wire_bytes = 0; parser = None } in
   t.parser <- Some (Sse.create ~on_event:(handle_event t));
   t
 
@@ -114,6 +134,11 @@ let finish t =
   if not t.finished then invalid "missing finish reason";
   if (not t.text_seen || Buffer.length t.content = 0) && t.calls = [] then
     invalid "empty response";
+  if Gemini_wire.gemini_three t.model && t.calls <> [] && not t.signature_seen then
+    invalid "Gemini 3 tool turn lacks native thought signature";
   { Protocol.role = "assistant";
     content = (if t.text_seen then Some (Buffer.contents t.content) else None);
-    tool_calls = List.rev t.calls; tool_call_id = None; provider_state = None }
+    tool_calls = List.rev t.calls; tool_call_id = None;
+    provider_state = (if t.signature_seen then
+      Some (Gemini_wire.native_state ~model:t.model (List.rev t.parts))
+      else None) }

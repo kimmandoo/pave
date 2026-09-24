@@ -8,15 +8,15 @@ let chunk parts finish =
 let text value = `Assoc [ "text", `String value ]
 let tool id name arguments = `Assoc [ "functionCall", `Assoc [
   "id", `String id; "name", `String name; "args", arguments ] ]
-let invalid wire =
-  let stream = Pave.Gemini_stream.create ~on_text:(fun _ -> ()) in
+let invalid ?(model="gemini-2.5-flash") wire =
+  let stream = Pave.Gemini_stream.create ~model ~on_text:(fun _ -> ()) in
   match Pave.Gemini_stream.feed stream wire; Pave.Gemini_stream.finish stream with
   | exception Pave.Protocol.Invalid_response _ -> ()
   | _ -> failwith "expected invalid Gemini stream"
 
 let () =
   let deltas = ref [] in
-  let stream = Pave.Gemini_stream.create ~on_text:(fun fragment ->
+  let stream = Pave.Gemini_stream.create ~model:"gemini-2.5-flash" ~on_text:(fun fragment ->
     deltas := fragment :: !deltas) in
   let args = `Assoc [ "path", `String "日本語.txt" ] in
   let wire = ": keepalive\r\n\r\n" ^ chunk [ text "你好，" ] false ^
@@ -30,14 +30,14 @@ let () =
   assert (result.content = Some "你好，世界 🌍!");
   assert (result.tool_calls = [ { Pave.Protocol.id = "fc-1";
     name = "read_file"; arguments = args } ]);
-  let result_without_id = Pave.Gemini_stream.create ~on_text:(fun _ -> ()) in
+  let result_without_id = Pave.Gemini_stream.create ~model:"gemini-2.5-flash" ~on_text:(fun _ -> ()) in
   Pave.Gemini_stream.feed result_without_id
     (chunk [ `Assoc [ "functionCall", `Assoc [ "name", `String "read_file";
       "args", args ] ] ] true);
   (match (Pave.Gemini_stream.finish result_without_id).tool_calls with
    | [ invocation ] -> assert (invocation.id <> "" && invocation.arguments = args)
    | _ -> failwith "missing streamed tool call");
-  let text_only = Pave.Gemini_stream.create ~on_text:(fun _ -> ()) in
+  let text_only = Pave.Gemini_stream.create ~model:"gemini-2.5-flash" ~on_text:(fun _ -> ()) in
   Pave.Gemini_stream.feed text_only (chunk [ text "éclair" ] true);
   assert ((Pave.Gemini_stream.finish text_only).content = Some "éclair");
   invalid (chunk [ text "partial" ] false);
@@ -48,12 +48,46 @@ let () =
   invalid (event {|{"promptFeedback":{"blockReason":"SAFETY"},"candidates":[]}|});
   invalid (chunk [ tool "fc-1" "read_file" args ] false ^
     chunk [ tool "fc-1" "read_file" args ] true);
-  invalid (chunk [ `Assoc [ "thoughtSignature", `String "c2ln";
-    "functionCall", `Assoc [ "name", `String "read_file"; "args", args ] ] ] true);
-  invalid (chunk [ `Assoc [ "text", `String "signed";
-    "thoughtSignature", `String "c2ln" ] ] false ^
-    chunk [ tool "fc-2" "read_file" args ] true);
+  let signed_part = `Assoc [ "thoughtSignature", `String "c2ln";
+    "functionCall", `Assoc [ "name", `String "read_file"; "args", args ] ] in
+  let signed_stream = Pave.Gemini_stream.create ~model:"gemini-3-pro"
+    ~on_text:(fun _ -> ()) in
+  Pave.Gemini_stream.feed signed_stream
+    (chunk [ text "Reading " ] false ^ chunk [ signed_part ] true);
+  let signed = Pave.Gemini_stream.finish signed_stream in
+  assert (signed.content = Some "Reading ");
+  (match signed.tool_calls with
+   | [ invocation ] ->
+       let request = Pave.Gemini_wire.request ~model:"gemini-3-pro"
+         [ Pave.Protocol.user "Read"; signed;
+           Pave.Protocol.tool_result invocation.id "contents" ] [] in
+       assert (Pave.Protocol.member "contents" request = `List [
+         `Assoc [ "role", `String "user"; "parts", `List [ text "Read" ] ];
+         `Assoc [ "role", `String "model";
+           "parts", `List [ text "Reading "; signed_part ] ];
+         `Assoc [ "role", `String "user"; "parts", `List [
+           `Assoc [ "functionResponse", `Assoc [
+             "name", `String "read_file";
+             "response", `Assoc [ "output", `String "contents" ] ] ] ] ] ])
+   | _ -> failwith "signed stream lost call");
+  invalid ~model:"gemini-3-pro" (chunk [ tool "fc-3" "read_file" args ] true);
+  invalid ~model:"gemini-3-pro" (chunk [ signed_part ] false ^
+    chunk [ signed_part ] true);
+  invalid ~model:"gemini-3-pro"
+    (chunk [ `Assoc [ "text", `String "Hello";
+      "thoughtSignature", `String "c2ln" ] ] false ^
+     chunk [ `Assoc [ "text", `String "Hello again";
+       "thoughtSignature", `String "c2ln" ] ] true);
   invalid (chunk [ text "finished" ] true ^ chunk [ text "extra" ] true);
   invalid "data: {\"candidates\": [\r\n\r\n";
   invalid "data: {\"candidates\":[]}";
+  let oversized = Pave.Gemini_stream.create ~model:"gemini-3-pro"
+    ~on_text:(fun _ -> ()) in
+  let repeated = chunk [ `Assoc [ "thought", `Bool true;
+    "text", `String (String.make 850_000 'x') ] ] false in
+  let bounded = try
+    for _ = 1 to 22 do Pave.Gemini_stream.feed oversized repeated done;
+    false
+  with Pave.Protocol.Invalid_response _ -> true in
+  if not bounded then failwith "native Gemini thought state exceeded the response bound";
   print_endline "Gemini incremental SSE: ok"

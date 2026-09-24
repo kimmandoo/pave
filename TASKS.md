@@ -8,9 +8,9 @@ The full planned feature set is still in progress. Tests must establish behavior
 
 - [x] Implemented the OCaml CLI, bounded tool loop, session recovery and initial mobile workspace tools.
 - [x] Implemented OpenAI-compatible Chat Completions and Anthropic Messages, buffered and SSE-streaming, with local HTTP/tool-call verification.
-- [x] Added nine provider descriptors and six distinct wire transports; Anthropic/Codex OAuth PKCE and OpenRouter's state-less PKCE-to-key login use private storage, locked refresh where applicable and pinned inference endpoints. Verified each registered route in isolated local fixtures; Codex replay preserved encrypted native reasoning across session restart.
-- [ ] Complete the model catalog, Gemini thought signatures, remaining provider transports and provider-specific thinking, usage, errors, multimodal content, proprietary gateway state and account entitlements.
-- [ ] Implement every remaining authentication policy and its matching inference transport. The generic authorization-code and device-code engines exist, but only Anthropic, Codex and OpenRouter browser sign-in are wired to CLI inference. A new provider should change one descriptor plus a transport only if its wire protocol differs.
+- [x] Added ten provider descriptors and six wire payload formats; Anthropic/Codex OAuth PKCE, OpenRouter's state-less PKCE-to-key login and GitHub Copilot's public device-code login use private storage and pinned OAuth inference endpoints. Verified registered routes in isolated local fixtures; Codex replay preserved encrypted reasoning and Gemini 3 replay preserved native thought signatures across tool turns and session restart.
+- [ ] Complete the model catalog, remaining provider transports and provider-specific thinking, usage, errors, multimodal content, proprietary gateway state and account entitlements; Gemini 3 signed tool calls now replay correctly, but other Gemini semantics still require parity work.
+- [ ] Implement every remaining authentication policy and its matching inference transport. The generic authorization-code and device-code engines exist, but only Anthropic, Codex, OpenRouter and personal GitHub Copilot sign-in are wired to CLI inference. Copilot currently supports only the public Chat endpoint and two pinned model IDs, not Enterprise, Responses, Anthropic or model discovery. A new provider should change one descriptor plus a transport only if its wire protocol differs.
 
 ### Phase 2 — Session and interactive runtime (in progress)
 

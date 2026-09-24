@@ -57,9 +57,13 @@ let history_for_model ~wire ~model messages =
     match message.provider_state with
     | None -> true
     | Some state ->
-        wire = Provider.Codex_responses &&
-        Protocol.member "provider" state = `String "openai-codex" &&
-        Protocol.member "model" state = `String model in
+        let compatible = match wire with
+          | Provider.Codex_responses ->
+              Protocol.member "provider" state = `String "openai-codex"
+          | Provider.Gemini_direct ->
+              Protocol.member "provider" state = `String "google"
+          | _ -> false in
+        compatible && Protocol.member "model" state = `String model in
   if List.for_all retain messages then messages
   else List.map (fun (message : Protocol.message) ->
     if retain message then message else { message with provider_state = None })

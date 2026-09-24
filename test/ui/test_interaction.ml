@@ -27,6 +27,13 @@ let () =
     ~input:"anthropic/claude-sonnet-4-5" in
   if descriptor.id <> "anthropic" || route.name <> "messages" then
     fail "explicit provider was not routed to native Messages";
+  let descriptor, _, route = resolve_model ~current_provider:"openai"
+    ~input:"github-copilot/gpt-4.1" in
+  if descriptor.id <> "github-copilot" ||
+     route.wire <> Pave.Provider.Copilot_chat then
+    fail "Copilot model selected an incompatible transport";
+  invalid "unsupported Copilot model" (fun () ->
+    resolve_model ~current_provider:"openai" ~input:"github-copilot/gpt-5");
   invalid "unknown provider" (fun () -> resolve_model ~current_provider:"openai" ~input:"missing/foo");
   invalid "empty model" (fun () -> resolve_model ~current_provider:"openai" ~input:"openrouter/");
   invalid "control in model ID" (fun () -> resolve_model ~current_provider:"openai" ~input:"gpt-5\nother");
@@ -52,4 +59,16 @@ let () =
   if state same <> Some native || state other_model <> None ||
      state other_protocol <> None || state history <> Some native then
     fail "opaque Codex state crossed the model or protocol boundary";
+  let signed = `Assoc [
+    "provider", `String "google"; "model", `String "gemini-3-pro";
+    "parts", `List [] ] in
+  let google_history = [ Pave.Protocol.user "original prompt";
+    { assistant with provider_state = Some signed } ] in
+  if state (history_for_model ~wire:Pave.Provider.Gemini_direct
+       ~model:"gemini-3-pro" google_history) <> Some signed ||
+     state (history_for_model ~wire:Pave.Provider.Gemini_direct
+       ~model:"gemini-3-flash" google_history) <> None ||
+     state (history_for_model ~wire:Pave.Provider.Codex_responses
+       ~model:"gemini-3-pro" google_history) <> None then
+    fail "signed Gemini state crossed the model or protocol boundary";
   print_endline "interactive login and model routing: ok"

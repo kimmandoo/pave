@@ -67,11 +67,19 @@ let builtins = [
     default_route = "chat"; model_routes = [];
     api_key_env = Some "OPENROUTER_API_KEY"; oauth = Some "openrouter";
     default_model = None };
+  { id = "github-copilot"; display_name = "GitHub Copilot Chat (public github.com)";
+    routes = [ { name = "chat"; wire = Provider.Copilot_chat;
+      endpoint = Github_copilot_wire.endpoint } ];
+    default_route = "chat"; model_routes = [];
+    api_key_env = None; oauth = Some "github-copilot";
+    default_model = None };
 ]
 
 let all () = builtins
 let find id = List.find_opt (fun provider -> provider.id = id) builtins
 let route provider ~model name =
+  if provider.id = "github-copilot" &&
+     not (Github_copilot_wire.supported_model model) then None else
   let name = if name <> "" then name else
     match List.find_opt (fun (prefix, _) ->
       String.starts_with ~prefix model) provider.model_routes with

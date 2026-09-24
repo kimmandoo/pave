@@ -99,3 +99,11 @@
 (test
  (name test_openrouter_oauth)
  (libraries pave unix yojson))
+
+(test
+ (name test_github_copilot_oauth)
+ (libraries pave unix yojson))
+
+(test
+ (name test_github_copilot_wire)
+ (libraries pave unix yojson))
