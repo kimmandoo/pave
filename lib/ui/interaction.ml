@@ -8,6 +8,7 @@ type command =
   | New
   | Resume of string option
   | Compact
+  | Retry
   | Tree
   | Branch of string
   | Fork of string
@@ -22,7 +23,7 @@ type command =
 type action =
   | A_login | A_model | A_settings | A_new | A_resume | A_cancel
   | A_entries | A_tree | A_tools | A_context | A_usage | A_hotkeys | A_branch | A_fork
-  | A_compact | A_help | A_quit
+  | A_compact | A_retry | A_help | A_quit
 
 type shortcut = { name : string; usage : string; summary : string; action : action }
 
@@ -33,6 +34,7 @@ let commands = [
   { name = "/new"; usage = ""; summary = "Start a private saved session"; action = A_new };
   { name = "/resume"; usage = "[PATH]"; summary = "Search or reopen saved sessions"; action = A_resume };
   { name = "/cancel"; usage = ""; summary = "Cancel the active turn"; action = A_cancel };
+  { name = "/retry"; usage = ""; summary = "Retry the last turn only if no tools ran"; action = A_retry };
   { name = "/tools"; usage = "[NAME]"; summary = "List or inspect enabled tools"; action = A_tools };
   { name = "/context"; usage = ""; summary = "Inspect active model and saved context"; action = A_context };
   { name = "/usage"; usage = ""; summary = "Inspect reported token usage by model"; action = A_usage };
@@ -110,6 +112,7 @@ let parse line =
     | Some A_new -> no_args (); New
     | Some A_resume -> Resume (Option.map (require_path name) argument)
     | Some A_compact -> no_args (); Compact
+    | Some A_retry -> no_args (); Retry
     | Some A_branch -> Branch (require_single_argument name
         (Option.value ~default:"" argument))
     | Some A_fork -> Fork (require_path name (Option.value ~default:"" argument))

@@ -560,6 +560,31 @@ let () =
         | Pave.Interaction.New -> start_session ()
         | Pave.Interaction.Resume path -> resume_session path
         | Pave.Interaction.Compact -> compact ()
+        | Pave.Interaction.Retry ->
+          let submit text = match !runner with
+            | Some active -> Pave.Turn_runner.submit active text
+            | None -> send text in
+          (match !journal with
+           | Some current ->
+               (match Pave.Session.retry_candidate current with
+                | None ->
+                    on_event "Retry unavailable: last turn used tools, changed model, or has no earlier journal entry."
+                | Some (parent, text) ->
+                    checkout_branch current parent;
+                    submit text)
+           | None ->
+               let history = match !agent with
+                 | Some current -> Pave.Agent.messages current
+                 | None -> !retained_history in
+               (match Pave.Session.retryable_history history with
+                | None -> on_event "Retry unavailable: no prior tool-free user turn."
+                | Some (before, text) ->
+                    retained_history := before;
+                    agent := None;
+                    (match !ui with
+                     | Some screen -> Tui.show_history screen before
+                     | None -> on_event "Retrying last tool-free turn.");
+                    submit text))
         | Pave.Interaction.Branch target ->
           (match !journal with
            | None -> on_event "Error: --session is required to branch"
@@ -666,8 +691,11 @@ let () =
               | None -> !ephemeral_usage) with
              | None -> ["Token usage/context limit/cost · not tracked"]
              | Some usage ->
-                 [Printf.sprintf "Ollama-reported on branch: %d in · %d out tokens"
-                    usage.input_tokens usage.output_tokens;
+                 let source = match !journal with
+                   | Some _ -> "on branch"
+                   | None -> "in ephemeral session" in
+                 [Printf.sprintf "Ollama-reported %s: %d in · %d out tokens"
+                    source usage.input_tokens usage.output_tokens;
                   "Other providers/context limit/cost · not tracked"]) in
           (match !ui with
            | Some screen -> Tui.events screen lines
