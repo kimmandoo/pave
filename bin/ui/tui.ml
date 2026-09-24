@@ -30,6 +30,19 @@ let error = A.(fg lightred)
 let idle_status =
   "Enter send   ·   Shift+Enter newline   ·   ↑↓ history   ·   /login /model /help"
 
+(* Two ASCII columns per 8px SVG pixel keep the mark square in a terminal. *)
+let startup_logo =
+  let mint = I.string accent "##" and shadow = I.string muted "++"
+  and cursor = I.string warning "**" and blank = I.string A.empty "  " in
+  let pixel = function
+    | '#' -> mint | '+' -> shadow | '*' -> cursor | _ -> blank in
+  let mark = I.vcat (List.map (fun row ->
+    I.hcat (List.init (String.length row) (fun index -> pixel row.[index])))
+    [ "#######"; "########"; "##+++++##"; "##+    ##+";
+      "##+    ##+"; "##+    ##+"; "########++"; "#######++";
+      "##++++++"; "##+"; "##+     *"; " ++" ]) in
+  I.(mark <-> void 1 1 <-> string accent "      P A V E")
+
 let sanitize text =
   let buffer = Buffer.create (min max_line_bytes (String.length text)) in
   let append () _ = function
@@ -77,15 +90,29 @@ let paint t =
     | Some (width, height, revision, body)
       when width = cols && height = body_height && revision = t.revision -> body
     | _ ->
-        let all = Queue.to_seq t.lines |> List.of_seq in
-        let all = if t.live = "" then all
-          else all @ [ { text = "PAVE › " ^ fit_bytes t.live; attr = text_attr } ] in
-        let total = List.length all in
-        let rec drop count lines = if count <= 0 then lines else match lines with
-          | [] -> [] | _ :: rest -> drop (count - 1) rest in
-        let visible = drop (max 0 (total - body_height)) all in
-        let body = I.vsnap ~align:`Bottom body_height
-          (I.vcat (List.map (fun row -> styled_line cols row.attr row.text) visible)) in
+        let body =
+          if Queue.is_empty t.lines && t.live = "" then (
+            let logo_width = I.width startup_logo
+            and logo_height = I.height startup_logo in
+            if cols < logo_width || body_height < logo_height then
+              I.vsnap ~align:`Bottom body_height
+                (styled_line cols accent "  PAVE")
+            else
+              let left = (cols - logo_width) / 2
+              and top = (body_height - logo_height) / 2 in
+              I.(void cols top
+                <-> hsnap ~align:`Left cols (void left 1 <|> startup_logo)
+                <-> void cols (body_height - top - logo_height)))
+          else (
+            let all = Queue.to_seq t.lines |> List.of_seq in
+            let all = if t.live = "" then all
+              else all @ [ { text = "PAVE › " ^ fit_bytes t.live; attr = text_attr } ] in
+            let total = List.length all in
+            let rec drop count lines = if count <= 0 then lines else match lines with
+              | [] -> [] | _ :: rest -> drop (count - 1) rest in
+            let visible = drop (max 0 (total - body_height)) all in
+            I.vsnap ~align:`Bottom body_height
+              (I.vcat (List.map (fun row -> styled_line cols row.attr row.text) visible))) in
         t.body_cache <- Some (cols, body_height, t.revision, body);
         body in
   let footer = styled_line cols muted ("  " ^ t.status) in
