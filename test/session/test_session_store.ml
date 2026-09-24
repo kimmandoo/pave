@@ -37,6 +37,7 @@ let () =
     let first = Store.create ~root in
     let second = Store.create ~root in
     assert (first.Pave.Session.path <> second.Pave.Session.path);
+    Pave.Session.set_model first ~provider:"ollama" ~model:"fixture";
     let prompt = "Fix SwiftUI navigation\027[31m\226\128\174spoof" in
     ignore (Pave.Session.append first (Pave.Protocol.user prompt));
     ignore (Pave.Session.append second (Pave.Protocol.user "Inspect Android lifecycle"));
@@ -52,6 +53,7 @@ let () =
     invalid (fun () -> Store.open_existing ~root:other first.path);
     let reopened = Store.open_existing ~root first.path in
     assert (Pave.Session.history reopened = [Pave.Protocol.user prompt]);
+    assert (Pave.Session.model reopened = Some ("ollama", "fixture"));
     let link = child base "alias" in
     Unix.symlink root link;
     assert (Store.directory ~root:link = Store.directory ~root);

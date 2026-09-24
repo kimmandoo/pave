@@ -28,6 +28,8 @@ let summary (entry : Session.entry) =
   match entry.kind with
   | Session.Branch -> "branch point"
   | Session.Compaction _ -> "compacted context"
+  | Session.Model { provider; model } ->
+      "model · " ^ first_line (provider ^ "/" ^ model)
   | Session.Message message ->
       let content = match message.content with
         | None | Some "" when message.tool_calls <> [] -> "tool calls"

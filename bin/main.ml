@@ -66,6 +66,9 @@ let () =
     let max_turns = Option.value ~default:(Option.value ~default:20
       configured.max_turns) !max_turns in
     if max_turns <= 0 then failwith "--max-turns must be positive";
+    let explicit_model_override =
+      !provider_name <> "" || !model <> "" || !api_name <> "" ||
+      !endpoint <> "" in
     let provider_name = if !provider_name <> "" then !provider_name
       else Option.value ~default:"openai" configured.default_provider in
     let descriptor = match Pave.Provider_catalog.find provider_name with
@@ -105,19 +108,32 @@ let () =
       ?custom_text:!custom_prompt ?template_file:!prompt_template
       ?append_text:!append_prompt () in
     let system = prompt_configuration.text in
-    let model = if !model <> "" then !model
-      else match configured.default_provider with
-        | Some configured_provider when configured_provider = descriptor.id ->
-            Option.value ~default:(Option.value ~default:"" descriptor.default_model)
-              configured.default_model
-        | _ -> Option.value ~default:"" descriptor.default_model in
-    let route = match Pave.Provider_catalog.route descriptor ~model !api_name with
-      | Some value -> value
-      | None -> failwith ("unsupported API for " ^ descriptor.id ^ ": " ^ !api_name) in
-    let active_descriptor = ref descriptor and active_model = ref model
-      and active_route = ref route and endpoint_override = ref !endpoint in
     let journal = ref (if !session = "" then None else
       Some (Pave.Session.open_file ~cwd:root !session)) in
+    let saved_model =
+      if explicit_model_override then None
+      else Option.bind !journal Pave.Session.model in
+    let descriptor = match saved_model with
+      | None -> descriptor
+      | Some (provider, _) ->
+          (match Pave.Provider_catalog.find provider with
+           | Some value -> value
+           | None -> failwith ("saved session uses unavailable provider " ^
+               provider ^ "; specify --provider and --model to override")) in
+    let model = match saved_model with
+      | Some (_, saved) -> saved
+      | None when !model <> "" -> !model
+      | None -> match configured.default_provider with
+          | Some configured_provider when configured_provider = descriptor.id ->
+              Option.value ~default:(Option.value ~default:"" descriptor.default_model)
+                configured.default_model
+          | _ -> Option.value ~default:"" descriptor.default_model in
+    let route = match Pave.Provider_catalog.route descriptor ~model !api_name with
+      | Some value -> value
+      | None -> failwith ("unsupported saved model or API for " ^
+          descriptor.id ^ "/" ^ model ^ "; specify --model to override") in
+    let active_descriptor = ref descriptor and active_model = ref model
+      and active_route = ref route and endpoint_override = ref !endpoint in
     let ui = ref None in
     let runner : Pave.Turn_runner.t option ref = ref None in
     let on_event message = match !ui with
@@ -159,6 +175,11 @@ let () =
       provider, authentication, resolve_credential in
     let make_agent () =
       let provider, authentication, resolve_credential = resolve_provider () in
+      (match !journal with
+       | Some session when !active_model <> "" ->
+           Pave.Session.set_model session ~provider:!active_descriptor.id
+             ~model:!active_model
+       | _ -> ());
       let history = match !journal with
         | Some session -> Pave.Session.context session
         | None -> !retained_history in
@@ -191,9 +212,28 @@ let () =
         | None ->
             on_event "Error: current conversation is unsaved; start with --session to preserve it";
             false in
-    let switch_session next =
-      journal := Some next;
+    let session_selection saved =
+      if explicit_model_override then None
+      else Option.map (fun (provider, model) ->
+        Pave.Interaction.resolve_model ~current_provider:provider
+          ~input:(provider ^ "/" ^ model)) saved in
+    let use_selection (descriptor, model, route) =
+      active_descriptor := descriptor;
+      active_model := model;
+      active_route := route;
+      endpoint_override := "";
       agent := None;
+      match !ui with
+      | Some screen -> Tui.set_model screen (descriptor.id ^ "/" ^ model)
+      | None -> () in
+    let switch_session next =
+      let selected = session_selection (Pave.Session.model next) in
+      let descriptor, model, _ = match selected with
+        | Some choice -> choice
+        | None -> !active_descriptor, !active_model, !active_route in
+      if model <> "" then Pave.Session.set_model next ~provider:descriptor.id ~model;
+      journal := Some next;
+      (match selected with Some choice -> use_selection choice | None -> agent := None);
       retained_history := [];
       (match !ui with
        | Some screen ->
@@ -381,6 +421,10 @@ let () =
           with exn ->
             (match !ui with Some screen -> Tui.reset_status screen | None -> ());
             raise exn in
+        (match !journal with
+         | Some current ->
+             Pave.Session.set_model current ~provider:descriptor.id ~model
+         | None -> ());
         (match !journal, !agent with
          | None, Some previous -> retained_history := Pave.Agent.messages previous
          | _ -> ());
@@ -400,8 +444,16 @@ let () =
     let report_error exn = on_event ("Error: " ^ Printexc.to_string exn) in
     let interact () =
       let checkout_branch current target =
+        let selected = session_selection
+          (Pave.Session.model_at current (Some target)) in
         Pave.Session.branch current target;
-        agent := None;
+        (match selected with
+         | Some choice -> use_selection choice
+         | None ->
+             if !active_model <> "" then
+               Pave.Session.set_model current ~provider:!active_descriptor.id
+                 ~model:!active_model;
+             agent := None);
         match !ui with
         | Some screen ->
             Tui.show_history screen (Pave.Session.history current);
@@ -591,6 +643,9 @@ let () =
                        | None -> "<tool calls>"))
                  | Pave.Session.Compaction _ ->
                      Some (entry.id ^ " compaction <summary>")
+                 | Pave.Session.Model { provider; model } ->
+                     Some (entry.id ^ " model " ^
+                       Pave.Session_tree.first_line (provider ^ "/" ^ model))
                  | Pave.Session.Branch -> None) (Pave.Session.entries current) in
                (match !ui with
                 | Some screen -> Tui.events screen lines

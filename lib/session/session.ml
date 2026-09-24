@@ -1,6 +1,7 @@
 type kind =
   | Message of Protocol.message
   | Compaction of { summary : string; first_kept_id : string }
+  | Model of { provider : string; model : string }
   | Branch
 type entry = { id : string; parent_id : string option; timestamp : string; kind : kind }
 
@@ -49,7 +50,8 @@ let new_header cwd =
 
 let entry_json entry =
   let fields = [ "type", `String (match entry.kind with
-    | Message _ -> "message" | Compaction _ -> "compaction" | Branch -> "branch");
+    | Message _ -> "message" | Compaction _ -> "compaction"
+    | Model _ -> "model" | Branch -> "branch");
     "id", `String entry.id; "parentId", option_json entry.parent_id;
     "timestamp", `String entry.timestamp ] in
   match entry.kind with
@@ -58,6 +60,8 @@ let entry_json entry =
   | Compaction { summary; first_kept_id } ->
       `Assoc (fields @ [ "summary", `String summary;
                          "firstKeptEntryId", `String first_kept_id ])
+  | Model { provider; model } ->
+      `Assoc (fields @ ["provider", `String provider; "model", `String model])
   | Branch -> `Assoc fields
 
 let write_all fd text =
@@ -92,6 +96,10 @@ let append_line t json =
       Unix.fsync fd;
       t.disk_size <- (Unix.fstat fd).Unix.st_size))
 
+let valid_model_field text =
+  text <> "" && not (String.exists (fun char ->
+    Char.code char <= 32 || Char.code char = 127) text)
+
 let parse_entry json =
   let get key = Protocol.member key json in
   let id = match get "id" with `String value when value <> "" -> value
@@ -108,6 +116,12 @@ let parse_entry json =
            when String.trim summary <> "" && first_kept_id <> "" ->
              Compaction { summary; first_kept_id }
          | _ -> invalid "invalid compaction")
+    | `String "model" ->
+        (match get "provider", get "model" with
+         | `String provider, `String model
+           when valid_model_field provider && valid_model_field model ->
+             Model { provider; model }
+         | _ -> invalid "invalid model selection")
     | `String "branch" -> Branch
     | _ -> invalid "unsupported journal entry type" in
   { id; parent_id; timestamp; kind }
@@ -124,10 +138,21 @@ let branch_entries t =
 
 let entries t = List.rev t.records_rev
 let leaf_id t = t.leaf
+let model_at t leaf =
+  let rec find = function
+    | None -> None
+    | Some id ->
+        let entry = try Hashtbl.find t.by_id id
+          with Not_found -> invalid ("missing parent entry: " ^ id) in
+        match entry.kind with
+        | Model { provider; model } -> Some (provider, model)
+        | Message _ | Compaction _ | Branch -> find entry.parent_id in
+  find leaf
+let model t = model_at t t.leaf
 let messages entries =
   List.filter_map (fun entry -> match entry.kind with
     | Message message -> Some message
-    | Compaction _ | Branch -> None) entries
+    | Compaction _ | Model _ | Branch -> None) entries
 
 let history t = messages (branch_entries t)
 
@@ -135,7 +160,7 @@ let context t =
   let path = branch_entries t in
   let latest = List.fold_left (fun found entry -> match entry.kind with
     | Compaction { summary; first_kept_id } -> Some (entry.id, summary, first_kept_id)
-    | Message _ | Branch -> found) None path in
+    | Message _ | Model _ | Branch -> found) None path in
   match latest with
   | None -> messages path
   | Some (marker_id, summary, first_kept_id) ->
@@ -211,12 +236,25 @@ let append t message =
   t.leaf <- Some entry.id;
   entry.id
 
+let set_model t ~provider ~model:selected =
+  if not (valid_model_field provider && valid_model_field selected) then
+    invalid "invalid model selection";
+  let selection = Model { provider; model = selected } in
+  if model t <> Some (provider, selected) then (
+    let entry = { id = fresh_id (); parent_id = t.leaf;
+      timestamp = timestamp (); kind = selection } in
+    append_line t (entry_json entry);
+    t.records_rev <- entry :: t.records_rev;
+    Hashtbl.add t.by_id entry.id entry;
+    t.leaf <- Some entry.id)
+
 let branch t id =
   if not (Hashtbl.mem t.by_id id) then invalid ("entry not found: " ^ id);
   let marker = { id = fresh_id (); parent_id = Some id; timestamp = timestamp ();
                  kind = Branch } in
   append_line t (entry_json marker);
   t.records_rev <- marker :: t.records_rev;
+  Hashtbl.add t.by_id marker.id marker;
   t.leaf <- Some id;
   List.iter (fun message -> ignore (append t message))
     (missing_results (history t))
@@ -252,7 +290,8 @@ let load_journal path =
            invalid ("entry has missing parent: " ^ parent)
        | _ -> ());
       (match entry.kind with
-       | Message _ -> Hashtbl.add by_id entry.id entry; leaf := Some entry.id
+       | Message _ | Model _ ->
+           Hashtbl.add by_id entry.id entry; leaf := Some entry.id
        | Compaction { first_kept_id; _ } ->
            let rec ancestor = function
              | None -> false
@@ -263,7 +302,9 @@ let load_journal path =
            if not (ancestor entry.parent_id) then
              invalid "compaction boundary is not an ancestor user entry";
            Hashtbl.add by_id entry.id entry; leaf := Some entry.id
-       | Branch -> leaf := entry.parent_id);
+       | Branch ->
+           Hashtbl.add by_id entry.id entry;
+           leaf := entry.parent_id);
       records := entry :: !records
     done with End_of_file -> ());
     { path; header; records_rev = !records; by_id; leaf = !leaf;

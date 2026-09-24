@@ -94,25 +94,24 @@ let read_preview path stat =
         let root, started = match field "type", field "version", field "cwd", field "timestamp" with
           | `String "session", `Int 1, `String root, `String started -> root, started
           | _ -> invalid_arg "session journal has an invalid header" in
-        let title =
-          let start = ending + 1 in
+        let rec title start =
           match String.index_from_opt content start '\n' with
           | None -> "(untitled)"
           | Some finish ->
               let line = String.sub content start (finish - start) in
               (try
-                let json = Yojson.Basic.from_string line in
-                let message = Protocol.member "message" json in
-                let content = Protocol.member "content" message in
-                match Protocol.member "type" json,
-                  Protocol.member "role" message, content with
-                | `String "message", `String "user", `String text ->
-                    let summary = String.split_on_char '\n' text |> List.hd
-                      |> String.trim in
-                    if summary = "" then "(untitled)" else summary
-                | _ -> "(untitled)"
+                 let json = Yojson.Basic.from_string line in
+                 let message = Protocol.member "message" json in
+                 let value = Protocol.member "content" message in
+                 match Protocol.member "type" json,
+                   Protocol.member "role" message, value with
+                 | `String "message", `String "user", `String text ->
+                     let summary = String.split_on_char '\n' text |> List.hd
+                       |> String.trim in
+                     if summary = "" then "(untitled)" else summary
+                 | _ -> title (finish + 1)
                with Yojson.Json_error _ -> "(untitled)") in
-        root, started, title)
+        root, started, title (ending + 1))
 
 let preview ~root path =
   let stat = Unix.lstat path in
