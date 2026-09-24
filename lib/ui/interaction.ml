@@ -10,13 +10,14 @@ type command =
   | Compact
   | Branch of string
   | Fork of string
+  | Tools of string option
   | Entries
   | Prompt of string
   | Unknown of string
 
 type action =
   | A_login | A_model | A_settings | A_new | A_resume | A_cancel
-  | A_entries | A_branch | A_fork | A_compact | A_help | A_quit
+  | A_entries | A_tools | A_branch | A_fork | A_compact | A_help | A_quit
 
 type shortcut = { name : string; usage : string; summary : string; action : action }
 
@@ -27,6 +28,7 @@ let commands = [
   { name = "/new"; usage = ""; summary = "Start a private saved session"; action = A_new };
   { name = "/resume"; usage = "[PATH]"; summary = "Search or reopen saved sessions"; action = A_resume };
   { name = "/cancel"; usage = ""; summary = "Cancel the active turn"; action = A_cancel };
+  { name = "/tools"; usage = "[NAME]"; summary = "List or inspect enabled tools"; action = A_tools };
   { name = "/entries"; usage = ""; summary = "List journal entries"; action = A_entries };
   { name = "/branch"; usage = "ID"; summary = "Continue from an earlier entry"; action = A_branch };
   { name = "/fork"; usage = "PATH"; summary = "Copy the selected journal branch"; action = A_fork };
@@ -102,6 +104,7 @@ let parse line =
     | Some A_branch -> Branch (require_single_argument name
         (Option.value ~default:"" argument))
     | Some A_fork -> Fork (require_path name (Option.value ~default:"" argument))
+    | Some A_tools -> Tools (single name argument)
     | Some A_entries -> no_args (); Entries
     | None -> Unknown line
 

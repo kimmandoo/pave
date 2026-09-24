@@ -75,9 +75,7 @@ let run ?(max_turns = 20) ?cancel t text =
     let system : Protocol.message =
       { role = "system"; content = Some system_text; tool_calls = [];
         tool_call_id = None; provider_state = None } in
-    let definitions = if t.allow_shell then Tools.definitions else
-      List.filter (fun json -> Protocol.member "name" (Protocol.member "function" json)
-        <> `String "run_command") Tools.definitions in
+    let definitions = Tools.available ~allow_shell:t.allow_shell in
     let transcript = system :: messages t in
     let reply =
       if t.stream then Provider.complete ~authentication:t.authentication
