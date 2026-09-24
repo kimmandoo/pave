@@ -12,10 +12,28 @@ let () =
   (match parse "/model openrouter/openai/gpt-4o" with
    | Model (Some "openrouter/openai/gpt-4o") -> ()
    | _ -> fail "namespaced model parsing");
-  (match parse "/models" with Other -> () | _ -> fail "command prefix confused");
-  (match parse "/model/foo" with Other -> () | _ -> fail "slash form confused");
+  (match parse "/models" with Unknown _ -> () | _ -> fail "command prefix confused");
+  (match parse "/model/foo" with Unknown _ -> () | _ -> fail "slash form confused");
+  (match parse "/branch abc123" with
+   | Branch "abc123" -> () | _ -> fail "journal branch ID parsing");
+  (match parse "/resume /tmp/saved session.jsonl" with
+   | Resume (Some "/tmp/saved session.jsonl") -> ()
+   | _ -> fail "resume path with spaces");
+  (match parse "/fork /tmp/saved session.jsonl" with
+   | Fork "/tmp/saved session.jsonl" -> ()
+   | _ -> fail "fork path with spaces");
+  (match parse "/new", parse "/entries", parse "/quit", parse "mobile task" with
+   | New, Entries, Quit, Prompt "mobile task" -> ()
+   | _ -> fail "slash commands versus model prompt");
+  (match List.map (fun (entry : shortcut) -> entry.name) (suggestions "/re") with
+   | ["/resume"] -> ()
+   | _ -> fail "slash completion selected a wrong command");
+  if suggestions "/model/foo" <> [] then fail "slash completion matched invalid prefix";
   invalid "multiple model arguments" (fun () -> parse "/model openai/gpt-5 extra");
   invalid "control in login provider" (fun () -> parse "/login openrouter\tother");
+  invalid "missing branch ID" (fun () -> parse "/branch");
+  invalid "missing fork path" (fun () -> parse "/fork");
+  invalid "trailing command arguments" (fun () -> parse "/new accidental");
   let descriptor, model, route = resolve_model ~current_provider:"openai" ~input:"gpt-5" in
   if descriptor.id <> "openai" || model <> "gpt-5" || route.name <> "responses" then
     fail "model-specific Responses route was not selected";
