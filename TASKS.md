@@ -97,7 +97,7 @@ Source paths below are relative to the inspected sibling reference tree. Tasks d
 
 ### P4 — Workspace tools, IDE and network
 
-- [ ] Implement gitignore-aware regex grep/glob, line/page/selective file reads and bounded directory/URL/document/archive/SQLite/internal-URI readers; retain workspace symlink/traversal protection. Reference: `packages/coding-agent/src/tools/{read.ts,grep.ts,glob.ts,read-archive.ts,read-sqlite.ts,fetch.ts}`.
+- [ ] Implement gitignore-aware regex grep/glob, line/page/selective file reads and bounded directory/URL/document/archive/notebook/SQLite/internal-URI readers; retain workspace symlink/traversal protection. Reference: `packages/coding-agent/src/tools/{read.ts,grep.ts,glob.ts,read-archive.ts,read-sqlite.ts,fetch.ts}`, `docs/notebook-tool-runtime.md`.
 - [ ] Add snapshot/conflict-aware multi-hunk and AST edit/rename, deterministic previews and exact failure reporting; do not degrade the current unique-match atomic edit. Reference: `packages/coding-agent/src/{edit/,tools/ast-edit.ts,tools/write.ts}`.
 - [ ] Add cancellable foreground shell, PTY where supported and explicit managed background/service jobs with cwd/env/timeouts, bounded output, readiness, stdin and kill; keep separate approval for each command. Reference: `packages/coding-agent/src/{exec/bash-executor.ts,async/job-manager.ts,tools/bash-interactive.ts}`, `docs/tools/bash.md`.
 - [ ] Add managed LSP lifecycle, definitions/references/diagnostics/hover/rename/code actions with write-through sync and guarded edits; prefer actual language-server semantics over text search. Reference: `packages/coding-agent/src/lsp/`, `docs/tools/lsp.md`.
@@ -121,6 +121,8 @@ Source paths below are relative to the inspected sibling reference tree. Tasks d
 - [ ] Migrate existing slash handlers into one discoverable registry with aliases, argument validation, completion and truthful help; add core `/resume`, `/tree`, `/new`, `/retry`, `/tools`, `/context`, `/usage`, `/hotkeys`, `/settings` only with working backends. Reference: `packages/coding-agent/src/slash-commands/`, `docs/slash-command-internals.md`.
 - [ ] Expose configurable conflict-checked keybindings, focus precedence, Escape interruption versus dialog dismissal, prompt/path/model/skill completion and accessible fallback shortcuts. Reference: `packages/tui/src/{app-keybindings.ts,autocomplete.ts,hotkeys-markdown.ts}`.
 - [ ] Make advanced slash groups conditional on implemented runtimes rather than no-op stubs: plan/goal/vibe, agent/jobs/todo, extensions/plugins/skills/MCP, browser/media/security/SSH, sharing/collaboration. Reference: `packages/coding-agent/src/slash-commands/builtin-{modes,session,lifecycle,control,collaboration,marketplace,skills}.ts`.
+- [ ] Support headless stdin/file/image prompt inputs, text versus structured JSON event output and clean exit codes without rendering a terminal; retain the existing `--prompt` path. Reference: `packages/coding-agent/src/modes/print-mode.ts`, `docs/cli-reference.md`.
+- [ ] Make turn-scoped instruction shortcuts opt-in, visibly indicated and restricted to user prose (never pasted code, filenames or tool output); allow each shortcut to be disabled. Reference: `packages/coding-agent/src/modes/magic-keywords.ts`, `docs/magic-keywords.md`.
 
 ### P6 — Extensibility, remote clients and auxiliary features
 
