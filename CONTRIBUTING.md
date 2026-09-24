@@ -2,6 +2,22 @@
 
 Pave targets iOS, Android, Flutter, and React Native repositories. The port is in progress; check `TASKS.md` and `docs/DESIGN_RULES.md` before proposing a capability as complete.
 
+## Find the right module
+
+| Area | Source | Test |
+| --- | --- | --- |
+| Executable and credentials | `bin/main.ml`, `bin/cli_auth.ml` | provider/auth tests below |
+| Terminal rendering and input | `bin/ui/`, `lib/ui/` | `test/ui/` |
+| Conversation contracts and stream frames | `lib/core/` | `test/core/` |
+| Provider registry and HTTP dispatch | `lib/provider/` | `test/provider/` |
+| Provider-specific wire encoders/decoders | `lib/provider/transports/` | `test/provider/transports/` |
+| Browser/device authentication and private credential store | `lib/auth/` | `test/auth/` |
+| Agent loop and mobile prompt | `lib/agent/` | `test/agent/` |
+| Durable conversation journal | `lib/session/` | `test/session/` |
+| Workspace and shell tools | `lib/tools/` | `test/tools/` |
+
+`lib/dune`, `bin/dune` and `test/dune` use unqualified subdirectories: **moving a file does not change its OCaml module name** (`lib/auth/oauth_flow.ml` remains `Pave.Oauth_flow`). Module names must be unique within a Dune stanza. For an OpenAI-compatible endpoint, add a descriptor in `lib/provider/provider_catalog.ml`; for a distinct protocol, put an encoder/decoder in `lib/provider/transports/` and route it explicitly in `lib/provider/provider.ml`. Provider-specific browser grants belong in `lib/auth/`, with CLI actions in `bin/cli_auth.ml`. Exercise authentication **and** completion/tool turns against an isolated transport fixture before listing a route as working. Keep tests beside the corresponding responsibility, not in a duplicate top-level module hierarchy.
+
 ## Report an issue
 
 Open a GitHub issue with the operating system, OCaml version, installation method, terminal type, a minimal reproduction, the expected behavior, and the observed output. Remove API keys, private source code, and session transcripts before sharing logs. For a security issue, use `SECURITY.md` instead of a public issue.

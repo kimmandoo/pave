@@ -30,9 +30,10 @@ The full planned feature set is still in progress. Tests must establish behavior
 - [ ] Implement persistent JS/Python eval kernels, tool bridge, browser/CDP, MCP, skills and extension hooks.
 - [ ] Inventory and implement the remaining catalog, native services, TUI widgets, statistics, collaboration, snapshot/compaction and utility features required for the planned product.
 
-### Phase 5 — Maintainability pass (after product capabilities)
+### Phase 5 — Maintainability pass (final review after product capabilities)
 
-- [ ] Review the final dependency graph and group provider, session, agent, tool, terminal and CLI code into clearly owned directories/files. Keep public contracts narrow, remove superseded code paths and update callers, tests, build rules and contributor docs together. Verify CLI, PTY and provider behavior after the move.
+- [x] Grouped the current provider, auth, session, agent, tool and terminal modules and their tests into responsibility-based directories without changing public OCaml module names; separated CLI credential commands/selection from runtime orchestration.
+- [ ] Revisit the **final** dependency graph after new capabilities land; keep public contracts narrow, split newly oversized files along actual responsibilities, remove superseded code paths and update callers, tests, build rules and contributor docs together. Verify CLI, PTY and provider behavior after the final move.
 
 ### Product completion requirements
 

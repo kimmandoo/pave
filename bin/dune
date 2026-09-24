@@ -1,5 +1,7 @@
+(include_subdirs unqualified)
+
 (executable
  (name main)
  (public_name pave)
- (modules main tui terminal_input)
+ (modules main cli_auth tui terminal_input)
  (libraries pave unix notty-community notty-community.unix uutf))

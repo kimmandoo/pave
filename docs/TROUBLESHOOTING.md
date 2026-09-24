@@ -16,7 +16,7 @@
 
 ### [2026-09-24] Unbound tool-call record field during OCaml build
 
-- **Context / Symptom:** `dune runtest` failed in `lib/agent.ml` with `Error: Unbound record field name` at `call.name`.
+- **Context / Symptom:** `dune runtest` failed in the then-flat `lib/agent.ml` (now `lib/agent/agent.ml`) with `Error: Unbound record field name` at `call.name`.
 - **Root Cause:** The compiler could not infer the module-qualified `Protocol.tool_call` record type from the `List.iter` lambda at that point.
 - **Solution:** Annotated the lambda argument `(call : Protocol.tool_call)` so record-field resolution is unambiguous. Subsequent `dune runtest` passed.
 - **Prevention / Reference:** Annotate arguments at module boundaries when OCaml record fields are accessed before type inference has resolved the record type.

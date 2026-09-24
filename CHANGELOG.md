@@ -2,6 +2,9 @@
 
 ## 2026-09-24
 
+- refactor(project): grouped library, executable UI and tests by responsibility while preserving public OCaml module names; moved CLI authentication commands and credential selection into a dedicated module.
+- docs(project): mapped source/test ownership and provider contribution paths so new transports and browser grants have a single obvious home.
+
 - feat(provider): added account-scoped Codex Responses streaming with encrypted reasoning replay persisted across session reopen, model-bound native output verification and enterprise residency routing; registered OpenRouter's compatible chat endpoint.
 - feat(auth): added Codex OAuth PKCE login, account-bound JWT identity, refresh and pinned bearer inference; added OpenRouter's explicit state-less PKCE-to-key browser exchange without weakening standard OAuth state validation.
 - test(provider): exercised Codex and OpenRouter browser callbacks, token exchange, refresh, SSE tool turns, reopened-session reasoning replay, vendor endpoint isolation and private key storage through isolated CLI fixtures; no live vendor account was used.
