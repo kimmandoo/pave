@@ -5,13 +5,17 @@ type message = {
   content : string option;
   tool_calls : tool_call list;
   tool_call_id : string option;
+  provider_state : Yojson.Basic.t option;
 }
 
 exception Invalid_response of string
 
-let user content = { role = "user"; content = Some content; tool_calls = []; tool_call_id = None }
+let user content =
+  { role = "user"; content = Some content; tool_calls = [];
+    tool_call_id = None; provider_state = None }
 let tool_result id content =
-  { role = "tool"; content = Some content; tool_calls = []; tool_call_id = Some id }
+  { role = "tool"; content = Some content; tool_calls = [];
+    tool_call_id = Some id; provider_state = None }
 
 let member key = function
   | `Assoc fields -> (match List.assoc_opt key fields with Some v -> v | None -> `Null)
@@ -24,13 +28,16 @@ let call_to_json call =
     "function", `Assoc [ "name", `String call.name;
                             "arguments", `String (Yojson.Basic.to_string call.arguments) ] ]
 
-let message_to_json msg =
+let message_to_json ?(stored = false) msg =
   let fields = [ "role", `String msg.role ] in
   let fields = match msg.content with None -> fields | Some s -> fields @ [ "content", `String s ] in
   let fields = if msg.tool_calls = [] then fields
     else fields @ [ "tool_calls", `List (List.map call_to_json msg.tool_calls) ] in
   let fields = match msg.tool_call_id with None -> fields
     | Some id -> fields @ [ "tool_call_id", `String id ] in
+  let fields = match stored, msg.provider_state with
+    | true, Some state -> fields @ [ "provider_state", state ]
+    | _ -> fields in
   `Assoc fields
 
 let parse_call json =
@@ -57,7 +64,8 @@ let parse_message json =
   let content = match member "content" json with
     | `Null -> None | `String s -> Some s | _ -> raise (Invalid_response "invalid assistant content") in
   let tool_calls = parse_calls (member "tool_calls" json) in
-  { role = "assistant"; content; tool_calls; tool_call_id = None }
+  { role = "assistant"; content; tool_calls; tool_call_id = None;
+    provider_state = None }
 
 let message_from_json json =
   let role = member "role" json |> string in
@@ -66,12 +74,16 @@ let message_from_json json =
   let tool_calls = parse_calls (member "tool_calls" json) in
   let tool_call_id = match member "tool_call_id" json with
     | `Null -> None | `String id -> Some id | _ -> raise (Invalid_response "invalid tool_call_id") in
-  (match role, content, tool_calls, tool_call_id with
-  | "user", Some _, [], None
-  | "assistant", _, _, None
-  | "tool", Some _, [], Some _ -> ()
+  let provider_state = match member "provider_state" json with
+    | `Null -> None
+    | (`Assoc _ as state) -> Some state
+    | _ -> raise (Invalid_response "invalid provider state") in
+  (match role, content, tool_calls, tool_call_id, provider_state with
+  | "user", Some _, [], None, None
+  | "assistant", _, _, None, _
+  | "tool", Some _, [], Some _, None -> ()
   | _ -> raise (Invalid_response "invalid stored message"));
-  { role; content; tool_calls; tool_call_id }
+  { role; content; tool_calls; tool_call_id; provider_state }
 
 let parse_completion json =
   match member "choices" json with

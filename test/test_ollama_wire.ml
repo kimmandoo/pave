@@ -4,9 +4,11 @@ let expect_invalid f = match f () with
   | _ -> failwith "expected invalid Ollama response"
 
 let assistant content calls : Pave.Protocol.message =
-  { role = "assistant"; content; tool_calls = calls; tool_call_id = None }
+  { role = "assistant"; content; tool_calls = calls; tool_call_id = None;
+    provider_state = None }
 let system content : Pave.Protocol.message =
-  { role = "system"; content = Some content; tool_calls = []; tool_call_id = None }
+  { role = "system"; content = Some content; tool_calls = [];
+    tool_call_id = None; provider_state = None }
 let native_call name arguments = `Assoc [ "type", `String "function";
   "function", `Assoc [ "name", `String name; "arguments", arguments ] ]
 let native_message role content extras =

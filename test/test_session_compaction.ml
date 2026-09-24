@@ -1,6 +1,7 @@
 let user = Pave.Protocol.user
 let assistant text : Pave.Protocol.message =
-  { role = "assistant"; content = Some text; tool_calls = []; tool_call_id = None }
+  { role = "assistant"; content = Some text; tool_calls = [];
+    tool_call_id = None; provider_state = None }
 
 let () =
   let path = Filename.temp_file "pave-compaction-" ".jsonl" in
@@ -23,7 +24,7 @@ let () =
     let call : Pave.Protocol.tool_call = { id = "call-1"; name = "read_file";
       arguments = `Assoc [ "path", `String "App.swift" ] } in
     ignore (Pave.Session.append session { role = "assistant"; content = None;
-      tool_calls = [ call ]; tool_call_id = None });
+      tool_calls = [ call ]; tool_call_id = None; provider_state = None });
     let reopened = Pave.Session.open_file path in
     (match List.rev (Pave.Session.context reopened) with
      | result :: _ ->

@@ -7,9 +7,11 @@ let expect_invalid f =
 
 let call id name arguments : Pave.Protocol.tool_call = { id; name; arguments }
 let assistant content calls : Pave.Protocol.message =
-  { role = "assistant"; content; tool_calls = calls; tool_call_id = None }
+  { role = "assistant"; content; tool_calls = calls; tool_call_id = None;
+    provider_state = None }
 let system text : Pave.Protocol.message =
-  { role = "system"; content = Some text; tool_calls = []; tool_call_id = None }
+  { role = "system"; content = Some text; tool_calls = [];
+    tool_call_id = None; provider_state = None }
 let block kind fields = `Assoc (("type", `String kind) :: fields)
 let message role blocks = `Assoc [ "role", `String role; "content", `List blocks ]
 let response stop blocks =

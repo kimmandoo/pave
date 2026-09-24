@@ -25,6 +25,11 @@ let builtins = [
       "o3", "responses"; "o4", "responses"; "daybreak-", "responses" ];
     api_key_env = Some "OPENAI_API_KEY";
     oauth = None; default_model = Some "gpt-4.1-mini" };
+  { id = "openai-codex"; display_name = "OpenAI Codex subscription";
+    routes = [ { name = "responses"; wire = Provider.Codex_responses;
+      endpoint = "https://chatgpt.com/backend-api/codex/responses" } ];
+    default_route = "responses"; model_routes = [];
+    api_key_env = None; oauth = Some "openai-codex"; default_model = None };
   { id = "anthropic"; display_name = "Anthropic";
     routes = [ { name = "messages"; wire = Provider.Anthropic_messages;
       endpoint = "https://api.anthropic.com/v1/messages" } ];
@@ -56,6 +61,12 @@ let builtins = [
       endpoint = "https://api.mistral.ai/v1/chat/completions" } ];
     default_route = "chat"; model_routes = [];
     api_key_env = Some "MISTRAL_API_KEY"; oauth = None; default_model = None };
+  { id = "openrouter"; display_name = "OpenRouter";
+    routes = [ { name = "chat"; wire = Provider.Openai_completions;
+      endpoint = "https://openrouter.ai/api/v1/chat/completions" } ];
+    default_route = "chat"; model_routes = [];
+    api_key_env = Some "OPENROUTER_API_KEY"; oauth = Some "openrouter";
+    default_model = None };
 ]
 
 let all () = builtins

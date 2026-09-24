@@ -116,4 +116,4 @@ let finish t =
     invalid "empty response";
   { Protocol.role = "assistant";
     content = (if t.text_seen then Some (Buffer.contents t.content) else None);
-    tool_calls = List.rev t.calls; tool_call_id = None }
+    tool_calls = List.rev t.calls; tool_call_id = None; provider_state = None }

@@ -53,7 +53,8 @@ let entry_json entry =
     "id", `String entry.id; "parentId", option_json entry.parent_id;
     "timestamp", `String entry.timestamp ] in
   match entry.kind with
-  | Message message -> `Assoc (fields @ [ "message", Protocol.message_to_json message ])
+  | Message message -> `Assoc (fields @ [
+      "message", Protocol.message_to_json ~stored:true message ])
   | Compaction { summary; first_kept_id } ->
       `Assoc (fields @ [ "summary", `String summary;
                          "firstKeptEntryId", `String first_kept_id ])

@@ -159,4 +159,4 @@ let finish t =
    | None -> assert false);
   { Protocol.role = "assistant";
     content = (if Buffer.length text = 0 then None else Some (Buffer.contents text));
-    tool_calls = calls; tool_call_id = None }
+    tool_calls = calls; tool_call_id = None; provider_state = None }

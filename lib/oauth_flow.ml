@@ -237,7 +237,7 @@ let required key params =
 let check_deadline ?(now = Unix.gettimeofday ()) auth =
   if not (Float.is_finite now) || now >= auth.deadline then fail "OAuth authorization timed out"
 
-let parse_callback ?now auth ~response =
+let parse_callback ?now ?(require_state = true) auth ~response =
   check_deadline ?now auth;
   let expected = parse_uri auth.redirect_uri in
   let response = String.trim response in
@@ -255,13 +255,19 @@ let parse_callback ?now auth ~response =
       if slice response 0 split <> expected.path then fail "OAuth callback redirect mismatch";
       query_params (if split = String.length response then "" else
         slice response (split + 1) (String.length response)))
-    else (
-      (* A pasted code still requires the state sent with the authorization request. *)
+    else if require_state then (
+      (* Standard providers must echo the login's unguessable state. *)
       match String.split_on_char '#' response with
       | [code; state] when code <> "" && state <> "" -> ["code", code; "state", state]
-      | _ -> fail "paste the redirect URL or code#state") in
-  let received = required "state" params in
-  if not (constant_equal auth.state received) then fail "OAuth callback state mismatch";
+      | _ -> fail "paste the redirect URL or code#state")
+    else if response <> "" && not (String.contains response '#') then
+      ["code", response]
+    else fail "paste the redirect URL or authorization code" in
+  if require_state then (
+    let received = required "state" params in
+    if not (constant_equal auth.state received) then
+      fail "OAuth callback state mismatch")
+  else if List.mem_assoc "state" params then fail "unexpected OAuth state";
   if List.mem_assoc "error" params then fail "OAuth authorization denied";
   let code = required "code" params in
   if has_controls code then fail "invalid OAuth authorization code";
@@ -446,10 +452,10 @@ let port_of_authority authority =
   if port < 1 || port > 65535 then fail "invalid loopback callback port";
   port
 
-let listen_loopback ?now ?ttl policy =
-  validate_policy policy;
-  let uri = redirect policy in
-  if uri.scheme <> "http" then fail "loopback listener requires an HTTP redirect";
+let bind_loopback_callback redirect_uri =
+  let uri = validate_url ~local:true redirect_uri in
+  if uri.scheme <> "http" || uri.query <> "" || not (loopback_host uri.authority)
+  then fail "loopback listener requires a fixed HTTP redirect";
   let host = String.lowercase_ascii uri.authority in
   let address =
     if String.starts_with ~prefix:"localhost:" host || String.starts_with ~prefix:"127.0.0.1:" host
@@ -463,6 +469,13 @@ let listen_loopback ?now ?ttl policy =
     Unix.setsockopt socket Unix.SO_REUSEADDR true;
     Unix.bind socket (Unix.ADDR_INET (address, port_of_authority uri.authority));
     Unix.listen socket 4;
+    socket
+  with exn -> Unix.close socket; raise exn
+
+let listen_loopback ?now ?ttl policy =
+  validate_policy policy;
+  let socket = bind_loopback_callback policy.redirect_uri in
+  try
     let auth = start ?now ?ttl policy in
     auth, socket
   with exn -> Unix.close socket; raise exn
@@ -494,7 +507,7 @@ let read_callback_request ~now auth client =
   in
   receive ()
 
-let await_callback ?(now = Unix.gettimeofday) auth listener =
+let await_callback ?(now = Unix.gettimeofday) ?(require_state = true) auth listener =
   Fun.protect ~finally:(fun () -> Unix.close listener) (fun () ->
     let rec loop () =
       let remaining = auth.deadline -. now () in
@@ -524,7 +537,7 @@ let await_callback ?(now = Unix.gettimeofday) auth listener =
               else None) lines in
             let expected_host = String.lowercase_ascii (parse_uri auth.redirect_uri).authority in
             if hosts <> [expected_host] then fail "OAuth callback host mismatch";
-            Ok (parse_callback ~now:(now ()) auth ~response:target)
+            Ok (parse_callback ~now:(now ()) ~require_state auth ~response:target)
           with
           | OAuth_error message -> Error message
           | Unix.Unix_error _ -> Error "invalid OAuth callback request" in

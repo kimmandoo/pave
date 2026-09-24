@@ -2,6 +2,11 @@
 
 ## 2026-09-24
 
+- feat(provider): added account-scoped Codex Responses streaming with encrypted reasoning replay persisted across session reopen, model-bound native output verification and enterprise residency routing; registered OpenRouter's compatible chat endpoint.
+- feat(auth): added Codex OAuth PKCE login, account-bound JWT identity, refresh and pinned bearer inference; added OpenRouter's explicit state-less PKCE-to-key browser exchange without weakening standard OAuth state validation.
+- test(provider): exercised Codex and OpenRouter browser callbacks, token exchange, refresh, SSE tool turns, reopened-session reasoning replay, vendor endpoint isolation and private key storage through isolated CLI fixtures; no live vendor account was used.
+- test(distribution): verified four-platform public CI for the seven-provider milestone and successful publishing of all four `v0.1.2` release builds.
+
 - feat(provider): added registered OpenAI Responses, native Ollama and Google Gemini transports alongside Chat Completions and Anthropic Messages; routed DeepSeek, Groq and Mistral through explicit compatible chat descriptors.
 - feat(auth): added Anthropic OAuth PKCE browser/manual login, validated loopback callback, private atomic credential storage, cross-process refresh and bearer inference that rejects custom endpoints.
 - fix(provider): rejected inconsistent streamed Responses tool arguments and final assistant output rather than executing a divergent tool call.

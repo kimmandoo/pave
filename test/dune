@@ -77,3 +77,19 @@
 (test
  (name test_oauth_flow)
  (libraries pave unix yojson))
+
+(test
+ (name test_codex_oauth)
+ (libraries pave unix yojson))
+
+(test
+ (name test_codex_wire)
+ (libraries pave unix yojson))
+
+(test
+ (name test_codex_stream)
+ (libraries pave unix yojson))
+
+(test
+ (name test_openrouter_oauth)
+ (libraries pave unix yojson))

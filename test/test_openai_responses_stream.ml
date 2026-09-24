@@ -66,7 +66,8 @@ let () =
   assert (List.rev !deltas = [ "Hello "; "world" ]);
   assert (response = { Protocol.role = "assistant"; content = Some "Hello world";
     tool_calls = [ { Protocol.id = "call_1"; name = "read_file";
-      arguments = `Assoc [ "path", `String "a.txt" ] } ]; tool_call_id = None });
+      arguments = `Assoc [ "path", `String "a.txt" ] } ];
+    tool_call_id = None; provider_state = None });
   let without_deltas = added 0 initial_message ^ done_item 0 final_message
     ^ completion [ final_message ] in
   let deltas = ref [] in

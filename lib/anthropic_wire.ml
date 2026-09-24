@@ -80,7 +80,7 @@ let request ~model ~max_tokens messages tools =
              (* A whole run of tool results is one Anthropic user turn. *)
              let rec collect acc = function
                | ({ role = "tool"; content = Some text; tool_call_id = Some id;
-                    tool_calls = [] } : message) :: remaining ->
+                    tool_calls = []; _ } : message) :: remaining ->
                    if not (List.mem id !pending) then invalid "unexpected or duplicate tool result";
                    pending := List.filter (( <> ) id) !pending;
                    collect (tool_result_block id text :: acc) remaining
@@ -137,4 +137,5 @@ let parse_response json =
   let content = match List.rev !texts with
     | [] -> None
     | texts -> Some (String.concat "" texts) in
-  { role = "assistant"; content; tool_calls; tool_call_id = None }
+  { role = "assistant"; content; tool_calls; tool_call_id = None;
+    provider_state = None }

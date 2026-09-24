@@ -8,7 +8,8 @@ let () =
   let call = { id = "call-1"; name = "read_file";
                arguments = `Assoc [ "path", `String "App.swift" ] } in
   let assistant = { role = "assistant"; content = None;
-                    tool_calls = [ call ]; tool_call_id = None } in
+                    tool_calls = [ call ]; tool_call_id = None;
+                    provider_state = None } in
   let restored = message_from_json (message_to_json assistant) in
   assert (restored = assistant);
   let completed = `Assoc [ "choices", `List [ `Assoc [

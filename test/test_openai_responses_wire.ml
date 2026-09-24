@@ -5,9 +5,11 @@ let invalid f = match f () with
   | exception Protocol.Invalid_response _ -> ()
   | _ -> failwith "expected invalid Responses response"
 let assistant content calls : Protocol.message =
-  { role = "assistant"; content; tool_calls = calls; tool_call_id = None }
+  { role = "assistant"; content; tool_calls = calls; tool_call_id = None;
+    provider_state = None }
 let system content : Protocol.message =
-  { role = "system"; content = Some content; tool_calls = []; tool_call_id = None }
+  { role = "system"; content = Some content; tool_calls = [];
+    tool_call_id = None; provider_state = None }
 let call id name arguments : Protocol.tool_call = { id; name; arguments }
 let item kind fields = `Assoc (("type", `String kind) :: fields)
 let completed outputs = `Assoc [ "status", `String "completed"; "output", `List outputs ]

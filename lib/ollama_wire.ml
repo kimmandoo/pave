@@ -101,7 +101,8 @@ let parse_message json =
   let tool_calls = parse_calls (field "tool_calls" json) in
   if tool_calls = [] && (content = None || content = Some "") then
     invalid "empty assistant response";
-  { role = "assistant"; content; tool_calls; tool_call_id = None }
+  { role = "assistant"; content; tool_calls; tool_call_id = None;
+    provider_state = None }
 
 let check_done_reason json has_calls =
   match field "done_reason" json with

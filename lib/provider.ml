@@ -1,7 +1,12 @@
 type api = Openai_completions | Anthropic_messages | Openai_responses
-  | Ollama_chat | Gemini_direct
+  | Ollama_chat | Gemini_direct | Codex_responses
 type authentication = Api_key | OAuth
 type config = { endpoint : string; api_key : string; model : string; api : api }
+type credentials = {
+  access : string;
+  account_id : string option;
+  residency : string option;
+}
 
 exception Provider_error of string
 
@@ -318,14 +323,19 @@ let post_stream ~endpoint ~headers ~secret body_json ~on_chunk ~is_done ~is_fini
         raise (Provider_error (Printf.sprintf "HTTP %d%s" code suffix)));
       if Buffer.length pending <> 0 then on_chunk (Buffer.contents pending)))
 
-let complete ?(authentication = Api_key) ?resolve_key ?on_text config messages tools =
+let complete ?(authentication = Api_key) ?resolve_credential ?on_text config messages tools =
   if authentication = OAuth &&
-     (config.api <> Anthropic_messages ||
-      config.endpoint <> "https://api.anthropic.com/v1/messages") then
-    raise (Provider_error "OAuth inference requires the registered Anthropic endpoint");
-  let api_key = match resolve_key with
+     not (match config.api, config.endpoint with
+       | Anthropic_messages, "https://api.anthropic.com/v1/messages"
+       | Codex_responses, "https://chatgpt.com/backend-api/codex/responses" -> true
+       | _ -> false) then
+    raise (Provider_error "OAuth inference requires a registered provider endpoint");
+  if config.api = Codex_responses && authentication <> OAuth then
+    raise (Provider_error "Codex subscription inference requires OAuth");
+  let credential = match resolve_credential with
     | Some get -> get ()
-    | None -> config.api_key in
+    | None -> { access = config.api_key; account_id = None; residency = None } in
+  let api_key = credential.access in
   reject_controls "API key" api_key;
   if authentication = OAuth && api_key = "" then
     raise (Provider_error "OAuth access token unavailable");
@@ -442,3 +452,32 @@ let complete ?(authentication = Api_key) ?resolve_key ?on_text config messages t
               ~is_done:(fun () -> Gemini_stream.is_done stream)
               ~is_finished:(fun () -> Gemini_stream.is_finished stream);
             Gemini_stream.finish stream))
+  | Codex_responses ->
+      let account_id = match credential.account_id with
+        | Some id when id <> "" -> id
+        | _ -> raise (Provider_error "Codex OAuth account ID unavailable") in
+      reject_controls "account ID" account_id;
+      reject_controls "model" config.model;
+      let headers = [
+        "Authorization: Bearer " ^ api_key;
+        "chatgpt-account-id: " ^ account_id;
+        "OpenAI-Beta: responses=experimental";
+        "originator: pave";
+        "version: 0.155.1";
+        "x-codex-routing-hint: model=" ^ config.model;
+        "Accept: text/event-stream" ] @
+        (match credential.residency with
+         | None -> []
+         | Some residency ->
+             reject_controls "Codex residency" residency;
+             [ "x-openai-internal-codex-residency: " ^ residency ]) in
+      let body = parse (fun () ->
+        Codex_wire.request ~model:config.model messages tools) in
+      let emit = match on_text with Some emit -> emit | None -> fun _ -> () in
+      let stream = Codex_stream.create ~model:config.model ~on_text:emit in
+      parse (fun () ->
+        post_stream ~endpoint:config.endpoint ~headers ~secret:api_key
+          body ~on_chunk:(Codex_stream.feed stream)
+          ~is_done:(fun () -> Codex_stream.is_done stream)
+          ~is_finished:(fun () -> Codex_stream.is_finished stream);
+        Codex_stream.finish stream)

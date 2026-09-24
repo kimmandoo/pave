@@ -8,9 +8,9 @@ The full planned feature set is still in progress. Tests must establish behavior
 
 - [x] Implemented the OCaml CLI, bounded tool loop, session recovery and initial mobile workspace tools.
 - [x] Implemented OpenAI-compatible Chat Completions and Anthropic Messages, buffered and SSE-streaming, with local HTTP/tool-call verification.
-- [x] Added a focused provider registry with seven route descriptors, five wire transports, Anthropic OAuth PKCE login, secure local credential storage, locked refresh and protected inference; verified each registered route in local fixtures.
-- [ ] Complete the model catalog, OpenAI Codex subscription route, Gemini thought signatures, other provider transports and all provider-specific thinking, usage, errors and multimodal content.
-- [ ] Implement every remaining authentication policy and its matching inference transport. Authorization-code and device-code engines exist; only Anthropic's OAuth grant is currently wired into CLI inference. A new provider should change one descriptor plus a transport only if the wire protocol differs.
+- [x] Added nine provider descriptors and six distinct wire transports; Anthropic/Codex OAuth PKCE and OpenRouter's state-less PKCE-to-key login use private storage, locked refresh where applicable and pinned inference endpoints. Verified each registered route in isolated local fixtures; Codex replay preserved encrypted native reasoning across session restart.
+- [ ] Complete the model catalog, Gemini thought signatures, remaining provider transports and provider-specific thinking, usage, errors, multimodal content, proprietary gateway state and account entitlements.
+- [ ] Implement every remaining authentication policy and its matching inference transport. The generic authorization-code and device-code engines exist, but only Anthropic, Codex and OpenRouter browser sign-in are wired to CLI inference. A new provider should change one descriptor plus a transport only if its wire protocol differs.
 
 ### Phase 2 — Session and interactive runtime (in progress)
 

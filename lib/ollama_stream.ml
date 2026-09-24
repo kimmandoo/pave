@@ -136,7 +136,7 @@ let handle_frame t line =
         if tool_calls = [] && (content = None || content = Some "") then
           invalid "empty assistant response";
         t.result <- Some { Protocol.role = "assistant"; content;
-          tool_calls; tool_call_id = None };
+          tool_calls; tool_call_id = None; provider_state = None };
         t.done_seen <- true
     | _ -> invalid "invalid done marker")
 

@@ -123,4 +123,4 @@ let parse_completion json =
     | _ -> invalid "unsupported output item") outputs;
   { role = "assistant"; content = (match List.rev !texts with
       | [] -> None | texts -> Some (String.concat "" texts));
-    tool_calls = List.rev !calls; tool_call_id = None }
+    tool_calls = List.rev !calls; tool_call_id = None; provider_state = None }

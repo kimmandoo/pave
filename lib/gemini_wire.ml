@@ -119,7 +119,7 @@ let request ~model messages tools =
              let ordered_ids = List.map fst !pending in
              let rec collect parts = function
                | ({ role = "tool"; content = Some text; tool_call_id = Some id;
-                    tool_calls = [] } : message) :: remaining ->
+                    tool_calls = []; _ } : message) :: remaining ->
                    let name = match List.assoc_opt id !pending with
                      | Some name -> name
                      | None -> invalid "unexpected or duplicate tool result" in
@@ -218,7 +218,8 @@ let parse_candidate candidate =
     | _ -> invalid "missing candidate content" in
   let content, tool_calls = parse_parts parts in
   if (content = None || content = Some "") && tool_calls = [] then invalid "empty candidate";
-  { role = "assistant"; content; tool_calls; tool_call_id = None }
+  { role = "assistant"; content; tool_calls; tool_call_id = None;
+    provider_state = None }
 
 let parse_completion json =
   (match field "error" json with

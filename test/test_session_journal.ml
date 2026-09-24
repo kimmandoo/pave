@@ -38,7 +38,7 @@ let () =
     let current = Pave.Session.open_file path in
     Pave.Session.branch current selected;
     let pending_id = Pave.Session.append current { role = "assistant"; content = None;
-      tool_calls = [ call ]; tool_call_id = None } in
+      tool_calls = [ call ]; tool_call_id = None; provider_state = None } in
     let recovered = Pave.Session.open_file path in
     (match List.rev (Pave.Session.history recovered) with
      | result :: _ ->

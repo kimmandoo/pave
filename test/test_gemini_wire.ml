@@ -4,9 +4,11 @@ let expect_invalid f = match f () with
   | _ -> failwith "expected invalid Gemini response"
 let call id name arguments : Pave.Protocol.tool_call = { id; name; arguments }
 let assistant content tool_calls : Pave.Protocol.message =
-  { role = "assistant"; content; tool_calls; tool_call_id = None }
+  { role = "assistant"; content; tool_calls; tool_call_id = None;
+    provider_state = None }
 let system text : Pave.Protocol.message =
-  { role = "system"; content = Some text; tool_calls = []; tool_call_id = None }
+  { role = "system"; content = Some text; tool_calls = [];
+    tool_call_id = None; provider_state = None }
 let item role parts = `Assoc [ "role", `String role; "parts", `List parts ]
 let text value = `Assoc [ "text", `String value ]
 let fn name args = `Assoc [ "functionCall", `Assoc [ "name", `String name; "args", args ] ]

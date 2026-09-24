@@ -1,7 +1,7 @@
 type t = {
   provider : Provider.config;
   authentication : Provider.authentication;
-  resolve_key : (unit -> string) option;
+  resolve_credential : (unit -> Provider.credentials) option;
   root : string;
   allow_shell : bool;
   stream : bool;
@@ -14,10 +14,10 @@ type t = {
 }
 
 let create ~provider ~root ~system ?(authentication = Provider.Api_key)
-    ?resolve_key ?(allow_shell = false) ?(stream = false)
+    ?resolve_credential ?(allow_shell = false) ?(stream = false)
     ?(approve_command = fun _ -> false) ?(history = [])
     ?(on_change = fun _ -> ()) ?(on_delta = fun _ -> ()) ~on_event () =
-  { provider; authentication; resolve_key; root; system; allow_shell; stream;
+  { provider; authentication; resolve_credential; root; system; allow_shell; stream;
     approve_command; history_rev = List.rev history;
     on_change; on_delta; on_event }
 
@@ -33,17 +33,18 @@ let run ?(max_turns = 20) t text =
   let rec turn remaining =
     if remaining = 0 then failwith "tool-call limit reached; inspect workspace before continuing";
     let system : Protocol.message =
-      { role = "system"; content = Some t.system; tool_calls = []; tool_call_id = None } in
+      { role = "system"; content = Some t.system; tool_calls = [];
+        tool_call_id = None; provider_state = None } in
     let definitions = if t.allow_shell then Tools.definitions else
       List.filter (fun json -> Protocol.member "name" (Protocol.member "function" json)
         <> `String "run_command") Tools.definitions in
     let transcript = system :: messages t in
     let reply =
       if t.stream then Provider.complete ~authentication:t.authentication
-        ?resolve_key:t.resolve_key ~on_text:t.on_delta t.provider
+        ?resolve_credential:t.resolve_credential ~on_text:t.on_delta t.provider
         transcript definitions
       else Provider.complete ~authentication:t.authentication
-        ?resolve_key:t.resolve_key t.provider transcript definitions in
+        ?resolve_credential:t.resolve_credential t.provider transcript definitions in
     append t reply;
     (match reply.content with
      | Some s when s <> "" ->

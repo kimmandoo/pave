@@ -170,4 +170,4 @@ let finish t =
    | _ -> ());
   { Protocol.role = "assistant";
     content = (if t.content_seen then Some (Buffer.contents t.content) else None);
-    tool_calls = calls; tool_call_id = None }
+    tool_calls = calls; tool_call_id = None; provider_state = None }

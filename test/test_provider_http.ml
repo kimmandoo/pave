@@ -102,15 +102,31 @@ let () =
     let anthropic : Pave.Provider.config = { endpoint; api_key = "mock-anthropic";
       model = "mock-claude"; api = Pave.Provider.Anthropic_messages } in
     let system : Pave.Protocol.message = { role = "system"; content = Some "mobile system";
-      tool_calls = []; tool_call_id = None } in
+      tool_calls = []; tool_call_id = None; provider_state = None } in
     let user = Pave.Protocol.user "inspect" in
     let credential_read = ref false in
     let foreign = { anthropic with endpoint = "https://attacker.example/v1/messages" } in
     (match Pave.Provider.complete ~authentication:Pave.Provider.OAuth
-      ~resolve_key:(fun () -> credential_read := true; "sensitive") foreign
+      ~resolve_credential:(fun () -> credential_read := true;
+        { Pave.Provider.access = "sensitive"; account_id = None; residency = None }) foreign
       [ system; user ] [] with
      | exception Pave.Provider.Provider_error _ -> assert (not !credential_read)
      | _ -> failwith "OAuth credential accepted by a foreign HTTPS endpoint");
+    let codex = { anthropic with
+      api = Pave.Provider.Codex_responses;
+      endpoint = "https://chatgpt.com/backend-api/codex/responses" } in
+    (match Pave.Provider.complete codex [ system; user ] [] with
+     | exception Pave.Provider.Provider_error _ -> ()
+     | _ -> failwith "Codex accepted an API key in place of its OAuth grant");
+    credential_read := false;
+    (match Pave.Provider.complete ~authentication:Pave.Provider.OAuth
+      ~resolve_credential:(fun () -> credential_read := true;
+        { Pave.Provider.access = "sensitive";
+          account_id = Some "workspace"; residency = None })
+      { codex with endpoint = "https://attacker.example/codex/responses" }
+      [ system; user ] [] with
+     | exception Pave.Provider.Provider_error _ -> assert (not !credential_read)
+     | _ -> failwith "Codex bearer accepted by a foreign HTTPS endpoint");
     let deltas = ref [] in
     let streamed = Pave.Provider.complete ~on_text:(fun delta -> deltas := delta :: !deltas)
       openai [ system; user ] [] in

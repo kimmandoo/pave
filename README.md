@@ -14,7 +14,7 @@
 <p align="center"><a href="#install">Install</a> · <a href="#use">Use</a> · <a href="#providers">Providers</a> · <a href="#features">Features</a> · <a href="#contribute">Contribute</a></p>
 
 > [!NOTE]
-> Pave is in active development. Seven provider descriptors and five wire transports, the agent loop, OAuth login/refresh for Anthropic, session journal and interactive terminal work in local fixtures. Live credentialed inference, cancellation, LSP/DAP, subagents, plugins and a full model catalog are not yet verified or implemented. See [TASKS.md](TASKS.md) for the remaining work.
+> Pave is in active development. Nine provider descriptors and six wire transports, the agent loop, three browser login paths, session journal and interactive terminal work in local fixtures. Live credentialed inference, cancellation, LSP/DAP, subagents, plugins and a full model catalog are not yet verified or implemented. See [TASKS.md](TASKS.md) for the remaining work.
 
 ## Install
 
@@ -71,11 +71,19 @@ pave --provider openai --model gpt-5 --prompt 'Inspect the Android build failure
 pave --login anthropic
 pave --provider anthropic --model "$MODEL_ID" --root /path/to/mobile/repo
 
+# Codex subscription: separate ChatGPT OAuth and account-scoped Responses API.
+pave --login openai-codex
+pave --provider openai-codex --model "$CODEX_MODEL" --prompt 'Inspect this project'
+
+# OpenRouter browser exchange yields a durable API key; or set OPENROUTER_API_KEY.
+pave --login openrouter
+pave --provider openrouter --model "$ROUTER_MODEL" --prompt 'Inspect this project'
+
 # Local Ollama; pull a model with Ollama before invoking Pave.
 pave --provider ollama --model "$LOCAL_MODEL" --prompt 'Inspect this project'
 ```
 
-For a remote browser, use `pave --login-manual anthropic` and paste the **full callback URL**; `pave --logout anthropic` removes the locally stored credential. The OAuth store is unencrypted at `${XDG_CONFIG_HOME:-~/.config}/pave/oauth.json`, with a private directory and 0600 file permissions. `ANTHROPIC_API_KEY` takes precedence if set. Refresh happens under a cross-process lock before expiry. OAuth tokens cannot be sent to a custom `--endpoint`.
+For a remote browser, use `pave --login-manual PROVIDER` and paste the full callback URL; OpenRouter also accepts the authorization code alone because that provider does not echo state. Standard OAuth providers require the correct callback state. `pave --logout PROVIDER` removes a stored credential. The private store is **unencrypted** at `${XDG_CONFIG_HOME:-~/.config}/pave/oauth.json` (0700 directory, 0600 file); OpenRouter's browser exchange stores an API key there. An environment API key takes precedence where available. OAuth refresh is locked across processes; browser-derived tokens/keys cannot be sent to a custom `--endpoint`.
 
 `--api NAME` selects an explicit registered route; `--endpoint URL` overrides an API-key provider's completion endpoint. `--model ID` overrides the OpenAI default (`gpt-4.1-mini`) and is required by the other providers. Redirected input/output uses a plain line-oriented CLI instead of the full-screen interface.
 
@@ -95,20 +103,22 @@ Sessions are private append-only JSONL journals on creation, **not encrypted**. 
 | Provider | Transport | Authentication | CLI selection |
 | --- | --- | --- | --- |
 | OpenAI | Chat Completions, Responses | `OPENAI_API_KEY` | `--provider openai`; `--api responses` or GPT-5/o-series auto-route |
+| OpenAI Codex subscription | account-scoped Codex Responses | `--login openai-codex` (PKCE; refresh) | `--provider openai-codex --model MODEL_ID` |
 | Anthropic | Messages | `ANTHROPIC_API_KEY` or `--login anthropic` | `--provider anthropic --model MODEL_ID` |
 | Ollama | native `/api/chat` | none (local server) | `--provider ollama --model MODEL_ID` |
 | Google Gemini API | native `generateContent` | `GEMINI_API_KEY` | `--provider google --model MODEL_ID` |
 | DeepSeek | Chat Completions | `DEEPSEEK_API_KEY` | `--provider deepseek --model MODEL_ID` |
 | Groq | Chat Completions | `GROQ_API_KEY` | `--provider groq --model MODEL_ID` |
 | Mistral | Chat Completions | `MISTRAL_API_KEY` | `--provider mistral --model MODEL_ID` |
+| OpenRouter | Chat Completions | `OPENROUTER_API_KEY` or `--login openrouter` (PKCE exchanges for API key) | `--provider openrouter --model MODEL_ID` |
 
-All seven entries completed a **local HTTP CLI fixture**; wire tests covered buffering and incremental streaming. OAuth browser callback, protected file, refresh and bearer inference completed an **isolated HTTPS-transport fixture**, not a live Anthropic account. Vendor entitlements, model support and actual API responses remain unverified. Gemini 3 **tool requests fail closed** because their thought signatures cannot yet be preserved; text-only Gemini 3 requests are not blocked. Other upstream authentication and provider-specific wire families, including Codex subscription inference, are still missing. A compatible endpoint does not imply every model feature works.
+All nine entries completed **isolated CLI fixtures**, not live vendor calls. The Codex scenario exercised a real loopback callback, JWT account routing, refresh, SSE tool turns, encrypted reasoning replay through a reopened session and enterprise residency headers; OpenRouter exercised its state-less PKCE exception, key exchange, stored-key inference and logout. Auth fixtures intercepted HTTPS with a local subprocess, so client registration, live account entitlement, model support and actual vendor responses remain **unverified**. Gemini 3 tool requests fail closed because thought signatures are not yet preserved; text-only Gemini 3 requests are not blocked. Other reference auth policies, proprietary gateway transports and full model semantics are still missing. A compatible endpoint does not imply every model feature works.
 
 ## Features
 
 | Available | Not yet available |
 | --- | --- |
-| Five wire transports with distinct provider routes; bounded buffered and incremental-stream decoders | Codex subscription inference, provider-specific thinking/usage/multimodal parity and full model catalog |
+| Six wire transports with distinct provider routes; bounded buffered and incremental-stream decoders; Codex native reasoning replay | Most provider-specific thinking/usage/multimodal parity and full model catalog |
 | Mobile manifest detection, workspace file read/search/edit/write, bounded agent turns | LSP/DAP, subagents, extensions and full tool catalog |
 | Grapheme-aware CJK input, live transcript, branching sessions and manual compaction | Cancellation/queued typing during an active model turn; automatic compaction |
 
