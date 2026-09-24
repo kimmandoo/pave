@@ -122,6 +122,7 @@ For optional prompt customization, use `<workspace>/.pave/SYSTEM.md`, `SYSTEM_TE
 | `/cancel` · `/settings` | Stop the active request/command; edit typed project defaults for the next launch |
 | `/tools [NAME]` | List the tools actually offered to the model, or inspect one tool's description; shell availability follows `--allow-shell` and still requires per-command approval |
 | `/context` | Inspect the actual model/route, saved branch and retained conversation count; show only Ollama-reported input/output tokens on this ancestry, with other providers, context limit and cost explicitly untracked |
+| `/usage` | Inspect only recorded provider-reported tokens; private journals group the selected branch's input/output totals by model, while ephemeral conversations show the combined Ollama total |
 | `/hotkeys` | Display actual interactive keyboard shortcuts (including search, word editing, paste and tool expansion); headless CLI does not claim terminal keys work |
 | `/new` · `/resume [PATH]` | Create a private, persistent workspace journal; search recent journals or reopen an explicit workspace journal |
 | `/help` · `/entries` | Show descriptive commands · list journal message IDs |

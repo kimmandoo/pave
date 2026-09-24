@@ -1,6 +1,7 @@
 # Changelog
 
 ## 2026-09-25
+- feat(tui): add `/usage` to the typed command catalog and searchable help; private journals show real provider/model-grouped token totals only on the selected ancestry, while unsaved conversations show an Ollama-only combined total. A 70×18 native PTY verified empty saved/ephemeral states, two streamed model turns showing 36 input/14 output tokens, and headless `/help` exposed the command. Journal tests cover aggregation, fork isolation and branch rollback.
 - feat(context): record only native Ollama's reported prompt/completion tokens from valid buffered responses and final streamed frames; retain private per-completion branch-local usage across `/resume`, `/branch`, `/fork` and compaction without inserting it into model messages. `/context` reports the selected ancestry's actual counts while explicitly leaving other providers, context limits and cost untracked. Exercised a real 70×18 PTY against a local streamed Ollama fixture, a buffered turn, branch rollback, journal reopen and ephemeral conversation; transport and journal regressions passed.
 
 - test(distribution): published `v0.1.13` across all four native targets; an explicitly isolated public-installed `v0.1.12` upgraded over HTTPS and reported current. A real shipped 70×18 PTY showed `/resume`'s journal footer first, then confirmed `/context` and `/hotkeys` each restored normal shortcut hints without losing the saved conversation.

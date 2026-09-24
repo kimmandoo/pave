@@ -672,6 +672,36 @@ let () =
           (match !ui with
            | Some screen -> Tui.events screen lines
            | None -> List.iter on_event lines)
+        | Pave.Interaction.Usage ->
+          let lines = match !journal with
+            | None ->
+                ["Usage · ephemeral conversation"] @
+                (match !ephemeral_usage with
+                 | None -> ["No provider-reported tokens yet"]
+                 | Some tokens ->
+                     [Printf.sprintf "Ollama · %d input / %d output tokens"
+                        tokens.input_tokens tokens.output_tokens])
+            | Some current ->
+                let by_model = Pave.Session.usage_by_model current in
+                ["Usage · selected journal branch"] @
+                (match by_model with
+                 | [] -> ["No provider-reported tokens on this branch"]
+                 | rows ->
+                     let total = List.fold_left (fun summed (_, tokens) ->
+                       Pave.Protocol.add_usage summed tokens)
+                       { Pave.Protocol.input_tokens = 0; output_tokens = 0 }
+                       rows in
+                     [Printf.sprintf "Total · %d input / %d output tokens"
+                        total.input_tokens total.output_tokens] @
+                     List.map (fun ((provider, model), (tokens : Pave.Protocol.usage)) ->
+                       Printf.sprintf "%s · %d in / %d out"
+                         (Pave.Session_tree.first_line (provider ^ "/" ^ model))
+                         tokens.input_tokens tokens.output_tokens) rows) in
+          let lines = lines @
+            ["Only native Ollama reports tokens · context limit/cost untracked"] in
+          (match !ui with
+           | Some screen -> Tui.events screen lines
+           | None -> List.iter on_event lines)
         | Pave.Interaction.Entries ->
           (match !journal with
            | None -> on_event "Error: --session is required to list entries"

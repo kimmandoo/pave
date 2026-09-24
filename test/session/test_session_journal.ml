@@ -82,8 +82,16 @@ let () =
     let copy = Pave.Session.fork branched metadata_fork in
     assert (Pave.Session.usage copy = Some counted);
     assert (Pave.Session.history copy = [message "first"; message "second"]);
+    Pave.Session.append_usage copy ~provider:"ollama" ~model:"local"
+      { input_tokens = 3; output_tokens = 2 };
+    Pave.Session.append_usage copy ~provider:"ollama" ~model:"other"
+      { input_tokens = 1; output_tokens = 1 };
+    assert (Pave.Session.usage_by_model copy =
+      [(("ollama", "local"), { input_tokens = 21; output_tokens = 9 });
+       (("ollama", "other"), { input_tokens = 1; output_tokens = 1 })]);
     Pave.Session.branch copy first;
     assert (Pave.Session.usage copy = None);
+    assert (Pave.Session.usage_by_model copy = []);
     Pave.Session.branch branched branch_marker;
     assert (Pave.Session.model branched = Some ("openai", "gpt-6-sol"));
     assert (Pave.Session.history (Pave.Session.open_file metadata_path) =
