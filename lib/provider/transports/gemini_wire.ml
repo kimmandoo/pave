@@ -11,7 +11,10 @@ let next_call_id () =
   incr call_sequence;
   "gemini_call_" ^ string_of_int !call_sequence
 
-let gemini_three model = String.starts_with ~prefix:"gemini-3" model
+let gemini_three model =
+  let model = if String.starts_with ~prefix:"models/" model then
+    String.sub model 7 (String.length model - 7) else model in
+  String.starts_with ~prefix:"gemini-3" model
 let part text = `Assoc [ "text", `String text ]
 let content role parts = `Assoc [ "role", `String role; "parts", `List parts ]
 let native_state ~model parts = `Assoc [

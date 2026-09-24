@@ -129,7 +129,7 @@ let parse_rule text =
         then None else Some (patterns, String.concat "\n" body)
   | _ -> None
 
-let load ?path ~root () : result =
+let load ?path ?(scoped_only = false) ~root () : result =
   let diagnostics = ref [] and provenance = ref [] and chunks = ref [] in
   let diag path code message =
     diagnostics := { path; code; message } :: !diagnostics in
@@ -240,28 +240,29 @@ let load ?path ~root () : result =
         | Some text ->
           let expanded = expand ~base ~kind ~scope ~depth:0 ~stack:[] file text in
           chunks := expanded :: !chunks in
-    let home = match Sys.getenv_opt "HOME" with
-      | Some value when value <> "" && not (Filename.is_relative value) -> canonical value
-      | _ -> None in
-    let config_dir = match Sys.getenv_opt "XDG_CONFIG_HOME" with
-      | Some value when value <> "" && not (Filename.is_relative value) -> Some value
-      | _ -> Option.map (fun dir -> Filename.concat dir ".config") home in
-    (match config_dir with
-     | None -> diag root "no_user_config" "HOME is unavailable; user instructions skipped"
-     | Some dir ->
-       (match canonical dir with
-        | None -> if present dir then
-            diag dir "unsafe_config" "User config directory is not accessible"
-        | Some dir -> add ~base:dir ~kind:User (Filename.concat dir "pave/AGENTS.md")));
-    let boundary = match home with
-      | Some home when within ~base:home root -> home
-      | _ -> "/" in
-    let rec ancestors dir acc =
-      if dir = boundary || dir = "/" then dir :: acc
-      else ancestors (Filename.dirname dir) (dir :: acc) in
-    List.iter (fun dir ->
-      add ~base:dir ~kind:Project (Filename.concat dir "AGENTS.md"))
-      (ancestors root []);
+    if not scoped_only then (
+      let home = match Sys.getenv_opt "HOME" with
+        | Some value when value <> "" && not (Filename.is_relative value) -> canonical value
+        | _ -> None in
+      let config_dir = match Sys.getenv_opt "XDG_CONFIG_HOME" with
+        | Some value when value <> "" && not (Filename.is_relative value) -> Some value
+        | _ -> Option.map (fun dir -> Filename.concat dir ".config") home in
+      (match config_dir with
+       | None -> diag root "no_user_config" "HOME is unavailable; user instructions skipped"
+       | Some dir ->
+         (match canonical dir with
+          | None -> if present dir then
+              diag dir "unsafe_config" "User config directory is not accessible"
+          | Some dir -> add ~base:dir ~kind:User (Filename.concat dir "pave/AGENTS.md")));
+      let boundary = match home with
+        | Some home when within ~base:home root -> home
+        | _ -> "/" in
+      let rec ancestors dir acc =
+        if dir = boundary || dir = "/" then dir :: acc
+        else ancestors (Filename.dirname dir) (dir :: acc) in
+      List.iter (fun dir ->
+        add ~base:dir ~kind:Project (Filename.concat dir "AGENTS.md"))
+        (ancestors root []));
     let target = match path with
       | None -> None
       | Some path ->
@@ -346,3 +347,18 @@ let load ?path ~root () : result =
        diag rules_dir "read_error" "Cannot inspect rule parent");
     { text = String.concat "\n\n" (List.rev !chunks);
       diagnostics = List.rev !diagnostics; provenance = List.rev !provenance }
+
+(* Resolve just the per-file instructions. The caller must put [text] into a
+   system message, never into a tool result. Incomplete rule sets fail closed:
+   a skipped rule or import could otherwise silently omit restrictions. Two
+   matching rules are deterministic (lexical order), so their conflict is
+   reported but both are supplied. Do not cache this result: rules and symlink
+   targets may change between model turns. *)
+type scoped = { text : string; diagnostics : diagnostic list; safe : bool }
+
+let resolve_scoped ~root ~path () : scoped =
+  let result = load ~root ~path ~scoped_only:true () in
+  let safe = List.for_all (fun diagnostic ->
+    diagnostic.code = "rule_conflict") result.diagnostics in
+  { text = if safe then result.text else "";
+    diagnostics = result.diagnostics; safe }

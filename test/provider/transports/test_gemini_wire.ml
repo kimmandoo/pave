@@ -127,6 +127,21 @@ let () =
            "thoughtSignature", `String "c2ln"; "inlineData", `Assoc [] ] ] ]) });
        expect_invalid (fun () -> replay { signed with provider_state = None })
    | _ -> failwith "signed call was not parsed");
+  let discovered_model = "models/gemini-3-pro" in
+  let discovered = Pave.Gemini_wire.parse_completion ~model:discovered_model
+    (response native_parts "STOP") in
+  (match discovered.tool_calls with
+   | [ invocation ] ->
+       let continued = Pave.Gemini_wire.request ~model:discovered_model
+         [ user "Read"; discovered; tool_result invocation.id "file contents" ] [ tool ] in
+       assert (field "contents" continued = `List [
+         item "user" [ text "Read" ]; item "model" native_parts;
+         item "user" [ `Assoc [ "functionResponse", `Assoc [
+           "name", `String "read_file";
+           "response", `Assoc [ "output", `String "file contents" ] ] ] ] ])
+   | _ -> failwith "service-prefixed Gemini 3 lost its signed function call");
+  expect_invalid (fun () -> Pave.Gemini_wire.parse_completion
+    ~model:discovered_model (response [ fn "read_file" first.arguments ] "STOP"));
   let parallel_parts = [ signed_part; fn "read_file" second.arguments ] in
   let parallel = Pave.Gemini_wire.parse_completion ~model:"gemini-3-pro"
     (response parallel_parts "STOP") in

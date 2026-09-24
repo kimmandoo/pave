@@ -6,6 +6,8 @@ let () =
   let max_turns = ref None and list_providers = ref false
     and list_models = ref false in
   let login = ref "" and login_manual = ref "" and logout = ref "" in
+  let custom_prompt = ref None and prompt_template = ref None
+    and append_prompt = ref None in
   let options = [
     "--root", Arg.Set_string root, "Workspace directory (default: current directory)";
     "--model", Arg.Set_string model, "Model ID (required unless the provider has a default)";
@@ -22,6 +24,12 @@ let () =
     "--session", Arg.Set_string session, "Save and restore conversation at this file";
     "--prompt", Arg.Set_string prompt, "Send one prompt, then exit";
     "--allow-shell", Arg.Set allow_shell, "Offer model-requested shell commands for individual interactive approval (NOT sandboxed)";
+    "--system-prompt", Arg.String (fun text -> custom_prompt := Some text),
+      "Explicit custom instructions (replaces discovered SYSTEM.md, not mobile safety)";
+    "--system-prompt-template", Arg.String (fun path -> prompt_template := Some path),
+      "Strict custom instruction template file (mutually exclusive with --system-prompt)";
+    "--append-system-prompt", Arg.String (fun text -> append_prompt := Some text),
+      "Additional instruction text (replaces discovered APPEND_SYSTEM.md)";
     "--max-turns", Arg.Int (fun count -> max_turns := Some count),
       "Maximum model turns per prompt (default: 20)";
   ] in
@@ -63,21 +71,22 @@ let () =
     let descriptor = match Pave.Provider_catalog.find provider_name with
       | Some value -> value
       | None -> failwith ("unsupported provider: " ^ provider_name) in
+    let discovery_credential (descriptor : Pave.Provider_catalog.descriptor) =
+      match descriptor.id with
+      | "openai" | "google" ->
+          Option.bind descriptor.api_key_env (fun name ->
+            match Sys.getenv_opt name with
+            | Some key when key <> "" ->
+                Some (Pave.Model_discovery.Api_key key)
+            | _ -> None)
+      | "github-copilot" ->
+          Option.map (fun (stored : Pave.Oauth_store.credential) ->
+            Pave.Model_discovery.Copilot_oauth stored.access)
+            (Pave.Oauth_store.get ~path:(Pave.Oauth_store.default_path ())
+              ~provider:descriptor.id)
+      | _ -> None in
     if !list_models then (
-      let credential : Pave.Model_discovery.credential option =
-        match descriptor.id with
-        | "openai" | "google" ->
-            Option.bind descriptor.api_key_env (fun name ->
-              match Sys.getenv_opt name with
-              | Some key when key <> "" ->
-                  Some (Pave.Model_discovery.Api_key key)
-              | _ -> None)
-        | "github-copilot" ->
-            Option.map (fun (stored : Pave.Oauth_store.credential) ->
-              Pave.Model_discovery.Copilot_oauth stored.access)
-              (Pave.Oauth_store.get ~path:(Pave.Oauth_store.default_path ())
-                ~provider:descriptor.id)
-        | _ -> None in
+      let credential = discovery_credential descriptor in
       (match Pave.Model_discovery.discover ~provider:descriptor.id
         ?credential () with
        | Error error -> failwith (Pave.Model_discovery.message error)
@@ -91,10 +100,11 @@ let () =
              Printf.printf "No models reported by %s.\n" descriptor.id);
       exit 0);
     let project_context = Pave.Project_context.load ~root () in
-    let system = Pave.Mobile_prompt.text ^
-      (if project_context.text = "" then "" else
-        "\n\nProject instructions (lower priority than mobile safety):\n" ^
-        project_context.text) in
+    let prompt_configuration = Pave.System_prompt.load ~root
+      ~mobile:Pave.Mobile_prompt.text ~project:project_context.text
+      ?custom_text:!custom_prompt ?template_file:!prompt_template
+      ?append_text:!append_prompt () in
+    let system = prompt_configuration.text in
     let model = if !model <> "" then !model
       else match configured.default_provider with
         | Some configured_provider when configured_provider = descriptor.id ->
@@ -223,6 +233,58 @@ let () =
              ~login_manual:"" ~logout:""));
         on_event ("Signed in to " ^ id ^
           ". Select a model with /model " ^ id ^ "/MODEL_ID.")) in
+    let choose_dynamic_model screen choices =
+      let descriptor = !active_descriptor in
+      let read_fd, write_fd = Unix.pipe () in
+      Unix.set_close_on_exec read_fd;
+      Unix.set_close_on_exec write_fd;
+      let cancelled = Atomic.make false in
+      let lock = Mutex.create () and outcome = ref None in
+      let worker = Thread.create (fun () ->
+        let answer =
+          try
+            let credential = discovery_credential descriptor in
+            `Listing (Pave.Model_discovery.discover
+              ~cancel:(fun () -> Atomic.get cancelled)
+              ~provider:descriptor.id ?credential ())
+          with Pave.Provider.Cancelled -> `Cancelled
+             | _ -> `Unavailable in
+        Mutex.lock lock;
+        outcome := Some answer;
+        Mutex.unlock lock;
+        (try ignore (Unix.write_substring write_fd "x" 0 1)
+         with Unix.Unix_error _ -> ())) () in
+      Fun.protect ~finally:(fun () ->
+        Atomic.set cancelled true;
+        Thread.join worker;
+        Unix.close write_fd;
+        Unix.close read_fd) (fun () ->
+        let on_wake () =
+          let marker = Bytes.create 1 in
+          ignore (Unix.read read_fd marker 0 1);
+          Mutex.lock lock;
+          let answer = !outcome in
+          Mutex.unlock lock;
+          match answer with
+          | Some (`Listing (Ok ids)) ->
+              let verified = List.filter_map (fun id ->
+                match Pave.Provider_catalog.route descriptor ~model:id "" with
+                | Some _ -> Some (descriptor.id ^ "/" ^ id)
+                | None -> None) ids in
+              let status = Printf.sprintf "%s: %d live routable model%s"
+                descriptor.display_name (List.length verified)
+                (if List.length verified = 1 then "" else "s") in
+              Tui.update_choices screen ~verified ~status ()
+          | Some (`Listing (Error error)) ->
+              Tui.update_choices screen ~verified:[]
+                ~status:(Pave.Model_discovery.message error) ()
+          | Some `Unavailable ->
+              Tui.update_choices screen ~verified:[]
+                ~status:"Model listing unavailable; offline suggestions remain" ()
+          | Some `Cancelled | None -> () in
+        Tui.choose screen ~allow_custom:true ~wake_fd:read_fd ~on_wake
+          ~title:"Model · live account IDs + offline suggestions"
+          ~choices) in
     let choose_model selected =
       let selector = match selected with
         | Some selector -> selector
@@ -234,9 +296,8 @@ let () =
                    (fun (entry : Pave.Provider_catalog.descriptor) ->
                      List.map (fun model -> entry.id ^ "/" ^ model)
                        (Pave.Provider_catalog.known_models entry)) providers in
-                 (match Tui.choose screen ~allow_custom:true
-                   ~title:"Model · type PROVIDER/MODEL_ID for custom"
-                   ~choices with Some value -> value | None -> "")
+                 (match choose_dynamic_model screen choices with
+                  | Some value -> value | None -> "")
              | None ->
                  on_event ("Current model: " ^ !active_descriptor.id ^ "/" ^
                    (if !active_model = "" then "(none)" else !active_model));
@@ -378,7 +439,7 @@ let () =
     let instruction_diagnostics =
       List.map (fun (issue : Pave.Project_context.diagnostic) ->
         Printf.sprintf "%S [%s]: %s" issue.path issue.code issue.message)
-        project_context.diagnostics in
+        project_context.diagnostics @ prompt_configuration.diagnostics in
     if !prompt <> "" then (
       List.iter (fun diagnostic -> prerr_endline ("Settings: " ^ diagnostic))
         settings.diagnostics;
