@@ -30,7 +30,7 @@ The [installer](install.sh) verifies the release archive against its published S
 <summary>Version pinning, custom destination, upgrade and removal</summary>
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/kimmandoo/pave/main/install.sh | PAVE_VERSION=v0.1.0 sh
+curl -fsSL https://raw.githubusercontent.com/kimmandoo/pave/main/install.sh | PAVE_VERSION=v0.1.4 sh
 curl -fsSL https://raw.githubusercontent.com/kimmandoo/pave/main/install.sh | PAVE_INSTALL_DIR=/absolute/path/bin sh
 ```
 

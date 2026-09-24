@@ -6,6 +6,7 @@
 - feat(auth): added personal GitHub Copilot HTTPS device-code sign-in with private credential storage, public Chat-only endpoint/model guards and explicit unsupported refresh/Enterprise routes; exposed in-session `/login github-copilot` and `/model github-copilot/gpt-4.1`.
 - test(provider): exercised Gemini 3 signed tools and journal replay over local HTTP buffered/SSE scenarios; exercised Copilot device code, private storage, guarded token routing, two-request Chat tool turns and native PTY slash sign-in with fake HTTPS; no live vendor credentials were used.
 - fix(tui): allowed a Copilot terminal to start before a model is selected without permitting unsupported model requests or reading a bearer token; verified `/model` rejection and selection in a native PTY.
+- test(distribution): published `v0.1.4` across four native release targets and installed the checksum-verified latest arm64 archive into an isolated directory; the shipped binary entered a model-less Copilot TUI, selected a model and exited normally.
 
 - feat(tui): added in-session `/login [PROVIDER]` with a browser callback and terminal suspend/resume that retains the transcript; added `/model [PROVIDER/MODEL_ID]` with route recomputation and preserved conversation across model changes.
 - fix(cli): deferred credential resolution until the first model request so users can sign in from an otherwise uncredentialed terminal; prevented unknown slash commands from becoming model prompts and cleared stale custom endpoints on model switches.
