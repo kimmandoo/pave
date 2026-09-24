@@ -1,0 +1,91 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: ${{ matrix.os }} / ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            os: linux
+            arch: x86_64
+          - runner: ubuntu-22.04-arm
+            os: linux
+            arch: aarch64
+          - runner: macos-15
+            os: darwin
+            arch: arm64
+          - runner: macos-15-intel
+            os: darwin
+            arch: x86_64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: '5.5.1'
+      - name: Install dependencies
+        run: opam install . --deps-only --with-test -y
+      - name: Run tests
+        run: opam exec -- dune runtest --force
+      - name: Build native executable
+        run: opam exec -- dune build --profile release bin/main.exe
+      - name: Package release archive
+        env:
+          ASSET: pave-${{ matrix.os }}-${{ matrix.arch }}.tar.gz
+        run: |
+          set -eu
+          mkdir -p bundle
+          cp _build/default/bin/main.exe bundle/pave
+          cp LICENSE THIRD_PARTY_NOTICES bundle/
+          tar -czf "$ASSET" -C bundle pave LICENSE THIRD_PARTY_NOTICES
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pave-${{ matrix.os }}-${{ matrix.arch }}
+          path: pave-${{ matrix.os }}-${{ matrix.arch }}.tar.gz
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: pave-*
+          path: dist
+          merge-multiple: true
+      - name: Generate SHA256SUMS and publish release
+        working-directory: dist
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -eu
+          sha256sum \
+            pave-darwin-arm64.tar.gz \
+            pave-darwin-x86_64.tar.gz \
+            pave-linux-aarch64.tar.gz \
+            pave-linux-x86_64.tar.gz > SHA256SUMS
+          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes
+          fi
+          gh release upload "$GITHUB_REF_NAME" \
+            pave-darwin-arm64.tar.gz \
+            pave-darwin-x86_64.tar.gz \
+            pave-linux-aarch64.tar.gz \
+            pave-linux-x86_64.tar.gz \
+            SHA256SUMS --clobber

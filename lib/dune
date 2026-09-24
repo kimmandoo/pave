@@ -1,0 +1,3 @@
+(library
+ (name pave)
+ (libraries yojson unix uuseg))

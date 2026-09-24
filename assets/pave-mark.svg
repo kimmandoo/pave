@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-labelledby="title description">
+  <title id="title">Pave</title>
+  <desc id="description">A single mint-colored path forming the letter P on a dark rounded square.</desc>
+  <rect width="128" height="128" rx="28" fill="#102A35"/>
+  <path d="M42 95V34h34c14 0 23 9 23 22s-9 22-23 22H42" fill="none" stroke="#73DDC8" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

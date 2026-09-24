@@ -1,0 +1,43 @@
+(test
+ (name test_protocol)
+ (libraries pave unix yojson))
+
+(test
+ (name test_tools)
+ (libraries pave unix yojson))
+
+(test
+ (name test_agent)
+ (libraries pave unix yojson))
+
+(test
+ (name test_openai_stream)
+ (libraries pave unix yojson))
+
+(test
+ (name test_anthropic_wire)
+ (libraries pave unix yojson))
+
+(test
+ (name test_provider_http)
+ (libraries pave unix yojson))
+
+(test
+ (name test_anthropic_stream)
+ (libraries pave unix yojson))
+
+(test
+ (name test_agent_stream)
+ (libraries pave unix yojson))
+
+(test
+ (name test_session_journal)
+ (libraries pave unix yojson))
+
+(test
+ (name test_session_compaction)
+ (libraries pave unix yojson))
+
+(test
+ (name test_composer)
+ (libraries pave unix yojson))

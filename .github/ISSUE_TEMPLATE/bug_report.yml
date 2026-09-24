@@ -1,0 +1,38 @@
+name: Bug report
+description: Report a reproducible Pave failure
+body:
+  - type: markdown
+    attributes:
+      value: "Do not include API keys, private source files, or session journals. Report security issues via SECURITY.md instead."
+  - type: input
+    id: platform
+    attributes:
+      label: Platform and terminal
+      placeholder: "macOS 15 arm64; iTerm2; OCaml 5.5.1"
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Pave version or commit
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Include a minimal repository or redacted example when relevant.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior and redacted output
+    validations:
+      required: true
