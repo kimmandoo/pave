@@ -9,6 +9,7 @@ type credentials = {
 }
 
 exception Provider_error of string
+exception Cancelled
 
 let reject_controls label value =
   String.iter
@@ -76,11 +77,16 @@ let rec write_all fd data offset =
 
 exception Stream_complete
 
-let read_all ?on_chunk ?is_done ?is_finished fd =
+let check_cancel = function
+  | Some cancel when cancel () -> raise Cancelled
+  | _ -> ()
+
+let read_all ?on_chunk ?is_done ?is_finished ?cancel fd =
   let buffer = Buffer.create 128 in
   let chunk = Bytes.create 8192 in
   let finished_at = ref None in
   let rec loop () =
+    check_cancel cancel;
     (match is_done with
      | Some done_now when done_now () -> raise Stream_complete
      | _ -> ());
@@ -95,16 +101,25 @@ let read_all ?on_chunk ?is_done ?is_finished fd =
                let remaining = 1. -. (Unix.gettimeofday () -. start) in
                if remaining <= 0. then raise Stream_complete;
                Some remaining) in
+    let timeout = match cancel, timeout with
+      | None, None -> None
+      | Some _, None -> Some 0.1
+      | None, Some duration -> Some duration
+      | Some _, Some duration -> Some (min 0.1 duration) in
     let ready = match timeout with
       | None -> true
-      | Some remaining ->
-          let readable, _, _ = Unix.select [fd] [] [] remaining in
-          readable <> [] in
+      | Some duration ->
+          (try
+            let readable, _, _ = Unix.select [fd] [] [] duration in
+            readable <> []
+          with Unix.Unix_error (Unix.EINTR, _, _) -> false) in
+    check_cancel cancel;
     if ready then (
       let count =
         try Unix.read fd chunk 0 (Bytes.length chunk)
         with Unix.Unix_error (Unix.EINTR, _, _) -> -1 in
       if count <> 0 then (
+        check_cancel cancel;
         if count > 0 then (
           match on_chunk with
           | None -> Buffer.add_subbytes buffer chunk 0 count
@@ -120,11 +135,19 @@ let read_all ?on_chunk ?is_done ?is_finished fd =
   loop ();
   Buffer.contents buffer
 
-let rec wait_for pid =
-  try snd (Unix.waitpid [] pid) with
-  | Unix.Unix_error (Unix.EINTR, _, _) -> wait_for pid
+let rec wait_for ?cancel pid =
+  check_cancel cancel;
+  let flags = match cancel with None -> [] | Some _ -> [ Unix.WNOHANG ] in
+  try
+    let waited, status = Unix.waitpid flags pid in
+    if waited <> 0 then status
+    else (
+      ignore (Unix.select [] [] [] 0.1);
+      wait_for ?cancel pid)
+  with Unix.Unix_error (Unix.EINTR, _, _) -> wait_for ?cancel pid
 
-let run_curl ?on_chunk ?is_done ?is_finished configuration =
+let run_curl ?on_chunk ?is_done ?is_finished ?cancel configuration =
+  check_cancel cancel;
   let input_read, input_write = Unix.pipe () in
   let output_read, output_write =
     try Unix.pipe ()
@@ -168,10 +191,11 @@ let run_curl ?on_chunk ?is_done ?is_finished configuration =
         with Unix.Unix_error (Unix.EPIPE, _, _) -> true
       in
       close_fd input_write;
-      let status_code = read_all ?on_chunk ?is_done ?is_finished output_read in
+      let status_code = read_all ?on_chunk ?is_done ?is_finished ?cancel output_read in
       close_fd output_read;
-      let status = wait_for pid in
+      let status = wait_for ?cancel pid in
       waited := true;
+      check_cancel cancel;
       match status with
       | Unix.WEXITED 0 when not write_failed -> status_code
       | Unix.WEXITED code ->
@@ -239,7 +263,7 @@ let curl_options ~endpoint ~headers ~body_path =
   ^ option "max-time" "120"
   ^ option "proto" "=http,https"
 
-let post_json ~endpoint ~headers ~secret body_json =
+let post_json ?cancel ~endpoint ~headers ~secret body_json =
   let body = request_body ~endpoint ~headers body_json in
   with_temp_file (fun body_path body_output ->
     output_string body_output body;
@@ -251,7 +275,8 @@ let post_json ~endpoint ~headers ~secret body_json =
         curl_options ~endpoint ~headers ~body_path
         ^ option "output" response_path
         ^ option "write-out" "%{http_code}" in
-      let status = run_curl configuration in
+      let status = run_curl ?cancel configuration in
+      check_cancel cancel;
       let response = read_file response_path in
       let json =
         try Some (Yojson.Basic.from_string response)
@@ -282,7 +307,7 @@ let status_from_headers headers =
       | _ -> current
     else current) None (String.split_on_char '\n' headers)
 
-let post_stream ~endpoint ~headers ~secret body_json ~on_chunk ~is_done ~is_finished =
+let post_stream ?cancel ~endpoint ~headers ~secret body_json ~on_chunk ~is_done ~is_finished =
   let body = request_body ~endpoint ~headers body_json in
   with_temp_file (fun body_path body_output ->
     output_string body_output body;
@@ -310,8 +335,9 @@ let post_stream ~endpoint ~headers ~secret body_json ~on_chunk ~is_done ~is_fini
             if Buffer.length pending + String.length chunk > 16_384 then
               raise (Provider_error "HTTP error or missing response headers exceeded 16 KiB");
             Buffer.add_string pending chunk in
-      (try ignore (run_curl ~on_chunk:consume ~is_done ~is_finished configuration)
+      (try ignore (run_curl ~on_chunk:consume ~is_done ~is_finished ?cancel configuration)
        with Stream_complete -> ());
+      check_cancel cancel;
       let code = match status_from_headers (read_file header_path) with
         | Some code -> code
         | None -> raise (Provider_error "missing HTTP response status") in
@@ -323,7 +349,8 @@ let post_stream ~endpoint ~headers ~secret body_json ~on_chunk ~is_done ~is_fini
         raise (Provider_error (Printf.sprintf "HTTP %d%s" code suffix)));
       if Buffer.length pending <> 0 then on_chunk (Buffer.contents pending)))
 
-let complete ?(authentication = Api_key) ?resolve_credential ?on_text config messages tools =
+let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?cancel config messages tools =
+  check_cancel cancel;
   if authentication = OAuth &&
      not (match config.api, config.endpoint with
        | Anthropic_messages, "https://api.anthropic.com/v1/messages"
@@ -349,7 +376,7 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text config mes
     try f () with
     | Protocol.Invalid_response message ->
         raise (Provider_error ("invalid completion response: " ^ redact api_key message)) in
-  match config.api with
+  let result = match config.api with
   | Openai_completions | Copilot_chat ->
       let fields = [ "model", `String config.model;
                      "messages", `List (List.map Protocol.message_to_json messages) ] in
@@ -363,14 +390,14 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text config mes
             [ "Authorization: Bearer " ^ api_key ] in
       (match on_text with
       | None ->
-          let json = post_json ~endpoint:config.endpoint ~headers ~secret:api_key
+          let json = post_json ?cancel ~endpoint:config.endpoint ~headers ~secret:api_key
             (`Assoc fields) in
           parse (fun () -> Protocol.parse_completion json)
       | Some emit ->
           let stream = Openai_stream.create ~on_text:emit in
           let body = `Assoc (fields @ [ "stream", `Bool true ]) in
           parse (fun () ->
-            post_stream ~endpoint:config.endpoint ~headers ~secret:api_key
+            post_stream ?cancel ~endpoint:config.endpoint ~headers ~secret:api_key
               body ~on_chunk:(Openai_stream.feed stream)
               ~is_done:(fun () -> Openai_stream.is_done stream)
               ~is_finished:(fun () -> Openai_stream.is_finished stream);
@@ -389,7 +416,7 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text config mes
                "User-Agent: pave/0.1.1"; "x-app: cli" ]) in
       (match on_text with
       | None ->
-          let json = post_json ~endpoint:config.endpoint ~headers ~secret:api_key body in
+          let json = post_json ?cancel ~endpoint:config.endpoint ~headers ~secret:api_key body in
           parse (fun () -> Anthropic_wire.parse_response json)
       | Some emit ->
           let stream = Anthropic_stream.create ~on_text:emit in
@@ -397,7 +424,7 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text config mes
             | `Assoc fields -> `Assoc (fields @ [ "stream", `Bool true ])
             | _ -> assert false in
           parse (fun () ->
-            post_stream ~endpoint:config.endpoint ~headers ~secret:api_key
+            post_stream ?cancel ~endpoint:config.endpoint ~headers ~secret:api_key
               body ~on_chunk:(Anthropic_stream.feed stream)
               ~is_done:(fun () -> Anthropic_stream.is_done stream)
               ~is_finished:(fun () -> Anthropic_stream.is_finished stream);
@@ -409,7 +436,7 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text config mes
         [ "Authorization: Bearer " ^ api_key ] in
       (match on_text with
       | None ->
-          let json = post_json ~endpoint:config.endpoint ~headers ~secret:api_key body in
+          let json = post_json ?cancel ~endpoint:config.endpoint ~headers ~secret:api_key body in
           parse (fun () -> Openai_responses_wire.parse_completion json)
       | Some emit ->
           let stream = Openai_responses_stream.create ~on_text:emit in
@@ -417,7 +444,7 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text config mes
             Openai_responses_wire.request ~stream:true
               ~model:config.model messages tools) in
           parse (fun () ->
-            post_stream ~endpoint:config.endpoint ~headers ~secret:api_key
+            post_stream ?cancel ~endpoint:config.endpoint ~headers ~secret:api_key
               body ~on_chunk:(Openai_responses_stream.feed stream)
               ~is_done:(fun () -> Openai_responses_stream.is_done stream)
               ~is_finished:(fun () -> Openai_responses_stream.is_finished stream);
@@ -427,7 +454,7 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text config mes
         Ollama_wire.request ~model:config.model messages tools) in
       (match on_text with
       | None ->
-          let json = post_json ~endpoint:config.endpoint ~headers:[] ~secret:"" body in
+          let json = post_json ?cancel ~endpoint:config.endpoint ~headers:[] ~secret:"" body in
           parse (fun () -> Ollama_wire.parse_completion json)
       | Some emit ->
           let stream = Ollama_stream.create ~on_text:emit in
@@ -436,7 +463,7 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text config mes
                 `Assoc (("stream", `Bool true) :: List.remove_assoc "stream" fields)
             | _ -> assert false in
           parse (fun () ->
-            post_stream ~endpoint:config.endpoint ~headers:[] ~secret:""
+            post_stream ?cancel ~endpoint:config.endpoint ~headers:[] ~secret:""
               body ~on_chunk:(Ollama_stream.feed stream)
               ~is_done:(fun () -> Ollama_stream.is_done stream)
               ~is_finished:(fun () -> Ollama_stream.is_finished stream);
@@ -452,13 +479,13 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text config mes
       (match on_text with
       | None ->
           let endpoint = base ^ "/" ^ model_path ^ ":generateContent" in
-          let json = post_json ~endpoint ~headers ~secret:api_key body in
+          let json = post_json ?cancel ~endpoint ~headers ~secret:api_key body in
           parse (fun () -> Gemini_wire.parse_completion ~model:config.model json)
       | Some emit ->
           let stream = Gemini_stream.create ~model:config.model ~on_text:emit in
           let endpoint = base ^ "/" ^ model_path ^ ":streamGenerateContent?alt=sse" in
           parse (fun () ->
-            post_stream ~endpoint ~headers ~secret:api_key
+            post_stream ?cancel ~endpoint ~headers ~secret:api_key
               body ~on_chunk:(Gemini_stream.feed stream)
               ~is_done:(fun () -> Gemini_stream.is_done stream)
               ~is_finished:(fun () -> Gemini_stream.is_finished stream);
@@ -487,8 +514,11 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text config mes
       let emit = match on_text with Some emit -> emit | None -> fun _ -> () in
       let stream = Codex_stream.create ~model:config.model ~on_text:emit in
       parse (fun () ->
-        post_stream ~endpoint:config.endpoint ~headers ~secret:api_key
+        post_stream ?cancel ~endpoint:config.endpoint ~headers ~secret:api_key
           body ~on_chunk:(Codex_stream.feed stream)
           ~is_done:(fun () -> Codex_stream.is_done stream)
           ~is_finished:(fun () -> Codex_stream.is_finished stream);
         Codex_stream.finish stream)
+  in
+  check_cancel cancel;
+  result

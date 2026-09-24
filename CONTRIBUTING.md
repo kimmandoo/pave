@@ -23,6 +23,8 @@ In-session `/login` reuses `bin/cli_auth.ml` and temporarily releases the full-s
 
 `bin/dune` generates the embedded installer module directly from the checked-in `install.sh`; edit the script once, then verify both the one-command installer and an installed binary's `pave update`. Keep the ownership marker, custom-directory behavior, checksum/archive validation and executable-last replacement aligned. Never invoke a remotely downloaded update script or self-update an opam-managed executable. `TASKS.md` contains the source-indexed parity inventory; unchecked entries are not implemented.
 
+The release workflow supplies `PAVE_RELEASE_VERSION` from its validated tag when compiling the bundled updater; ordinary source builds embed `source`. Check `pave update --check` against a bounded fake release response and, after publication, the actual GitHub latest release before documenting the updater as available.
+
 ## Report an issue
 
 Open a GitHub issue with the operating system, OCaml version, installation method, terminal type, a minimal reproduction, the expected behavior, and the observed output. Remove API keys, private source code, and session transcripts before sharing logs. For a security issue, use `SECURITY.md` instead of a public issue.

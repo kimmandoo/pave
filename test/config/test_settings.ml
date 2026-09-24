@@ -1,0 +1,71 @@
+let write path text =
+  let output = open_out_bin path in
+  Fun.protect ~finally:(fun () -> close_out output) (fun () ->
+    output_string output text)
+
+let () =
+  let base = Filename.temp_file "pave-settings-" "" in
+  Sys.remove base;
+  Unix.mkdir base 0o700;
+  let user_home = Filename.concat base "config" in
+  let user_dir = Filename.concat user_home "pave" in
+  let workspace = Filename.concat base "workspace" in
+  let project_dir = Filename.concat workspace ".pave" in
+  Unix.mkdir user_home 0o700;
+  Unix.mkdir user_dir 0o700;
+  Unix.mkdir workspace 0o700;
+  let previous = Sys.getenv_opt "XDG_CONFIG_HOME" in
+  Unix.putenv "XDG_CONFIG_HOME" user_home;
+  Fun.protect ~finally:(fun () ->
+    (match previous with Some value -> Unix.putenv "XDG_CONFIG_HOME" value
+      | None -> Unix.putenv "XDG_CONFIG_HOME" "");
+    (try match (Unix.lstat project_dir).Unix.st_kind with
+     | Unix.S_DIR ->
+         (try Sys.remove (Filename.concat project_dir "settings.json")
+          with Sys_error _ -> ());
+         (try Sys.remove (Filename.concat project_dir "settings.lock")
+          with Sys_error _ -> ());
+         Unix.rmdir project_dir
+     | Unix.S_LNK -> Sys.remove project_dir
+     | _ -> ()
+     with Unix.Unix_error (Unix.ENOENT, _, _) -> ());
+    Sys.remove (Filename.concat user_dir "settings.json");
+    Unix.rmdir workspace; Unix.rmdir user_dir; Unix.rmdir user_home;
+    Unix.rmdir base) (fun () ->
+    write (Filename.concat user_dir "settings.json")
+      {|{"default_provider":"openai","default_model":"gpt-6-sol","disable_shell":true,"max_turns":12}|};
+    let inherited = Pave.Settings.load ~root:workspace in
+    assert (inherited.values.default_model = Some "gpt-6-sol");
+    assert (inherited.values.disable_shell);
+    assert (inherited.values.max_turns = Some 12);
+    Unix.mkdir project_dir 0o700;
+    let project_file = Filename.concat project_dir "settings.json" in
+    write project_file
+      {|{"default_provider":"anthropic","disable_shell":false,"max_turns":6}|};
+    let project = Pave.Settings.load ~root:workspace in
+    assert (project.values.default_provider = Some "anthropic");
+    assert (project.values.default_model = None);
+    assert (project.values.max_turns = Some 6);
+    assert (project.values.disable_shell);
+    ignore (Pave.Settings.update_project ~root:workspace (fun current ->
+      { current with max_turns = Some 9 }));
+    assert ((Pave.Settings.load ~root:workspace).values.max_turns = Some 9);
+    let rejected = try
+      ignore (Pave.Settings.update_project ~root:workspace (fun current ->
+        { current with max_turns = Some 0 }));
+      false
+    with Invalid_argument _ -> true in
+    assert (rejected);
+    assert ((Pave.Settings.load ~root:workspace).values.max_turns = Some 9);
+    write project_file {|{"max_turns":2,"max_turns":90}|};
+    let invalid = Pave.Settings.load ~root:workspace in
+    assert (invalid.values.max_turns = Some 12);
+    assert (invalid.diagnostics <> []);
+    Sys.remove project_file;
+    Sys.remove (Filename.concat project_dir "settings.lock");
+    Unix.rmdir project_dir;
+    Unix.symlink user_dir project_dir;
+    let escaped = Pave.Settings.load ~root:workspace in
+    assert (escaped.values.default_provider = Some "openai");
+    assert (escaped.diagnostics <> []));
+  print_endline "settings precedence: ok"

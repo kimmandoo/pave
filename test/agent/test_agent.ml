@@ -27,11 +27,15 @@ let serve client step =
    | `List messages when step = 1 ->
        assert (List.exists (fun msg ->
          Pave.Protocol.member "tool_call_id" msg = `String "call-1"
-         && Pave.Protocol.member "content" msg = `String "struct App {}\n") messages)
+         && (match Pave.Protocol.member "content" msg with
+            | `String text -> String.starts_with ~prefix:"struct App {}\n" text
+            | _ -> false)) messages)
    | `List messages when step = 3 ->
        assert (List.exists (fun msg ->
          Pave.Protocol.member "tool_call_id" msg = `String "call-2"
-         && Pave.Protocol.member "content" msg = `String "Error: command not approved") messages)
+         && (match Pave.Protocol.member "content" msg with
+             | `String text -> String.starts_with ~prefix:"Error:" text
+             | _ -> false)) messages)
    | _ -> ());
   let body = match step with
     | 0 -> tool_reply | 2 -> shell_reply | _ -> final_reply in

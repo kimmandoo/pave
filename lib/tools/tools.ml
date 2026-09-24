@@ -7,6 +7,7 @@ let max_search_bytes = 16_777_216
 let max_matches = 100
 
 exception Tool_error of string
+exception Cancelled
 
 let fail message = raise (Tool_error message)
 
@@ -127,6 +128,110 @@ let find_from text needle start =
     else scan (i + 1)
   in
   scan start
+(* Wildcards never cross directory separators, except for a whole ** segment.
+   This also keeps ignore rules and user globs on the same matching semantics. *)
+let glob_segment pattern name =
+  let plen = String.length pattern and nlen = String.length name in
+  let rec scan pi ni star retry =
+    if ni = nlen then
+      if pi = plen then true
+      else if pattern.[pi] = '*' then scan (pi + 1) ni star retry
+      else false
+    else if pi < plen && (pattern.[pi] = '?' || pattern.[pi] = name.[ni]) then
+      scan (pi + 1) (ni + 1) star retry
+    else if pi < plen && pattern.[pi] = '*' then
+      scan (pi + 1) ni pi ni
+    else if star >= 0 then
+      scan (star + 1) (retry + 1) star (retry + 1)
+    else false
+  in
+  scan 0 0 (-1) 0
+
+let glob_parts pattern path =
+  let patterns = Array.of_list (String.split_on_char '/' pattern) in
+  let names = Array.of_list (String.split_on_char '/' path) in
+  let memo = Hashtbl.create 32 in
+  let rec matches i j =
+    match Hashtbl.find_opt memo (i, j) with
+    | Some answer -> answer
+    | None ->
+        let answer =
+          if i = Array.length patterns then j = Array.length names
+          else if patterns.(i) = "**" then
+            matches (i + 1) j ||
+            (j < Array.length names && matches i (j + 1))
+          else j < Array.length names &&
+            glob_segment patterns.(i) names.(j) && matches (i + 1) (j + 1) in
+        Hashtbl.add memo (i, j) answer;
+        answer
+  in
+  matches 0 0
+
+let valid_glob pattern =
+  if pattern = "" || String.length pattern > 512 ||
+     String.contains pattern '\000' ||
+     List.exists (fun part -> part = ".." || part = ".")
+       (String.split_on_char '/' pattern) ||
+     not (Filename.is_relative pattern) then
+    fail "glob must be a nonempty relative pattern (up to 512 bytes) without '.' or '..'"
+
+type ignore_rule = {
+  base : string;
+  pattern : string;
+  directory_only : bool;
+  negated : bool;
+  basename_only : bool;
+}
+
+let ignore_rules absolute base =
+  let path = Filename.concat absolute ".gitignore" in
+  try
+    if (Unix.lstat path).Unix.st_kind <> Unix.S_REG then []
+    else
+      let text = read_bounded path max_read_bytes in
+      String.split_on_char '\n' text |> List.filter_map (fun line ->
+        let line = String.trim line in
+        if line = "" || line.[0] = '#' then None
+        else
+          let negated = line.[0] = '!' in
+          let pattern = if negated then String.sub line 1 (String.length line - 1) else line in
+          if pattern = "" then None
+          else
+            let directory_only = pattern.[String.length pattern - 1] = '/' in
+            let pattern = if directory_only then String.sub pattern 0 (String.length pattern - 1) else pattern in
+            let anchored = String.length pattern > 0 && pattern.[0] = '/' in
+            let pattern = if anchored then
+              String.sub pattern 1 (String.length pattern - 1) else pattern in
+            if pattern = "" || String.length pattern > 512 then None
+            else Some { base; pattern; directory_only; negated;
+                        basename_only = not anchored && not (String.contains pattern '/') })
+  with Unix.Unix_error (Unix.ENOENT, _, _) -> []
+
+let ignored rules relative is_directory =
+  List.fold_left (fun excluded rule ->
+    let local =
+      if rule.base = "" then Some relative
+      else
+        let prefix = rule.base ^ "/" in
+        if String.length relative > String.length prefix &&
+           String.sub relative 0 (String.length prefix) = prefix then
+          Some (String.sub relative (String.length prefix)
+                  (String.length relative - String.length prefix))
+        else None in
+    match local with
+    | None -> excluded
+    | Some local ->
+        if rule.directory_only && not is_directory then excluded
+        else
+          let matches =
+            if rule.basename_only then
+              List.exists (glob_segment rule.pattern) (String.split_on_char '/' local)
+            else glob_parts rule.pattern local in
+          if matches then not rule.negated else excluded) false rules
+
+let matching_glob pattern relative =
+  if String.contains pattern '/' then glob_parts pattern relative
+  else List.exists (glob_segment pattern) (String.split_on_char '/' relative)
 
 let skip_directory = function
   | ".git" | ".hg" | ".svn" | "_build" | "build" | ".build" | "dist"
@@ -134,34 +239,49 @@ let skip_directory = function
   | _ -> false
 
 let walk root relative visit =
-  if List.exists skip_directory (String.split_on_char '/' relative) then
-    fail ("directory is excluded from listing/search: " ^ relative);
   let starting = checked_path root relative in
+  let relative =
+    match List.filter (fun part -> part <> "" && part <> ".")
+            (String.split_on_char '/' relative) with
+    | [] -> "."
+    | parts -> String.concat "/" parts in
   if (Unix.stat starting).Unix.st_kind <> Unix.S_DIR then fail ("not a directory: " ^ relative);
-  let entries = ref 0 in
-  let truncated = ref false in
-  let rec directory absolute prefix =
+  let entries = ref 0 and truncated = ref false in
+  let rec ancestors absolute prefix rules = function
+    | [] -> rules
+    | name :: rest ->
+        let child = if prefix = "" then name else prefix ^ "/" ^ name in
+        if skip_directory name || ignored rules child true then
+          fail ("directory is excluded from listing/search: " ^ child);
+        let absolute = Filename.concat absolute name in
+        ancestors absolute child (rules @ ignore_rules absolute child) rest in
+  let root_rules = ignore_rules root "" in
+  let rules = if relative = "." then root_rules else
+    ancestors root "" root_rules (String.split_on_char '/' relative) in
+  let rec directory absolute prefix rules =
     let dir = Unix.opendir absolute in
-    Fun.protect ~finally:(fun () -> Unix.closedir dir) (fun () ->
-      let rec next () =
-        if !entries >= max_walk_entries then truncated := true
-        else
-          match Unix.readdir dir with
-          | exception End_of_file -> ()
-          | "." | ".." -> next ()
-          | name ->
-              incr entries;
-              let child = Filename.concat absolute name in
-              let relative = if prefix = "" then name else prefix ^ "/" ^ name in
-              let kind = (Unix.lstat child).Unix.st_kind in
-              (match kind with
-               | Unix.S_DIR when not (skip_directory name) -> directory child relative
-               | Unix.S_REG -> visit relative child
-               | _ -> ());
-              next ()
-      in next ())
+    let names = Fun.protect ~finally:(fun () -> Unix.closedir dir) (fun () ->
+      let rec collect acc =
+        if !entries >= max_walk_entries then (truncated := true; acc)
+        else match Unix.readdir dir with
+          | exception End_of_file -> acc
+          | "." | ".." -> collect acc
+          | name -> incr entries; collect (name :: acc)
+      in List.sort String.compare (collect [])) in
+    List.iter (fun name ->
+      let child = Filename.concat absolute name in
+      let relative = if prefix = "" then name else prefix ^ "/" ^ name in
+      try
+        match (Unix.lstat child).Unix.st_kind with
+        | Unix.S_DIR when not (skip_directory name) &&
+                          not (ignored rules relative true) ->
+            directory child relative (rules @ ignore_rules child relative)
+        | Unix.S_REG when not (ignored rules relative false) ->
+            visit relative child
+        | _ -> ()
+      with Unix.Unix_error (Unix.ENOENT, _, _) -> ()) names
   in
-  directory starting (if relative = "." then "" else relative);
+  directory starting (if relative = "." then "" else relative) rules;
   !truncated
 
 let append_bounded output text limit =
@@ -174,64 +294,127 @@ let list_files root args =
   let count = ref 0 and overflow = ref false in
   let walk_limit = walk root relative (fun name _ ->
     if !count < 500 && not !overflow then
-      if append_bounded output (name ^ "\n") max_read_bytes then incr count
+      if append_bounded output (name ^ "\n") (max_read_bytes - 128) then incr count
       else overflow := true
     else overflow := true) in
   if walk_limit || !overflow then Buffer.add_string output "[truncated; narrow the path]\n";
   if !count = 0 && not (walk_limit || !overflow) then "No files found" else Buffer.contents output
 
-let search root args =
-  let query = required_string "pattern" args in
-  if query = "" then fail "pattern must not be empty";
+let glob root args =
+  let pattern = required_string "pattern" args in
+  valid_glob pattern;
   let relative = optional_string "path" "." args in
+  let limit = optional_int "limit" 100 ~minimum:1 ~maximum:500 args in
+  let output = Buffer.create 4096 in
+  let count = ref 0 and overflow = ref false in
+  let walk_limit = walk root relative (fun name _ ->
+    if matching_glob pattern name then
+      if !count < limit && not !overflow then
+        if append_bounded output (name ^ "\n") (max_read_bytes - 128) then incr count
+        else overflow := true
+      else overflow := true) in
+  if walk_limit || !overflow then Buffer.add_string output "[truncated; narrow the glob or path]\n";
+  if !count = 0 && not (walk_limit || !overflow) then "No files found" else Buffer.contents output
+
+let search_matches root args ~regex =
+  let query = required_string "pattern" args in
+  if query = "" || String.length query > 4096 then fail "pattern must contain 1 to 4096 bytes";
+  let compiled = if regex then
+    Some (try Str.regexp query with Failure reason -> fail ("invalid regex: " ^ reason))
+    else None in
+  let relative = optional_string "path" "." args in
+  let limit = optional_int "limit" max_matches ~minimum:1 ~maximum:max_matches args in
   let output = Buffer.create 4096 in
   let matches = ref 0 and scanned = ref 0 and truncated = ref false in
   let walk_limit = walk root relative (fun name path ->
     let size = (Unix.stat path).Unix.st_size in
     if size > max_write_bytes then ()
     else if !scanned + size > max_search_bytes then truncated := true
-    else if !matches >= max_matches then truncated := true
-    else (
+    else if not !truncated then (
       scanned := !scanned + size;
       let contents = read_bounded path max_write_bytes in
       if not (String.contains contents '\000') then (
         let length = String.length contents in
         let rec lines start number =
-          if start < length && !matches < max_matches && not !truncated then (
+          if start < length && not !truncated then (
             let finish = try String.index_from contents start '\n' with Not_found -> length in
             let line = String.sub contents start (finish - start) in
-            if find_from line query 0 <> None then (
-              let preview = if String.length line > 240 then String.sub line 0 240 ^ "…" else line in
-              if append_bounded output (Printf.sprintf "%s:%d:%s\n" name number preview) max_read_bytes then incr matches
-              else truncated := true);
+            let matched = match compiled with
+              | None -> find_from line query 0 <> None
+              | Some expression ->
+                  (try ignore (Str.search_forward expression line 0); true
+                   with Not_found -> false) in
+            if matched then (
+              if !matches >= limit then truncated := true
+              else (
+                let preview = if String.length line > 240 then String.sub line 0 240 ^ "..." else line in
+                if append_bounded output (Printf.sprintf "%s:%d:%s\n" name number preview)
+                    (max_read_bytes - 128) then incr matches
+                else truncated := true));
             lines (finish + 1) (number + 1))
         in lines 0 1))) in
   if walk_limit || !truncated then Buffer.add_string output "[truncated; narrow the path or query]\n";
   if !matches = 0 && not (walk_limit || !truncated) then "No matches found" else Buffer.contents output
 
+let search root args = search_matches root args ~regex:false
+let grep root args = search_matches root args ~regex:true
 let read_file root args =
   let relative = required_string "path" args in
   let path = regular_path root relative in
-  let offset = optional_int "offset" 0 ~minimum:0 ~maximum:max_int args in
+  let requested_offset = optional_int "offset" 0 ~minimum:0 ~maximum:max_int args in
+  let line = optional_int "line" 0 ~minimum:1 ~maximum:max_int args in
+  if line > 0 && field "offset" args <> `Null then fail "use either line or offset, not both";
   let count = optional_int "max_bytes" 16_384 ~minimum:1 ~maximum:max_read_bytes args in
+  let max_lines = optional_int "max_lines" 1000 ~minimum:1 ~maximum:1000 args in
   with_fd path [Unix.O_RDONLY] 0 (fun fd ->
     let size = (Unix.fstat fd).Unix.st_size in
-    if offset > size then fail (Printf.sprintf "offset %d exceeds file size %d" offset size);
+    if requested_offset > size then
+      fail (Printf.sprintf "offset %d exceeds file size %d" requested_offset size);
+    let buffer = Bytes.create 8192 in
+    let position = ref 0 and current_line = ref 1 in
+    (* Count preceding newlines or locate a line without loading the file. *)
+    while !position < size &&
+          (if line > 0 then !current_line < line else !position < requested_offset) do
+      let available = if line > 0 then size - !position
+                      else requested_offset - !position in
+      let n = Unix.read fd buffer 0 (min 8192 available) in
+      if n = 0 then fail "file changed while reading";
+      let consumed = ref n in
+      for i = 0 to n - 1 do
+        if (line = 0 || !current_line < line) && Bytes.get buffer i = '\n' then (
+          incr current_line;
+          if line > 0 && !current_line = line then consumed := i + 1)
+      done;
+      position := !position + !consumed
+    done;
+    if line > 0 && !current_line <> line then
+      fail (Printf.sprintf "line %d exceeds file line count" line);
+    let offset = if line > 0 then !position else requested_offset in
     ignore (Unix.lseek fd offset Unix.SEEK_SET);
-    let remaining = min count (size - offset) in
-    let bytes = Bytes.create remaining in
+    let requested = min (max_read_bytes - 512) (min count (size - offset)) in
+    let bytes = Bytes.create requested in
     let rec read_at position =
-      if position < remaining then (
-        let n = Unix.read fd bytes position (remaining - position) in
+      if position < requested then (
+        let n = Unix.read fd bytes position (requested - position) in
         if n <> 0 then read_at (position + n) else position)
-      else position
-    in
+      else position in
     let actual = read_at 0 in
-    let text = Bytes.sub_string bytes 0 actual in
-    if String.contains text '\000' then fail "binary file; read_file supports text only";
-    if offset + actual < size then
-      Printf.sprintf "%s\n[truncated; next offset: %d; file size: %d]" text (offset + actual) size
-    else text)
+    let newlines = ref 0 and selected = ref actual in
+    for i = 0 to actual - 1 do
+      if i < !selected && Bytes.get bytes i = '\000' then
+        fail "binary file; read_file supports text only";
+      if !selected = actual && Bytes.get bytes i = '\n' then (
+        incr newlines;
+        if !newlines = max_lines then selected := i + 1)
+    done;
+    let text = Bytes.sub_string bytes 0 !selected in
+    let end_offset = offset + !selected in
+    let end_line = if !selected = 0 then !current_line
+                   else !current_line + !newlines -
+                     (if text.[!selected - 1] = '\n' then 1 else 0) in
+    Printf.sprintf "%s\n[page: offset: %d; bytes: %d; lines: %d-%d; next offset: %d; next line: %d; file size: %d; %s]"
+      text offset !selected !current_line end_line end_offset
+      (!current_line + !newlines) size (if end_offset < size then "truncated" else "end of file"))
 
 let write_file root args =
   let relative = required_string "path" args in
@@ -370,7 +553,9 @@ let mobile_project root =
     "No supported mobile project manifests found at workspace root."
   else "Detected mobile project stacks and suggested commands (not executed):\n" ^ Buffer.contents output
 
-let run_command root args =
+let run_command ?cancel root args =
+  let cancelled () = match cancel with Some check -> check () | None -> false in
+  if cancelled () then raise Cancelled;
   let command = required_string "command" args in
   if command = "" then fail "command must not be empty";
   let timeout = optional_int "timeout_seconds" 60 ~minimum:1 ~maximum:300 args in
@@ -396,7 +581,7 @@ let run_command root args =
   let used = ref 0 and truncated = ref false and timed_out = ref false in
   let deadline = Unix.gettimeofday () +. float_of_int timeout in
   let chunk = Bytes.create 8192 in
-  let status = ref None and eof = ref false in
+  let status = ref None and eof = ref false and completed = ref false in
   let reap () =
     if !status = None then
       match Unix.waitpid [Unix.WNOHANG] child with
@@ -408,8 +593,11 @@ let run_command root args =
     (try Unix.kill child Sys.sigkill with Unix.Unix_error (Unix.ESRCH, _, _) -> ());
     if !status = None then status := Some (snd (Unix.waitpid [] child))
   in
-  Fun.protect ~finally:(fun () -> Unix.close reader; if !status = None then terminate ()) (fun () ->
+  Fun.protect ~finally:(fun () ->
+    Unix.close reader;
+    if not !completed || !status = None then terminate ()) (fun () ->
     while not !eof && not !timed_out do
+      if cancelled () then raise Cancelled;
       reap ();
       let remaining = deadline -. Unix.gettimeofday () in
       if remaining <= 0. then timed_out := true
@@ -428,6 +616,7 @@ let run_command root args =
     done;
     if !timed_out then terminate ()
     else while !status = None && not !timed_out do
+      if cancelled () then raise Cancelled;
       reap ();
       if !status = None then
         if Unix.gettimeofday () >= deadline then (timed_out := true; terminate ())
@@ -441,6 +630,7 @@ let run_command root args =
         | Some (Unix.WSTOPPED signal) -> Printf.sprintf "stopped %d" signal
         | None -> "unknown status"
     in
+    completed := true;
     Printf.sprintf "Status: %s%s\n%s" result
       (if !truncated then " (output truncated to last 65536 bytes)" else "")
       (Bytes.sub_string captured 0 !used))
@@ -461,15 +651,26 @@ let integer_field description minimum maximum =
 let definitions = [
   schema "mobile_project" "Detect root mobile project manifests and suggest relevant build/test commands without executing anything."
     [] [];
-  schema "read_file" "Read workspace text, at most 65536 bytes per request. Use offset to continue."
+  schema "read_file" "Read a bounded text page, including byte and line metadata; use offset or line to continue large files."
     ["path", string_field "Workspace-relative file path";
-     "offset", integer_field "Byte offset (default 0)" 0 max_int;
-     "max_bytes", integer_field "Bytes to read (default 16384)" 1 max_read_bytes] ["path"];
-  schema "list_files" "Recursively list workspace files; skips build, dependency and Git directories. Output is bounded."
+     "offset", integer_field "Byte offset (default 0; exclusive with line)" 0 max_int;
+     "line", integer_field "One-based starting line (exclusive with offset)" 1 max_int;
+     "max_lines", integer_field "Maximum lines returned (default 1000)" 1 1000;
+     "max_bytes", integer_field "Maximum page bytes (default 16384, capped to leave room for metadata)" 1 max_read_bytes] ["path"];
+  schema "list_files" "Recursively list workspace files; respects .gitignore and excludes build/dependency/Git directories. Bounded output."
     ["path", string_field "Workspace-relative directory (default .)"] [];
-  schema "search" "Find literal, case-sensitive text in workspace files. Skips binary, large, build, dependency and Git files/directories. Results are bounded."
+  schema "glob" "Discover workspace files matching * and ? within path segments, or ** across directories; respects .gitignore. Bounded output."
+    ["pattern", string_field "Workspace-relative glob, for example **/*.swift";
+     "path", string_field "Workspace-relative directory (default .)";
+     "limit", integer_field "Maximum matching paths (default 100)" 1 500] ["pattern"];
+  schema "search" "Find literal case-sensitive text in workspace files, respecting .gitignore. Skips binary and files above 1 MiB; bounded output."
     ["pattern", string_field "Literal text to search for";
-     "path", string_field "Workspace-relative directory (default .)"] ["pattern"];
+     "path", string_field "Workspace-relative directory (default .)";
+     "limit", integer_field "Maximum matching lines (default 100)" 1 max_matches] ["pattern"];
+  schema "grep" "Find OCaml Str regular-expression matches per line, respecting .gitignore. Skips binary and files above 1 MiB; bounded output."
+    ["pattern", string_field "OCaml Str regular expression (case-sensitive)";
+     "path", string_field "Workspace-relative directory (default .)";
+     "limit", integer_field "Maximum matching lines (default 100)" 1 max_matches] ["pattern"];
   schema "write_file" "Atomically create or replace a workspace file (maximum 1 MiB); parent directory must exist."
     ["path", string_field "Workspace-relative file path";
      "content", string_field "Complete replacement file contents"] ["path"; "content"];
@@ -482,7 +683,7 @@ let definitions = [
      "timeout_seconds", integer_field "Deadline in seconds (default 60, maximum 300)" 1 300] ["command"]
 ]
 
-let execute ~root ~name ~args =
+let execute ?cancel ~root ~name ~args () =
   try
     let root = root_path root in
     (match args with `Assoc _ -> () | _ -> fail "arguments must be a JSON object");
@@ -490,9 +691,11 @@ let execute ~root ~name ~args =
     | "read_file" -> read_file root args
     | "list_files" -> list_files root args
     | "search" -> search root args
+    | "glob" -> glob root args
+    | "grep" -> grep root args
     | "write_file" -> write_file root args
     | "edit_file" -> edit_file root args
-    | "run_command" -> run_command root args
+    | "run_command" -> run_command ?cancel root args
     | "mobile_project" -> mobile_project root
     | _ -> fail ("unknown tool: " ^ name)
   with

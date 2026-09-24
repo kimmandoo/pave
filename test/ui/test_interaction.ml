@@ -19,6 +19,12 @@ let () =
   let descriptor, model, route = resolve_model ~current_provider:"openai" ~input:"gpt-5" in
   if descriptor.id <> "openai" || model <> "gpt-5" || route.name <> "responses" then
     fail "model-specific Responses route was not selected";
+  let openai = Option.get (Pave.Provider_catalog.find "openai") in
+  let default = Option.get openai.default_model in
+  if default <> "gpt-6-sol" then fail "OpenAI startup did not select the current coding model";
+  (match Pave.Provider_catalog.route openai ~model:default "" with
+   | Some route when route.wire = Pave.Provider.Openai_responses -> ()
+   | _ -> fail "default coding model did not use the Responses transport");
   let descriptor, model, route = resolve_model ~current_provider:"openai"
     ~input:"openrouter/openai/gpt-4o" in
   if descriptor.id <> "openrouter" || model <> "openai/gpt-4o" || route.name <> "chat" then

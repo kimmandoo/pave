@@ -2,4 +2,4 @@
 
 (library
  (name pave)
- (libraries yojson unix uuseg digestif))
+ (libraries yojson unix uuseg digestif str threads))

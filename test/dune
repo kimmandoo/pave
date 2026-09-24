@@ -107,3 +107,19 @@
 (test
  (name test_github_copilot_wire)
  (libraries pave unix yojson))
+
+(test
+ (name test_turn_runner)
+ (libraries pave unix threads))
+
+(test
+ (name test_settings)
+ (libraries pave unix yojson))
+
+(test
+ (name test_project_context)
+ (libraries pave unix yojson))
+
+(test
+ (name test_model_discovery)
+ (libraries pave unix yojson))
