@@ -2,6 +2,12 @@
 
 ## 2026-09-24
 
+- feat(provider): added registered OpenAI Responses, native Ollama and Google Gemini transports alongside Chat Completions and Anthropic Messages; routed DeepSeek, Groq and Mistral through explicit compatible chat descriptors.
+- feat(auth): added Anthropic OAuth PKCE browser/manual login, validated loopback callback, private atomic credential storage, cross-process refresh and bearer inference that rejects custom endpoints.
+- fix(provider): rejected inconsistent streamed Responses tool arguments and final assistant output rather than executing a divergent tool call.
+- test(provider): exercised all seven CLI provider descriptors against local HTTP fixtures, and an isolated OAuth callback, token exchange, refresh, protected inference and logout with a fake HTTPS subprocess; no live vendor credential was used.
+- test(distribution): verified the public `v0.1.1` GitHub Release completed all four native builds and published the release artifacts.
+
 - chore(license): identified Pave as the MIT copyright holder and preserved earlier MIT notices verbatim in the distributed third-party notice file.
 - docs(provider): listed only the two working wire protocols and API-key authentication methods; marked OAuth and additional transports as pending.
 - docs(project): redesigned the public README around install, use, feature status and contribution paths; replaced the rounded logo with a two-dimensional pixel-art mark.

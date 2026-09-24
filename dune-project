@@ -11,4 +11,4 @@
  (homepage "https://github.com/kimmandoo/pave")
  (bug_reports "https://github.com/kimmandoo/pave/issues")
  (source (github kimmandoo/pave))
- (depends ocaml dune yojson notty-community uutf uuseg))
+ (depends ocaml dune yojson notty-community uutf uuseg digestif))

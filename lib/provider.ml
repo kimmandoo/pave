@@ -1,4 +1,6 @@
-type api = Openai_completions | Anthropic_messages
+type api = Openai_completions | Anthropic_messages | Openai_responses
+  | Ollama_chat | Gemini_direct
+type authentication = Api_key | OAuth
 type config = { endpoint : string; api_key : string; model : string; api : api }
 
 exception Provider_error of string
@@ -193,6 +195,22 @@ let error_message key json =
   | Some message when message <> "" -> Some (redact key message)
   | _ -> None
 
+let gemini_model_path model =
+  let model = if String.starts_with ~prefix:"models/" model then
+    String.sub model 7 (String.length model - 7) else model in
+  if model = "" || String.length model > 256 then
+    raise (Provider_error "invalid Gemini model ID");
+  let result = Buffer.create (String.length model) in
+  String.iter (fun c ->
+    let code = Char.code c in
+    if (code >= 0x41 && code <= 0x5a)
+       || (code >= 0x61 && code <= 0x7a)
+       || (code >= 0x30 && code <= 0x39)
+       || c = '-' || c = '_' || c = '.' || c = '~'
+    then Buffer.add_char result c
+    else Printf.bprintf result "%%%02X" code) model;
+  Buffer.contents result
+
 let request_body ~endpoint ~headers body_json =
   if not (String.starts_with ~prefix:"https://" endpoint
           || String.starts_with ~prefix:"http://" endpoint) then
@@ -300,29 +318,38 @@ let post_stream ~endpoint ~headers ~secret body_json ~on_chunk ~is_done ~is_fini
         raise (Provider_error (Printf.sprintf "HTTP %d%s" code suffix)));
       if Buffer.length pending <> 0 then on_chunk (Buffer.contents pending)))
 
-let complete ?on_text config messages tools =
-  reject_controls "API key" config.api_key;
+let complete ?(authentication = Api_key) ?resolve_key ?on_text config messages tools =
+  if authentication = OAuth &&
+     (config.api <> Anthropic_messages ||
+      config.endpoint <> "https://api.anthropic.com/v1/messages") then
+    raise (Provider_error "OAuth inference requires the registered Anthropic endpoint");
+  let api_key = match resolve_key with
+    | Some get -> get ()
+    | None -> config.api_key in
+  reject_controls "API key" api_key;
+  if authentication = OAuth && api_key = "" then
+    raise (Provider_error "OAuth access token unavailable");
   let parse f =
     try f () with
     | Protocol.Invalid_response message ->
-        raise (Provider_error ("invalid completion response: " ^ redact config.api_key message)) in
+        raise (Provider_error ("invalid completion response: " ^ redact api_key message)) in
   match config.api with
   | Openai_completions ->
       let fields = [ "model", `String config.model;
                      "messages", `List (List.map Protocol.message_to_json messages) ] in
       let fields = if tools = [] then fields else fields @ [ "tools", `List tools ] in
-      let headers = if config.api_key = "" then [] else
-        [ "Authorization: Bearer " ^ config.api_key ] in
+      let headers = if api_key = "" then [] else
+        [ "Authorization: Bearer " ^ api_key ] in
       (match on_text with
       | None ->
-          let json = post_json ~endpoint:config.endpoint ~headers ~secret:config.api_key
+          let json = post_json ~endpoint:config.endpoint ~headers ~secret:api_key
             (`Assoc fields) in
           parse (fun () -> Protocol.parse_completion json)
       | Some emit ->
           let stream = Openai_stream.create ~on_text:emit in
           let body = `Assoc (fields @ [ "stream", `Bool true ]) in
           parse (fun () ->
-            post_stream ~endpoint:config.endpoint ~headers ~secret:config.api_key
+            post_stream ~endpoint:config.endpoint ~headers ~secret:api_key
               body ~on_chunk:(Openai_stream.feed stream)
               ~is_done:(fun () -> Openai_stream.is_done stream)
               ~is_finished:(fun () -> Openai_stream.is_finished stream);
@@ -330,11 +357,18 @@ let complete ?on_text config messages tools =
   | Anthropic_messages ->
       let body = parse (fun () ->
         Anthropic_wire.request ~model:config.model ~max_tokens:4096 messages tools) in
-      let headers = [ "anthropic-version: 2023-06-01" ]
-        @ (if config.api_key = "" then [] else [ "x-api-key: " ^ config.api_key ]) in
+      let headers = [ "anthropic-version: 2023-06-01" ] @
+        (match authentication with
+         | Api_key ->
+             if api_key = "" then [] else [ "x-api-key: " ^ api_key ]
+         | OAuth ->
+             [ "Authorization: Bearer " ^ api_key;
+               "anthropic-beta: oauth-2025-04-20,claude-code-20250219";
+               "anthropic-dangerous-direct-browser-access: true";
+               "User-Agent: pave/0.1.1"; "x-app: cli" ]) in
       (match on_text with
       | None ->
-          let json = post_json ~endpoint:config.endpoint ~headers ~secret:config.api_key body in
+          let json = post_json ~endpoint:config.endpoint ~headers ~secret:api_key body in
           parse (fun () -> Anthropic_wire.parse_response json)
       | Some emit ->
           let stream = Anthropic_stream.create ~on_text:emit in
@@ -342,8 +376,69 @@ let complete ?on_text config messages tools =
             | `Assoc fields -> `Assoc (fields @ [ "stream", `Bool true ])
             | _ -> assert false in
           parse (fun () ->
-            post_stream ~endpoint:config.endpoint ~headers ~secret:config.api_key
+            post_stream ~endpoint:config.endpoint ~headers ~secret:api_key
               body ~on_chunk:(Anthropic_stream.feed stream)
               ~is_done:(fun () -> Anthropic_stream.is_done stream)
               ~is_finished:(fun () -> Anthropic_stream.is_finished stream);
             Anthropic_stream.finish stream))
+  | Openai_responses ->
+      let body = parse (fun () ->
+        Openai_responses_wire.request ~model:config.model messages tools) in
+      let headers = if api_key = "" then [] else
+        [ "Authorization: Bearer " ^ api_key ] in
+      (match on_text with
+      | None ->
+          let json = post_json ~endpoint:config.endpoint ~headers ~secret:api_key body in
+          parse (fun () -> Openai_responses_wire.parse_completion json)
+      | Some emit ->
+          let stream = Openai_responses_stream.create ~on_text:emit in
+          let body = parse (fun () ->
+            Openai_responses_wire.request ~stream:true
+              ~model:config.model messages tools) in
+          parse (fun () ->
+            post_stream ~endpoint:config.endpoint ~headers ~secret:api_key
+              body ~on_chunk:(Openai_responses_stream.feed stream)
+              ~is_done:(fun () -> Openai_responses_stream.is_done stream)
+              ~is_finished:(fun () -> Openai_responses_stream.is_finished stream);
+            Openai_responses_stream.finish stream))
+  | Ollama_chat ->
+      let body = parse (fun () ->
+        Ollama_wire.request ~model:config.model messages tools) in
+      (match on_text with
+      | None ->
+          let json = post_json ~endpoint:config.endpoint ~headers:[] ~secret:"" body in
+          parse (fun () -> Ollama_wire.parse_completion json)
+      | Some emit ->
+          let stream = Ollama_stream.create ~on_text:emit in
+          let body = match body with
+            | `Assoc fields ->
+                `Assoc (("stream", `Bool true) :: List.remove_assoc "stream" fields)
+            | _ -> assert false in
+          parse (fun () ->
+            post_stream ~endpoint:config.endpoint ~headers:[] ~secret:""
+              body ~on_chunk:(Ollama_stream.feed stream)
+              ~is_done:(fun () -> Ollama_stream.is_done stream)
+              ~is_finished:(fun () -> Ollama_stream.is_finished stream);
+            Ollama_stream.finish stream))
+  | Gemini_direct ->
+      let body = parse (fun () ->
+        Gemini_wire.request ~model:config.model messages tools) in
+      let headers = [ "x-goog-api-key: " ^ api_key ] in
+      let base = if String.ends_with ~suffix:"/" config.endpoint then
+        String.sub config.endpoint 0 (String.length config.endpoint - 1)
+        else config.endpoint in
+      let model_path = gemini_model_path config.model in
+      (match on_text with
+      | None ->
+          let endpoint = base ^ "/" ^ model_path ^ ":generateContent" in
+          let json = post_json ~endpoint ~headers ~secret:api_key body in
+          parse (fun () -> Gemini_wire.parse_completion json)
+      | Some emit ->
+          let stream = Gemini_stream.create ~on_text:emit in
+          let endpoint = base ^ "/" ^ model_path ^ ":streamGenerateContent?alt=sse" in
+          parse (fun () ->
+            post_stream ~endpoint ~headers ~secret:api_key
+              body ~on_chunk:(Gemini_stream.feed stream)
+              ~is_done:(fun () -> Gemini_stream.is_done stream)
+              ~is_finished:(fun () -> Gemini_stream.is_finished stream);
+            Gemini_stream.finish stream))

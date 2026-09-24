@@ -14,7 +14,7 @@
 <p align="center"><a href="#install">Install</a> · <a href="#use">Use</a> · <a href="#providers">Providers</a> · <a href="#features">Features</a> · <a href="#contribute">Contribute</a></p>
 
 > [!NOTE]
-> Pave is in active development. The provider/agent core, session journal and interactive terminal work; cancellation, LSP/DAP, subagents, plugins and a model catalog are not yet implemented. See [TASKS.md](TASKS.md) before relying on a planned feature.
+> Pave is in active development. Seven provider descriptors and five wire transports, the agent loop, OAuth login/refresh for Anthropic, session journal and interactive terminal work in local fixtures. Live credentialed inference, cancellation, LSP/DAP, subagents, plugins and a full model catalog are not yet verified or implemented. See [TASKS.md](TASKS.md) for the remaining work.
 
 ## Install
 
@@ -58,20 +58,26 @@ The switch belongs to the checkout; prefix commands with `opam exec --` without 
 
 ## Use
 
-Set `OPENAI_API_KEY` in your environment for the default provider, or use `ANTHROPIC_API_KEY` with `--provider anthropic`. Keep credentials out of checked-in config and session files.
+The default provider reads `OPENAI_API_KEY`. Choose another registered provider with `--provider ID`; `pave --providers` shows IDs, routes and required key variables. Keep API keys out of checked-in config and session files.
 
 ```sh
 # Interactive: resize-aware TUI, prompt history and a persistent session.
 pave --root /path/to/mobile/repo --session /private/path/pave.jsonl
 
-# One-shot, streaming reply.
-pave --root /path/to/mobile/repo --prompt 'Inspect the Android build failure' --stream
+# One-shot, streaming reply; GPT-5/o-series models select the Responses route.
+pave --provider openai --model gpt-5 --prompt 'Inspect the Android build failure' --stream
 
-# Anthropic: provide a model supported by your account.
+# Anthropic: API key, or explicit browser-based OAuth login for a subscription.
+pave --login anthropic
 pave --provider anthropic --model "$MODEL_ID" --root /path/to/mobile/repo
+
+# Local Ollama; pull a model with Ollama before invoking Pave.
+pave --provider ollama --model "$LOCAL_MODEL" --prompt 'Inspect this project'
 ```
 
-`--endpoint URL` selects a custom completion endpoint; `--model ID` overrides the default OpenAI model (`gpt-4.1-mini`). Anthropic requires an explicit model. Redirected input/output uses a plain line-oriented CLI instead of the full-screen interface.
+For a remote browser, use `pave --login-manual anthropic` and paste the **full callback URL**; `pave --logout anthropic` removes the locally stored credential. The OAuth store is unencrypted at `${XDG_CONFIG_HOME:-~/.config}/pave/oauth.json`, with a private directory and 0600 file permissions. `ANTHROPIC_API_KEY` takes precedence if set. Refresh happens under a cross-process lock before expiry. OAuth tokens cannot be sent to a custom `--endpoint`.
+
+`--api NAME` selects an explicit registered route; `--endpoint URL` overrides an API-key provider's completion endpoint. `--model ID` overrides the OpenAI default (`gpt-4.1-mini`) and is required by the other providers. Redirected input/output uses a plain line-oriented CLI instead of the full-screen interface.
 
 | In the TUI | Action |
 | --- | --- |
@@ -86,18 +92,23 @@ Sessions are private append-only JSONL journals on creation, **not encrypted**. 
 
 ## Providers
 
-| Provider / protocol | Authentication | Usage |
-| --- | --- | --- |
-| OpenAI-compatible Chat Completions | `OPENAI_API_KEY` | `--provider openai` (default); `--endpoint` supports compatible servers |
-| Anthropic Messages | `ANTHROPIC_API_KEY` | `--provider anthropic --model MODEL_ID` |
+| Provider | Transport | Authentication | CLI selection |
+| --- | --- | --- | --- |
+| OpenAI | Chat Completions, Responses | `OPENAI_API_KEY` | `--provider openai`; `--api responses` or GPT-5/o-series auto-route |
+| Anthropic | Messages | `ANTHROPIC_API_KEY` or `--login anthropic` | `--provider anthropic --model MODEL_ID` |
+| Ollama | native `/api/chat` | none (local server) | `--provider ollama --model MODEL_ID` |
+| Google Gemini API | native `generateContent` | `GEMINI_API_KEY` | `--provider google --model MODEL_ID` |
+| DeepSeek | Chat Completions | `DEEPSEEK_API_KEY` | `--provider deepseek --model MODEL_ID` |
+| Groq | Chat Completions | `GROQ_API_KEY` | `--provider groq --model MODEL_ID` |
+| Mistral | Chat Completions | `MISTRAL_API_KEY` | `--provider mistral --model MODEL_ID` |
 
-Both protocols support buffered and SSE-streamed replies. **OAuth is not available yet**: provider login, token refresh, OpenAI Responses/Codex, Gemini-native and additional API protocols are being implemented. A compatible endpoint is not proof that all models/features of that service work.
+All seven entries completed a **local HTTP CLI fixture**; wire tests covered buffering and incremental streaming. OAuth browser callback, protected file, refresh and bearer inference completed an **isolated HTTPS-transport fixture**, not a live Anthropic account. Vendor entitlements, model support and actual API responses remain unverified. Gemini 3 **tool requests fail closed** because their thought signatures cannot yet be preserved; text-only Gemini 3 requests are not blocked. Other upstream authentication and provider-specific wire families, including Codex subscription inference, are still missing. A compatible endpoint does not imply every model feature works.
 
 ## Features
 
 | Available | Not yet available |
 | --- | --- |
-| OpenAI-compatible Chat Completions and Anthropic Messages, buffered or SSE-streamed | OpenAI Responses/Codex, Gemini-native and a full model catalog |
+| Five wire transports with distinct provider routes; bounded buffered and incremental-stream decoders | Codex subscription inference, provider-specific thinking/usage/multimodal parity and full model catalog |
 | Mobile manifest detection, workspace file read/search/edit/write, bounded agent turns | LSP/DAP, subagents, extensions and full tool catalog |
 | Grapheme-aware CJK input, live transcript, branching sessions and manual compaction | Cancellation/queued typing during an active model turn; automatic compaction |
 

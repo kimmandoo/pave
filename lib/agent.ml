@@ -1,5 +1,7 @@
 type t = {
   provider : Provider.config;
+  authentication : Provider.authentication;
+  resolve_key : (unit -> string) option;
   root : string;
   allow_shell : bool;
   stream : bool;
@@ -11,11 +13,13 @@ type t = {
   on_change : Protocol.message -> unit;
 }
 
-let create ~provider ~root ~system ?(allow_shell = false) ?(stream = false)
+let create ~provider ~root ~system ?(authentication = Provider.Api_key)
+    ?resolve_key ?(allow_shell = false) ?(stream = false)
     ?(approve_command = fun _ -> false) ?(history = [])
     ?(on_change = fun _ -> ()) ?(on_delta = fun _ -> ()) ~on_event () =
-  { provider; root; system; allow_shell; stream; approve_command;
-    history_rev = List.rev history; on_change; on_delta; on_event }
+  { provider; authentication; resolve_key; root; system; allow_shell; stream;
+    approve_command; history_rev = List.rev history;
+    on_change; on_delta; on_event }
 
 let messages t = List.rev t.history_rev
 let append t message =
@@ -35,9 +39,11 @@ let run ?(max_turns = 20) t text =
         <> `String "run_command") Tools.definitions in
     let transcript = system :: messages t in
     let reply =
-      if t.stream then Provider.complete ~on_text:t.on_delta t.provider
+      if t.stream then Provider.complete ~authentication:t.authentication
+        ?resolve_key:t.resolve_key ~on_text:t.on_delta t.provider
         transcript definitions
-      else Provider.complete t.provider transcript definitions in
+      else Provider.complete ~authentication:t.authentication
+        ?resolve_key:t.resolve_key t.provider transcript definitions in
     append t reply;
     (match reply.content with
      | Some s when s <> "" ->

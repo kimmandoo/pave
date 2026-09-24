@@ -15,6 +15,7 @@ depends: [
   "notty-community"
   "uutf"
   "uuseg"
+  "digestif"
   "odoc" {with-doc}
 ]
 build: [
