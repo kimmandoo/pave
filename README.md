@@ -186,6 +186,23 @@ Settings live in `${XDG_CONFIG_HOME:-~/.config}/pave/settings.json` (user) and `
 
 Explicit CLI flags override session choices, then project and user defaults. A session restores its saved API with its model. Invalid, duplicate, oversized or symlinked settings are reported and skipped; `/settings` atomically replaces private project settings for the **next** launch.
 
+**Tool approvals:** `--approval-mode` overrides the configured mode for one run. The default is `write`: reads and workspace writes are allowed, while execution needs approval. `always-ask` prompts for writes and execution; `yolo` allows ordinary tool tiers. `tools.approval` can set a tool to `allow`, `prompt` or `deny`; deny wins across user/project settings. `/settings` edits the project mode and per-tool overrides for the next launch.
+
+```json
+{
+  "tools": {
+    "approvalMode": "write",
+    "approval": {"write_file": "prompt", "run_command": "deny"},
+    "commandPatterns": [
+      {"match": "rm -rf *", "approval": "deny"},
+      {"match": "git status *", "approval": "allow"}
+    ]
+  }
+}
+```
+
+Command patterns apply to shell arguments and use `*` for wildcard matching: deny takes precedence over allow, allow matches only a single simple command, and compound commands are checked segment by segment. No mode or allow policy skips Pave's existing prompt for each shell command. Prompt-required actions are denied when no interactive approval surface is available; previews show the tool, tier, impact and arguments, and identify shell execution as unsandboxed.
+
 **Project instructions:** User and ancestor `AGENTS.md` files load below the fixed mobile safety prompt, with bounded relative `@file.md` imports. Workspace `.pave/rules/*.md` scopes paths with frontmatter such as `---`, `paths: src/**/*.swift`, `---`. The first `write_file`/`edit_file` affected by a new rule is **withheld and journaled as unexecuted**; the rule enters the next model request and the model must retry. Unsafe imports/paths fail closed. Project instructions are not a sandbox; approved shell commands can modify files outside these scoped operations.
 
 **Prompt customization:** Place `SYSTEM.md`, `SYSTEM_TEMPLATE.md` or `APPEND_SYSTEM.md` in `<workspace>/.pave/`, with `${XDG_CONFIG_HOME:-~/.config}/pave/` as fallback. `SYSTEM.md` wins over `SYSTEM_TEMPLATE.md` within a scope; project wins over user. `--system-prompt TEXT` and strict `--system-prompt-template FILE` override discovered system content but conflict with each other; `--append-system-prompt TEXT` overrides discovered append content. Templates support `{{root}}`; unknown placeholders fail for explicit files and are diagnosed with fallback for discovered files. Sources are bounded UTF-8 regular files read once at launch. Neither customization nor tool output replaces the mobile safety prompt or `AGENTS.md`.
@@ -327,7 +344,7 @@ Use `pave --providers` for the live list. This reference separates wire transpor
 | Mobile manifest detection, workspace file read/search/edit/write, bounded agent turns | LSP/DAP, subagents, extensions and full tool catalog |
 | Grapheme-aware CJK input, cancellable streaming with queued follow-ups, searchable dynamic model picker, branching sessions and manual compaction | Automatic context budgeting/compaction and full structured session resume |
 
-**Shell safety:** model-requested shell execution is off by default. `--allow-shell` asks for **each** command in an interactive terminal; noninteractive runs deny commands even with the flag. Approved commands are **not sandboxed** and can access files outside the workspace. Check commands before approving them; Pave does not install mobile SDKs, sign apps or deploy to devices for you.
+**Shell safety:** model-requested shell execution is off by default. `--allow-shell` advertises shell commands but still asks for **each** command in an interactive terminal, even with `--approval-mode yolo` or a per-tool allow; noninteractive runs deny shell execution. Approved commands are **not sandboxed** and can access files outside the workspace. Check the impact preview and exact command before approving it; Pave does not install mobile SDKs, sign apps or deploy to devices for you.
 
 ## Contribute
 

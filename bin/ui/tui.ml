@@ -1136,8 +1136,8 @@ let choose ?(allow_custom = false) ?(intro = []) ?(plain = [])
       | _ -> loop () in
     loop ())
 
-let reviewable_command command =
-  String.length command <= 4096 && sanitize command = command &&
+let reviewable_text ~max_bytes text =
+  String.length text <= max_bytes && sanitize text = text &&
   Uutf.String.fold_utf_8 (fun valid _ -> function
     | `Malformed _ -> false
     | `Uchar uchar ->
@@ -1148,11 +1148,17 @@ let reviewable_command command =
         not (code >= 0x202a && code <= 0x202e) &&
         not (code >= 0x2066 && code <= 0x2069) &&
         code <> 0x61c && code <> 0xad &&
-        code <> 0x2060 && code <> 0xfeff) true command
+        code <> 0x2060 && code <> 0xfeff) true text
 
-let confirm t command =
-  let command_lines = if String.length command > 4096 then []
-    else String.split_on_char '\n' (sanitize command) in
+
+let approval_body_rows ~columns ~measure body =
+  String.split_on_char '\n' body
+  |> List.fold_left (fun total line ->
+    total + max 1 (Transcript_view.wrapped_count ~columns ~measure line)) 0
+
+let confirm_review t ~title ~label ~body ~max_bytes ~wrap
+    ~too_large ~unsafe_text ~approved_text ~denied_text =
+  let body_lines = String.split_on_char '\n' body in
   let fits () =
     let cols, rows = Notty_unix.Term.size t.term in
     let content_cols = max 1 (cols - 5) in
@@ -1164,29 +1170,70 @@ let confirm t command =
           let draft = Pave.Composer.layout ~columns:prompt_cols ~measure t.editor in
           min 4 (max 1 (min (rows - 4) (Array.length draft))) in
     let header_height = Transcript_view.wrapped_count ~columns:content_cols
-      ~measure "SHELL APPROVAL · review before deciding" in
-    t.chooser = None && String.length command <= 4096 &&
+      ~measure title in
+    let body_height = if wrap then
+        approval_body_rows ~columns:content_cols ~measure body
+      else List.length body_lines in
+    t.chooser = None && String.length body <= max_bytes &&
     cols >= 25 && rows >= 10 &&
-    rows - 4 - editor_height >=
-      header_height + 1 + List.length command_lines &&
-    List.for_all (fun line -> measure line <= content_cols) command_lines in
-  if String.length command > 4096 then (
-    alert t "Shell command denied: too large to review on screen";
+    rows - 4 - editor_height >= header_height + 1 + body_height &&
+    (wrap || List.for_all (fun line -> measure line <= content_cols) body_lines) in
+  if String.length body > max_bytes then (
+    alert t too_large;
     false)
-  else if not (reviewable_command command) then (
-    alert t "Shell command denied: hidden/control text cannot be reviewed";
+  else if not (reviewable_text ~max_bytes body) then (
+    alert t unsafe_text;
     false)
   else if not (fits ()) then (
-    alert t "Shell command denied: too large to review on screen";
+    alert t too_large;
     false)
   else (
-    change_transcript t (fun () -> Transcript_view.approval t.transcript command);
+    change_transcript t (fun () ->
+      Transcript_view.approval ~title t.transcript body);
     t.scroll <- 0;
-    alert t "SHELL: y=yes · other=no";
+    alert t label;
     let rec decision () = match next_input t with
       | `Resize _ -> if fits () then (paint t; decision ()) else false
       | `Key (`ASCII ('y' | 'Y'), []) -> true
       | _ -> false in
     let accepted = decision () in
-    alert t (if accepted then "Shell command approved" else "Shell command denied");
+    alert t (if accepted then approved_text else denied_text);
     accepted)
+
+let confirm t command =
+  let title = "SHELL APPROVAL · review before deciding" in
+  confirm_review t ~title ~label:"SHELL: y=yes · other=no"
+    ~body:command ~max_bytes:4096 ~wrap:false
+    ~too_large:"Shell command denied: too large to review on screen"
+    ~unsafe_text:"Shell command denied: hidden/control text cannot be reviewed"
+    ~approved_text:"Shell command approved"
+    ~denied_text:"Shell command denied"
+
+let confirm_tool t (request : Pave.Approval.request) =
+  let shell = request.tool_name = "run_command" in
+  let title = if shell then
+      "SHELL APPROVAL · review before deciding"
+    else "TOOL APPROVAL · review before deciding" in
+  let body = String.concat "\n" ([
+    "Tool: " ^ request.tool_name;
+    "Tier: " ^ String.uppercase_ascii
+      (Pave.Approval.tier_name request.tier);
+    "Impact: " ^ request.impact;
+    "Details:"
+  ] @ request.details @ [
+    (match request.reason with Some reason -> "Policy: " ^ reason | None -> "")
+  ]) in
+  let oversized_shell_command = shell && List.exists (fun detail ->
+    let prefix = "Command: " in
+    String.starts_with ~prefix detail &&
+    String.length detail - String.length prefix > 4096) request.details in
+  if oversized_shell_command then (
+    alert t "Shell command denied: too large to review on screen";
+    false)
+  else
+    confirm_review t ~title ~label:"APPROVE: y=yes · other=no" ~body
+      ~max_bytes:8192 ~wrap:true
+      ~too_large:"Tool action denied: preview does not fit on screen"
+      ~unsafe_text:"Tool action denied: hidden/control text cannot be reviewed"
+      ~approved_text:"Tool action approved"
+      ~denied_text:"Tool action denied"

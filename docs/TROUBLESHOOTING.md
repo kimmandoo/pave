@@ -1,5 +1,19 @@
 # Troubleshooting
 
+### [2026-09-25] System Dune did not use project switch dependencies
+
+- **Context / Symptom:** Running `dune build @install` directly failed with `Library "yojson" not found`, although the repository's opam switch contained Yojson.
+- **Root Cause:** The shell selected Homebrew Dune at `/opt/homebrew/bin/dune` without activating the repository's `_opam` switch environment.
+- **Solution:** Ran the build through `opam exec -- dune build @install`; it then completed successfully.
+- **Prevention / Reference:** Run Dune commands as `opam exec -- dune ...` so compiler and libraries come from the project switch.
+
+### [2026-09-25] Multiline approval preview passed a control character to Notty
+
+- **Context / Symptom:** The first 70×18 fake-provider PTY failed when a tool approval opened with `Invalid_argument("Notty: control character: U+0A, \"\\n\"")`.
+- **Root Cause:** Approval layout passed the newline-separated preview body to Notty's single-line text measurement function.
+- **Solution:** Split the preview into lines and measured each wrapped line independently. A regression now checks multiline approval row counts; the 70×18 write and shell approval PTY then rendered and denied both actions without side effects.
+- **Prevention / Reference:** Never pass line-feed characters to `Notty.I.string`; split terminal content before measuring its display width.
+
 ### [2026-09-25] Chat wrappers double-wrapped the multimodal message list
 
 - **Context / Symptom:** Compilation failed in Chat provider wrappers after they wrapped `Protocol.chat_messages_to_json` in another JSON `List`.

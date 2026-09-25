@@ -127,6 +127,13 @@ let () =
   expect "approval retains exact reviewable command"
     (heading_count approval_block Approval = 1 &&
       has "pwd" (lines approval_block 60));
+  let tool_approval = create () in
+  approval ~title:"TOOL APPROVAL · review before deciding" tool_approval
+    "Tool: write_file\nTier: WRITE\nImpact: Replaces a workspace file.\nPath: Sources/App.swift";
+  expect "typed approval presents the impact and exact target"
+    (heading_count tool_approval Approval = 1 &&
+     has "TOOL APPROVAL · review before deciding" (lines tool_approval 64) &&
+     has "Path: Sources/App.swift" (lines tool_approval 64));
   let large = create () in
   sent large (String.make 4096 'A');
   let compact = snapshot large ~columns:1 ~measure:(fun _ -> 1) in

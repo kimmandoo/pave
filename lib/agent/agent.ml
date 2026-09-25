@@ -21,7 +21,11 @@ type t = {
   allow_shell : bool;
   tool_available : string -> bool;
   stream : bool;
+  approval_mode : Approval.mode;
+  tool_approval : (string * Approval.policy) list;
+  command_patterns : Approval.command_rule list;
   approve_command : string -> bool;
+  approve_tool : (Approval.request -> bool) option;
   system : string;
   mutable scoped_pending : (string * string) list;
   mutable history_rev : Protocol.message list;
@@ -32,17 +36,20 @@ type t = {
   on_phase : (phase -> unit) option;
   on_tool_event : (tool_event -> unit) option;
 }
-
 let create ~provider ~root ~system ?(authentication = Provider.Api_key)
     ?resolve_credential ?(allow_shell = false)
     ?(tool_available = fun _ -> true) ?(stream = false)
-    ?(approve_command = fun _ -> false) ?(history = [])
+    ?(approval_mode = Approval.Ask_exec) ?(tool_approval = [])
+    ?(command_patterns = []) ?(approve_command = fun _ -> false)
+    ?approve_tool ?(history = [])
     ?on_usage ?on_phase ?on_tool_event ?(on_change = fun _ -> ())
     ?(on_delta = fun _ -> ()) ~on_event () =
   { provider; authentication; resolve_credential; root; system; allow_shell;
-    tool_available; stream;
-    approve_command; history_rev = List.rev history; scoped_pending = [];
+    tool_available; stream; approval_mode; tool_approval; command_patterns;
+    approve_command; approve_tool;
+    history_rev = List.rev history; scoped_pending = [];
     on_change; on_delta; on_event; on_usage; on_phase; on_tool_event }
+
 
 let messages t = List.rev t.history_rev
 let append t message =
@@ -207,16 +214,48 @@ let run ?(max_turns = 20) ?cancel t text =
               | Some execute -> execute
               | None -> assert false in
             try
-              if Tools.execution_mode call.name = Tool_scheduler.Exclusive then
-                Provider.check_cancel cancel;
-              if call.name = "run_command" then
-                (match Protocol.member "command" call.arguments with
-                 | `String command when t.approve_command command ->
-                     Provider.check_cancel cancel;
-                     execute ?cancel ?on_progress ()
-                 | `String _ -> [Protocol.Text "Error: command not approved"]
-                 | _ -> [Protocol.Text "Error: missing command"])
-              else execute ?cancel ?on_progress ()
+              Provider.check_cancel cancel;
+              let decision = Tools.approval_decision
+                ~command_patterns:t.command_patterns ~name:call.name
+                ~args:call.arguments in
+              let resolution = Approval.resolve ~mode:t.approval_mode
+                ~decision
+                ~user_policy:(List.assoc_opt call.name t.tool_approval) in
+              let shell = call.name = "run_command" in
+              match resolution with
+              | Approval.Denied reason ->
+                  [Protocol.Text ("Error: " ^ reason)]
+              | (Approval.Allowed | Approval.Requires_prompt _) as resolved ->
+                  let reason = match resolved with
+                    | Approval.Requires_prompt reason -> reason
+                    | Approval.Allowed -> decision.reason
+                    | Approval.Denied _ -> assert false in
+                  let prompt_required = shell ||
+                    (match resolved with
+                     | Approval.Requires_prompt _ -> true
+                     | _ -> false) in
+                  let request = Tools.approval_request ~root:t.root
+                    ~name:call.name ~args:call.arguments decision in
+                  let request = { request with
+                    Approval.reason = (match reason with
+                      | Some _ -> reason
+                      | None -> request.reason) } in
+                  let approved =
+                    if not prompt_required then true
+                    else match t.approve_tool with
+                      | Some approve -> approve request
+                      | None when shell ->
+                          (match Protocol.member "command" call.arguments with
+                           | `String command -> t.approve_command command
+                           | _ -> false)
+                      | None -> false in
+                  if not approved then
+                    [Protocol.Text (if shell then
+                      "Error: command not approved"
+                      else "Error: tool approval denied")]
+                  else (
+                    Provider.check_cancel cancel;
+                    execute ?cancel ?on_progress ())
             with
             | Provider.Cancelled -> raise Provider.Cancelled
             | Tools.Cancelled -> raise Tools.Cancelled

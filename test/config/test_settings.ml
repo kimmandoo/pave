@@ -37,22 +37,32 @@ let () =
     Unix.rmdir workspace; Unix.rmdir user_dir; Unix.rmdir user_home;
     Unix.rmdir base) (fun () ->
     write (Filename.concat user_dir "settings.json")
-      {|{"default_provider":"openai","default_model":"gpt-6-sol","default_api":"responses","disable_shell":true,"max_turns":12}|};
+      {|{"default_provider":"openai","default_model":"gpt-6-sol","default_api":"responses","disable_shell":true,"max_turns":12,"tools":{"approvalMode":"yolo","approval":{"write_file":"deny","run_command":"allow"},"commandPatterns":[{"match":"rm -rf *","approval":"deny"}]}}|};
     let inherited = Pave.Settings.load ~root:workspace in
     assert (inherited.values.default_model = Some "gpt-6-sol");
     assert (inherited.values.default_api = Some "responses");
     assert (inherited.values.disable_shell);
     assert (inherited.values.max_turns = Some 12);
+    assert (inherited.values.approval_mode = Some Pave.Approval.Auto_all);
+    assert (List.assoc "write_file" inherited.values.tool_approval =
+      Pave.Approval.Deny);
+    assert (List.length inherited.values.command_patterns = 1);
     Unix.mkdir project_dir 0o700;
     let project_file = Filename.concat project_dir "settings.json" in
     write project_file
-      {|{"default_provider":"anthropic","disable_shell":false,"max_turns":6}|};
+      {|{"default_provider":"anthropic","disable_shell":false,"max_turns":6,"tools":{"approvalMode":"write","approval":{"write_file":"allow","read_file":"prompt"},"commandPatterns":[{"match":"git status*","approval":"allow"}]}}|};
     let project = Pave.Settings.load ~root:workspace in
     assert (project.values.default_provider = Some "anthropic");
     assert (project.values.default_model = None);
     assert (project.values.default_api = None);
     assert (project.values.max_turns = Some 6);
     assert (project.values.disable_shell);
+    assert (project.values.approval_mode = Some Pave.Approval.Ask_exec);
+    assert (List.assoc "write_file" project.values.tool_approval =
+      Pave.Approval.Deny);
+    assert (List.assoc "read_file" project.values.tool_approval =
+      Pave.Approval.Prompt);
+    assert (List.length project.values.command_patterns = 2);
     ignore (Pave.Settings.update_project ~root:workspace (fun current ->
       { current with max_turns = Some 9 }));
     assert ((Pave.Settings.load ~root:workspace).values.max_turns = Some 9);

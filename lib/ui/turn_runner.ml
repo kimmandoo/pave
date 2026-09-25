@@ -35,6 +35,7 @@ type notice =
   | Phase of int * Agent.phase
   | Tool of int * Agent.tool_event
   | Approve of int * string * approval * (unit -> bool)
+  | Approve_tool of int * Approval.request * approval * (unit -> bool)
   | Finished of int * completion
 
 type t = {
@@ -54,6 +55,7 @@ type t = {
   run : cancel:(unit -> bool) -> string -> unit;
   on_event : event -> unit;
   on_approve : string -> bool;
+  on_approve_tool : Approval.request -> bool;
   on_queued : int -> unit;
 }
 
@@ -61,7 +63,8 @@ let with_guard t callback =
   Mutex.lock t.guard;
   Fun.protect ~finally:(fun () -> Mutex.unlock t.guard) callback
 
-let create ~run ~on_event ~on_approve ~on_queued () =
+let create ~run ~on_event ~on_approve ~on_queued
+    ?(on_approve_tool = fun _ -> false) () =
   let read_fd, write_fd = Unix.pipe () in
   Unix.set_close_on_exec read_fd;
   Unix.set_close_on_exec write_fd;
@@ -73,9 +76,10 @@ let create ~run ~on_event ~on_approve ~on_queued () =
     steering = Queue.create (); follow_ups = Queue.create ();
     worker = None; active_turn = None;
     next_turn_id = 0; closed = false;
-    run; on_event; on_approve; on_queued }
+    run; on_event; on_approve; on_approve_tool; on_queued }
 let fd t = t.read_fd
 let busy t = t.worker <> None
+
 
 let queued_count t = Queue.length t.steering + Queue.length t.follow_ups
 
@@ -158,6 +162,25 @@ let approve t command =
     answer = None } in
   with_guard t (fun () -> t.approvals <- request :: t.approvals);
   notify t turn (Approve (turn.id, command, request, cancel));
+  Mutex.lock request.mutex;
+  let rec await () = match request.answer with
+    | Some result -> result
+    | None -> Condition.wait request.condition request.mutex; await () in
+  let result = Fun.protect ~finally:(fun () -> Mutex.unlock request.mutex) await in
+  with_guard t (fun () ->
+    t.approvals <- List.filter (fun candidate -> candidate != request) t.approvals);
+  if cancel () then raise Provider.Cancelled;
+  result
+let approve_tool t approval_request =
+  let turn = match worker_turn t with
+    | Some turn -> turn
+    | None -> raise Provider.Cancelled in
+  let cancel () = Atomic.get turn.cancelled in
+  if cancel () then raise Provider.Cancelled;
+  let request = { mutex = Mutex.create (); condition = Condition.create ();
+    answer = None } in
+  with_guard t (fun () -> t.approvals <- request :: t.approvals);
+  notify t turn (Approve_tool (turn.id, approval_request, request, cancel));
   Mutex.lock request.mutex;
   let rec await () = match request.answer with
     | Some result -> result
@@ -287,6 +310,17 @@ let drain t =
               t.on_event (Transcript_message {
                 turn_id = id;
                 text = "Error: shell approval failed: " ^ Printexc.to_string exn
+              }));
+        handle ()
+    | Some (Approve_tool (id, approval_request, request, cancelled)) ->
+        if cancelled () || cancel_requested t id then answer request false
+        else (try answer request (t.on_approve_tool approval_request)
+          with exn ->
+            answer request false;
+            if not (cancel_requested t id) then
+              t.on_event (Transcript_message {
+                turn_id = id;
+                text = "Error: tool approval failed: " ^ Printexc.to_string exn
               }));
         handle ()
     | Some (Finished (id, outcome)) ->

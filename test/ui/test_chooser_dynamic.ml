@@ -97,4 +97,9 @@ let () =
      "openai/gpt-4.1"; "google/gemini-2.5-pro"]);
   assert (Tui.candidate_label mixed found.(1) =
     "[listed · API unverified] stepfun/new-audio");
+  let approval_rows = Tui.approval_body_rows ~columns:8
+    ~measure:(fun text ->
+      Notty.I.width (Notty.I.string Notty.A.empty text))
+    "Tier: WRITE\nPath: ok" in
+  assert (approval_rows = 3);
   print_endline "dynamic chooser filtering and source labels: ok"

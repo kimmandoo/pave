@@ -792,6 +792,76 @@ let execution_mode = function
       Tool_scheduler.Shared
   | _ -> Tool_scheduler.Exclusive
 
+let approval_decision ~command_patterns ~name ~args =
+  let tier value = {
+    Approval.tier = value; policy = None; override = false; reason = None
+  } in
+  match name with
+  | "mobile_project" | "read_file" | "list_files" | "glob" | "search" | "grep" ->
+      tier Approval.Read
+  | "write_file" | "edit_file" -> tier Approval.Write
+  | "run_command" ->
+      (match Protocol.member "command" args with
+       | `String command -> Approval.command_decision command_patterns command
+       | _ -> tier Approval.Exec)
+  | _ -> tier Approval.Exec
+
+let preview_text text =
+  let limit = 2000 in
+  if String.length text <= limit then text
+  else
+    let rec boundary index =
+      if index > 0 && index < String.length text &&
+         (Char.code text.[index] land 0xc0) = 0x80 then boundary (index - 1)
+      else index in
+    let length = boundary limit in
+    String.sub text 0 length ^
+      Printf.sprintf "\n[%d bytes omitted]" (String.length text - length)
+
+let approval_request ~root ~name ~args (decision : Approval.decision) =
+  let value name fallback = match Protocol.member name args with
+    | `String text -> text | _ -> fallback in
+  let quoted name fallback = Printf.sprintf "%S" (value name fallback) in
+  let impact, details = match name with
+    | "mobile_project" ->
+        "Reads project manifests and suggests commands; it executes nothing.",
+        []
+    | "read_file" ->
+        "Reads a bounded workspace file; it makes no changes.",
+        ["Path: " ^ quoted "path" "(missing)"]
+    | "list_files" ->
+        "Lists workspace paths; it makes no changes.",
+        ["Directory: " ^ quoted "path" "."]
+    | "glob" ->
+        "Searches workspace paths; it makes no changes.",
+        ["Pattern: " ^ quoted "pattern" "(missing)";
+         "Directory: " ^ quoted "path" "."]
+    | "search" | "grep" ->
+        "Searches workspace file contents; it makes no changes.",
+        ["Pattern: " ^ quoted "pattern" "(missing)";
+         "Directory: " ^ quoted "path" "."]
+    | "write_file" ->
+        let content = value "content" "" in
+        "Creates or replaces a workspace file.",
+        ["Path: " ^ quoted "path" "(missing)";
+         Printf.sprintf "Content (%d bytes):" (String.length content);
+         Printf.sprintf "%S" (preview_text content)]
+    | "edit_file" ->
+        "Replaces one exact, unique text range in a workspace file.",
+        ["Path: " ^ quoted "path" "(missing)";
+         "Find: " ^ Printf.sprintf "%S"
+           (preview_text (value "old_string" "(missing)"));
+         "Replace with: " ^ Printf.sprintf "%S"
+           (preview_text (value "new_string" "(missing)"))]
+    | "run_command" ->
+        "Runs /bin/sh as your user from the workspace root. It is not sandboxed and may access or modify files outside the workspace or use the network.",
+        ["Working directory: " ^ Printf.sprintf "%S" root;
+         "Command: " ^ value "command" "(missing)"]
+    | _ ->
+        "Performs a tool action that has no safe preview.",
+        ["No argument preview is available."] in
+  { Approval.tool_name = name; tier = decision.tier; impact; details;
+    reason = decision.reason }
 
 let validate_arguments ~name ~args =
   let parameters =
