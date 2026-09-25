@@ -7,6 +7,7 @@ type candidate = { value : string; custom : bool; verified : bool }
 
 type chooser = {
   title : string;
+  intro : string array;
   suggestions : string array;
   mutable choices : candidate array;
   allow_custom : bool;
@@ -300,15 +301,23 @@ let paint t =
         let found = matches chooser in
         let count = Array.length found in
         chooser.selected <- max 0 (min (count - 1) chooser.selected);
-        let page = max 0 (body_height - 1) in
+        let intro_height =
+          if cols >= 52 && body_height >= 9 && chooser.filter = "" &&
+             Array.length chooser.intro > 0 then
+            min 3 (Array.length chooser.intro) + 1
+          else 0 in
+        let page = max 0 (body_height - 1 - intro_height) in
         if chooser.selected < chooser.offset then chooser.offset <- chooser.selected;
         if page > 0 && chooser.selected >= chooser.offset + page then
           chooser.offset <- chooser.selected - page + 1;
         chooser.offset <- min chooser.offset (max 0 (count - page));
         I.vcat (List.init body_height (fun i ->
           if i = 0 then styled_line cols accent ("  " ^ chooser.title)
+          else if i <= intro_height then
+            if i = intro_height then I.void cols 1
+            else styled_line cols muted ("  " ^ chooser.intro.(i - 1))
           else
-            let index = chooser.offset + i - 1 in
+            let index = chooser.offset + i - 1 - intro_height in
             if index >= count then I.void cols 1
             else let choice = found.(index) in
               styled_line cols
@@ -873,14 +882,16 @@ let update_choices t ~verified ?status () =
       paint t
   | _ -> invalid_arg "Tui.update_choices: no dynamic chooser is open"
 
-let choose ?(allow_custom = false) ?wake_fd ?on_wake ?dynamic t ~title ~choices =
+let choose ?(allow_custom = false) ?(intro = []) ?wake_fd ?on_wake ?dynamic t
+    ~title ~choices =
   let cols, rows = Notty_unix.Term.size t.term in
   if cols < 9 || rows < 2 then (
     alert t "Resize terminal (at least 9 columns × 2 rows) to select";
     None)
   else
   let suggestions = Array.of_list choices in
-  let chooser = { title = sanitize title; suggestions;
+  let chooser = { title = sanitize title;
+    intro = Array.of_list (List.map sanitize intro); suggestions;
     choices = Array.map (fun value ->
       { value; custom = false; verified = false }) suggestions;
     allow_custom; dynamic = Option.value dynamic
