@@ -157,10 +157,16 @@ let matches chooser =
     let rec find pos =
       pos + m <= n && (at pos 0 || find (pos + 1)) in
     if find 0 then found := item :: !found) chooser.choices;
-  match !found with
-  | [] when chooser.allow_custom && String.contains chooser.filter '/' ->
-      [| { value = chooser.filter; custom = true; verified = false } |]
-  | _ -> Array.of_list (List.rev !found)
+  let found = List.rev !found in
+  let manual =
+    chooser.allow_custom &&
+    chooser.filter <> "" &&
+    chooser.filter.[String.length chooser.filter - 1] <> '/' &&
+    String.contains chooser.filter '/' &&
+    not (List.exists (fun item -> item.value = chooser.filter) found) in
+  Array.of_list (if manual then
+    { value = chooser.filter; custom = true; verified = false } :: found
+    else found)
 
 let candidate_label chooser item =
   let source =
@@ -309,7 +315,9 @@ let paint t =
              Array.length chooser.intro > 0 then
             min 3 (Array.length chooser.intro) + 1
           else 0 in
-        let page = max 0 (body_height - 1 - intro_height) in
+        let status_height =
+          if body_height >= 3 && chooser.status <> None then 1 else 0 in
+        let page = max 0 (body_height - 1 - intro_height - status_height) in
         if chooser.selected < chooser.offset then chooser.offset <- chooser.selected;
         if page > 0 && chooser.selected >= chooser.offset + page then
           chooser.offset <- chooser.selected - page + 1;
@@ -319,8 +327,11 @@ let paint t =
           else if i <= intro_height then
             if i = intro_height then I.void cols 1
             else styled_line cols muted ("  " ^ chooser.intro.(i - 1))
+          else if status_height = 1 && i = intro_height + 1 then
+            styled_line cols muted
+              ("  " ^ Option.get chooser.status)
           else
-            let index = chooser.offset + i - 1 - intro_height in
+            let index = chooser.offset + i - 1 - intro_height - status_height in
             if index >= count then I.void cols 1
             else let choice = found.(index) in
               styled_line cols
@@ -356,15 +367,23 @@ let paint t =
     | Some chooser ->
         let found = matches chooser in
         let number = if Array.length found = 0 then 0 else chooser.selected + 1 in
-        let status = match chooser.status with None -> "" | Some text -> text ^ " · " in
-        if body_height < 2 then
-          Printf.sprintf "  %s%d/%d %s · Enter select · Esc cancel" status number
-            (Array.length found)
-            (if Array.length found = 0 then "(no match)"
-             else candidate_label chooser found.(chooser.selected))
+        let status = match chooser.status with
+          | Some text when body_height < 3 -> " · " ^ text
+          | _ -> "" in
+        if body_height < 2 then (
+          let label = if Array.length found = 0 then "(no match)"
+            else candidate_label chooser found.(chooser.selected) in
+          Printf.sprintf "  %d/%d %s · Enter select · Esc cancel%s"
+            number (Array.length found) label status)
+        else if cols < 55 then
+          Printf.sprintf "  %d/%d · Enter select · Esc cancel%s"
+            number (Array.length found) status
+        else if cols < 75 then
+          Printf.sprintf "  %d/%d · ↑↓ move · Enter select · Esc cancel%s"
+            number (Array.length found) status
         else
-          Printf.sprintf "  %s%d/%d · ↑↓/PgUp/PgDn move · Enter select · Esc cancel"
-            status number (Array.length found)
+          Printf.sprintf "  %d/%d · ↑↓/PgUp/PgDn move · Enter select · Esc cancel%s"
+            number (Array.length found) status
     | None when hint_height > 0 ->
         let selected = List.nth hints t.hint_selected in
         let label = selected.name ^ " · " ^ selected.summary in

@@ -1,5 +1,5 @@
-(* The UI owns chooser state; discovery runs on a cancellable worker and only
-   delivers verified IDs through the chooser's wake pipe. *)
+(* Discovery runs on a cancellable worker; unclassified listings never become
+   verified model suggestions in the chooser. *)
 let credential (descriptor : Pave.Provider_catalog.descriptor) =
   match descriptor.id with
   | "openai" | "google" | "anthropic" | "deepseek" | "groq" | "mistral"
@@ -8,7 +8,11 @@ let credential (descriptor : Pave.Provider_catalog.descriptor) =
   | "sakana" | "abliteration" | "gmi-cloud" | "moonshot" | "xai" | "nvidia"
   | "novita" | "siliconflow" | "siliconflow-cn" | "ollama-cloud"
   | "bedrock-mantle" | "stepfun" | "coreweave" | "synthetic"
-  | "zenmux" | "wafer-serverless" | "qianfan" | "xiaomi"
+  | "zenmux" | "wafer-serverless" | "qianfan" | "xiaomi" | "kilo"
+  | "singularityapi-dev" | "opencode-zen" | "opencode-go"
+  | "yolo-auto"
+  | "charm-hyper" | "meta" | "vercel-ai-gateway" | "commandcode"
+  | "devin"
   | "lm-studio" | "llama.cpp" | "vllm" ->
       Option.map (fun key -> Pave.Model_discovery.Api_key key)
         (Cli_auth.api_key descriptor)
@@ -43,7 +47,7 @@ let credential (descriptor : Pave.Provider_catalog.descriptor) =
   | _ -> None
 
 let choose screen ~(descriptor : Pave.Provider_catalog.descriptor) ?(intro = [])
-    ?(plain = []) ~title ~choices () =
+    ?(plain = []) ?route_name ~title ~choices () =
   let read_fd, write_fd = Unix.pipe () in
   Unix.set_close_on_exec read_fd;
   Unix.set_close_on_exec write_fd;
@@ -77,10 +81,16 @@ let choose screen ~(descriptor : Pave.Provider_catalog.descriptor) ?(intro = [])
       match answer with
       | Some (`Listing (Ok ids)) when
           Pave.Provider_catalog.unclassified_models descriptor.id ->
+          let selected = Option.value ~default:descriptor.default_route route_name in
+          let route = match selected with
+            | "responses" -> "Responses"
+            | "messages" -> "Messages"
+            | "select-route" -> "API-routed"
+            | _ -> "Chat" in
           Tui.update_choices screen ~verified:[]
             ~status:(Printf.sprintf
-              "%s: %d unclassified IDs; type a known Chat model ID"
-              descriptor.display_name (List.length ids)) ()
+              "%s: %d unclassified IDs; type a known %s model ID"
+              descriptor.id (List.length ids) route) ()
       | Some (`Listing (Ok ids)) ->
           let verified = match Pave.Provider_catalog.route descriptor "" with
             | None -> []

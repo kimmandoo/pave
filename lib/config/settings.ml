@@ -1,6 +1,7 @@
 type values = {
   default_provider : string option;
   default_model : string option;
+  default_api : string option;
   disable_shell : bool;
   max_turns : int option;
 }
@@ -8,7 +9,7 @@ type values = {
 type loaded = { values : values; diagnostics : string list }
 
 let empty = {
-  default_provider = None; default_model = None;
+  default_provider = None; default_model = None; default_api = None;
   disable_shell = false; max_turns = None;
 }
 
@@ -35,7 +36,8 @@ let parse text =
   let keys = List.map fst fields in
   if List.length keys <> List.length (List.sort_uniq String.compare keys) then
     invalid_arg "duplicate setting";
-  let allowed = ["default_provider"; "default_model"; "disable_shell"; "max_turns"] in
+  let allowed = ["default_provider"; "default_model"; "default_api";
+    "disable_shell"; "max_turns"] in
   List.iter (fun (name, _) -> if not (List.mem name allowed) then
     invalid_arg ("unknown setting " ^ name)) fields;
   let disable_shell = match member "disable_shell" fields with
@@ -44,10 +46,13 @@ let parse text =
     | Some _ -> invalid_arg "disable_shell must be boolean" in
   let default_provider = string_field "default_provider" fields in
   let default_model = string_field "default_model" fields in
-  (match default_model, default_provider with
-   | Some _, None -> invalid_arg "default_model requires default_provider"
+  let default_api = string_field "default_api" fields in
+  (match default_model, default_api, default_provider with
+   | _, Some _, None ->
+       invalid_arg "default_api requires default_provider"
+   | Some _, _, None -> invalid_arg "default_model requires default_provider"
    | _ -> ());
-  { default_provider; default_model; disable_shell;
+  { default_provider; default_model; default_api; disable_shell;
     max_turns = positive_field "max_turns" fields }
 
 let same_file a b =
@@ -103,6 +108,9 @@ let load ~root =
       default_model = (match project.default_provider with
         | Some _ -> project.default_model
         | None -> first_some project.default_model user.default_model);
+      default_api = (match project.default_provider with
+        | Some _ -> project.default_api
+        | None -> first_some project.default_api user.default_api);
       disable_shell = user.disable_shell || project.disable_shell;
       max_turns = first_some project.max_turns user.max_turns;
     };
@@ -146,6 +154,7 @@ let update_file ?(require_owner = false) ~directory change =
       let fields =
         option "default_provider" updated.default_provider
         @ option "default_model" updated.default_model
+        @ option "default_api" updated.default_api
         @ ["disable_shell", `Bool updated.disable_shell]
         @ (match updated.max_turns with None -> []
           | Some count -> ["max_turns", `Int count]) in

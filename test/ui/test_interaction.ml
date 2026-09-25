@@ -37,7 +37,7 @@ let () =
   invalid "trailing command arguments" (fun () -> parse "/new accidental");
   invalid "multiple tool arguments" (fun () -> parse "/tools read_file write_file");
   invalid "tree takes no argument" (fun () -> parse "/tree missing");
-  let descriptor, model, route = resolve_model ~current_provider:"openai" ~input:"gpt-5" in
+  let descriptor, model, route = resolve_model ~current_provider:"openai" ~input:"gpt-5" () in
   if descriptor.id <> "openai" || model <> "gpt-5" || route.name <> "responses" then
     fail "model-specific Responses route was not selected";
   let openai = Option.get (Pave.Provider_catalog.find "openai") in
@@ -45,26 +45,41 @@ let () =
    | Some route when route.wire = Pave.Provider.Openai_responses -> ()
    | _ -> fail "default OpenAI wire API should support discovered models");
   let descriptor, model, route = resolve_model ~current_provider:"openai"
-    ~input:"openrouter/openai/gpt-4o" in
+    ~input:"openrouter/openai/gpt-4o" () in
   if descriptor.id <> "openrouter" || model <> "openai/gpt-4o" || route.name <> "chat" then
     fail "provider-prefix selector lost namespaced model ID";
   let descriptor, _, route = resolve_model ~current_provider:"ollama"
-    ~input:"anthropic/claude-sonnet-4-5" in
+    ~input:"anthropic/claude-sonnet-4-5" () in
   if descriptor.id <> "anthropic" || route.name <> "messages" then
     fail "explicit provider was not routed to native Messages";
   let descriptor, _, route = resolve_model ~current_provider:"openai"
-    ~input:"github-copilot/gpt-4.1" in
+    ~input:"github-copilot/gpt-4.1" () in
   if descriptor.id <> "github-copilot" ||
      route.wire <> Pave.Provider.Copilot_chat then
     fail "Copilot model selected an incompatible transport";
   let descriptor, _, route = resolve_model ~current_provider:"openai"
-    ~input:"github-copilot/new-chat-model" in
+    ~input:"github-copilot/new-chat-model" () in
   if descriptor.id <> "github-copilot" ||
     route.wire <> Pave.Provider.Copilot_chat then
     fail "newly discovered Copilot model could not use pinned Chat route";
-  invalid "unknown provider" (fun () -> resolve_model ~current_provider:"openai" ~input:"missing/foo");
-  invalid "empty model" (fun () -> resolve_model ~current_provider:"openai" ~input:"openrouter/");
-  invalid "control in model ID" (fun () -> resolve_model ~current_provider:"openai" ~input:"gpt-5\nother");
+  let descriptor, model, route = resolve_model ~current_provider:"openai"
+    ~input:"commandcode@messages/future-studio-model" () in
+  if descriptor.id <> "commandcode" || model <> "future-studio-model" ||
+     route.name <> "messages" then
+    fail "explicit native provider route could not be selected interactively";
+  let _, model, route = resolve_model ~current_provider:"commandcode"
+    ~current_route:"messages" ~input:"future-studio-next" () in
+  if model <> "future-studio-next" || route.name <> "messages" then
+    fail "choosing another model reset the active Messages API route";
+  invalid "missing explicit route" (fun () ->
+    resolve_model ~current_provider:"openai" ~input:"commandcode/future-model" ());
+  invalid "unknown native route" (fun () ->
+    resolve_model ~current_provider:"openai" ~input:"commandcode@unknown/future-model" ());
+  invalid "empty route" (fun () ->
+    resolve_model ~current_provider:"openai" ~input:"commandcode@/future-model" ());
+  invalid "unknown provider" (fun () -> resolve_model ~current_provider:"openai" ~input:"missing/foo" ());
+  invalid "empty model" (fun () -> resolve_model ~current_provider:"openai" ~input:"openrouter/" ());
+  invalid "control in model ID" (fun () -> resolve_model ~current_provider:"openai" ~input:"gpt-5\nother" ());
   let native = `Assoc [
     "provider", `String "openai-codex";
     "model", `String "codex-model-a";
@@ -99,4 +114,29 @@ let () =
      state (history_for_model ~wire:Pave.Provider.Codex_responses
        ~model:"gemini-3-pro" google_history) <> None then
     fail "signed Gemini state crossed the model or protocol boundary";
+  let check_native ~provider ~wire ~other_wire ?route () =
+    let fields = ["provider", `String provider; "model", `String "same-model"] in
+    let fields = match route with
+      | None -> fields
+      | Some name -> ("route", `String name) :: fields in
+    let native = `Assoc fields in
+    let messages = [Pave.Protocol.user "prompt";
+      { assistant with provider_state = Some native }] in
+    if state (history_for_model ~wire ~model:"same-model" messages) <> Some native ||
+       state (history_for_model ~wire ~model:"different-model" messages) <> None ||
+       state (history_for_model ~wire:other_wire ~model:"same-model" messages) <> None
+    then fail ("native signed state lost or crossed route: " ^ provider) in
+  check_native ~provider:"meta" ~wire:Pave.Provider.Meta_responses
+    ~other_wire:Pave.Provider.Openai_responses ();
+  check_native ~provider:"opencode-zen"
+    ~wire:Pave.Provider.Opencode_zen_responses
+    ~other_wire:Pave.Provider.Meta_responses ();
+  check_native ~provider:"devin" ~wire:Pave.Provider.Devin_connect
+    ~other_wire:Pave.Provider.Meta_responses ();
+  check_native ~provider:"commandcode" ~route:"messages"
+    ~wire:Pave.Provider.Commandcode_messages
+    ~other_wire:Pave.Provider.Commandcode_responses ();
+  check_native ~provider:"gitlab-duo" ~route:"anthropic"
+    ~wire:Pave.Provider.Gitlab_duo_messages
+    ~other_wire:Pave.Provider.Gitlab_duo_responses ();
   print_endline "interactive login and model routing: ok"

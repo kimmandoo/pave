@@ -28,8 +28,9 @@ let summary (entry : Session.entry) =
   match entry.kind with
   | Session.Branch -> "branch point"
   | Session.Compaction _ -> "compacted context"
-  | Session.Model { provider; model } ->
-      "model · " ^ first_line (provider ^ "/" ^ model)
+  | Session.Model { provider; model; api } ->
+      "model · " ^ first_line (provider ^
+        (match api with None -> "" | Some api -> "@" ^ api) ^ "/" ^ model)
   | Session.Usage { provider; model; tokens } ->
       Printf.sprintf "usage · %s · %d in / %d out"
         (first_line (provider ^ "/" ^ model))

@@ -4,6 +4,15 @@ type api = Openai_completions | Local_chat | Anthropic_messages | Openai_respons
   | Novita_chat | Siliconflow_chat | Siliconflow_cn_chat
   | Stepfun_chat | Coreweave_chat | Synthetic_chat | Zai_chat
   | Zenmux_chat | Wafer_chat | Qianfan_chat | Xiaomi_chat
+  | Kilo_chat | Alibaba_coding_chat | Singularity_dev_chat
+  | Opencode_go_chat | Charm_hyper_chat | Opencode_zen_responses
+  | Singularity_tech_chat | Firepass_chat | Yolo_auto_chat
+  | Xiaomi_token_ams_chat | Xiaomi_token_cn_chat | Xiaomi_token_sgp_chat
+  | Minimax_code_chat | Minimax_code_cn_chat | Meta_responses
+  | Vercel_ai_gateway_chat | Cloudflare_ai_gateway_chat
+  | Commandcode_chat | Commandcode_messages | Commandcode_responses
+  | Devin_connect | Gitlab_duo_messages | Gitlab_duo_responses
+  | Gitlab_duo_chat
   | Codex_responses | Copilot_chat
 type authentication = Api_key | OAuth
 type config = { endpoint : string; api_key : string; model : string; api : api }
@@ -541,7 +550,14 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage 
             reply))
   | Xai_chat | Nvidia_chat | Novita_chat | Siliconflow_chat
   | Siliconflow_cn_chat | Stepfun_chat | Coreweave_chat | Synthetic_chat
-  | Zai_chat | Zenmux_chat | Wafer_chat | Qianfan_chat | Xiaomi_chat ->
+  | Zai_chat | Zenmux_chat | Wafer_chat | Qianfan_chat | Xiaomi_chat
+  | Kilo_chat | Alibaba_coding_chat | Singularity_dev_chat
+  | Opencode_go_chat | Charm_hyper_chat | Singularity_tech_chat
+  | Firepass_chat | Yolo_auto_chat | Xiaomi_token_ams_chat
+  | Xiaomi_token_cn_chat | Xiaomi_token_sgp_chat
+  | Minimax_code_chat | Minimax_code_cn_chat
+  | Vercel_ai_gateway_chat | Cloudflare_ai_gateway_chat
+  | Commandcode_chat ->
       let headers, body, parse_reply =
         (try match config.api with
         | Xai_chat ->
@@ -596,6 +612,78 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage 
             Xiaomi_api.chat_headers ~endpoint:config.endpoint ~api_key,
             Xiaomi_api.request ~model:config.model messages tools,
             Xiaomi_api.parse_completion
+        | Kilo_chat ->
+            Kilo_api.chat_headers ~endpoint:config.endpoint ~api_key,
+            Kilo_api.request ~model:config.model messages tools,
+            Kilo_api.parse_completion
+        | Alibaba_coding_chat ->
+            Alibaba_coding_api.chat_headers ~endpoint:config.endpoint ~api_key,
+            Alibaba_coding_api.request ~model:config.model messages tools,
+            Alibaba_coding_api.parse_completion
+        | Singularity_dev_chat ->
+            Singularity_dev_api.chat_headers ~endpoint:config.endpoint ~api_key,
+            Singularity_dev_api.request ~model:config.model messages tools,
+            Singularity_dev_api.parse_completion
+        | Opencode_go_chat ->
+            Opencode_go_api.chat_headers ~endpoint:config.endpoint ~api_key,
+            Opencode_go_api.request ~model:config.model messages tools,
+            Opencode_go_api.parse_completion
+        | Charm_hyper_chat ->
+            Charm_hyper_api.chat_headers ~endpoint:config.endpoint ~api_key,
+            Charm_hyper_api.request ~model:config.model messages tools,
+            Charm_hyper_api.parse_completion
+        | Singularity_tech_chat ->
+            Singularity_tech_api.chat_headers ~endpoint:config.endpoint ~api_key,
+            Singularity_tech_api.request ~model:config.model messages tools,
+            Singularity_tech_api.parse_completion
+        | Firepass_chat ->
+            Firepass_api.chat_headers ~endpoint:config.endpoint ~api_key,
+            Firepass_api.request ~model:config.model messages tools,
+            Firepass_api.parse_completion
+        | Yolo_auto_chat ->
+            Yolo_auto_api.chat_headers ~endpoint:config.endpoint ~api_key,
+            Yolo_auto_api.request ~model:config.model messages tools,
+            Yolo_auto_api.parse_completion
+        | Xiaomi_token_ams_chat ->
+            Xiaomi_token_api.chat_headers ~region:Xiaomi_token_api.Ams
+              ~endpoint:config.endpoint ~api_key,
+            Xiaomi_token_api.request ~model:config.model messages tools,
+            Xiaomi_token_api.parse_completion
+        | Xiaomi_token_cn_chat ->
+            Xiaomi_token_api.chat_headers ~region:Xiaomi_token_api.Cn
+              ~endpoint:config.endpoint ~api_key,
+            Xiaomi_token_api.request ~model:config.model messages tools,
+            Xiaomi_token_api.parse_completion
+        | Xiaomi_token_sgp_chat ->
+            Xiaomi_token_api.chat_headers ~region:Xiaomi_token_api.Sgp
+              ~endpoint:config.endpoint ~api_key,
+            Xiaomi_token_api.request ~model:config.model messages tools,
+            Xiaomi_token_api.parse_completion
+        | Minimax_code_chat ->
+            if config.endpoint <> Minimax_code_api.intl_chat_url then
+              raise (Provider_error "MiniMax global plan credential requires its pinned international endpoint");
+            Minimax_code_api.chat_headers ~endpoint:config.endpoint ~api_key,
+            Minimax_code_api.request ~model:config.model messages tools,
+            Minimax_code_api.parse_completion
+        | Minimax_code_cn_chat ->
+            if config.endpoint <> Minimax_code_api.china_chat_url then
+              raise (Provider_error "MiniMax China plan credential requires its pinned China endpoint");
+            Minimax_code_api.chat_headers ~endpoint:config.endpoint ~api_key,
+            Minimax_code_api.request ~model:config.model messages tools,
+            Minimax_code_api.parse_completion
+        | Vercel_ai_gateway_chat ->
+            Vercel_ai_gateway_api.chat_headers ~endpoint:config.endpoint ~api_key,
+            Vercel_ai_gateway_api.request ~model:config.model messages tools,
+            Vercel_ai_gateway_api.parse_completion
+        | Cloudflare_ai_gateway_chat ->
+            Cloudflare_ai_gateway_api.chat_headers ~endpoint:config.endpoint ~api_key,
+            Cloudflare_ai_gateway_api.request ~model:config.model messages tools,
+            Cloudflare_ai_gateway_api.parse_completion
+        | Commandcode_chat ->
+            Commandcode_api.chat_headers ~endpoint:config.endpoint ~api_key,
+            parse (fun () ->
+              Commandcode_api.chat_request ~model:config.model messages tools),
+            Commandcode_api.parse_chat_completion ~model:config.model
         | _ -> assert false
         with Invalid_argument reason -> raise (Provider_error reason)) in
       let json = post_json ?cancel ~endpoint:config.endpoint
@@ -609,6 +697,173 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage 
       (match on_text, reply.content with
       | Some emit, Some text -> check_cancel cancel; emit text
       | _ -> ());
+      reply
+  | Opencode_zen_responses ->
+      let headers = try
+        Opencode_zen_api.responses_headers ~endpoint:config.endpoint ~api_key
+      with Invalid_argument reason -> raise (Provider_error reason) in
+      let body = parse (fun () ->
+        Opencode_zen_api.request ~model:config.model messages tools) in
+      let json = post_json ?cancel ~endpoint:config.endpoint
+        ~headers ~secret:api_key body in
+      let reply = parse (fun () ->
+        Opencode_zen_api.parse_completion ~model:config.model json) in
+      (match on_usage with
+       | None -> ()
+       | Some report ->
+           check_cancel cancel;
+           Option.iter report (Openai_responses_wire.usage json));
+      (match on_text, reply.content with
+       | Some emit, Some text -> check_cancel cancel; emit text
+       | _ -> ());
+      reply
+  | Meta_responses ->
+      let headers = try
+        Meta_api.responses_headers ~endpoint:config.endpoint ~api_key
+      with Invalid_argument reason -> raise (Provider_error reason) in
+      let body = parse (fun () ->
+        Meta_api.request ~model:config.model messages tools) in
+      let json = post_json ?cancel ~endpoint:config.endpoint
+        ~headers ~secret:api_key body in
+      let reply = parse (fun () ->
+        Meta_api.parse_completion ~model:config.model json) in
+      (match on_usage with
+       | None -> ()
+       | Some report ->
+           check_cancel cancel;
+           Option.iter report (Openai_responses_wire.usage json));
+      (match on_text, reply.content with
+       | Some emit, Some text -> check_cancel cancel; emit text
+       | _ -> ());
+      reply
+  | Commandcode_responses ->
+      let headers = try
+        Commandcode_api.responses_headers ~endpoint:config.endpoint ~api_key
+      with Invalid_argument reason -> raise (Provider_error reason) in
+      let body = parse (fun () ->
+        Commandcode_api.responses_request ~model:config.model messages tools) in
+      let json = post_json ?cancel ~endpoint:config.endpoint
+        ~headers ~secret:api_key body in
+      let reply = parse (fun () ->
+        Commandcode_api.parse_responses_completion ~model:config.model json) in
+      (match on_usage with
+       | None -> ()
+       | Some report ->
+           check_cancel cancel;
+           Option.iter report (Openai_responses_wire.usage json));
+      (match on_text, reply.content with
+       | Some emit, Some text -> check_cancel cancel; emit text
+       | _ -> ());
+      reply
+  | Commandcode_messages ->
+      let headers = try
+        Commandcode_api.messages_headers ~endpoint:config.endpoint ~api_key
+      with Invalid_argument reason -> raise (Provider_error reason) in
+      let body = parse (fun () ->
+        Commandcode_api.messages_request ~model:config.model ~max_tokens:4096
+          messages tools) in
+      let json = post_json ?cancel ~endpoint:config.endpoint
+        ~headers ~secret:api_key body in
+      let reply = parse (fun () ->
+        Commandcode_api.parse_messages_completion ~model:config.model json) in
+      (match on_usage with
+       | None -> ()
+       | Some report ->
+           check_cancel cancel;
+           Option.iter report (Anthropic_wire.usage json));
+      (match on_text, reply.content with
+       | Some emit, Some text -> check_cancel cancel; emit text
+       | _ -> ());
+      reply
+  | Devin_connect ->
+      if config.endpoint <> Devin_api.chat_url then
+        raise (Provider_error "Devin session credential requires the pinned Connect endpoint");
+      let models = try (match Devin_api.discover ?cancel ~api_key () with
+        | Ok models -> models
+        | Error Devin_api.Invalid_credential ->
+            raise (Provider_error "invalid Devin session credential")
+        | Error Devin_api.Transport_error ->
+            raise (Provider_error "Devin model discovery transport failed")
+        | Error (Devin_api.Http_error status) ->
+            raise (Provider_error (Printf.sprintf "Devin model discovery HTTP %d" status))
+        | Error (Devin_api.Invalid_response reason) ->
+            raise (Provider_error reason))
+        with Devin_binary_http.Cancelled -> raise Cancelled in
+      let selected = match List.find_opt
+        (fun (entry : Devin_api.model) -> entry.id = config.model) models with
+        | Some model -> model
+        | None -> raise (Provider_error "Devin model is not in this account's live roster") in
+      if tools <> [] && not selected.supports_tools then
+        raise (Provider_error "selected Devin model does not support tools");
+      let cascade_id = try Devin_api.cascade_id messages
+        with Devin_api.Bad_wire reason -> raise (Provider_error reason) in
+      let reply, usage = try (match Devin_api.complete ?cancel ~api_key
+        ~model:selected.id ~cascade_id ~router:selected.router
+        ~max_tokens:selected.max_tokens
+        ~supports_parallel_tool_calls:selected.supports_parallel_tool_calls
+        messages tools with
+        | Ok completion -> completion
+        | Error Devin_api.Invalid_credential ->
+            raise (Provider_error "invalid Devin session credential")
+        | Error Devin_api.Transport_error ->
+            raise (Provider_error "Devin Connect transport failed")
+        | Error (Devin_api.Http_error status) ->
+            raise (Provider_error (Printf.sprintf "Devin Connect HTTP %d" status))
+        | Error (Devin_api.Invalid_response reason) ->
+            raise (Provider_error reason))
+        with Devin_binary_http.Cancelled -> raise Cancelled in
+      (match on_usage, usage with
+       | Some report, Some (input_tokens, output_tokens) ->
+           check_cancel cancel;
+           report { Protocol.input_tokens = input_tokens; output_tokens }
+       | _ -> ());
+      (match on_text, reply.content with
+       | Some emit, Some text -> check_cancel cancel; emit text
+       | _ -> ());
+      reply
+  | Gitlab_duo_messages | Gitlab_duo_responses | Gitlab_duo_chat ->
+      let module Duo = Gitlab_duo_api in
+      let route = match config.api with
+        | Gitlab_duo_messages -> Duo.Anthropic
+        | Gitlab_duo_responses -> Duo.Openai_responses
+        | Gitlab_duo_chat -> Duo.Openai_completions
+        | _ -> assert false in
+      if config.endpoint <> Duo.endpoint route then
+        raise (Provider_error "GitLab account credentials require their pinned Duo route");
+      let exchange = post_json ?cancel ~endpoint:Duo.direct_access_url
+        ~headers:["Authorization: Bearer " ^ api_key]
+        ~secret:api_key
+        (`Assoc ["feature_flags", `Assoc ["DuoAgentPlatformNext", `Bool true]]) in
+      let access = match Duo.parse_access exchange with
+        | Ok access -> access
+        | Error Duo.Invalid_credential ->
+            raise (Provider_error "invalid GitLab account credential")
+        | Error (Duo.Http_error status) ->
+            raise (Provider_error (Printf.sprintf "GitLab Direct Access HTTP %d" status))
+        | Error Duo.Transport_error ->
+            raise (Provider_error "GitLab Direct Access transport failed")
+        | Error (Duo.Invalid_response reason) ->
+            raise (Provider_error reason) in
+      let headers = try Duo.gateway_headers ~endpoint:config.endpoint access
+        with Invalid_argument reason -> raise (Provider_error reason) in
+      let body = parse (fun () -> Duo.request ~route ~model:config.model
+        ~max_tokens:4096 messages tools) in
+      let json = post_json ?cancel ~endpoint:config.endpoint
+        ~headers ~secret:access.token body in
+      let reply = parse (fun () ->
+        Duo.parse_completion ~route ~model:config.model json) in
+      (match on_usage with
+       | None -> ()
+       | Some report ->
+           check_cancel cancel;
+           let usage = match route with
+             | Duo.Anthropic -> Anthropic_wire.usage json
+             | Duo.Openai_responses -> Openai_responses_wire.usage json
+             | Duo.Openai_completions -> Protocol.completion_usage json in
+           Option.iter report usage);
+      (match on_text, reply.content with
+       | Some emit, Some text -> check_cancel cancel; emit text
+       | _ -> ());
       reply
   | Anthropic_messages ->
       let body = parse (fun () ->

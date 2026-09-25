@@ -145,12 +145,23 @@ let () =
           | Some configured_provider when configured_provider = descriptor.id ->
               Option.value ~default:"" configured.default_model
           | _ -> "") in
-    let route = match Pave.Provider_catalog.route descriptor !api_name with
+    let selected_api = if !api_name <> "" then !api_name
+      else match saved_model, Option.bind !journal Pave.Session.api with
+        | Some _, Some api -> api
+        | _ -> (match configured.default_provider with
+          | Some provider when provider = descriptor.id ->
+              Option.value ~default:"" configured.default_api
+          | _ -> "") in
+    let route = match Pave.Provider_catalog.route descriptor selected_api with
       | Some value -> value
       | None -> failwith ("unsupported API for " ^
           descriptor.id ^ "; specify --api to override") in
-    let configured_default_usable =
-      model <> "" && Pave.Provider_catalog.route descriptor "" <> None in
+    let configured_default_usable = model <> "" in
+    let model_label (descriptor : Pave.Provider_catalog.descriptor)
+        (route : Pave.Provider_catalog.route) model =
+      descriptor.id ^
+      (if descriptor.default_route = "select-route" then "@" ^ route.name else "") ^
+      "/" ^ model in
     let active_descriptor = ref descriptor and active_model = ref model
       and active_route = ref route and endpoint_override = ref !endpoint in
     let ui = ref None in
@@ -205,7 +216,10 @@ let () =
       let authentication, api_key, resolve_credential =
         Cli_auth.resolve_authentication ~descriptor ~route
           ~endpoint:!endpoint_override in
-      let endpoint = if !endpoint_override = "" then route.endpoint
+      let endpoint =
+        if route.wire = Pave.Provider.Cloudflare_ai_gateway_chat then
+          Option.get (Pave.Cloudflare_ai_gateway_api.env_chat_url ())
+        else if !endpoint_override = "" then route.endpoint
         else !endpoint_override in
       let provider : Pave.Provider.config = {
         endpoint; model = !active_model; api_key; api = route.wire } in
@@ -214,8 +228,8 @@ let () =
       let provider, authentication, resolve_credential = resolve_provider () in
       (match !journal with
        | Some session when !active_model <> "" ->
-           Pave.Session.set_model session ~provider:!active_descriptor.id
-             ~model:!active_model
+           Pave.Session.set_model ~api:!active_route.name session
+             ~provider:!active_descriptor.id ~model:!active_model
        | _ -> ());
       let history = match !journal with
         | Some session -> Pave.Session.context session
@@ -250,11 +264,15 @@ let () =
         | None ->
             on_event "Error: current conversation is unsaved; start with --session to preserve it";
             false in
-    let session_selection saved =
+    let session_selection ?saved_api saved =
       if explicit_model_override then None
       else Option.map (fun (provider, model) ->
-        Pave.Interaction.resolve_model ~current_provider:provider
-          ~input:(provider ^ "/" ^ model)) saved in
+        let current_route = match saved_api with
+          | Some name -> Some name
+          | None when provider = !active_descriptor.id -> Some !active_route.name
+          | None -> None in
+        Pave.Interaction.resolve_model ?current_route ~current_provider:provider
+          ~input:(provider ^ "/" ^ model) ()) saved in
     let use_selection (descriptor, model, route) =
       active_descriptor := descriptor;
       active_model := model;
@@ -262,24 +280,26 @@ let () =
       endpoint_override := "";
       agent := None;
       match !ui with
-      | Some screen -> Tui.set_model screen (descriptor.id ^ "/" ^ model)
+      | Some screen -> Tui.set_model screen (model_label descriptor route model)
       | None -> () in
     let apply_model_selection ((descriptor : Pave.Provider_catalog.descriptor),
-        model, route) =
+        model, (route : Pave.Provider_catalog.route)) =
       (match !journal with
        | Some current ->
-           Pave.Session.set_model current ~provider:descriptor.id ~model
+           Pave.Session.set_model ~api:route.name current ~provider:descriptor.id ~model
        | None -> ());
       (match !journal, !agent with
        | None, Some previous -> retained_history := Pave.Agent.messages previous
        | _ -> ());
       use_selection (descriptor, model, route) in
     let switch_session next =
-      let selected = session_selection (Pave.Session.model next) in
-      let descriptor, model, _ = match selected with
+      let selected = session_selection ?saved_api:(Pave.Session.api next)
+        (Pave.Session.model next) in
+      let descriptor, model, route = match selected with
         | Some choice -> choice
         | None -> !active_descriptor, !active_model, !active_route in
-      if model <> "" then Pave.Session.set_model next ~provider:descriptor.id ~model;
+      if model <> "" then
+        Pave.Session.set_model ~api:route.name next ~provider:descriptor.id ~model;
       journal := Some next;
       (match selected with Some choice -> use_selection choice | None -> agent := None);
       retained_history := [];
@@ -357,48 +377,18 @@ let () =
                  on_event "Compacted conversation; full journal preserved."
              | _ -> failwith "model returned no compaction summary")
            with exn -> on_event ("Error: " ^ error_message exn)) in
-    let choose_login selected =
-      let id = match selected, !ui with
-        | Some id, _ -> id
-        | None, Some screen ->
-            let options = List.filter_map (fun (entry : Pave.Provider_catalog.descriptor) ->
-              match entry.oauth with
-              | None -> None
-              | Some _ -> Some (entry.id ^ "  " ^ entry.display_name, entry.id))
-              (Pave.Interaction.selectable_providers ()) in
-            (match Tui.choose screen ~title:"Sign in · select provider"
-              ~choices:(List.map fst options) with
-             | Some choice -> List.assoc choice options
-             | None -> "")
-        | None, None ->
-            print_endline "Browser sign-in providers:";
-            List.iter (fun (entry : Pave.Provider_catalog.descriptor) ->
-              if entry.oauth <> None then
-                Printf.printf "  %s  %s\n" entry.id entry.display_name)
-              (Pave.Interaction.selectable_providers ());
-            print_string "Provider ID (blank cancels): "; flush stdout;
-            (try String.trim (read_line ()) with End_of_file -> "") in
-      if id <> "" then (
-        let descriptor = match Pave.Provider_catalog.find id with
-          | Some value when value.oauth <> None -> value
-          | _ -> failwith ("browser login unavailable for " ^ id) in
-        (match !ui with
-         | Some screen -> Tui.suspend screen (fun () ->
-             ignore (Cli_auth.handle_action ~login:descriptor.id
-               ~login_manual:"" ~logout:""))
-         | None -> ignore (Cli_auth.handle_action ~login:descriptor.id
-             ~login_manual:"" ~logout:""));
-        on_event ("Signed in to " ^ id ^
-          ". Select a model with /model " ^ id ^ "/MODEL_ID.")) in
-    let choose_model selected =
+    let choose_model ?preferred selected =
       let selector = match selected with
         | Some selector -> selector
         | None ->
             let providers = Pave.Interaction.selectable_providers () in
+            let descriptor = Option.value ~default:!active_descriptor preferred in
+            let route_name = if descriptor.id = !active_descriptor.id
+              then !active_route.name else descriptor.default_route in
             (match !ui with
              | Some screen ->
-                 (match Model_picker.choose screen ~descriptor:!active_descriptor
-                   ~title:"Model · live IDs (type an ID if unavailable)"
+                 (match Model_picker.choose screen ~descriptor ~route_name
+                   ~title:("Model · " ^ descriptor.id ^ " (current conversation)")
                    ~choices:[] () with
                   | Some value -> value | None -> "")
              | None ->
@@ -409,18 +399,74 @@ let () =
                  print_string "Provider/model ID (blank cancels): "; flush stdout;
                  (try String.trim (read_line ()) with End_of_file -> "")) in
       if selector <> "" then (
+        let current_provider, current_route = match preferred with
+          | Some descriptor when descriptor.id <> !active_descriptor.id ->
+              descriptor.id, descriptor.default_route
+          | _ -> !active_descriptor.id, !active_route.name in
         let descriptor, model, route =
           try Pave.Interaction.resolve_model
-            ~current_provider:!active_descriptor.id ~input:selector
+            ~current_provider ~current_route ~input:selector ()
           with exn ->
             (match !ui with Some screen -> Tui.reset_status screen | None -> ());
             raise exn in
         apply_model_selection (descriptor, model, route);
-        on_event ("Model: " ^ descriptor.id ^ "/" ^ model ^ " (" ^ route.name ^
-          "). Sign in with /login " ^ descriptor.id ^ " or set its API key if needed.")
+        on_event ("Active model: " ^ model_label descriptor route model ^
+          ". /setup saves a default for future sessions.")
       ) else match !ui with
-        | Some screen -> Tui.reset_status screen
+        | Some screen ->
+            Tui.reset_status screen;
+            Option.iter (fun (descriptor : Pave.Provider_catalog.descriptor) ->
+              on_event ("Signed in to " ^ descriptor.id ^
+                "; active model unchanged. Use /model when ready.")) preferred
         | None -> () in
+    let choose_login selected =
+      let id = match selected, !ui with
+        | Some id, _ -> id
+        | None, Some screen ->
+            let options = List.filter_map (fun (entry : Pave.Provider_catalog.descriptor) ->
+              match entry.oauth with
+              | None -> None
+              | Some _ -> Some (entry.id ^ "  " ^ entry.display_name, entry.id))
+              (Pave.Interaction.selectable_providers ()) in
+            (match Tui.choose screen
+              ~intro:["LOGIN = connect an account, not switch models.";
+                "Use /setup to save a provider + model default."]
+              ~title:"LOGIN · Connect an account"
+              ~choices:(List.map fst options) with
+             | Some choice -> List.assoc choice options
+             | None -> "")
+        | None, None ->
+            print_endline "Account sign-in providers (login does not change your model):";
+            List.iter (fun (entry : Pave.Provider_catalog.descriptor) ->
+              if entry.oauth <> None then
+                Printf.printf "  %s  %s\n" entry.id entry.display_name)
+              (Pave.Interaction.selectable_providers ());
+            print_string "Provider ID (blank cancels): "; flush stdout;
+            (try String.trim (read_line ()) with End_of_file -> "") in
+      if id <> "" then (
+        let descriptor = match Pave.Provider_catalog.find id with
+          | Some value when value.oauth <> None -> value
+          | _ -> failwith ("account sign-in unavailable for " ^ id) in
+        (match !ui with
+         | Some screen -> Tui.suspend screen (fun () ->
+             ignore (Cli_auth.handle_action ~login:descriptor.id
+               ~login_manual:"" ~logout:""))
+         | None -> ignore (Cli_auth.handle_action ~login:descriptor.id
+             ~login_manual:"" ~logout:""));
+        match !ui with
+        | Some screen ->
+            (match Tui.choose screen
+              ~intro:["Account connected; your active model has not changed.";
+                "Choose a model now for this conversation only.";
+                "Use /setup later to save a default for future sessions."]
+              ~title:("LOGIN · Connected to " ^ descriptor.id)
+              ~choices:["Choose model now"; "Keep current model"] with
+             | Some "Choose model now" ->
+                 choose_model ~preferred:descriptor None
+             | _ -> on_event ("Signed in to " ^ id ^ "; active model unchanged."))
+        | None ->
+            on_event ("Signed in to " ^ id ^ "; active model unchanged. " ^
+              "Use /model " ^ id ^ "/MODEL_ID to switch, /setup to save a default.")) in
     let run_setup screen ~first_run =
       match Setup_view.run screen with
       | Setup_view.Skipped ->
@@ -438,7 +484,7 @@ let () =
             try
               ignore (Pave.Settings.update_user (fun current -> {
                 current with default_provider = Some descriptor.id;
-                  default_model = Some model }));
+                  default_model = Some model; default_api = Some route.name }));
               true
             with exn ->
               on_event ("User default was not saved: " ^ error_message exn ^
@@ -462,14 +508,15 @@ let () =
     let interact () =
       let checkout_branch current target =
         let selected = session_selection
+          ?saved_api:(Pave.Session.api_at current (Some target))
           (Pave.Session.model_at current (Some target)) in
         Pave.Session.branch current target;
         (match selected with
          | Some choice -> use_selection choice
          | None ->
              if !active_model <> "" then
-               Pave.Session.set_model current ~provider:!active_descriptor.id
-                 ~model:!active_model;
+              Pave.Session.set_model ~api:!active_route.name current
+                ~provider:!active_descriptor.id ~model:!active_model;
              agent := None);
         match !ui with
         | Some screen ->
@@ -563,6 +610,8 @@ let () =
                  Option.value ~default:"openai" values.default_provider);
                on_event ("Default model: " ^
                  Option.value ~default:"(not selected)" values.default_model);
+               on_event ("Default API: " ^
+                 Option.value ~default:"(provider default)" values.default_api);
                on_event ("Disable shell tools: " ^
                  string_of_bool values.disable_shell);
                on_event ("Maximum turns: " ^
@@ -755,9 +804,11 @@ let () =
                        | None -> "<tool calls>"))
                  | Pave.Session.Compaction _ ->
                      Some (entry.id ^ " compaction <summary>")
-                 | Pave.Session.Model { provider; model } ->
+                 | Pave.Session.Model { provider; model; api } ->
                      Some (entry.id ^ " model " ^
-                       Pave.Session_tree.first_line (provider ^ "/" ^ model))
+                       Pave.Session_tree.first_line (provider ^
+                         (match api with None -> "" | Some api -> "@" ^ api) ^
+                         "/" ^ model))
                  | Pave.Session.Usage { provider; model; tokens } ->
                      Some (Printf.sprintf "%s usage %s · %d in / %d out"
                        entry.id (Pave.Session_tree.first_line
@@ -790,7 +841,7 @@ let () =
     else if Unix.isatty Unix.stdin && Unix.isatty Unix.stdout
       && Sys.getenv_opt "TERM" <> Some "dumb" then (
       let screen = Tui.create ~root
-        ~model:(descriptor.id ^ "/" ^
+        ~model:(model_label descriptor route
           (if model = "" then "(select with /model)" else model))
         ~session:(!session <> "") in
       Fun.protect ~finally:(fun () ->

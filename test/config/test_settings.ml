@@ -37,9 +37,10 @@ let () =
     Unix.rmdir workspace; Unix.rmdir user_dir; Unix.rmdir user_home;
     Unix.rmdir base) (fun () ->
     write (Filename.concat user_dir "settings.json")
-      {|{"default_provider":"openai","default_model":"gpt-6-sol","disable_shell":true,"max_turns":12}|};
+      {|{"default_provider":"openai","default_model":"gpt-6-sol","default_api":"responses","disable_shell":true,"max_turns":12}|};
     let inherited = Pave.Settings.load ~root:workspace in
     assert (inherited.values.default_model = Some "gpt-6-sol");
+    assert (inherited.values.default_api = Some "responses");
     assert (inherited.values.disable_shell);
     assert (inherited.values.max_turns = Some 12);
     Unix.mkdir project_dir 0o700;
@@ -49,6 +50,7 @@ let () =
     let project = Pave.Settings.load ~root:workspace in
     assert (project.values.default_provider = Some "anthropic");
     assert (project.values.default_model = None);
+    assert (project.values.default_api = None);
     assert (project.values.max_turns = Some 6);
     assert (project.values.disable_shell);
     ignore (Pave.Settings.update_project ~root:workspace (fun current ->
@@ -68,9 +70,11 @@ let () =
     Sys.remove project_file;
     ignore (Pave.Settings.update_user (fun current ->
       { current with default_provider = Some "ollama";
-        default_model = Some "llama3.2" }));
+        default_model = Some "llama3.2"; default_api = Some "chat" }));
     assert ((Pave.Settings.load ~root:workspace).values.default_provider =
       Some "ollama");
+    assert ((Pave.Settings.load ~root:workspace).values.default_api =
+      Some "chat");
     assert ((Pave.Settings.load ~root:workspace).values.disable_shell);
     assert ((Pave.Settings.load ~root:workspace).values.max_turns = Some 12);
     Pave.Setup_state.mark Pave.Setup_state.Complete;
