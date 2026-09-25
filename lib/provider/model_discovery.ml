@@ -508,6 +508,87 @@ let discover_stepfun ?http ?cancel credential =
            Error (Transport_error "request failed or timed out"))
   | Some _ -> Error Invalid_credential
 
+let discover_synthetic ?http ?cancel credential =
+  match credential with
+  | None -> Error Missing_credential
+  | Some (Api_key key) ->
+      let source = match http with
+        | Some callback -> callback
+        | None -> fun ~url ~headers -> default_http ?cancel ~url ~headers () in
+      let http ~url ~headers = match source ~url ~headers with
+        | Ok response -> Ok response
+        | Error Invalid_credential -> Error Synthetic_api.Invalid_credential
+        | Error (Http_error status) -> Error (Synthetic_api.Http_error status)
+        | Error (Invalid_response reason) ->
+            Error (Synthetic_api.Invalid_response reason)
+        | Error _ -> Error Synthetic_api.Transport_error in
+      (try
+        Provider.check_cancel cancel;
+        let result = Synthetic_api.discover ~http ~api_key:key () in
+        Provider.check_cancel cancel;
+        match result with
+        | Ok ids -> Ok ids
+        | Error Synthetic_api.Invalid_credential -> Error Invalid_credential
+        | Error Synthetic_api.Transport_error ->
+            Error (Transport_error "request failed or timed out")
+        | Error (Synthetic_api.Http_error status) -> Error (Http_error status)
+        | Error (Synthetic_api.Invalid_response reason) ->
+            Error (Invalid_response reason)
+       with
+       | Provider.Cancelled -> raise Provider.Cancelled
+       | Provider.Provider_error _ | Unix.Unix_error _ | Sys_error _ ->
+           Error (Transport_error "request failed or timed out"))
+  | Some _ -> Error Invalid_credential
+
+(* Vendor adapters own their pinned URL, key policy, response schema and
+   model-kind filter. This bridge only translates shared HTTP/cancel errors. *)
+module Native_discovery (M : sig
+  type error =
+    | Invalid_credential
+    | Transport_error
+    | Http_error of int
+    | Invalid_response of string
+  val discover :
+    http:(url:string -> headers:(string * string) list ->
+      (int * string, error) result) ->
+    api_key:string -> unit -> (string list, error) result
+end) = struct
+  let discover ?http ?cancel credential =
+    match credential with
+    | None -> Error Missing_credential
+    | Some (Api_key key) ->
+        let source = match http with
+          | Some callback -> callback
+          | None -> fun ~url ~headers -> default_http ?cancel ~url ~headers () in
+        let http ~url ~headers = match source ~url ~headers with
+          | Ok response -> Ok response
+          | Error Invalid_credential -> Error M.Invalid_credential
+          | Error (Http_error status) -> Error (M.Http_error status)
+          | Error (Invalid_response reason) -> Error (M.Invalid_response reason)
+          | Error _ -> Error M.Transport_error in
+        (try
+           Provider.check_cancel cancel;
+           let result = M.discover ~http ~api_key:key () in
+           Provider.check_cancel cancel;
+           match result with
+           | Ok ids -> Ok ids
+           | Error M.Invalid_credential -> Error Invalid_credential
+           | Error M.Transport_error ->
+               Error (Transport_error "request failed or timed out")
+           | Error (M.Http_error status) -> Error (Http_error status)
+           | Error (M.Invalid_response reason) -> Error (Invalid_response reason)
+         with
+         | Provider.Cancelled -> raise Provider.Cancelled
+         | Provider.Provider_error _ | Unix.Unix_error _ | Sys_error _ ->
+             Error (Transport_error "request failed or timed out"))
+    | Some _ -> Error Invalid_credential
+end
+
+module Zenmux_discovery = Native_discovery (Zenmux_api)
+module Wafer_discovery = Native_discovery (Wafer_api)
+module Qianfan_discovery = Native_discovery (Qianfan_api)
+module Xiaomi_discovery = Native_discovery (Xiaomi_api)
+
 let discover ?http ?cancel ~provider ?credential () =
   if Local_compat.engine provider <> None then
     discover_local ?http ?cancel ~provider credential
@@ -523,6 +604,16 @@ let discover ?http ?cancel ~provider ?credential () =
     discover_nvidia ?http ?cancel credential
   else if provider = "stepfun" then
     discover_stepfun ?http ?cancel credential
+  else if provider = "synthetic" then
+    discover_synthetic ?http ?cancel credential
+  else if provider = "zenmux" then
+    Zenmux_discovery.discover ?http ?cancel credential
+  else if provider = "wafer-serverless" then
+    Wafer_discovery.discover ?http ?cancel credential
+  else if provider = "qianfan" then
+    Qianfan_discovery.discover ?http ?cancel credential
+  else if provider = "xiaomi" then
+    Xiaomi_discovery.discover ?http ?cancel credential
   else if provider = "openai-codex" then discover_codex ?http ?cancel credential
   else if provider = "sakana" then (
     let credential = match credential with

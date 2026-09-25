@@ -97,6 +97,36 @@ let builtins = [
       endpoint = Coreweave_api.chat_url } ];
     default_route = "chat";
     api_key_env = Some "COREWEAVE_API_KEY"; oauth = None };
+  { id = "synthetic"; display_name = "Synthetic (unclassified model IDs)";
+    routes = [ { name = "chat"; wire = Provider.Synthetic_chat;
+      endpoint = Synthetic_api.chat_url } ];
+    default_route = "chat";
+    api_key_env = Some "SYNTHETIC_API_KEY"; oauth = None };
+  { id = "zai"; display_name = "Z.AI (standard Chat)";
+    routes = [ { name = "chat"; wire = Provider.Zai_chat;
+      endpoint = Zai_api.chat_url } ];
+    default_route = "chat";
+    api_key_env = Some "ZAI_API_KEY"; oauth = None };
+  { id = "zenmux"; display_name = "ZenMux (unclassified model IDs)";
+    routes = [ { name = "chat"; wire = Provider.Zenmux_chat;
+      endpoint = Zenmux_api.chat_url } ];
+    default_route = "chat";
+    api_key_env = Some "ZENMUX_API_KEY"; oauth = None };
+  { id = "wafer-serverless"; display_name = "Wafer Serverless (unclassified model IDs)";
+    routes = [ { name = "chat"; wire = Provider.Wafer_chat;
+      endpoint = Wafer_api.chat_url } ];
+    default_route = "chat";
+    api_key_env = Some "WAFER_SERVERLESS_API_KEY"; oauth = None };
+  { id = "qianfan"; display_name = "Baidu Qianfan V2";
+    routes = [ { name = "chat"; wire = Provider.Qianfan_chat;
+      endpoint = Qianfan_api.chat_url } ];
+    default_route = "chat";
+    api_key_env = Some "QIANFAN_API_KEY"; oauth = None };
+  { id = "xiaomi"; display_name = "Xiaomi MiMo pay-as-you-go (unclassified IDs)";
+    routes = [ { name = "chat"; wire = Provider.Xiaomi_chat;
+      endpoint = Xiaomi_api.chat_url } ];
+    default_route = "chat";
+    api_key_env = Some "XIAOMI_API_KEY"; oauth = None };
   { id = "moonshot"; display_name = "Moonshot AI (global)";
     routes = [ { name = "chat"; wire = Provider.Openai_completions;
       endpoint = "https://api.moonshot.ai/v1/chat/completions" } ];
@@ -219,6 +249,11 @@ let builtins = [
 
 let all () = builtins
 let find id = List.find_opt (fun provider -> provider.id = id) builtins
+
+(* These listings do not document enough modality/tool metadata to certify
+   that every returned ID is a routable Chat model. Manual IDs remain allowed. *)
+let unclassified_models id =
+  List.mem id [ "stepfun"; "synthetic"; "wafer-serverless"; "zenmux"; "xiaomi" ]
 
 let route provider name =
   let name = if name = "" then provider.default_route else name in
