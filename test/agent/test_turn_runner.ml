@@ -5,6 +5,9 @@ let () =
   let release_follow_up = Atomic.make false in
   let late_thread = ref None in
   let runner_ref = ref None in
+  let active_turn_id = ref None in
+  let seen_turn_ids = Hashtbl.create 8 in
+  let require_owner turn_id = assert (!active_turn_id = Some turn_id) in
   let caller_thread = Thread.id (Thread.self ()) in
   let run ~cancel text =
     let runner = Option.get !runner_ref in
@@ -41,23 +44,46 @@ let () =
     | "approve" ->
         if Pave.Turn_runner.approve runner "printf approved" then
           Pave.Turn_runner.delta runner "approved"
+    | "fail" -> failwith "expected turn failure"
     | _ -> failwith "unexpected turn" in
   let runner = Pave.Turn_runner.create ~run
-    ~on_message:(fun message -> event ("message:" ^ message))
-    ~on_delta:(fun text -> event ("delta:" ^ text))
+    ~on_event:(fun turn_event ->
+      assert (Thread.id (Thread.self ()) = caller_thread);
+      match turn_event with
+      | Pave.Turn_runner.Turn_started { turn_id; prompt } ->
+          assert (!active_turn_id = None);
+          assert (not (Hashtbl.mem seen_turn_ids turn_id));
+          Hashtbl.add seen_turn_ids turn_id ();
+          active_turn_id := Some turn_id;
+          event ("start:" ^ prompt)
+      | Pave.Turn_runner.Transcript_message { turn_id; text } ->
+          require_owner turn_id;
+          event ("message:" ^ text)
+      | Pave.Turn_runner.Text_delta { turn_id; text } ->
+          require_owner turn_id;
+          event ("delta:" ^ text)
+      | Pave.Turn_runner.Activity_phase { turn_id; phase } ->
+          require_owner turn_id;
+          event ("phase:" ^ match phase with
+            | Pave.Agent.Model -> "model"
+            | Pave.Agent.Tool name -> name)
+      | Pave.Turn_runner.Turn_completed { turn_id } ->
+          require_owner turn_id;
+          active_turn_id := None;
+          event "completed"
+      | Pave.Turn_runner.Turn_cancelled { turn_id } ->
+          require_owner turn_id;
+          active_turn_id := None;
+          event "cancelled"
+      | Pave.Turn_runner.Turn_failed { turn_id; error } ->
+          require_owner turn_id;
+          active_turn_id := None;
+          event ("failure:" ^ Printexc.to_string error))
     ~on_approve:(fun command ->
       assert (Thread.id (Thread.self ()) = caller_thread);
       assert (command = "printf approved");
       event "approved-request";
       true)
-    ~on_phase:(fun phase -> event ("phase:" ^ match phase with
-      | Pave.Agent.Model -> "model"
-      | Pave.Agent.Tool name -> name))
-    ~on_start:(fun text -> event ("start:" ^ text))
-    ~on_finish:(fun outcome -> event (match outcome with
-      | Pave.Turn_runner.Completed -> "completed"
-      | Pave.Turn_runner.Cancelled -> "cancelled"
-      | Pave.Turn_runner.Failed exn -> Printexc.to_string exn))
     ~on_queued:(fun count -> event ("queued:" ^ string_of_int count)) () in
   runner_ref := Some runner;
   Fun.protect ~finally:(fun () ->
@@ -121,5 +147,14 @@ let () =
     until_idle ();
     assert (List.length (List.filter ((=) "cancelled") !events)
       = cancelled_before + 1);
-    assert (not (Pave.Turn_runner.busy runner)));
+    assert (not (Pave.Turn_runner.busy runner));
+    let failures_before = List.length (List.filter
+      (String.starts_with ~prefix:"failure:") !events) in
+    Pave.Turn_runner.submit runner "fail";
+    until "failure:Failure(\"expected turn failure\")";
+    until_idle ();
+    assert (List.length (List.filter
+      (String.starts_with ~prefix:"failure:") !events) = failures_before + 1);
+    assert (!active_turn_id = None);
+  );
   print_endline "turn runner: ok"

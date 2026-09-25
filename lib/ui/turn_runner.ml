@@ -1,5 +1,14 @@
 type completion = Completed | Cancelled | Failed of exn
 
+type event =
+  | Turn_started of { turn_id : int; prompt : string }
+  | Transcript_message of { turn_id : int; text : string }
+  | Text_delta of { turn_id : int; text : string }
+  | Activity_phase of { turn_id : int; phase : Agent.phase }
+  | Turn_completed of { turn_id : int }
+  | Turn_cancelled of { turn_id : int }
+  | Turn_failed of { turn_id : int; error : exn }
+
 type turn = {
   id : int;
   cancelled : bool Atomic.t;
@@ -33,12 +42,8 @@ type t = {
   mutable next_turn_id : int;
   mutable closed : bool;
   run : cancel:(unit -> bool) -> string -> unit;
-  on_message : string -> unit;
-  on_delta : string -> unit;
-  on_phase : Agent.phase -> unit;
+  on_event : event -> unit;
   on_approve : string -> bool;
-  on_start : string -> unit;
-  on_finish : completion -> unit;
   on_queued : int -> unit;
 }
 
@@ -46,8 +51,7 @@ let with_guard t callback =
   Mutex.lock t.guard;
   Fun.protect ~finally:(fun () -> Mutex.unlock t.guard) callback
 
-let create ~run ~on_message ~on_delta ~on_approve ~on_start ~on_finish
-    ?(on_phase = fun _ -> ()) ~on_queued () =
+let create ~run ~on_event ~on_approve ~on_queued () =
   let read_fd, write_fd = Unix.pipe () in
   Unix.set_close_on_exec read_fd;
   Unix.set_close_on_exec write_fd;
@@ -58,10 +62,15 @@ let create ~run ~on_message ~on_delta ~on_approve ~on_start ~on_finish
     guard = Mutex.create (); notices = Queue.create (); approvals = [];
     pending = Queue.create (); worker = None; active_turn = None;
     next_turn_id = 0; closed = false;
-    run; on_message; on_delta; on_phase; on_approve; on_start; on_finish; on_queued }
+    run; on_event; on_approve; on_queued }
 
 let fd t = t.read_fd
 let busy t = t.worker <> None
+
+let emit_finish t turn_id = function
+  | Completed -> t.on_event (Turn_completed { turn_id })
+  | Cancelled -> t.on_event (Turn_cancelled { turn_id })
+  | Failed error -> t.on_event (Turn_failed { turn_id; error })
 
 let active_turn t id =
   with_guard t (fun () ->
@@ -144,10 +153,11 @@ let approve t command =
 
 let start t text =
   if t.closed then invalid_arg "turn runner closed";
-  t.on_start text;
-  let turn = { id = t.next_turn_id; cancelled = Atomic.make false;
-    thread_id = None } in
+  let turn_id = t.next_turn_id in
   t.next_turn_id <- t.next_turn_id + 1;
+  t.on_event (Turn_started { turn_id; prompt = text });
+  let turn = { id = turn_id; cancelled = Atomic.make false;
+    thread_id = None } in
   with_guard t (fun () -> t.active_turn <- Some turn);
   (try
      t.worker <- Some (Thread.create (fun () ->
@@ -165,7 +175,7 @@ let start t text =
        match t.active_turn with
        | Some active when active.id = turn.id -> t.active_turn <- None
        | _ -> ());
-     t.on_finish (Failed exn))
+     emit_finish t turn.id (Failed exn))
 
 let submit t text =
   if t.closed then invalid_arg "turn runner closed";
@@ -197,13 +207,16 @@ let drain t =
     match notice with
     | None -> ()
     | Some (Message (id, text)) ->
-        if not (cancel_requested t id) then t.on_message text;
+        if not (cancel_requested t id) then
+          t.on_event (Transcript_message { turn_id = id; text });
         handle ()
     | Some (Delta (id, text)) ->
-        if not (cancel_requested t id) then t.on_delta text;
+        if not (cancel_requested t id) then
+          t.on_event (Text_delta { turn_id = id; text });
         handle ()
     | Some (Phase (id, phase)) ->
-        if not (cancel_requested t id) then t.on_phase phase;
+        if not (cancel_requested t id) then
+          t.on_event (Activity_phase { turn_id = id; phase });
         handle ()
     | Some (Approve (id, command, request, cancelled)) ->
         if cancelled () || cancel_requested t id then answer request false
@@ -211,7 +224,10 @@ let drain t =
           with exn ->
             answer request false;
             if not (cancel_requested t id) then
-              t.on_message ("Error: shell approval failed: " ^ Printexc.to_string exn));
+              t.on_event (Transcript_message {
+                turn_id = id;
+                text = "Error: shell approval failed: " ^ Printexc.to_string exn
+              }));
         handle ()
     | Some (Finished (id, outcome)) ->
         (match active_turn t id with
@@ -220,7 +236,7 @@ let drain t =
              (match t.worker with Some worker -> Thread.join worker | None -> ());
              t.worker <- None;
              with_guard t (fun () -> t.active_turn <- None);
-             t.on_finish outcome;
+             emit_finish t id outcome;
              if not t.closed && not (Queue.is_empty t.pending) then (
                start t (Queue.take t.pending);
                t.on_queued (Queue.length t.pending)));
