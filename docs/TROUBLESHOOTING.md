@@ -66,7 +66,7 @@
 
 ### [2026-09-25] Concurrent Dune commands contended for the workspace lock
 
-- **Context / Symptom:** A focused `dune exec test/test_agent_stream.exe` invocation failed with a Dune global-lock error while another Dune test command was still running.
-- **Root Cause:** Independent Dune processes were started concurrently in the same workspace and contended for the shared `_build` lock.
-- **Solution:** Serialized the focused tests, full `dune runtest --force`, and `dune build @install`; subsequent commands passed.
+- **Context / Symptom:** Parallel `opam exec -- dune exec ...` invocations produced `Unexpected contents of build directory global lock file (_build/.lock). Expected an integer PID. Found:`; the generated lock file was empty.
+- **Root Cause:** Independent Dune processes were launched concurrently in the same workspace and collided on the shared `_build` lock; no Dune process remained after the failure.
+- **Solution:** Confirmed there was no active Dune process, removed only the generated stale `_build/.lock`, then ran focused tests, the full suite, install build and opam lint sequentially; all passed.
 - **Prevention / Reference:** Run one Dune command at a time in this workspace. Put parallelism inside one Dune invocation instead of launching multiple Dune processes.

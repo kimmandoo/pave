@@ -787,6 +787,11 @@ let available_for ~allow_shell ~enabled =
     | `String "run_command" when not allow_shell -> false
     | `String name -> enabled name
     | _ -> false) definitions
+let execution_mode = function
+  | "mobile_project" | "read_file" | "list_files" | "glob" | "search" | "grep" ->
+      Tool_scheduler.Shared
+  | _ -> Tool_scheduler.Exclusive
+
 
 let validate_arguments ~name ~args =
   let parameters =
@@ -824,7 +829,7 @@ let validate_arguments ~name ~args =
           | "object", `Assoc _ | "array", `List _ | "null", `Null
           | "number", (`Int _ | `Float _) -> true
           | _ -> false in
-        if not valid then fail (name ^ " must be a " ^ type_name);
+        if not valid then fail (name ^ " must have JSON type " ^ type_name);
         if type_name = "integer" then
           match value with
           | `Int number ->
@@ -839,29 +844,51 @@ let validate_arguments ~name ~args =
               then fail (name ^ " is outside its allowed range")
           | _ -> assert false) fields
 
-let execute ?cancel ?on_progress ?preflight ~root ~name ~args () =
+type prepared_execution =
+  ?cancel:(unit -> bool) -> ?on_progress:(int -> unit) -> unit -> string
+
+let prepare ~root ~name ~args () =
   try
     let root = root_path root in
     validate_arguments ~name ~args;
-    let dispatch () = match name with
-      | "read_file" -> read_file root args
-      | "list_files" -> list_files root args
-      | "search" -> search root args
-      | "glob" -> glob root args
-      | "grep" -> grep root args
-      | "write_file" -> write_file root args
-      | "edit_file" -> edit_file root args
-      | "run_command" -> run_command ?cancel ?on_progress root args
-      | "mobile_project" -> mobile_project root
-      | _ -> assert false in
-    match preflight with
-    | Some check ->
-        (match check () with
-         | Some message -> message
-         | None -> dispatch ())
-    | None -> dispatch ()
+    let execute ?cancel ?on_progress () =
+      try
+        match name with
+        | "read_file" -> read_file root args
+        | "list_files" -> list_files root args
+        | "search" -> search root args
+        | "glob" -> glob root args
+        | "grep" -> grep root args
+        | "write_file" -> write_file root args
+        | "edit_file" -> edit_file root args
+        | "run_command" -> run_command ?cancel ?on_progress root args
+        | "mobile_project" -> mobile_project root
+        | _ -> assert false
+      with
+      | Tool_error message -> "Error: " ^ message
+      | Unix.Unix_error (code, operation, path) ->
+          Printf.sprintf "Error: %s %s: %s" operation path (Unix.error_message code)
+      | Sys_error message -> "Error: " ^ message in
+    Ok execute
   with
-  | Tool_error message -> "Error: " ^ message
+  | Tool_error message -> Error ("Error: " ^ message)
   | Unix.Unix_error (code, operation, path) ->
-      Printf.sprintf "Error: %s %s: %s" operation path (Unix.error_message code)
-  | Sys_error message -> "Error: " ^ message
+      Error (Printf.sprintf "Error: %s %s: %s" operation path (Unix.error_message code))
+  | Sys_error message -> Error ("Error: " ^ message)
+
+let execute ?cancel ?on_progress ?preflight ~root ~name ~args () =
+  match prepare ~root ~name ~args () with
+  | Error result -> result
+  | Ok execute ->
+      try
+        match preflight with
+        | Some check ->
+            (match check () with
+             | Some message -> message
+             | None -> execute ?cancel ?on_progress ())
+        | None -> execute ?cancel ?on_progress ()
+      with
+      | Tool_error message -> "Error: " ^ message
+      | Unix.Unix_error (code, operation, path) ->
+          Printf.sprintf "Error: %s %s: %s" operation path (Unix.error_message code)
+      | Sys_error message -> "Error: " ^ message

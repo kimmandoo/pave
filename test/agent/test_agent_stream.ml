@@ -36,6 +36,13 @@ let invalid_shell_call = event
 let invalid_shell_answer = event
   {|{"choices":[{"index":0,"delta":{"content":"Invalid arguments rejected before approval."},"finish_reason":"stop"}]}|}
   ^ event "[DONE]"
+let parallel_read_calls = event
+  {|{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"parallel-first","function":{"name":"read_file","arguments":"{\"path\":\"App.swift\"}"}},{"index":1,"id":"parallel-second","function":{"name":"read_file","arguments":"{\"path\":\"App.swift\"}"}}]},"finish_reason":null}]}|}
+  ^ event {|{"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}|}
+  ^ event "[DONE]"
+let parallel_read_answer = event
+  {|{"choices":[{"index":0,"delta":{"content":"Parallel read results stayed ordered."},"finish_reason":"stop"}]}|}
+  ^ event "[DONE]"
 
 
 
@@ -89,16 +96,29 @@ let serve client step =
                   | `String text -> String.starts_with ~prefix:"Error: unexpected argument" text
                   | _ -> false)
               | None -> false)
+        | 10 -> assert (results = [])
+        | 11 ->
+            assert (List.length results = 2);
+            assert (List.map (fun item -> Pave.Protocol.member "tool_call_id" item)
+              results = [`String "parallel-first"; `String "parallel-second"]);
+            List.iter (fun call_id ->
+              assert (match result call_id with
+                | Some item -> (match Pave.Protocol.member "content" item with
+                    | `String text -> String.starts_with ~prefix:"struct App {}\n" text
+                    | _ -> false)
+                | None -> false)) ["parallel-first"; "parallel-second"]
         | _ -> assert (results = []));
        if step = 5 then assert (contains_tool "write_file");
        if step = 6 || step = 7 then assert (not (contains_tool "write_file"));
-       if step = 8 || step = 9 then assert (contains_tool "run_command")
+       if step = 8 || step = 9 then assert (contains_tool "run_command");
+       if step = 10 || step = 11 then assert (contains_tool "read_file")
    | _ -> failwith "missing messages");
   let body = match step with
     | 0 -> tool_call | 1 -> answer | 2 -> side_effect_call
     | 3 -> two_calls | 4 -> shell_call | 5 -> dynamic_first_call
     | 6 -> stale_dynamic_call | 7 -> dynamic_answer
-    | 8 -> invalid_shell_call | _ -> invalid_shell_answer in
+    | 8 -> invalid_shell_call | 9 -> invalid_shell_answer
+    | 10 -> parallel_read_calls | _ -> parallel_read_answer in
   Printf.fprintf oc "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s"
     (String.length body) body;
   flush oc;
@@ -114,7 +134,7 @@ let () =
   let port = match Unix.getsockname socket with Unix.ADDR_INET (_, port) -> port | _ -> assert false in
   let child = Unix.fork () in
   if child = 0 then (
-    (try for step = 0 to 9 do
+    (try for step = 0 to 11 do
       let client, _ = Unix.accept socket in serve client step
     done with exn -> prerr_endline (Printexc.to_string exn); exit 2);
     exit 0);
@@ -328,6 +348,31 @@ let () =
            | Some text -> String.starts_with ~prefix:"Error: unexpected argument" text
            | None -> false);
          assert (final.role = "assistant")
-     | _ -> failwith "invalid tool arguments reached approval or execution")
+     | _ -> failwith "invalid tool arguments reached approval or execution");
+    let parallel_events = ref [] in
+    let parallel_agent = Pave.Agent.create ~provider ~root
+      ~system:"inspect the mobile repo" ~stream:true ~on_event:(fun _ -> ())
+      ~on_tool_event:(fun event -> parallel_events := event :: !parallel_events) () in
+    assert (Pave.Agent.run parallel_agent "Read the workspace twice"
+      = "Parallel read results stayed ordered.");
+    (match Pave.Agent.messages parallel_agent with
+     | [ user; assistant; first; second; final ] ->
+         assert (user.role = "user");
+         assert (List.map (fun (call : Pave.Protocol.tool_call) -> call.id)
+           assistant.tool_calls = ["parallel-first"; "parallel-second"]);
+         assert (first.tool_call_id = Some "parallel-first");
+         assert (second.tool_call_id = Some "parallel-second");
+         assert (final.role = "assistant")
+     | _ -> failwith "parallel tool results did not preserve provider order");
+    (match List.rev !parallel_events with
+     | [ Pave.Agent.Tool_started { call_id = "parallel-first"; name = "read_file" };
+         Pave.Agent.Tool_started { call_id = "parallel-second"; name = "read_file" };
+         Pave.Agent.Tool_settled {
+           call_id = "parallel-first"; is_error = false; _
+         };
+         Pave.Agent.Tool_settled {
+           call_id = "parallel-second"; is_error = false; _
+         } ] -> ()
+     | _ -> failwith "shared tool lifecycle events lost provider order")
   );
   print_endline "streamed agent loop: ok"
