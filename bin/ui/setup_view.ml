@@ -12,12 +12,12 @@ let run screen =
   let skip = Skipped in
   let rec welcome () =
     match Tui.choose screen
-      ~intro:["◆  YOUR WORKSPACE, YOUR MODEL";
-        "Choose a provider, then the model you want to use.";
+      ~intro:["SETUP = choose a default provider and model.";
+        "Sign in here only if your provider requires it.";
         "Nothing runs until you send a prompt."]
-      ~title:"SETUP · Welcome to Pave"
-      ~choices:["Enter · provider + model"; "Esc · skip for now"] with
-    | Some "Enter · provider + model" -> provider ()
+      ~title:"SETUP · Save your default"
+      ~choices:["Start · provider → access → model"; "Skip for now"] with
+    | Some "Start · provider → access → model" -> provider ()
     | _ -> skip
   and provider () =
     let choices = provider_choices () in
@@ -44,8 +44,8 @@ let run screen =
       | None -> false in
     let key_label = Option.map (fun env ->
       env ^ (if key_is_set then " (set)" else " (not set)")) key in
-    let saved_label = "Use saved OAuth sign-in" in
-    let login_label = "Sign in via OAuth" in
+    let saved_label = "Continue with saved sign-in" in
+    let login_label = "Sign in (browser or device code)" in
     let choices =
       (if key_is_set then Option.to_list key_label else []) @
       (if saved_oauth then [saved_label] else []) @
@@ -58,9 +58,9 @@ let run screen =
       model descriptor None
     else match Tui.choose screen
       ~intro:["02 / 03  ·  ACCESS";
-        "Use an existing key or sign in; secrets stay out of chat.";
-        "A missing key can be configured in your shell later."]
-      ~title:"SETUP · Choose authentication"
+        "A key or saved sign-in lets this provider receive prompts.";
+        "/login only signs in; setup also saves your default model."]
+      ~title:"SETUP · Connect provider"
       ~choices with
     | None | Some "Skip setup" -> skip
     | Some "Back · providers" -> provider ()
@@ -87,13 +87,13 @@ let run screen =
     | Some _ -> authentication descriptor
   and key_instruction descriptor env =
     match Tui.choose screen
-      ~intro:["02 / 03  ·  KEY REQUIRED";
-        "Set this environment variable in your shell before prompts.";
-        "Skip only if you want to set the key later."]
-      ~title:("SETUP · Set " ^ env ^ " in shell")
-      ~choices:["Skip key · choose model"; "Back · authentication";
+      ~intro:["02 / 03  ·  KEY NOT SET";
+        "Set this variable in your shell; Pave never stores a typed key.";
+        "You can save a model now, but prompts will need the key."]
+      ~title:("SETUP · " ^ env ^ " is missing")
+      ~choices:["Choose model without key"; "Back · authentication";
         "Skip setup"] with
-    | Some "Skip key · choose model" -> model descriptor (Some env)
+    | Some "Choose model without key" -> model descriptor (Some env)
     | Some "Back · authentication" -> authentication descriptor
     | _ -> skip
   and model (descriptor : Pave.Provider_catalog.descriptor) missing_key =
@@ -104,8 +104,20 @@ let run screen =
     let back = if local_without_key then "Back · providers"
       else "Back · authentication" in
     let choices = [back; "Skip setup"] in
+    let selected_api =
+      if Pave.Provider_catalog.route descriptor "" <> None then
+        Some descriptor.default_route
+      else Tui.choose screen ~title:"SETUP · Select API route"
+        ~intro:["This provider serves different wire APIs.";
+          "Choose the route documented for your model."]
+        ~choices:(List.map
+          (fun (route : Pave.Provider_catalog.route) -> route.name)
+          descriptor.routes) in
+    match selected_api with
+    | None -> if local_without_key then provider () else authentication descriptor
+    | Some route_name ->
     match Model_picker.choose screen ~descriptor
-      ~plain:choices
+      ~route_name ~plain:choices
       ~intro:["03 / 03  ·  MODEL";
         "Use arrows and Enter to choose an available model.";
         "Type an ID only if the model you need is not listed."]
@@ -117,22 +129,23 @@ let run screen =
     | Some choice ->
         (try
            let selected, id, route = Pave.Interaction.resolve_model
-             ~current_provider:descriptor.id ~input:choice in
+             ~current_route:route_name ~current_provider:descriptor.id
+             ~input:choice () in
            if selected.id <> descriptor.id then
              invalid_arg "choose a model from the selected provider";
            finish selected id route missing_key
          with (Invalid_argument _ | Failure _) as exn ->
            Tui.alert screen ("Model unavailable: " ^ Printexc.to_string exn);
            model descriptor missing_key)
-  and finish descriptor id route missing_key =
-    let label = descriptor.id ^ "/" ^ id in
+  and finish descriptor id (route : Pave.Provider_catalog.route) missing_key =
+    let label = descriptor.id ^ "@" ^ route.name ^ "/" ^ id in
     let title = match missing_key with
       | Some env -> "SETUP · Set " ^ env ^ " before prompts"
       | None -> "SETUP · Confirm your model" in
     match Tui.choose screen
       ~intro:["READY  ·  REVIEW";
-        "This default is stored in your user config.";
-        "Project policy and explicit flags still take precedence."]
+        "Save this provider + API + model as your user default.";
+        "It does not change project policy or your shell keys."]
       ~title
       ~choices:["Save " ^ label; "Back · models"; "Skip setup"] with
     | Some selected when selected = "Save " ^ label ->

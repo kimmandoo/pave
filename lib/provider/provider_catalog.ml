@@ -127,6 +127,119 @@ let builtins = [
       endpoint = Xiaomi_api.chat_url } ];
     default_route = "chat";
     api_key_env = Some "XIAOMI_API_KEY"; oauth = None };
+  { id = "kilo"; display_name = "Kilo Gateway (public unclassified IDs)";
+    routes = [ { name = "chat"; wire = Provider.Kilo_chat;
+      endpoint = Kilo_api.chat_url } ];
+    default_route = "chat";
+    api_key_env = Some "KILO_API_KEY"; oauth = None };
+  { id = "alibaba-coding-plan"; display_name = "Alibaba Coding Plan (select region)";
+    routes = [
+      { name = "china"; wire = Provider.Alibaba_coding_chat;
+        endpoint = Alibaba_coding_api.china_chat_url };
+      { name = "intl"; wire = Provider.Alibaba_coding_chat;
+        endpoint = Alibaba_coding_api.intl_chat_url } ];
+    default_route = "select-region";
+    api_key_env = Some "ALIBABA_CODING_PLAN_API_KEY"; oauth = None };
+  { id = "singularityapi-dev"; display_name = "SingularityAPI universal";
+    routes = [ { name = "chat"; wire = Provider.Singularity_dev_chat;
+      endpoint = Singularity_dev_api.chat_url } ];
+    default_route = "chat";
+    api_key_env = Some "SINGULARITYAPI_DEV_API_KEY"; oauth = None };
+  { id = "opencode-zen"; display_name = "OpenCode Zen (explicit Responses, public unclassified IDs)";
+    routes = [ { name = "responses"; wire = Provider.Opencode_zen_responses;
+      endpoint = Opencode_zen_api.responses_url } ];
+    default_route = "responses";
+    api_key_env = Some "OPENCODE_API_KEY"; oauth = None };
+  { id = "opencode-go"; display_name = "OpenCode Go (explicit Chat, public unclassified IDs)";
+    routes = [ { name = "chat"; wire = Provider.Opencode_go_chat;
+      endpoint = Opencode_go_api.chat_url } ];
+    default_route = "chat";
+    api_key_env = Some "OPENCODE_API_KEY"; oauth = None };
+  { id = "charm-hyper"; display_name = "Charm Hyper (public unclassified IDs)";
+    routes = [ { name = "chat"; wire = Provider.Charm_hyper_chat;
+      endpoint = Charm_hyper_api.chat_url } ];
+    default_route = "chat";
+    api_key_env = Some "CHARM_HYPER_API_KEY"; oauth = None };
+  { id = "singularityapi-tech"; display_name = "SingularityAPI reserved lane (unverified entitlement)";
+    routes = [ { name = "chat"; wire = Provider.Singularity_tech_chat;
+      endpoint = Singularity_tech_api.chat_url } ];
+    default_route = "chat";
+    api_key_env = Some "SINGULARITYAPI_TECH_API_KEY"; oauth = None };
+  { id = "firepass"; display_name = "Fire Pass (manual full router ID)";
+    routes = [ { name = "chat"; wire = Provider.Firepass_chat;
+      endpoint = Firepass_api.chat_url } ];
+    default_route = "chat";
+    api_key_env = Some "FIREPASS_API_KEY"; oauth = None };
+  { id = "yolo-auto"; display_name = "Yolo Auto (unclassified model IDs)";
+    routes = [ { name = "chat"; wire = Provider.Yolo_auto_chat;
+      endpoint = Yolo_auto_api.chat_url } ];
+    default_route = "chat";
+    api_key_env = Some "YOLO_AUTO_API_KEY"; oauth = None };
+  { id = "xiaomi-token-plan-ams"; display_name = "Xiaomi MiMo Token Plan (Americas)";
+    routes = [ { name = "chat"; wire = Provider.Xiaomi_token_ams_chat;
+      endpoint = Xiaomi_token_api.chat_url Xiaomi_token_api.Ams } ];
+    default_route = "chat";
+    api_key_env = Some "XIAOMI_TOKEN_PLAN_AMS_API_KEY"; oauth = None };
+  { id = "xiaomi-token-plan-cn"; display_name = "Xiaomi MiMo Token Plan (China)";
+    routes = [ { name = "chat"; wire = Provider.Xiaomi_token_cn_chat;
+      endpoint = Xiaomi_token_api.chat_url Xiaomi_token_api.Cn } ];
+    default_route = "chat";
+    api_key_env = Some "XIAOMI_TOKEN_PLAN_CN_API_KEY"; oauth = None };
+  { id = "xiaomi-token-plan-sgp"; display_name = "Xiaomi MiMo Token Plan (Singapore)";
+    routes = [ { name = "chat"; wire = Provider.Xiaomi_token_sgp_chat;
+      endpoint = Xiaomi_token_api.chat_url Xiaomi_token_api.Sgp } ];
+    default_route = "chat";
+    api_key_env = Some "XIAOMI_TOKEN_PLAN_SGP_API_KEY"; oauth = None };
+  { id = "minimax-code"; display_name = "MiniMax Token Plan (international)";
+    routes = [ { name = "chat"; wire = Provider.Minimax_code_chat;
+      endpoint = Minimax_code_api.intl_chat_url } ];
+    default_route = "chat";
+    api_key_env = Some "MINIMAX_CODE_API_KEY"; oauth = None };
+  { id = "minimax-code-cn"; display_name = "MiniMax Token Plan (China)";
+    routes = [ { name = "chat"; wire = Provider.Minimax_code_cn_chat;
+      endpoint = Minimax_code_api.china_chat_url } ];
+    default_route = "chat";
+    api_key_env = Some "MINIMAX_CODE_CN_API_KEY"; oauth = None };
+  { id = "meta"; display_name = "Meta Model API (explicit Responses)";
+    routes = [ { name = "responses"; wire = Provider.Meta_responses;
+      endpoint = Meta_api.responses_url } ];
+    default_route = "responses";
+    api_key_env = Some "MODEL_API_KEY"; oauth = None };
+  { id = "vercel-ai-gateway"; display_name = "Vercel AI Gateway (unclassified model IDs)";
+    routes = [ { name = "chat"; wire = Provider.Vercel_ai_gateway_chat;
+      endpoint = Vercel_ai_gateway_api.chat_url } ];
+    default_route = "chat";
+    api_key_env = Some "AI_GATEWAY_API_KEY"; oauth = None };
+  { id = "cloudflare-ai-gateway"; display_name = "Cloudflare AI Gateway (configured account/gateway)";
+    routes = [ { name = "chat"; wire = Provider.Cloudflare_ai_gateway_chat;
+      endpoint = "" } ];
+    default_route = "chat";
+    api_key_env = Some "CLOUDFLARE_AI_GATEWAY_API_KEY"; oauth = None };
+  { id = "commandcode"; display_name = "Command Code Studio Provider API (choose route)";
+    routes = [
+      { name = "chat"; wire = Provider.Commandcode_chat;
+        endpoint = Commandcode_api.chat_url };
+      { name = "messages"; wire = Provider.Commandcode_messages;
+        endpoint = Commandcode_api.messages_url };
+      { name = "responses"; wire = Provider.Commandcode_responses;
+        endpoint = Commandcode_api.responses_url } ];
+    default_route = "select-route";
+    api_key_env = Some "COMMAND_CODE_API_KEY"; oauth = None };
+  { id = "devin"; display_name = "Devin CLI (account-scoped Connect)";
+    routes = [ { name = "connect"; wire = Provider.Devin_connect;
+      endpoint = Devin_api.chat_url } ];
+    default_route = "connect";
+    api_key_env = Some "DEVIN_API_KEY"; oauth = None };
+  { id = "gitlab-duo"; display_name = "GitLab Duo Direct Access (manual upstream model/route)";
+    routes = [
+      { name = "messages"; wire = Provider.Gitlab_duo_messages;
+        endpoint = Gitlab_duo_api.anthropic_url };
+      { name = "responses"; wire = Provider.Gitlab_duo_responses;
+        endpoint = Gitlab_duo_api.responses_url };
+      { name = "chat"; wire = Provider.Gitlab_duo_chat;
+        endpoint = Gitlab_duo_api.completions_url } ];
+    default_route = "select-route";
+    api_key_env = Some "GITLAB_TOKEN"; oauth = None };
   { id = "moonshot"; display_name = "Moonshot AI (global)";
     routes = [ { name = "chat"; wire = Provider.Openai_completions;
       endpoint = "https://api.moonshot.ai/v1/chat/completions" } ];
@@ -250,10 +363,12 @@ let builtins = [
 let all () = builtins
 let find id = List.find_opt (fun provider -> provider.id = id) builtins
 
-(* These listings do not document enough modality/tool metadata to certify
-   that every returned ID is a routable Chat model. Manual IDs remain allowed. *)
+(* These listings do not document enough API-route or tool metadata to certify
+   that every returned ID works on the registered route. Manual IDs remain allowed. *)
 let unclassified_models id =
-  List.mem id [ "stepfun"; "synthetic"; "wafer-serverless"; "zenmux"; "xiaomi" ]
+  List.mem id [ "stepfun"; "synthetic"; "wafer-serverless"; "zenmux";
+    "xiaomi"; "kilo"; "opencode-zen"; "opencode-go"; "charm-hyper";
+    "yolo-auto"; "meta"; "vercel-ai-gateway"; "commandcode" ]
 
 let route provider name =
   let name = if name = "" then provider.default_route else name in

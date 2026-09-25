@@ -29,10 +29,10 @@ type action =
 type shortcut = { name : string; usage : string; summary : string; action : action }
 
 let commands = [
-  { name = "/login"; usage = "[PROVIDER]"; summary = "Sign in to a provider"; action = A_login };
-  { name = "/model"; usage = "[PROVIDER/MODEL]"; summary = "Choose an inference model"; action = A_model };
+  { name = "/login"; usage = "[PROVIDER]"; summary = "Connect account only; does not change model"; action = A_login };
+  { name = "/model"; usage = "[PROVIDER[@API]/MODEL]"; summary = "Switch model for this conversation"; action = A_model };
   { name = "/settings"; usage = ""; summary = "View or edit project defaults"; action = A_settings };
-  { name = "/setup"; usage = ""; summary = "Choose a user default provider and model"; action = A_setup };
+  { name = "/setup"; usage = ""; summary = "Connect and save your user default model"; action = A_setup };
   { name = "/new"; usage = ""; summary = "Start a private saved session"; action = A_new };
   { name = "/resume"; usage = "[PATH]"; summary = "Search or reopen saved sessions"; action = A_resume };
   { name = "/cancel"; usage = ""; summary = "Cancel the active turn"; action = A_cancel };
@@ -129,22 +129,36 @@ let parse line =
 
 let selectable_providers () = Provider_catalog.all ()
 
-let resolve_model ~current_provider ~input =
+let resolve_model ?current_route ~current_provider ~input () =
   let input = String.trim input in
   if input = "" || String.exists is_whitespace_or_control input then
     invalid_argument "model selector must be a nonempty single argument";
-  let provider_id, model = match String.index_opt input '/' with
+  let provider_selector, model = match String.index_opt input '/' with
     | Some slash ->
       String.sub input 0 slash,
       String.sub input (slash + 1) (String.length input - slash - 1)
     | None -> current_provider, input in
   if model = "" then invalid_argument "model ID must not be empty";
+  let provider_id, selected_route = match String.index_opt provider_selector '@' with
+    | None -> provider_selector, ""
+    | Some at ->
+        String.sub provider_selector 0 at,
+        String.sub provider_selector (at + 1)
+          (String.length provider_selector - at - 1) in
+  if provider_id = "" || (selected_route = "" &&
+      String.contains provider_selector '@') then
+    invalid_argument "use PROVIDER@API/MODEL to select a wire route";
   let descriptor = match Provider_catalog.find provider_id with
     | Some descriptor -> descriptor
     | None -> invalid_argument ("unknown provider: " ^ provider_id) in
-  let route = match Provider_catalog.route descriptor "" with
+  let route_name = if selected_route <> "" then selected_route
+    else if provider_id = current_provider then
+      Option.value ~default:"" current_route
+    else "" in
+  let route = match Provider_catalog.route descriptor route_name with
     | Some route -> route
-    | None -> invalid_argument ("no route for provider: " ^ provider_id) in
+    | None -> invalid_argument
+        ("no route for " ^ provider_id ^ "; use " ^ provider_id ^ "@API/MODEL") in
   descriptor, model, route
 
 let history_for_model ~wire ~model messages =
@@ -152,13 +166,24 @@ let history_for_model ~wire ~model messages =
     match message.provider_state with
     | None -> true
     | Some state ->
-        let compatible = match wire with
-          | Provider.Codex_responses ->
-              Protocol.member "provider" state = `String "openai-codex"
-          | Provider.Gemini_direct ->
-              Protocol.member "provider" state = `String "google"
-          | _ -> false in
-        compatible && Protocol.member "model" state = `String model in
+        let provider, route = match wire with
+          | Provider.Codex_responses -> "openai-codex", None
+          | Provider.Gemini_direct -> "google", None
+          | Provider.Meta_responses -> "meta", None
+          | Provider.Opencode_zen_responses -> "opencode-zen", None
+          | Provider.Devin_connect -> "devin", None
+          | Provider.Commandcode_chat -> "commandcode", Some "chat"
+          | Provider.Commandcode_messages -> "commandcode", Some "messages"
+          | Provider.Commandcode_responses -> "commandcode", Some "responses"
+          | Provider.Gitlab_duo_messages -> "gitlab-duo", Some "anthropic"
+          | Provider.Gitlab_duo_responses -> "gitlab-duo", Some "responses"
+          | _ -> "", None in
+        provider <> "" &&
+        Protocol.member "provider" state = `String provider &&
+        Protocol.member "model" state = `String model &&
+        (match route with
+         | None -> true
+         | Some name -> Protocol.member "route" state = `String name) in
   if List.for_all retain messages then messages
   else List.map (fun (message : Protocol.message) ->
     if retain message then message else { message with provider_state = None })

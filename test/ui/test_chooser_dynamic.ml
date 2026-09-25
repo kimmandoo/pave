@@ -34,6 +34,14 @@ let () =
   assert (chooser.selected = 1);
   assert (Tui.candidate_label chooser (Tui.matches chooser).(0)
     = "[verified] openai/o3");
+  chooser.filter <- "openai/gpt-4";
+  chooser.selected <- 0;
+  let prefix = Tui.matches chooser in
+  assert (prefix.(0).value = "openai/gpt-4" && prefix.(0).custom);
+  assert (prefix.(1).value = "openai/gpt-4.1");
+  chooser.filter <- "openai/gpt-4.1";
+  let exact = Tui.matches chooser in
+  assert (Array.length exact = 1 && not exact.(0).custom);
   chooser.filter <- "local/custom";
   chooser.selected <- 0;
   Tui.update_chooser chooser ~verified:[ "openai/gpt-4.1" ] ~status:None;

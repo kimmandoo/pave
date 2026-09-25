@@ -298,3 +298,88 @@
  (name test_xiaomi_api)
  (modules test_xiaomi_api)
  (libraries pave unix yojson))
+
+(test
+ (name test_kilo_api)
+ (modules test_kilo_api)
+ (libraries pave unix yojson))
+
+(test
+ (name test_alibaba_coding_api)
+ (modules test_alibaba_coding_api)
+ (libraries pave unix yojson))
+
+(test
+ (name test_singularity_dev_api)
+ (modules test_singularity_dev_api)
+ (libraries pave unix yojson))
+
+(test
+ (name test_opencode_zen_api)
+ (modules test_opencode_zen_api)
+ (libraries pave unix yojson))
+
+(test
+ (name test_opencode_go_api)
+ (modules test_opencode_go_api)
+ (libraries pave unix yojson))
+
+(test
+ (name test_charm_hyper_api)
+ (modules test_charm_hyper_api)
+ (libraries pave unix yojson))
+
+(test
+ (name test_singularity_tech_api)
+ (modules test_singularity_tech_api)
+ (libraries pave unix yojson))
+
+(test
+ (name test_firepass_api)
+ (modules test_firepass_api)
+ (libraries pave unix yojson))
+
+(test
+ (name test_yolo_auto_api)
+ (modules test_yolo_auto_api)
+ (libraries pave unix yojson))
+
+(test
+ (name test_xiaomi_token_api)
+ (modules test_xiaomi_token_api)
+ (libraries pave unix yojson))
+
+(test
+ (name test_minimax_code_api)
+ (modules test_minimax_code_api)
+ (libraries pave unix yojson))
+
+(test
+ (name test_meta_api)
+ (modules test_meta_api)
+ (libraries pave unix yojson))
+
+(test
+ (name test_vercel_ai_gateway_api)
+ (modules test_vercel_ai_gateway_api)
+ (libraries pave unix yojson))
+
+(test
+ (name test_cloudflare_ai_gateway_api)
+ (modules test_cloudflare_ai_gateway_api)
+ (libraries pave unix yojson))
+
+(test
+ (name test_commandcode_api)
+ (modules test_commandcode_api)
+ (libraries pave unix yojson))
+
+(test
+ (name test_gitlab_duo_api)
+ (modules test_gitlab_duo_api)
+ (libraries pave unix yojson))
+
+(test
+ (name test_devin_api)
+ (modules test_devin_api)
+ (libraries pave unix yojson))

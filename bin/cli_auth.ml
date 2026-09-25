@@ -91,6 +91,14 @@ let api_key (descriptor : Pave.Provider_catalog.descriptor) =
       Pave.Ollama_cloud.env_api_key ()
   | None when descriptor.id = "coreweave" ->
       Pave.Coreweave_api.env_api_key ()
+  | None when descriptor.id = "charm-hyper" ->
+      Pave.Charm_hyper_api.env_api_key ()
+  | None when descriptor.id = "meta" ->
+      Pave.Meta_api.env_api_key ()
+  | None when descriptor.id = "vercel-ai-gateway" ->
+      Pave.Vercel_ai_gateway_api.env_api_key ()
+  | None when descriptor.id = "commandcode" ->
+      Pave.Commandcode_api.env_api_key ()
   | None -> None
 let resolve_authentication ~(descriptor : Pave.Provider_catalog.descriptor)
     ~(route : Pave.Provider_catalog.route) ~endpoint =
@@ -118,6 +126,16 @@ let resolve_authentication ~(descriptor : Pave.Provider_catalog.descriptor)
       match headers with
       | [ _ ] -> Pave.Provider.Api_key, key, None
       | _ -> assert false)
+    else if route.wire = Pave.Provider.Cloudflare_ai_gateway_chat then (
+      if endpoint <> "" then
+        failwith "Cloudflare gateway credentials require the configured account/gateway endpoint";
+      let url = match Pave.Cloudflare_ai_gateway_api.env_chat_url () with
+        | Some url -> url
+        | None -> failwith "set CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_GATEWAY_ID" in
+      let key = Option.value ~default:"" (api_key descriptor) in
+      ignore (Pave.Cloudflare_ai_gateway_api.chat_headers
+        ~endpoint:url ~api_key:key);
+      Pave.Provider.Api_key, key, None)
     else
     let env_key = api_key descriptor in
     let authentication, api_key, resolve_credential =

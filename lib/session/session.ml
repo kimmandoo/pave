@@ -1,7 +1,7 @@
 type kind =
   | Message of Protocol.message
   | Compaction of { summary : string; first_kept_id : string }
-  | Model of { provider : string; model : string }
+  | Model of { provider : string; model : string; api : string option }
   | Usage of { provider : string; model : string; tokens : Protocol.usage }
   | Branch
 type entry = { id : string; parent_id : string option; timestamp : string; kind : kind }
@@ -61,8 +61,9 @@ let entry_json entry =
   | Compaction { summary; first_kept_id } ->
       `Assoc (fields @ [ "summary", `String summary;
                          "firstKeptEntryId", `String first_kept_id ])
-  | Model { provider; model } ->
-      `Assoc (fields @ ["provider", `String provider; "model", `String model])
+  | Model { provider; model; api } ->
+      `Assoc (fields @ ["provider", `String provider; "model", `String model] @
+        (match api with None -> [] | Some api -> ["api", `String api]))
   | Usage { provider; model; tokens } ->
       `Assoc (fields @ ["provider", `String provider; "model", `String model;
         "inputTokens", `Int tokens.input_tokens;
@@ -122,10 +123,15 @@ let parse_entry json =
              Compaction { summary; first_kept_id }
          | _ -> invalid "invalid compaction")
     | `String "model" ->
-        (match get "provider", get "model" with
-         | `String provider, `String model
-           when valid_model_field provider && valid_model_field model ->
-             Model { provider; model }
+        (match get "provider", get "model", get "api" with
+         | `String provider, `String model, (`Null | `String _ as api)
+           when valid_model_field provider && valid_model_field model &&
+             (match api with
+              | `Null -> true
+              | `String name -> valid_model_field name
+              | _ -> false) ->
+             Model { provider; model;
+               api = (match api with `String name -> Some name | _ -> None) }
          | _ -> invalid "invalid model selection")
     | `String "usage" ->
         (match get "provider", get "model",
@@ -158,10 +164,21 @@ let model_at t leaf =
         let entry = try Hashtbl.find t.by_id id
           with Not_found -> invalid ("missing parent entry: " ^ id) in
         match entry.kind with
-        | Model { provider; model } -> Some (provider, model)
+        | Model { provider; model; _ } -> Some (provider, model)
         | Message _ | Compaction _ | Usage _ | Branch -> find entry.parent_id in
   find leaf
 let model t = model_at t t.leaf
+let api_at t leaf =
+  let rec find = function
+    | None -> None
+    | Some id ->
+        let entry = try Hashtbl.find t.by_id id
+          with Not_found -> invalid ("missing parent entry: " ^ id) in
+        match entry.kind with
+        | Model { api; _ } -> api
+        | Message _ | Compaction _ | Usage _ | Branch -> find entry.parent_id in
+  find leaf
+let api t = api_at t t.leaf
 let usage t =
   List.fold_left (fun total entry -> match entry.kind with
     | Usage { tokens; _ } ->
@@ -294,11 +311,12 @@ let append t message =
   t.leaf <- Some entry.id;
   entry.id
 
-let set_model t ~provider ~model:selected =
-  if not (valid_model_field provider && valid_model_field selected) then
+let set_model ?api t ~provider ~model:selected =
+  if not (valid_model_field provider && valid_model_field selected) ||
+     not (Option.fold ~none:true ~some:valid_model_field api) then
     invalid "invalid model selection";
-  let selection = Model { provider; model = selected } in
-  if model t <> Some (provider, selected) then (
+  let selection = Model { provider; model = selected; api } in
+  if model t <> Some (provider, selected) || api_at t t.leaf <> api then (
     let entry = { id = fresh_id (); parent_id = t.leaf;
       timestamp = timestamp (); kind = selection } in
     append_line t (entry_json entry);

@@ -128,6 +128,25 @@ let () =
     ignore (Pave.Session.append copy (message "switch model"));
     Pave.Session.set_model copy ~provider:"ollama" ~model:"local";
     assert (Pave.Session.retry_candidate copy = None);
+    Pave.Session.set_model ~api:"messages" copy
+      ~provider:"commandcode" ~model:"future-model";
+    let route_tip = Option.get (Pave.Session.leaf_id copy) in
+    Pave.Session.set_model ~api:"messages" copy
+      ~provider:"commandcode" ~model:"future-model";
+    assert (Pave.Session.leaf_id copy = Some route_tip);
+    assert (Pave.Session.api (Pave.Session.open_file metadata_fork) =
+      Some "messages");
+    Pave.Session.set_model ~api:"responses" copy
+      ~provider:"commandcode" ~model:"future-model";
+    assert (Pave.Session.api copy = Some "responses");
+    assert (Pave.Session.api_at copy (Some route_tip) = Some "messages");
+    Pave.Session.branch copy route_tip;
+    assert (Pave.Session.api (Pave.Session.open_file metadata_fork) =
+      Some "messages");
+    (match Pave.Session.set_model ~api:"invalid route" copy
+       ~provider:"commandcode" ~model:"future-model" with
+     | exception Pave.Protocol.Invalid_response _ -> ()
+     | _ -> failwith "invalid API marker was accepted");
     (match Pave.Session.set_model copy ~provider:"openai" ~model:"invalid name" with
      | exception Pave.Protocol.Invalid_response _ -> ()
      | _ -> failwith "invalid model marker was accepted"));

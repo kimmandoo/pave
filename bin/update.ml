@@ -99,7 +99,11 @@ let run () =
     let pid = Unix.create_process_env "/bin/sh" [| "/bin/sh"; script |]
       environment Unix.stdin Unix.stdout Unix.stderr in
     match wait_for pid with
-    | Unix.WEXITED 0 -> ()
+    | Unix.WEXITED 0 ->
+        if target = installed then
+          Printf.printf "Reinstalled Pave %s (already current).\n%!" installed
+        else
+          Printf.printf "Updated Pave %s → %s.\n%!" installed target
     | Unix.WEXITED code -> fail (Printf.sprintf "installer exited with status %d; inspect the installation before retrying" code)
     | Unix.WSIGNALED signal | Unix.WSTOPPED signal ->
         fail (Printf.sprintf "installer terminated with signal %d; check the installation before retrying" signal))

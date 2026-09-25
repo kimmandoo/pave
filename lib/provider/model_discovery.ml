@@ -553,10 +553,15 @@ module Native_discovery (M : sig
       (int * string, error) result) ->
     api_key:string -> unit -> (string list, error) result
 end) = struct
-  let discover ?http ?cancel credential =
-    match credential with
-    | None -> Error Missing_credential
-    | Some (Api_key key) ->
+  let discover ?http ?cancel ?(public = false) credential =
+    let api_key = match credential with
+      | None when public -> Ok ""
+      | None -> Error Missing_credential
+      | Some (Api_key key) -> Ok key
+      | Some _ -> Error Invalid_credential in
+    match api_key with
+    | Error _ as failure -> failure
+    | Ok key ->
         let source = match http with
           | Some callback -> callback
           | None -> fun ~url ~headers -> default_http ?cancel ~url ~headers () in
@@ -581,13 +586,59 @@ end) = struct
          | Provider.Cancelled -> raise Provider.Cancelled
          | Provider.Provider_error _ | Unix.Unix_error _ | Sys_error _ ->
              Error (Transport_error "request failed or timed out"))
-    | Some _ -> Error Invalid_credential
 end
 
 module Zenmux_discovery = Native_discovery (Zenmux_api)
 module Wafer_discovery = Native_discovery (Wafer_api)
 module Qianfan_discovery = Native_discovery (Qianfan_api)
 module Xiaomi_discovery = Native_discovery (Xiaomi_api)
+module Kilo_discovery = Native_discovery (Kilo_api)
+module Singularity_dev_discovery = Native_discovery (Singularity_dev_api)
+module Opencode_zen_discovery = Native_discovery (Opencode_zen_api)
+module Opencode_go_discovery = Native_discovery (Opencode_go_api)
+module Yolo_auto_discovery = Native_discovery (Yolo_auto_api)
+module Meta_discovery = Native_discovery (Meta_api)
+module Vercel_ai_gateway_discovery = Native_discovery (Vercel_ai_gateway_api)
+module Commandcode_discovery = Native_discovery (struct
+  type error = Commandcode_api.error =
+    | Invalid_credential
+    | Transport_error
+    | Http_error of int
+    | Invalid_response of string
+  let discover ~http ~api_key () =
+    Result.map
+      (List.map (fun (model : Commandcode_api.model) -> model.id))
+      (Commandcode_api.discover ~http ~api_key ())
+end)
+
+let discover_charm ?http ?cancel credential =
+  match credential with
+  | Some (Copilot_oauth _ | Codex_oauth _) -> Error Invalid_credential
+  | None | Some (Api_key _) ->
+      let source = match http with
+        | Some callback -> callback
+        | None -> fun ~url ~headers -> default_http ?cancel ~url ~headers () in
+      let http ~url ~headers = match source ~url ~headers with
+        | Ok response -> Ok response
+        | Error (Http_error status) -> Error (Charm_hyper_api.Http_error status)
+        | Error (Invalid_response reason) ->
+            Error (Charm_hyper_api.Invalid_response reason)
+        | Error _ -> Error Charm_hyper_api.Transport_error in
+      (try
+         Provider.check_cancel cancel;
+         let result = Charm_hyper_api.discover ~http ~api_key:"" () in
+         Provider.check_cancel cancel;
+         match result with
+         | Ok ids -> Ok ids
+         | Error Charm_hyper_api.Transport_error ->
+             Error (Transport_error "request failed or timed out")
+         | Error (Charm_hyper_api.Http_error status) -> Error (Http_error status)
+         | Error (Charm_hyper_api.Invalid_response reason) ->
+             Error (Invalid_response reason)
+       with
+       | Provider.Cancelled -> raise Provider.Cancelled
+       | Provider.Provider_error _ | Unix.Unix_error _ | Sys_error _ ->
+           Error (Transport_error "request failed or timed out"))
 
 let discover ?http ?cancel ~provider ?credential () =
   if Local_compat.engine provider <> None then
@@ -614,6 +665,40 @@ let discover ?http ?cancel ~provider ?credential () =
     Qianfan_discovery.discover ?http ?cancel credential
   else if provider = "xiaomi" then
     Xiaomi_discovery.discover ?http ?cancel credential
+  else if provider = "kilo" then
+    Kilo_discovery.discover ?http ?cancel ~public:true credential
+  else if provider = "singularityapi-dev" then
+    Singularity_dev_discovery.discover ?http ?cancel credential
+  else if provider = "opencode-zen" then
+    Opencode_zen_discovery.discover ?http ?cancel ~public:true credential
+  else if provider = "opencode-go" then
+    Opencode_go_discovery.discover ?http ?cancel ~public:true credential
+  else if provider = "charm-hyper" then
+    discover_charm ?http ?cancel credential
+  else if provider = "yolo-auto" then
+    Yolo_auto_discovery.discover ?http ?cancel credential
+  else if provider = "meta" then
+    Meta_discovery.discover ?http ?cancel credential
+  else if provider = "vercel-ai-gateway" then
+    Vercel_ai_gateway_discovery.discover ?http ?cancel credential
+  else if provider = "commandcode" then
+    Commandcode_discovery.discover ?http ?cancel credential
+  else if provider = "devin" then (
+    match credential with
+    | None -> Error Missing_credential
+    | Some (Api_key key) ->
+        if http <> None then
+          Error (Invalid_response "Devin model discovery uses its native protobuf transport")
+        else (match (try Devin_api.discover ?cancel ~api_key:key ()
+          with Devin_binary_http.Cancelled -> raise Provider.Cancelled) with
+           | Ok rows -> Ok (List.map (fun (model : Devin_api.model) -> model.id) rows)
+           | Error Devin_api.Invalid_credential -> Error Invalid_credential
+           | Error Devin_api.Transport_error ->
+               Error (Transport_error "Devin Connect request failed")
+           | Error (Devin_api.Http_error status) -> Error (Http_error status)
+           | Error (Devin_api.Invalid_response reason) ->
+               Error (Invalid_response reason))
+    | Some _ -> Error Invalid_credential)
   else if provider = "openai-codex" then discover_codex ?http ?cancel credential
   else if provider = "sakana" then (
     let credential = match credential with
