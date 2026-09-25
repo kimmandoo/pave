@@ -5,6 +5,7 @@ type event =
   | Transcript_message of { turn_id : int; text : string }
   | Text_delta of { turn_id : int; text : string }
   | Activity_phase of { turn_id : int; phase : Agent.phase }
+  | Tool_event of { turn_id : int; event : Agent.tool_event }
   | Turn_completed of { turn_id : int }
   | Turn_cancelled of { turn_id : int }
   | Turn_failed of { turn_id : int; error : exn }
@@ -25,6 +26,7 @@ type notice =
   | Message of int * string
   | Delta of int * string
   | Phase of int * Agent.phase
+  | Tool of int * Agent.tool_event
   | Approve of int * string * approval * (unit -> bool)
   | Finished of int * completion
 
@@ -124,6 +126,10 @@ let phase t value =
   Option.iter (fun turn -> notify t turn (Phase (turn.id, value)))
     (worker_turn t)
 
+let tool t event =
+  Option.iter (fun turn -> notify t turn (Tool (turn.id, event)))
+    (worker_turn t)
+
 let answer request result =
   Mutex.lock request.mutex;
   (match request.answer with
@@ -217,6 +223,13 @@ let drain t =
     | Some (Phase (id, phase)) ->
         if not (cancel_requested t id) then
           t.on_event (Activity_phase { turn_id = id; phase });
+        handle ()
+    | Some (Tool (id, event)) ->
+        let terminal = match event with
+          | Agent.Tool_settled _ | Agent.Tool_aborted _ -> true
+          | Agent.Tool_started _ | Agent.Tool_updated _ -> false in
+        if terminal || not (cancel_requested t id) then
+          t.on_event (Tool_event { turn_id = id; event });
         handle ()
     | Some (Approve (id, command, request, cancelled)) ->
         if cancelled () || cancel_requested t id then answer request false

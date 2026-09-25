@@ -15,7 +15,7 @@ let two_calls = event
   ^ event {|{"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}|}
   ^ event "[DONE]"
 let shell_call = event
-  {|{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"shell-wait","function":{"name":"run_command","arguments":"{\"command\":\"sleep 5\",\"timeout_seconds\":20}"}}]},"finish_reason":null}]}|}
+  {|{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"shell-wait","function":{"name":"run_command","arguments":"{\"command\":\"printf early; sleep 5\",\"timeout_seconds\":20}"}}]},"finish_reason":null}]}|}
   ^ event {|{"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}|}
   ^ event "[DONE]"
 
@@ -75,19 +75,32 @@ let () =
     let provider : Pave.Provider.config = { api = Pave.Provider.Openai_completions;
       endpoint = Printf.sprintf "http://127.0.0.1:%d/chat/completions" port;
       api_key = "mock"; model = "mock" } in
-    let events = ref [] and deltas = ref [] in
+    let events = ref [] and deltas = ref [] and tool_events = ref [] in
     let agent = Pave.Agent.create ~provider ~root ~system:"inspect the mobile repo"
       ~stream:true ~on_event:(fun text -> events := text :: !events)
-      ~on_delta:(fun text -> deltas := text :: !deltas) () in
+      ~on_delta:(fun text -> deltas := text :: !deltas)
+      ~on_tool_event:(fun event -> tool_events := event :: !tool_events) () in
     assert (Pave.Agent.run agent "Read App.swift" = "Swift source verified.");
     assert (List.rev !deltas = [ "Swift source verified."; "\n" ]);
     assert (not (List.mem "Swift source verified." !events));
     assert (List.length (Pave.Agent.messages agent) = 4);
+    (match List.rev !tool_events with
+     | [ Pave.Agent.Tool_started { call_id = "call-mobile"; name = "read_file" };
+         Pave.Agent.Tool_settled {
+           call_id = "call-mobile"; name = "read_file"; result; is_error = false
+         } ] ->
+         assert (String.starts_with ~prefix:"struct App {}\n" result)
+     | _ -> failwith "tool call did not emit ordered typed lifecycle events");
     let cancelled = ref false in
-    let changes = ref [] in
+    let changes = ref [] and cancel_events = ref [] in
     let cancelled_agent = Pave.Agent.create ~provider ~root ~system:"inspect the mobile repo"
-      ~stream:true
-      ~on_event:(fun event -> if event = "[write_file]" then cancelled := true)
+      ~stream:true ~on_event:(fun _ -> ())
+      ~on_tool_event:(fun event ->
+        cancel_events := event :: !cancel_events;
+        match event with
+        | Pave.Agent.Tool_started { call_id = "write-mobile"; _ } ->
+            cancelled := true
+        | _ -> ())
       ~on_change:(fun message -> changes := message :: !changes) () in
     (match Pave.Agent.run ~cancel:(fun () -> !cancelled) cancelled_agent "Write file" with
      | exception Pave.Provider.Cancelled -> ()
@@ -97,12 +110,22 @@ let () =
      | [ message ] -> assert (message.Pave.Protocol.role = "user")
      | _ -> failwith "cancelled agent journal contains an incomplete assistant turn");
     assert (List.rev !changes = Pave.Agent.messages cancelled_agent);
-    let cancelled_after_tool = ref false in
+    (match List.rev !cancel_events with
+     | [ Pave.Agent.Tool_started { call_id = "write-mobile"; name = "write_file" };
+         Pave.Agent.Tool_aborted {
+           call_id = "write-mobile"; side_effects_may_have_occurred = false; result; _
+         } ] ->
+         assert (String.starts_with ~prefix:"Error:" result)
+     | _ -> failwith "canceled unstarted tool did not settle as aborted");
+    let cancelled_after_tool = ref false and partial_events = ref [] in
     let partial_agent = Pave.Agent.create ~provider ~root ~system:"inspect the mobile repo"
-      ~stream:true
-      ~on_event:(fun event ->
-        if String.starts_with ~prefix:"[read_file] struct App" event then
-          cancelled_after_tool := true) () in
+      ~stream:true ~on_event:(fun _ -> ())
+      ~on_tool_event:(fun event ->
+        partial_events := event :: !partial_events;
+        match event with
+        | Pave.Agent.Tool_settled { call_id = "read-once"; _ } ->
+            cancelled_after_tool := true
+        | _ -> ()) () in
     (match Pave.Agent.run ~cancel:(fun () -> !cancelled_after_tool)
       partial_agent "Read then write" with
      | exception Pave.Provider.Cancelled -> ()
@@ -120,11 +143,19 @@ let () =
            | Some text -> String.starts_with ~prefix:"Error:" text
            | None -> false)
      | _ -> failwith "cancelled tool sequence left a dangling tool call");
+    (match List.rev !partial_events with
+     | [ Pave.Agent.Tool_started { call_id = "read-once"; name = "read_file" };
+         Pave.Agent.Tool_settled { call_id = "read-once"; is_error = false; _ };
+         Pave.Agent.Tool_started { call_id = "write-twice"; name = "write_file" };
+         Pave.Agent.Tool_aborted {
+           call_id = "write-twice"; side_effects_may_have_occurred = false; _
+         } ] -> ()
+     | _ -> failwith "multi-tool lifecycle lost call IDs or provider order");
     assert (not (Sys.file_exists (Filename.concat root "MUST_NOT_EXIST")));
-    let shell_started = ref None in
+    let shell_started = ref None and shell_events = ref [] in
     let shell_agent = Pave.Agent.create ~provider ~root ~system:"inspect the mobile repo"
-      ~stream:true ~allow_shell:true
-      ~on_event:(fun _ -> ())
+      ~stream:true ~allow_shell:true ~on_event:(fun _ -> ())
+      ~on_tool_event:(fun event -> shell_events := event :: !shell_events)
       ~approve_command:(fun _ -> shell_started := Some (Unix.gettimeofday ()); true) () in
     let started = Unix.gettimeofday () in
     (match Pave.Agent.run ~cancel:(fun () -> match !shell_started with
@@ -141,5 +172,23 @@ let () =
          assert (match stopped.content with
            | Some text -> String.starts_with ~prefix:"Error:" text
            | None -> false)
-     | _ -> failwith "cancelled command did not settle the tool call"));
+     | _ -> failwith "cancelled command did not settle the tool call");
+    (match List.rev !shell_events with
+     | Pave.Agent.Tool_started { call_id = "shell-wait"; name = "run_command" } :: tail ->
+         assert (List.exists (function
+           | Pave.Agent.Tool_updated {
+               call_id = "shell-wait"; received_bytes; _
+             } -> received_bytes >= String.length "early"
+           | _ -> false) tail);
+         assert (List.exists (function
+           | Pave.Agent.Tool_aborted {
+               call_id = "shell-wait";
+               side_effects_may_have_occurred = true; _
+             } -> true
+           | _ -> false) tail);
+         assert (not (List.exists (function
+           | Pave.Agent.Tool_settled { call_id = "shell-wait"; _ } -> true
+           | _ -> false) tail))
+     | _ -> failwith "running shell tool emitted no progress/abort lifecycle")
+  );
   print_endline "streamed agent loop: ok"

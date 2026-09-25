@@ -166,6 +166,7 @@ let () =
       and active_route = ref route and endpoint_override = ref !endpoint in
     let ui = ref None in
     let runner : Pave.Turn_runner.t option ref = ref None in
+    let ui_thread = Thread.id (Thread.self ()) in
     let on_event message = match !ui with
       | Some screen -> Tui.event screen message
       | None -> print_endline message; flush stdout in
@@ -179,6 +180,21 @@ let () =
         | None ->
             Printf.eprintf "\nShell command in %s:\n%s\nApprove? [y/N] %!" root command;
             (match read_line () with "y" | "Y" | "yes" -> true | _ -> false) in
+    let render_tool_event screen = function
+      | Pave.Agent.Tool_started { call_id; name } ->
+          Tui.tool_started screen call_id name
+      | Pave.Agent.Tool_updated { call_id; name; received_bytes } ->
+          Tui.tool_updated screen call_id name received_bytes
+      | Pave.Agent.Tool_settled { call_id; name; result; is_error } ->
+          Tui.tool_settled screen call_id name result is_error
+      | Pave.Agent.Tool_aborted { call_id; name; result; _ } ->
+          Tui.tool_aborted screen call_id name result in
+    let worker_tool_event event = match !ui with
+      | Some screen when Thread.id (Thread.self ()) = ui_thread ->
+          render_tool_event screen event
+      | Some _ ->
+          Option.iter (fun current -> Pave.Turn_runner.tool current event) !runner
+      | None -> () in
     let worker_event message = match !runner with
       | Some current -> Pave.Turn_runner.message current message
       | None -> on_event message in
@@ -244,6 +260,7 @@ let () =
         ~allow_shell:!allow_shell ~stream:(!stream || Option.is_some !ui)
         ~approve_command:worker_approval ~on_usage:record_usage
         ?on_phase:(if Option.is_some !ui then Some worker_phase else None)
+        ?on_tool_event:(if Option.is_some !ui then Some worker_tool_event else None)
         ~history ~on_change ~on_event:worker_event ~on_delta:worker_delta () in
     let get_agent () = match !agent with
       | Some current -> current
@@ -879,6 +896,8 @@ let () =
                      Tui.set_activity screen (Some "Working")
                  | Pave.Agent.Tool name ->
                      Tui.set_activity screen (Some ("Tool: " ^ name)))
+            | Pave.Turn_runner.Tool_event { event; _ } ->
+                render_tool_event screen event
             | Pave.Turn_runner.Turn_completed _ ->
                 refresh_usage screen;
                 Tui.set_activity screen None;

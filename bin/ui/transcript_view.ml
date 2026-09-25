@@ -171,7 +171,7 @@ let start_tool t name =
     (name ^ " · running");
   id
 
-let tool_result ?group:existing t name result =
+let tool_result ?group:existing ?(aborted = false) ?(is_error = false) t name result =
   let name = single_line name in
   let id = match existing, t.pending_tool with
     | Some id, _ -> id
@@ -179,18 +179,21 @@ let tool_result ?group:existing t name result =
     | None, _ -> start_tool t name in
   t.pending_tool <- None;
   t.fenced <- false;
-  let failed = String.starts_with ~prefix:"Error:" result in
+  let failed = is_error || String.starts_with ~prefix:"Error:" result in
+  let error = failed || aborted in
+  let outcome = if aborted then "aborted" else if failed then "failed" else "completed" in
   for i = 0 to t.count - 1 do
     let row = t.rows.(i) in
     if row.group = id && row.kind = Tool && row.style = Heading then (
       mark_dirty t i;
-      row.text <- name ^ (if failed then " · failed" else " · completed"))
+      row.text <- name ^ " · " ^ outcome)
   done;
   let length = String.fold_left (fun count char ->
     if char = '\n' then count + 1 else count) 1 result in
-  add_line t ~kind:(if failed then Error else Tool) ~group:id
+  add_line t ~kind:(if error then Error else Tool) ~group:id
     ~provisional:false ~style:Tool_state
-    (name ^ (if failed then " · error" else " · done") ^ " · Alt+O expand");
+    (name ^ (if aborted then " · aborted" else
+      if failed then " · error" else " · done") ^ " · Alt+O expand");
   let position = ref 0 in
   for index = 0 to min (length - 1) (max_tool_lines - 1) do
     let stop = match String.index_from_opt result !position '\n' with
@@ -206,10 +209,10 @@ let tool_result ?group:existing t name result =
           while !prefix > 0 && Char.code line.[!prefix] land 0xc0 = 0x80 do
             decr prefix done;
           String.sub line 0 !prefix ^ "…" in
-      add_line t ~kind:(if failed then Error else Tool) ~group:id
+      add_line t ~kind:(if error then Error else Tool) ~group:id
         ~provisional:false ~preview:true excerpt);
-    content_line t ~kind:(if failed then Error else Tool) ~group:id
-      ~provisional:false ~detail:true line;
+    content_line t ~kind:(if error then Error else Tool)
+      ~group:id ~provisional:false ~detail:true line;
     position := stop + 1
   done;
   if length > max_tool_lines then
