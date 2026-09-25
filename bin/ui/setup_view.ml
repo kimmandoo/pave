@@ -96,12 +96,13 @@ let run screen =
       | _ -> models in
     let choices = List.map (fun id -> descriptor.id ^ "/" ^ id) models in
     let instructions = "Type " ^ descriptor.id ^ "/MODEL_ID" in
-    match Tui.choose screen ~allow_custom:true
+    match Model_picker.choose screen ~descriptor
+      ~plain:[instructions; "Back · authentication"; "Skip setup"]
       ~intro:["03 / 03  ·  MODEL";
         "Filter the list or type PROVIDER/MODEL_ID.";
         "Only routable model IDs can become your default."]
       ~title:"SETUP · Choose model (type ID)"
-      ~choices:(choices @ [instructions; "Back · authentication"; "Skip setup"]) with
+      ~choices:(choices @ [instructions; "Back · authentication"; "Skip setup"]) () with
     | None | Some "Skip setup" -> skip
     | Some "Back · authentication" -> authentication descriptor
     | Some choice when choice = instructions ->

@@ -1,6 +1,7 @@
 let chooser : Tui.chooser = {
   title = "Model";
   intro = [||];
+  plain = [];
   suggestions = [| "openai/gpt-4.1"; "google/gemini-2.5-pro" |];
   choices = [| { Tui.value = "openai/gpt-4.1"; custom = false; verified = false };
     { Tui.value = "google/gemini-2.5-pro"; custom = false; verified = false } |];
@@ -44,4 +45,25 @@ let () =
   assert (Tui.candidate_label chooser (Tui.matches chooser).(0)
     = "[suggested] google/gemini-2.5-pro");
   assert (chooser.status = Some "Offline");
+  let onboarding = { chooser with
+    plain = ["Type ollama/MODEL_ID"; "Back · authentication"; "Skip setup"];
+    suggestions = [| "Type ollama/MODEL_ID"; "Back · authentication"; "Skip setup" |];
+    choices = Array.map (fun value ->
+      { Tui.value; custom = false; verified = false })
+      [| "Type ollama/MODEL_ID"; "Back · authentication"; "Skip setup" |];
+    filter = ""; selected = 0; offset = 0 } in
+  Tui.update_chooser onboarding
+    ~verified:["ollama/llama3.2:latest"; "ollama/qwen2.5-coder:7b"]
+    ~status:(Some "2 live models");
+  let shown = Tui.matches onboarding in
+  assert (shown.(0).value = "ollama/llama3.2:latest");
+  assert (Tui.candidate_label onboarding shown.(0) =
+    "[verified] ollama/llama3.2:latest");
+  assert (onboarding.selected = 0);
+  assert (Tui.candidate_label onboarding shown.(3) = "Back · authentication");
+  onboarding.selected <- 3;
+  Tui.update_chooser onboarding ~verified:["ollama/another"]
+    ~status:None;
+  assert ((Tui.matches onboarding).(onboarding.selected).value =
+    "Back · authentication");
   print_endline "dynamic chooser filtering and source labels: ok"

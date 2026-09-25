@@ -9,6 +9,7 @@ type chooser = {
   title : string;
   intro : string array;
   suggestions : string array;
+  plain : string list;
   mutable choices : candidate array;
   allow_custom : bool;
   dynamic : bool;
@@ -162,7 +163,7 @@ let matches chooser =
 let candidate_label chooser item =
   let source =
     if item.custom then "Use: "
-    else if not chooser.dynamic then ""
+    else if not chooser.dynamic || List.mem item.value chooser.plain then ""
     else if item.verified then "[verified] " else "[suggested] " in
   source ^ sanitize item.value
 
@@ -861,12 +862,19 @@ let update_chooser chooser ~verified ~status =
       Hashtbl.add seen value ();
       choices := { value; custom = false;
         verified = Hashtbl.mem confirmed value } :: !choices) in
-  Array.iter add chooser.suggestions;
+  Array.iter (fun value ->
+    if not (List.mem value chooser.plain) then add value) chooser.suggestions;
   List.iter add verified;
+  Array.iter (fun value ->
+    if List.mem value chooser.plain then add value) chooser.suggestions;
   chooser.choices <- Array.of_list (List.rev !choices);
   chooser.status <- Option.map sanitize status;
   let found = matches chooser in
-  chooser.selected <- (match selected with
+  chooser.selected <- (if verified <> [] && chooser.filter = "" &&
+    chooser.selected = 0 &&
+    (match selected with Some value -> List.mem value chooser.plain
+      | None -> false) then 0
+    else match selected with
     | Some value ->
         let rec locate i =
           if i = Array.length found then 0
@@ -882,8 +890,8 @@ let update_choices t ~verified ?status () =
       paint t
   | _ -> invalid_arg "Tui.update_choices: no dynamic chooser is open"
 
-let choose ?(allow_custom = false) ?(intro = []) ?wake_fd ?on_wake ?dynamic t
-    ~title ~choices =
+let choose ?(allow_custom = false) ?(intro = []) ?(plain = [])
+    ?wake_fd ?on_wake ?dynamic t ~title ~choices =
   let cols, rows = Notty_unix.Term.size t.term in
   if cols < 9 || rows < 2 then (
     alert t "Resize terminal (at least 9 columns × 2 rows) to select";
@@ -891,7 +899,7 @@ let choose ?(allow_custom = false) ?(intro = []) ?wake_fd ?on_wake ?dynamic t
   else
   let suggestions = Array.of_list choices in
   let chooser = { title = sanitize title;
-    intro = Array.of_list (List.map sanitize intro); suggestions;
+    intro = Array.of_list (List.map sanitize intro); plain; suggestions;
     choices = Array.map (fun value ->
       { value; custom = false; verified = false }) suggestions;
     allow_custom; dynamic = Option.value dynamic
