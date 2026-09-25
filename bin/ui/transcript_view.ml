@@ -142,7 +142,8 @@ let sent t text = add_block t User "YOU" text
 let assistant t text = add_block t Assistant "PAVE" text
 let notice t text = add_block t Notice "NOTICE" text
 let error t text = add_block t Error "ERROR" text
-let approval t text = add_block t Approval "SHELL APPROVAL · review before deciding" text
+let approval ?(title = "SHELL APPROVAL · review before deciding") t text =
+  add_block t Approval title text
 
 let valid_tool_name name =
   name <> "" && String.length name <= 64 &&

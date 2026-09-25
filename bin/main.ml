@@ -15,6 +15,7 @@ let () =
   let stream = ref false in
   let session = ref "" and prompt = ref "" and prompt_supplied = ref false
     and allow_shell = ref false in
+  let approval_mode_override = ref None in
   let explicit_selection = ref false and session_supplied = ref false in
   let max_turns = ref None and list_providers = ref false
     and list_models = ref false in
@@ -47,6 +48,12 @@ let () =
       "Save and restore conversation at this file";
     "--prompt", Arg.String (fun text -> prompt := text; prompt_supplied := true),
       "Send one prompt, then exit";
+    "--approval-mode", Arg.String (fun value ->
+      match Pave.Approval.mode_of_string value with
+      | Some mode -> approval_mode_override := Some mode
+      | None -> raise (Arg.Bad
+          "approval mode must be always-ask, write, or yolo")),
+      "Tool approval mode (always-ask, write, or yolo)";
     "--allow-shell", Arg.Set allow_shell, "Offer model-requested shell commands for individual interactive approval (NOT sandboxed)";
     "--system-prompt", Arg.String (fun text -> custom_prompt := Some text),
       "Explicit custom instructions (replaces discovered SYSTEM.md, not mobile safety)";
@@ -93,6 +100,10 @@ let () =
       failwith "--models uses a provider's pinned listing endpoint; remove --endpoint";
     let settings = Pave.Settings.load ~root in
     let configured = settings.values in
+    let configured_approval_mode = Option.value
+      ~default:Pave.Approval.Ask_exec configured.approval_mode in
+    let effective_approval_mode = Option.value
+      ~default:configured_approval_mode !approval_mode_override in
     if !allow_shell && configured.disable_shell then
       failwith "shell tools are disabled in user or project settings";
     let max_turns = Option.value ~default:(Option.value ~default:20
@@ -188,6 +199,21 @@ let () =
         | None ->
             Printf.eprintf "\nShell command in %s:\n%s\nApprove? [y/N] %!" root command;
             (match read_line () with "y" | "Y" | "yes" -> true | _ -> false) in
+    let approve_tool_request (request : Pave.Approval.request) =
+      if not (Unix.isatty Unix.stdin) then false
+      else match !ui with
+        | Some screen -> Tui.confirm_tool screen request
+        | None ->
+            Printf.eprintf
+              "\nTool action approval in %s:\nTool: %s\nTier: %s\nImpact: %s\n%s%sApprove? [y/N] %!"
+              root request.tool_name
+              (String.uppercase_ascii
+                (Pave.Approval.tier_name request.tier))
+              request.impact (String.concat "\n" request.details)
+              (match request.reason with
+               | Some reason -> "\nPolicy: " ^ reason ^ "\n"
+               | None -> "\n");
+            (match read_line () with "y" | "Y" | "yes" -> true | _ -> false) in
     let render_tool_event screen = function
       | Pave.Agent.Tool_started { call_id; name } ->
           Tui.tool_started screen call_id name
@@ -233,6 +259,9 @@ let () =
     let worker_approval command = match !runner with
       | Some current -> Pave.Turn_runner.approve current command
       | None -> approve_command command in
+    let worker_tool_approval request = match !runner with
+      | Some current -> Pave.Turn_runner.approve_tool current request
+      | None -> approve_tool_request request in
     let agent : Pave.Agent.t option ref = ref None in
     let retained_history : Pave.Protocol.message list ref = ref [] in
     let ephemeral_usage : Pave.Protocol.usage option ref = ref None in
@@ -284,7 +313,11 @@ let () =
       Pave.Agent.create ~provider ~authentication ?resolve_credential
         ~root ~system
         ~allow_shell:!allow_shell ~stream:(!stream || Option.is_some !ui)
-        ~approve_command:worker_approval ~on_usage:record_usage
+        ~approval_mode:effective_approval_mode
+        ~tool_approval:configured.tool_approval
+        ~command_patterns:configured.command_patterns
+        ~approve_command:worker_approval ~approve_tool:worker_tool_approval
+        ~on_usage:record_usage
         ?on_phase:(if Option.is_some !ui then Some worker_phase else None)
         ?on_tool_event:(if Option.is_some !ui || Option.is_some !journal
           then Some worker_tool_event else None)
@@ -685,6 +718,16 @@ let () =
                  Option.value ~default:"(provider default)" values.default_api);
                on_event ("Disable shell tools: " ^
                  string_of_bool values.disable_shell);
+               on_event ("Approval mode: " ^
+                 Pave.Approval.string_of_mode (Option.value
+                   ~default:Pave.Approval.Ask_exec values.approval_mode));
+               on_event ("Per-tool approval: " ^
+                 (match values.tool_approval with
+                  | [] -> "(inherit)"
+                  | policies -> String.concat ", " (List.map
+                      (fun (name, policy) ->
+                        name ^ "=" ^ Pave.Approval.string_of_policy policy)
+                      policies)));
                on_event ("Maximum turns: " ^
                  string_of_int (Option.value ~default:20 values.max_turns)))
         | Pave.Interaction.New -> start_session ()
@@ -1007,6 +1050,7 @@ let () =
                 Tui.clear_live screen;
                 Tui.event screen ("Error: " ^ error_message error))
           ~on_approve:(Tui.confirm screen)
+          ~on_approve_tool:(Tui.confirm_tool screen)
           ~on_queued:(Tui.set_queue screen) () in
         runner := Some active;
         interact ()))

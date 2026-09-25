@@ -408,3 +408,13 @@
  (name test_kilo_oauth)
  (modules test_kilo_oauth)
  (libraries pave unix yojson))
+
+(test
+ (name test_approval)
+ (modules test_approval)
+ (libraries pave unix))
+
+(test
+ (name test_agent_approval)
+ (modules test_agent_approval)
+ (libraries pave unix yojson))
