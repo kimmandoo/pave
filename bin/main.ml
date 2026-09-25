@@ -24,7 +24,7 @@ let () =
     "--root", Arg.Set_string root, "Workspace directory (default: current directory)";
     "--model", Arg.String (fun value ->
       model := value; explicit_selection := true),
-      "Model ID (required unless the provider has a default)";
+      "Model ID (required for prompts unless saved in settings or session)";
     "--provider", Arg.String (fun value ->
       provider_name := value; explicit_selection := true),
       "Provider ID (see --providers)";
