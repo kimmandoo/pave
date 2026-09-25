@@ -268,3 +268,33 @@
  (name test_coreweave_api)
  (modules test_coreweave_api)
  (libraries pave unix yojson))
+
+(test
+ (name test_synthetic_api)
+ (modules test_synthetic_api)
+ (libraries pave unix yojson))
+
+(test
+ (name test_zai_api)
+ (modules test_zai_api)
+ (libraries pave unix yojson))
+
+(test
+ (name test_zenmux_api)
+ (modules test_zenmux_api)
+ (libraries pave unix yojson))
+
+(test
+ (name test_wafer_api)
+ (modules test_wafer_api)
+ (libraries pave unix yojson))
+
+(test
+ (name test_qianfan_api)
+ (modules test_qianfan_api)
+ (libraries pave unix yojson))
+
+(test
+ (name test_xiaomi_api)
+ (modules test_xiaomi_api)
+ (libraries pave unix yojson))

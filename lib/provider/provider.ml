@@ -2,7 +2,9 @@ type api = Openai_completions | Local_chat | Anthropic_messages | Openai_respons
   | Azure_responses | Bedrock_mantle_responses | Ollama_chat | Gemini_direct
   | Vertex_generate | Bedrock_converse | Xai_chat | Nvidia_chat
   | Novita_chat | Siliconflow_chat | Siliconflow_cn_chat
-  | Stepfun_chat | Coreweave_chat | Codex_responses | Copilot_chat
+  | Stepfun_chat | Coreweave_chat | Synthetic_chat | Zai_chat
+  | Zenmux_chat | Wafer_chat | Qianfan_chat | Xiaomi_chat
+  | Codex_responses | Copilot_chat
 type authentication = Api_key | OAuth
 type config = { endpoint : string; api_key : string; model : string; api : api }
 type credentials = {
@@ -538,7 +540,8 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage 
                  Option.iter report (Openai_stream.usage stream));
             reply))
   | Xai_chat | Nvidia_chat | Novita_chat | Siliconflow_chat
-  | Siliconflow_cn_chat | Stepfun_chat | Coreweave_chat ->
+  | Siliconflow_cn_chat | Stepfun_chat | Coreweave_chat | Synthetic_chat
+  | Zai_chat | Zenmux_chat | Wafer_chat | Qianfan_chat | Xiaomi_chat ->
       let headers, body, parse_reply =
         (try match config.api with
         | Xai_chat ->
@@ -569,9 +572,33 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage 
             Coreweave_api.chat_headers ~endpoint:config.endpoint ~api_key,
             Coreweave_api.request ~model:config.model messages tools,
             Coreweave_api.parse_completion
+        | Synthetic_chat ->
+            Synthetic_api.chat_headers ~endpoint:config.endpoint ~api_key,
+            Synthetic_api.request ~model:config.model messages tools,
+            Synthetic_api.parse_completion
+        | Zai_chat ->
+            Zai_api.chat_headers ~endpoint:config.endpoint ~api_key,
+            Zai_api.request ~model:config.model messages tools,
+            Zai_api.parse_completion
+        | Zenmux_chat ->
+            Zenmux_api.chat_headers ~endpoint:config.endpoint ~api_key,
+            Zenmux_api.request ~model:config.model messages tools,
+            Zenmux_api.parse_completion
+        | Wafer_chat ->
+            Wafer_api.chat_headers ~endpoint:config.endpoint ~api_key,
+            Wafer_api.request ~model:config.model messages tools,
+            Wafer_api.parse_completion
+        | Qianfan_chat ->
+            Qianfan_api.chat_headers ~endpoint:config.endpoint ~api_key,
+            Qianfan_api.request ~model:config.model messages tools,
+            Qianfan_api.parse_completion
+        | Xiaomi_chat ->
+            Xiaomi_api.chat_headers ~endpoint:config.endpoint ~api_key,
+            Xiaomi_api.request ~model:config.model messages tools,
+            Xiaomi_api.parse_completion
         | _ -> assert false
         with Invalid_argument reason -> raise (Provider_error reason)) in
-      let json = post_json ~local:true ?cancel ~endpoint:config.endpoint
+      let json = post_json ?cancel ~endpoint:config.endpoint
         ~headers ~secret:api_key body in
       let reply = parse (fun () -> parse_reply json) in
       (match on_usage with
