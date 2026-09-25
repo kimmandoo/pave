@@ -27,6 +27,10 @@ type t = {
   transcript : Transcript_view.t;
   mutable scroll : int;
   mutable chooser : chooser option;
+  mutable hint_draft : string;
+  mutable hint_selected : int;
+  mutable hint_offset : int;
+  mutable hint_suppressed : string option;
   mutable revision : int;
   mutable body_cache : (int * int * int * I.t) option;
   mutable layout_cache : (int * int * Transcript_view.snapshot) option;
@@ -53,7 +57,7 @@ let idle_status =
 
 let hotkeys = [
   "Keys · Enter send · Shift+Enter newline";
-  "/ then Tab · search commands; Enter inserts";
+  "/ · live commands; ↑/↓ select · Tab/Enter insert · Esc close";
   "Ctrl+R reverse search · Esc cancel search";
   "↑/↓ move in draft · Ctrl+P/N or Alt+↑/↓ prompt history";
   "Ctrl+A/E line ends · Alt+B/F move by word · Ctrl+W erase word";
@@ -165,6 +169,60 @@ let view_height t =
   let _, rows = Notty_unix.Term.size t.term in
   max 1 (rows - 6)
 
+(* Hint state belongs to the editor, never to the transcript or the modal chooser.
+   A dismissed/inserted draft remains quiet until the user edits it again. *)
+let hint_matches t =
+  let draft = Pave.Composer.text t.editor in
+  if t.hint_draft <> draft then (
+    t.hint_draft <- draft;
+    t.hint_selected <- 0;
+    t.hint_offset <- 0;
+    t.hint_suppressed <- None);
+  if t.paste || Option.is_some t.chooser ||
+    Pave.Composer.search_query t.editor <> None ||
+    t.hint_suppressed = Some draft ||
+    Pave.Composer.cursor t.editor <> String.length draft ||
+    String.exists (fun c -> c = ' ' || c = '\t' || c = '\n') draft
+  then []
+  else Pave.Interaction.suggestions draft
+
+let hint_room t =
+  let cols, rows = Notty_unix.Term.size t.term in
+  let prompt_width = I.width (I.string accent prompt) in
+  let field_width = max 1 (cols - if cols <= prompt_width then 0
+    else prompt_width) in
+  let measure cluster = I.width (I.string text_attr cluster) in
+  let lines = Pave.Composer.layout ~columns:field_width ~measure t.editor in
+  let height = min 4 (max 1 (min (rows - 4) (Array.length lines))) in
+  rows - 4 - height >= 2
+
+let hints_visible t = hint_matches t <> [] && hint_room t
+
+let selected_hint t =
+  let matches = hint_matches t in
+  if t.hint_selected < List.length matches then
+    Some (List.nth matches t.hint_selected)
+  else None
+
+let dismiss_hint t =
+  t.hint_suppressed <- Some (Pave.Composer.text t.editor)
+
+let insert_hint t (item : Pave.Interaction.shortcut) =
+  let draft = Pave.Composer.text t.editor in
+  Pave.Composer.finish t.editor;
+  Pave.Composer.insert t.editor
+    (String.sub item.name (String.length draft)
+      (String.length item.name - String.length draft));
+  t.hint_draft <- Pave.Composer.text t.editor;
+  dismiss_hint t
+
+let hint_row cols selected (item : Pave.Interaction.shortcut) =
+  let marker = if selected then "  ❯ " else "    " in
+  let usage = if item.usage = "" then "" else " " ^ item.usage in
+  I.hsnap ~align:`Left cols I.(
+    string (if selected then accent else text_attr) (marker ^ item.name) <|>
+    string (if selected then text_attr else muted) (usage ^ " · " ^ item.summary))
+
 let paint t =
   let cols, rows = Notty_unix.Term.size t.term in
   let cols = max 1 cols and rows = max 1 rows in
@@ -180,6 +238,16 @@ let paint t =
     | Some _, _ | None, Some _ -> 1
     | None, None -> min 4 (max 1 (min (rows - 4) (Array.length editor_lines))) in
   let body_height = max 0 (rows - 4 - editor_height) in
+  let hints = hint_matches t in
+  let hint_count = List.length hints in
+  let hint_height = if body_height < 2 || hint_count = 0 then 0
+    else min body_height (min 8 (hint_count + 1)) in
+  let hint_page = max 0 (hint_height - 1) in
+  t.hint_selected <- min t.hint_selected (max 0 (hint_count - 1));
+  if t.hint_selected < t.hint_offset then t.hint_offset <- t.hint_selected;
+  if hint_page > 0 && t.hint_selected >= t.hint_offset + hint_page then
+    t.hint_offset <- t.hint_selected - hint_page + 1;
+  t.hint_offset <- min t.hint_offset (max 0 (hint_count - hint_page));
   let activity = match t.activity with
     | None -> ""
     | Some state ->
@@ -285,6 +353,11 @@ let paint t =
         else
           Printf.sprintf "  %s%d/%d · ↑↓/PgUp/PgDn move · Enter select · Esc cancel"
             status number (Array.length found)
+    | None when hint_height > 0 ->
+        let selected = List.nth hints t.hint_selected in
+        let label = selected.name ^ " · " ^ selected.summary in
+        if cols < 45 then "  " ^ label
+        else "  " ^ label ^ "   ·   ↑↓ move · Tab/Enter insert · Esc close"
     | None ->
         let status = match Pave.Composer.search_query t.editor with
           | None -> t.status
@@ -346,7 +419,17 @@ let paint t =
       candidates
   else Array.concat [
     [| header; location; divider |];
-    Array.init body_height (fun row -> I.vcrop row (body_height - row - 1) body);
+    Array.init body_height (fun row ->
+      if row < body_height - hint_height then
+        I.vcrop row (body_height - row - 1) body
+      else
+        let index = row - (body_height - hint_height) in
+        if index = 0 then
+          styled_line cols accent
+            "  / Commands · ↑↓ move · Tab/Enter insert · Esc close"
+        else
+          let choice = List.nth hints (t.hint_offset + index - 1) in
+          hint_row cols (t.hint_offset + index - 1 = t.hint_selected) choice);
     [| footer |]; prompt_rows ] in
   let output = Buffer.create 512 in
   Buffer.add_string output "\027[?25l";
@@ -411,6 +494,8 @@ let create ~root ~model ~session =
   let t = { term; input = Terminal_input.create term;
     root; model; session; editor = Pave.Composer.create ();
     transcript = Transcript_view.create (); scroll = 0; chooser = None;
+    hint_draft = ""; hint_selected = 0; hint_offset = 0;
+    hint_suppressed = None;
     revision = 0; body_cache = None; layout_cache = None;
     previous = None; status = idle_status; activity = None;
     activity_started = None; usage_badge = None; queue = 0;
@@ -579,10 +664,12 @@ let read ?wake_fd ?on_wake ?on_interrupt ?on_completion t =
         t.paste <- true;
         if Pave.Composer.search_query t.editor = None then
           Pave.Composer.begin_paste t.editor;
-        loop ()
+        paint t; loop ()
     | `Paste `End ->
         t.paste <- false;
         Pave.Composer.end_paste t.editor;
+        t.hint_draft <- Pave.Composer.text t.editor;
+        dismiss_hint t;
         paint t; loop ()
     | `Key (`Enter, _) when t.paste ->
         if Pave.Composer.search_query t.editor = None then paste_insert "\n";
@@ -611,6 +698,18 @@ let read ?wake_fd ?on_wake ?on_interrupt ?on_completion t =
             Pave.Composer.search_insert t.editor (utf8 uchar)
         | _ -> ());
         changed (); loop ()
+    | `Key (`Arrow `Up, []) when hints_visible t ->
+        t.hint_selected <- max 0 (t.hint_selected - 1);
+        changed (); loop ()
+    | `Key (`Arrow `Down, []) when hints_visible t ->
+        t.hint_selected <- min (List.length (hint_matches t) - 1)
+          (t.hint_selected + 1);
+        changed (); loop ()
+    | `Key (`Escape, _) when hints_visible t ->
+        dismiss_hint t; changed (); loop ()
+    | `Key (`Tab, _) when hints_visible t ->
+        Option.iter (insert_hint t) (selected_hint t);
+        changed (); loop ()
     | `Key (`Tab, _) ->
         (match on_completion with
         | None -> ()
@@ -628,6 +727,10 @@ let read ?wake_fd ?on_wake ?on_interrupt ?on_completion t =
                    changed ()
                | _ -> ()));
         loop ()
+    | `Key (`Enter, mods) when not (List.mem `Shift mods) &&
+        hints_visible t ->
+        Option.iter (insert_hint t) (selected_hint t);
+        changed (); loop ()
     | `Key (`Enter, mods) ->
         if t.paste || List.mem `Shift mods then
           (Pave.Composer.insert t.editor "\n"; changed (); loop ())

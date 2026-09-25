@@ -12,7 +12,9 @@ let () =
   let root = ref "." and model = ref "" in
   let endpoint = ref "" and provider_name = ref "" and api_name = ref "" in
   let stream = ref false in
-  let session = ref "" and prompt = ref "" and allow_shell = ref false in
+  let session = ref "" and prompt = ref "" and prompt_supplied = ref false
+    and allow_shell = ref false in
+  let explicit_selection = ref false and session_supplied = ref false in
   let max_turns = ref None and list_providers = ref false
     and list_models = ref false in
   let login = ref "" and login_manual = ref "" and logout = ref "" in
@@ -20,19 +22,30 @@ let () =
     and append_prompt = ref None in
   let options = [
     "--root", Arg.Set_string root, "Workspace directory (default: current directory)";
-    "--model", Arg.Set_string model, "Model ID (required unless the provider has a default)";
-    "--provider", Arg.Set_string provider_name, "Provider ID (see --providers)";
+    "--model", Arg.String (fun value ->
+      model := value; explicit_selection := true),
+      "Model ID (required unless the provider has a default)";
+    "--provider", Arg.String (fun value ->
+      provider_name := value; explicit_selection := true),
+      "Provider ID (see --providers)";
     "--providers", Arg.Set list_providers, "List registered inference providers and exit";
     "--models", Arg.Set list_models,
       "List models reported by the selected provider (authenticated; not an offline catalog)";
-    "--api", Arg.Set_string api_name, "Provider wire API (see --providers)";
+    "--api", Arg.String (fun value ->
+      api_name := value; explicit_selection := true),
+      "Provider wire API (see --providers)";
     "--login", Arg.Set_string login, "Log in using the provider's OAuth browser callback";
     "--login-manual", Arg.Set_string login_manual, "Log in by pasting the full redirect URL from another browser";
     "--logout", Arg.Set_string logout, "Remove the locally stored OAuth credential";
-    "--endpoint", Arg.Set_string endpoint, "Provider's full completion endpoint URL";
+    "--endpoint", Arg.String (fun value ->
+      endpoint := value; explicit_selection := true),
+      "Provider's full completion endpoint URL";
     "--stream", Arg.Set stream, "Stream text deltas as they arrive";
-    "--session", Arg.Set_string session, "Save and restore conversation at this file";
-    "--prompt", Arg.Set_string prompt, "Send one prompt, then exit";
+    "--session", Arg.String (fun value ->
+      session := value; session_supplied := true),
+      "Save and restore conversation at this file";
+    "--prompt", Arg.String (fun text -> prompt := text; prompt_supplied := true),
+      "Send one prompt, then exit";
     "--allow-shell", Arg.Set allow_shell, "Offer model-requested shell commands for individual interactive approval (NOT sandboxed)";
     "--system-prompt", Arg.String (fun text -> custom_prompt := Some text),
       "Explicit custom instructions (replaces discovered SYSTEM.md, not mobile safety)";
@@ -76,9 +89,7 @@ let () =
     let max_turns = Option.value ~default:(Option.value ~default:20
       configured.max_turns) !max_turns in
     if max_turns <= 0 then failwith "--max-turns must be positive";
-    let explicit_model_override =
-      !provider_name <> "" || !model <> "" || !api_name <> "" ||
-      !endpoint <> "" in
+    let explicit_model_override = !explicit_selection in
     let provider_name = if !provider_name <> "" then !provider_name
       else Option.value ~default:"openai" configured.default_provider in
     let descriptor = match Pave.Provider_catalog.find provider_name with
@@ -142,6 +153,18 @@ let () =
       | Some value -> value
       | None -> failwith ("unsupported saved model or API for " ^
           descriptor.id ^ "/" ^ model ^ "; specify --model to override") in
+    let configured_default_usable =
+      match configured.default_provider with
+      | Some _ -> model <> "" &&
+          Pave.Provider_catalog.route descriptor ~model "" <> None
+      | None ->
+          (* An API key plus the built-in OpenAI default is already usable. *)
+          (match descriptor.api_key_env with
+           | Some name when descriptor.id = "openai" && model <> "" ->
+               (match Sys.getenv_opt name with
+                | Some key -> key <> ""
+                | None -> false)
+           | _ -> false) in
     let active_descriptor = ref descriptor and active_model = ref model
       and active_route = ref route and endpoint_override = ref !endpoint in
     let ui = ref None in
@@ -255,6 +278,16 @@ let () =
       match !ui with
       | Some screen -> Tui.set_model screen (descriptor.id ^ "/" ^ model)
       | None -> () in
+    let apply_model_selection ((descriptor : Pave.Provider_catalog.descriptor),
+        model, route) =
+      (match !journal with
+       | Some current ->
+           Pave.Session.set_model current ~provider:descriptor.id ~model
+       | None -> ());
+      (match !journal, !agent with
+       | None, Some previous -> retained_history := Pave.Agent.messages previous
+       | _ -> ());
+      use_selection (descriptor, model, route) in
     let switch_session next =
       let selected = session_selection (Pave.Session.model next) in
       let descriptor, model, _ = match selected with
@@ -453,26 +486,49 @@ let () =
           with exn ->
             (match !ui with Some screen -> Tui.reset_status screen | None -> ());
             raise exn in
-        (match !journal with
-         | Some current ->
-             Pave.Session.set_model current ~provider:descriptor.id ~model
-         | None -> ());
-        (match !journal, !agent with
-         | None, Some previous -> retained_history := Pave.Agent.messages previous
-         | _ -> ());
-        active_descriptor := descriptor;
-        active_model := model;
-        active_route := route;
-        endpoint_override := "";
-        agent := None;
-        (match !ui with
-         | Some screen -> Tui.set_model screen (descriptor.id ^ "/" ^ model)
-         | None -> ());
+        apply_model_selection (descriptor, model, route);
         on_event ("Model: " ^ descriptor.id ^ "/" ^ model ^ " (" ^ route.name ^
           "). Sign in with /login " ^ descriptor.id ^ " or set its API key if needed.")
       ) else match !ui with
         | Some screen -> Tui.reset_status screen
         | None -> () in
+    let run_setup screen ~first_run =
+      match Setup_view.run screen with
+      | Setup_view.Skipped ->
+          if first_run then (
+            (try
+               Pave.Setup_state.mark Pave.Setup_state.Skipped;
+               on_event "Setup skipped for this user. Run /setup to return."
+             with exn ->
+               on_event ("Setup skip was not saved: " ^ error_message exn ^
+                 ". Run /setup to return.")))
+          else on_event "Setup cancelled; your saved default is unchanged."
+      | Setup_view.Selected (descriptor, model, route, missing_key) ->
+          apply_model_selection (descriptor, model, route);
+          let saved =
+            try
+              ignore (Pave.Settings.update_user (fun current -> {
+                current with default_provider = Some descriptor.id;
+                  default_model = Some model }));
+              true
+            with exn ->
+              on_event ("User default was not saved: " ^ error_message exn ^
+                ". Run /setup to retry.");
+              false in
+          if saved then (
+            (try
+               Pave.Setup_state.mark (match missing_key with
+                 | Some _ -> Pave.Setup_state.Skipped
+                 | None -> Pave.Setup_state.Complete);
+               on_event (match missing_key with
+                 | Some env -> "Default saved: " ^ descriptor.id ^ "/" ^ model ^
+                     ". Key setup skipped; set " ^ env ^
+                     " in your shell before sending prompts. Run /setup to finish."
+                 | None -> "Setup complete. Default: " ^ descriptor.id ^ "/" ^
+                     model ^ ".")
+             with exn ->
+               on_event ("Default saved, but setup status was not saved: " ^
+                 error_message exn ^ ". Run /setup to retry."))) in
     let report_error exn = on_event ("Error: " ^ error_message exn) in
     let interact () =
       let checkout_branch current target =
@@ -565,6 +621,10 @@ let () =
              feedback "Wait for the current turn or /cancel it before changing session or model."
          | Pave.Interaction.Login selected -> choose_login selected
          | Pave.Interaction.Model selected -> choose_model selected
+         | Pave.Interaction.Setup ->
+             (match !ui with
+              | Some screen -> run_setup screen ~first_run:false
+              | None -> on_event "Setup needs an interactive terminal; use --provider and --model.")
          | Pave.Interaction.Settings ->
           (match !ui with
            | Some screen -> Settings_view.open_view screen ~root
@@ -792,7 +852,7 @@ let () =
       List.map (fun (issue : Pave.Project_context.diagnostic) ->
         Printf.sprintf "%S [%s]: %s" issue.path issue.code issue.message)
         project_context.diagnostics @ prompt_configuration.diagnostics in
-    if !prompt <> "" then (
+    if !prompt_supplied then (
       List.iter (fun diagnostic -> prerr_endline ("Settings: " ^ diagnostic))
         settings.diagnostics;
       List.iter (fun diagnostic -> prerr_endline ("Instructions: " ^ diagnostic))
@@ -815,6 +875,13 @@ let () =
         (match !journal with
          | Some current -> Tui.show_history screen (Pave.Session.history current)
          | None -> ());
+        if not explicit_model_override && not !session_supplied &&
+           not configured_default_usable then (
+          let setup = Pave.Setup_state.load () in
+          if setup.status = None then run_setup screen ~first_run:true;
+          List.iter (fun diagnostic ->
+            Tui.event screen ("Setup state: " ^ diagnostic))
+            setup.diagnostics);
         refresh_usage screen;
         List.iter (fun diagnostic ->
           Tui.event screen ("Settings: " ^ diagnostic)) settings.diagnostics;

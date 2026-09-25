@@ -29,6 +29,10 @@ let () =
      | Unix.S_LNK -> Sys.remove project_dir
      | _ -> ()
      with Unix.Unix_error (Unix.ENOENT, _, _) -> ());
+    (try Sys.remove (Filename.concat user_dir "setup.json")
+     with Sys_error _ -> ());
+    (try Sys.remove (Filename.concat user_dir "settings.lock")
+     with Sys_error _ -> ());
     Sys.remove (Filename.concat user_dir "settings.json");
     Unix.rmdir workspace; Unix.rmdir user_dir; Unix.rmdir user_home;
     Unix.rmdir base) (fun () ->
@@ -62,10 +66,34 @@ let () =
     assert (invalid.values.max_turns = Some 12);
     assert (invalid.diagnostics <> []);
     Sys.remove project_file;
+    ignore (Pave.Settings.update_user (fun current ->
+      { current with default_provider = Some "ollama";
+        default_model = Some "llama3.2" }));
+    assert ((Pave.Settings.load ~root:workspace).values.default_provider =
+      Some "ollama");
+    assert ((Pave.Settings.load ~root:workspace).values.disable_shell);
+    assert ((Pave.Settings.load ~root:workspace).values.max_turns = Some 12);
+    Pave.Setup_state.mark Pave.Setup_state.Complete;
+    assert ((Pave.Setup_state.load ()).status =
+      Some Pave.Setup_state.Complete);
+    let status_path = Filename.concat user_dir "setup.json" in
+    Sys.remove status_path;
+    Unix.symlink (Filename.concat user_dir "settings.json") status_path;
+    assert ((Pave.Setup_state.load ()).diagnostics <> []);
+    let rejected_status = try
+      Pave.Setup_state.mark Pave.Setup_state.Skipped; false
+    with Invalid_argument _ -> true in
+    assert (rejected_status);
+    assert ((Pave.Settings.load ~root:workspace).values.default_model =
+      Some "llama3.2");
+    Sys.remove status_path;
+    Pave.Setup_state.mark Pave.Setup_state.Skipped;
+    assert ((Pave.Setup_state.load ()).status =
+      Some Pave.Setup_state.Skipped);
     Sys.remove (Filename.concat project_dir "settings.lock");
     Unix.rmdir project_dir;
     Unix.symlink user_dir project_dir;
     let escaped = Pave.Settings.load ~root:workspace in
-    assert (escaped.values.default_provider = Some "openai");
+    assert (escaped.values.default_provider = Some "ollama");
     assert (escaped.diagnostics <> []));
   print_endline "settings precedence: ok"
