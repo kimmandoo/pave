@@ -481,6 +481,12 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage 
        | Anthropic_messages, "https://api.anthropic.com/v1/messages"
        | Codex_responses, "https://chatgpt.com/backend-api/codex/responses" -> true
        | Copilot_chat, endpoint when endpoint = Github_copilot_wire.endpoint -> true
+       | Devin_connect, endpoint when endpoint = Devin_api.chat_url -> true
+       | (Gitlab_duo_messages | Gitlab_duo_responses | Gitlab_duo_chat), endpoint
+         when endpoint = Gitlab_duo_api.anthropic_url ||
+           endpoint = Gitlab_duo_api.responses_url ||
+           endpoint = Gitlab_duo_api.completions_url -> true
+       | Kilo_chat, endpoint when endpoint = Kilo_api.chat_url -> true
        | _ -> false) then
     raise (Provider_error "OAuth inference requires a registered provider endpoint");
   if config.api = Codex_responses && authentication <> OAuth then

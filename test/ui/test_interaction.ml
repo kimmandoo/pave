@@ -5,9 +5,6 @@ let invalid label f =
 
 let () =
   let open Pave.Interaction in
-  (match parse "/login" with Login None -> () | _ -> fail "login selector missing");
-  (match parse "/login openrouter" with
-   | Login (Some "openrouter") -> () | _ -> fail "login provider parsing");
   (match parse "/model" with Model None -> () | _ -> fail "model selector missing");
   (match parse "/model openrouter/openai/gpt-4o" with
    | Model (Some "openrouter/openai/gpt-4o") -> ()
@@ -31,7 +28,6 @@ let () =
    | _ -> fail "tool detail selection");
   if suggestions "/model/foo" <> [] then fail "slash completion matched invalid prefix";
   invalid "multiple model arguments" (fun () -> parse "/model openai/gpt-5 extra");
-  invalid "control in login provider" (fun () -> parse "/login openrouter\tother");
   invalid "missing branch ID" (fun () -> parse "/branch");
   invalid "missing fork path" (fun () -> parse "/fork");
   invalid "trailing command arguments" (fun () -> parse "/new accidental");
@@ -139,4 +135,4 @@ let () =
   check_native ~provider:"gitlab-duo" ~route:"anthropic"
     ~wire:Pave.Provider.Gitlab_duo_messages
     ~other_wire:Pave.Provider.Gitlab_duo_responses ();
-  print_endline "interactive login and model routing: ok"
+  print_endline "interactive model routing: ok"

@@ -175,6 +175,11 @@
  (libraries pave unix notty-community notty-community.unix uutf))
 
 (test
+ (name test_terminal_input)
+ (modules test_terminal_input terminal_input)
+ (libraries unix notty-community notty-community.unix))
+
+(test
  (name test_model_discovery_cancel)
  (modules test_model_discovery_cancel)
  (libraries pave unix threads))
@@ -382,4 +387,19 @@
 (test
  (name test_devin_api)
  (modules test_devin_api)
+ (libraries pave unix yojson))
+
+(test
+ (name test_gitlab_duo_oauth)
+ (modules test_gitlab_duo_oauth)
+ (libraries pave unix yojson))
+
+(test
+ (name test_devin_oauth)
+ (modules test_devin_oauth)
+ (libraries pave unix yojson))
+
+(test
+ (name test_kilo_oauth)
+ (modules test_kilo_oauth)
  (libraries pave unix yojson))

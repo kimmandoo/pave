@@ -59,7 +59,7 @@ let run screen =
     else match Tui.choose screen
       ~intro:["02 / 03  ·  ACCESS";
         "A key or saved sign-in lets this provider receive prompts.";
-        "/login only signs in; setup also saves your default model."]
+        "Use /setup for account access and saved defaults."]
       ~title:"SETUP · Connect provider"
       ~choices with
     | None | Some "Skip setup" -> skip

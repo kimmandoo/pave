@@ -12,6 +12,17 @@ type row = {
   preview : bool;
 }
 
+(* The snapshot stores logical rows, never all their wrapped visual lines. *)
+type visual = { source : int; row : row; text : string; continuation : bool }
+type entry = { source : int; row : row; start : int; length : int }
+type snapshot = {
+  entries : entry array;
+  total : int;
+  columns : int;
+  measure : string -> int;
+  mutable recent : (int * string array) option;
+}
+
 type t = {
   mutable rows : row array;
   mutable count : int;
@@ -22,6 +33,8 @@ type t = {
   mutable streaming : bool;
   mutable fenced : bool;
   mutable revision : int;
+  mutable cached : snapshot option;
+  mutable dirty : int;
 }
 
 let max_rows = 10_000
@@ -32,7 +45,8 @@ let blank = { kind = Notice; style = Text; text = ""; provisional = false;
 
 let create () = { rows = [||]; count = 0; next_group = 1;
   expanded = Hashtbl.create 32; pending_tool = None; live = "";
-  streaming = false; fenced = false; revision = 0 }
+  streaming = false; fenced = false; revision = 0;
+  cached = None; dirty = 0 }
 
 let sanitize text =
   let buffer = Buffer.create (String.length text) in
@@ -60,8 +74,11 @@ let fit text =
     String.sub text 0 !size ^ "…")
 
 let group t = let id = t.next_group in t.next_group <- id + 1; id
+let mark_dirty t index = t.dirty <- min t.dirty index
+
 let add t row =
   if t.count = max_rows then (
+    mark_dirty t 0;
     let removed = 1000 in
     Array.blit t.rows removed t.rows 0 (t.count - removed);
     Array.fill t.rows (t.count - removed) removed blank;
@@ -74,6 +91,7 @@ let add t row =
     let grown = Array.make (min max_rows (max 128 (2 * t.count))) blank in
     Array.blit t.rows 0 grown 0 t.count;
     t.rows <- grown);
+  mark_dirty t t.count;
   t.rows.(t.count) <- row;
   t.count <- t.count + 1;
   t.revision <- t.revision + 1
@@ -164,8 +182,9 @@ let tool_result ?group:existing t name result =
   let failed = String.starts_with ~prefix:"Error:" result in
   for i = 0 to t.count - 1 do
     let row = t.rows.(i) in
-    if row.group = id && row.kind = Tool && row.style = Heading then
-      row.text <- name ^ (if failed then " · failed" else " · completed")
+    if row.group = id && row.kind = Tool && row.style = Heading then (
+      mark_dirty t i;
+      row.text <- name ^ (if failed then " · failed" else " · completed"))
   done;
   let length = String.fold_left (fun count char ->
     if char = '\n' then count + 1 else count) 1 result in
@@ -228,6 +247,7 @@ let delta t chunk =
     match String.split_on_char '\n' chunk with
     | [] -> ()
     | first :: rest ->
+        mark_dirty t t.count;
         t.live <- fit (t.live ^ first);
         List.iter (fun part ->
           content_line t ~kind:Assistant ~group:id ~provisional:true t.live;
@@ -244,12 +264,14 @@ let finish t =
 let interrupt_tool t name id =
   for i = 0 to t.count - 1 do
     let row = t.rows.(i) in
-    if row.group = id && row.kind = Tool && row.style = Heading then
-      row.text <- name ^ " · interrupted (outcome unknown)"
+    if row.group = id && row.kind = Tool && row.style = Heading then (
+      mark_dirty t i;
+      row.text <- name ^ " · interrupted (outcome unknown)")
   done;
   t.revision <- t.revision + 1
 
 let rollback t =
+  mark_dirty t t.count;
   t.live <- "";
   t.streaming <- false;
   (match t.pending_tool with
@@ -261,12 +283,14 @@ let rollback t =
   for i = 0 to t.count - 1 do
     if not t.rows.(i).provisional then (
       t.rows.(!kept) <- t.rows.(i); incr kept)
+    else mark_dirty t i
   done;
   Array.fill t.rows !kept (t.count - !kept) blank;
   t.count <- !kept;
   t.revision <- t.revision + 1
 
 let clear t =
+  mark_dirty t 0;
   t.count <- 0;
   t.pending_tool <- None;
   t.live <- "";
@@ -293,6 +317,9 @@ let toggle t ~first:_ ~last =
         not (Option.value (Hashtbl.find_opt t.expanded id) ~default:false) in
       Hashtbl.replace t.expanded id expanded;
       for i = 0 to t.count - 1 do
+        if t.rows.(i).group = id then mark_dirty t i
+      done;
+      for i = 0 to t.count - 1 do
         let row = t.rows.(i) in
         if row.group = id && row.style = Tool_state &&
           String.ends_with ~suffix:" · Alt+O expand" row.text then
@@ -310,33 +337,21 @@ let toggle t ~first:_ ~last =
 
 let wrap ~columns ~measure text =
   let columns = max 1 columns in
-  let _, chunks = Uuseg_string.fold_utf_8 `Grapheme_cluster
-    (fun (_, chunks) cluster -> ((), cluster :: chunks)) ((), []) text in
   let segments = ref [] and buffer = Buffer.create (min max_line_bytes columns) in
   let used = ref 0 in
   let push () = segments := Buffer.contents buffer :: !segments; Buffer.clear buffer;
     used := 0 in
-  List.iter (fun chunk ->
-    let width = max 0 (measure chunk) in
-    if !used > 0 && !used + width > columns then push ();
-    if width > columns then (
-      Buffer.add_char buffer '?'; used := !used + 1)
-    else (Buffer.add_string buffer chunk; used := !used + width))
-    (List.rev chunks);
+  ignore (Uuseg_string.fold_utf_8 `Grapheme_cluster
+    (fun () chunk ->
+      let width = max 0 (measure chunk) in
+      if !used > 0 && !used + width > columns then push ();
+      if width > columns then (
+        Buffer.add_char buffer '?'; used := !used + 1)
+      else (Buffer.add_string buffer chunk; used := !used + width))
+    () text);
   push ();
   Array.of_list (List.rev !segments)
 
-(* One entry per stored logical row, not per wrapped cell row: even a 1-column
-   terminal cannot turn a bounded transcript into an unbounded layout cache. *)
-type visual = { source : int; row : row; text : string; continuation : bool }
-type entry = { source : int; row : row; start : int; length : int }
-type snapshot = {
-  entries : entry array;
-  total : int;
-  columns : int;
-  measure : string -> int;
-  mutable recent : (int * string array) option;
-}
 
 let wrapped_count ~columns ~measure text =
   let columns = max 1 columns in
@@ -349,29 +364,59 @@ let wrapped_count ~columns ~measure text =
       else lines, used + rendered_width) (1, 0) text)
 
 let snapshot t ~columns ~measure =
-  let entries = ref [] and total = ref 0 in
-  let push source (row : row) =
-    let length = wrapped_count ~columns ~measure row.text in
-    entries := { source; row; start = !total; length } :: !entries;
-    total := !total + length in
-  for i = 0 to t.count - 1 do
-    let row = t.rows.(i) in
-    if visible t row then push i row
-  done;
-  if t.live <> "" then (
-    let style =
-      if String.starts_with ~prefix:"```" t.live || t.fenced then Code
-      else if String.starts_with ~prefix:"# " t.live ||
-        String.starts_with ~prefix:"## " t.live then Subheading
-      else if String.starts_with ~prefix:"> " t.live then Quote
-      else if String.starts_with ~prefix:"- " t.live ||
-        String.starts_with ~prefix:"* " t.live then List_item
-      else Text in
-    push t.count { kind = Assistant; style; text = t.live;
-      provisional = true; group = t.next_group - 1; detail = false;
-      preview = false });
-  { entries = Array.of_list (List.rev !entries); total = !total;
-    columns; measure; recent = None }
+  let previous = match t.cached with
+    | Some cached when cached.columns = columns && cached.measure == measure ->
+        Some cached
+    | _ -> None in
+  match previous with
+  | Some cached when t.dirty = max_int -> cached
+  | _ ->
+      let old_entries = match previous with
+        | Some cached -> cached.entries
+        | None -> [||] in
+      let prefix, start = match previous with
+        | None -> 0, 0
+        | Some _ ->
+            let low = ref 0 and high = ref (Array.length old_entries) in
+            while !low < !high do
+              let middle = (!low + !high) / 2 in
+              if old_entries.(middle).source < t.dirty then
+                low := middle + 1
+              else high := middle
+            done;
+            !low, (if !low = 0 then 0 else
+              let entry = old_entries.(!low - 1) in
+              entry.start + entry.length) in
+      let entries = ref [] and total = ref start in
+      let push source (row : row) =
+        let length = wrapped_count ~columns ~measure row.text in
+        entries := { source; row; start = !total; length } :: !entries;
+        total := !total + length in
+      let first = if Option.is_some previous then min t.dirty t.count else 0 in
+      for i = first to t.count - 1 do
+        let row = t.rows.(i) in
+        if visible t row then push i row
+      done;
+      if t.live <> "" then (
+        let style =
+          if String.starts_with ~prefix:"```" t.live || t.fenced then Code
+          else if String.starts_with ~prefix:"# " t.live ||
+            String.starts_with ~prefix:"## " t.live then Subheading
+          else if String.starts_with ~prefix:"> " t.live then Quote
+          else if String.starts_with ~prefix:"- " t.live ||
+            String.starts_with ~prefix:"* " t.live then List_item
+          else Text in
+        push t.count { kind = Assistant; style; text = t.live;
+          provisional = true; group = t.next_group - 1; detail = false;
+          preview = false });
+      let suffix = Array.of_list (List.rev !entries) in
+      let entries = Array.init (prefix + Array.length suffix) (fun i ->
+        if i < prefix then old_entries.(i)
+        else suffix.(i - prefix)) in
+      let view = { entries; total = !total; columns; measure; recent = None } in
+      t.cached <- Some view;
+      t.dirty <- max_int;
+      view
 
 let visual_at layout position =
   if position < 0 || position >= layout.total then invalid_arg "visual_at";

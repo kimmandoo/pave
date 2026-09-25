@@ -1,5 +1,4 @@
 type command =
-  | Login of string option
   | Model of string option
   | Quit
   | Cancel
@@ -22,14 +21,13 @@ type command =
   | Unknown of string
 
 type action =
-  | A_login | A_model | A_settings | A_setup | A_new | A_resume | A_cancel
+  | A_model | A_settings | A_setup | A_new | A_resume | A_cancel
   | A_entries | A_tree | A_tools | A_context | A_usage | A_hotkeys | A_branch | A_fork
   | A_compact | A_retry | A_help | A_quit
 
 type shortcut = { name : string; usage : string; summary : string; action : action }
 
 let commands = [
-  { name = "/login"; usage = "[PROVIDER]"; summary = "Connect account only; does not change model"; action = A_login };
   { name = "/model"; usage = "[PROVIDER[@API]/MODEL]"; summary = "Switch model for this conversation"; action = A_model };
   { name = "/settings"; usage = ""; summary = "View or edit project defaults"; action = A_settings };
   { name = "/setup"; usage = ""; summary = "Connect and save your user default model"; action = A_setup };
@@ -105,7 +103,6 @@ let parse line =
       | None when name = "/exit" -> Some A_quit
       | None -> None in
     match action with
-    | Some A_login -> Login (single name argument)
     | Some A_model -> Model (single name argument)
     | Some A_quit -> no_args (); Quit
     | Some A_cancel -> no_args (); Cancel
