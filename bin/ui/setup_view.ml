@@ -11,13 +11,21 @@ let provider_choices () =
 let run screen =
   let skip = Skipped in
   let rec welcome () =
-    match Tui.choose screen ~title:"SETUP · Welcome to Pave"
+    match Tui.choose screen
+      ~intro:["◆  YOUR WORKSPACE, YOUR MODEL";
+        "Choose a provider, then the model you want to use.";
+        "Nothing runs until you send a prompt."]
+      ~title:"SETUP · Welcome to Pave"
       ~choices:["Enter · provider + model"; "Esc · skip for now"] with
     | Some "Enter · provider + model" -> provider ()
     | _ -> skip
   and provider () =
     let choices = provider_choices () in
-    match Tui.choose screen ~title:"SETUP · Select provider"
+    match Tui.choose screen
+      ~intro:["01 / 03  ·  PROVIDER";
+        "Choose a service or a local model host.";
+        "Use letters to filter, arrows to move, Enter to choose."]
+      ~title:"SETUP · Select provider"
       ~choices:(List.map fst choices @ ["Back · welcome"; "Skip setup"]) with
     | None | Some "Skip setup" -> skip
     | Some "Back · welcome" -> welcome ()
@@ -41,7 +49,11 @@ let run screen =
       (if oauth then [login_label] else []) @
       ["Back · providers"; "Skip setup"] in
     if key = None && not oauth then model descriptor None
-    else match Tui.choose screen ~title:"SETUP · Choose authentication"
+    else match Tui.choose screen
+      ~intro:["02 / 03  ·  ACCESS";
+        "Use an existing key or sign in; secrets stay out of chat.";
+        "A missing key can be configured in your shell later."]
+      ~title:"SETUP · Choose authentication"
       ~choices with
     | None | Some "Skip setup" -> skip
     | Some "Back · providers" -> provider ()
@@ -67,7 +79,11 @@ let run screen =
              authentication descriptor)
     | Some _ -> authentication descriptor
   and key_instruction descriptor env =
-    match Tui.choose screen ~title:("SETUP · Set " ^ env ^ " in shell")
+    match Tui.choose screen
+      ~intro:["02 / 03  ·  KEY REQUIRED";
+        "Set this environment variable in your shell before prompts.";
+        "Skip only if you want to set the key later."]
+      ~title:("SETUP · Set " ^ env ^ " in shell")
       ~choices:["Skip key · choose model"; "Back · authentication";
         "Skip setup"] with
     | Some "Skip key · choose model" -> model descriptor (Some env)
@@ -81,6 +97,9 @@ let run screen =
     let choices = List.map (fun id -> descriptor.id ^ "/" ^ id) models in
     let instructions = "Type " ^ descriptor.id ^ "/MODEL_ID" in
     match Tui.choose screen ~allow_custom:true
+      ~intro:["03 / 03  ·  MODEL";
+        "Filter the list or type PROVIDER/MODEL_ID.";
+        "Only routable model IDs can become your default."]
       ~title:"SETUP · Choose model (type ID)"
       ~choices:(choices @ [instructions; "Back · authentication"; "Skip setup"]) with
     | None | Some "Skip setup" -> skip
@@ -104,7 +123,11 @@ let run screen =
     let title = match missing_key with
       | Some env -> "SETUP · Set " ^ env ^ " before prompts"
       | None -> "SETUP · Confirm your model" in
-    match Tui.choose screen ~title
+    match Tui.choose screen
+      ~intro:["READY  ·  REVIEW";
+        "This default is stored in your user config.";
+        "Project policy and explicit flags still take precedence."]
+      ~title
       ~choices:["Save " ^ label; "Back · models"; "Skip setup"] with
     | Some selected when selected = "Save " ^ label ->
         Selected (descriptor, id, route, missing_key)

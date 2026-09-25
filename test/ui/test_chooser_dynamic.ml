@@ -1,5 +1,6 @@
 let chooser : Tui.chooser = {
   title = "Model";
+  intro = [||];
   suggestions = [| "openai/gpt-4.1"; "google/gemini-2.5-pro" |];
   choices = [| { Tui.value = "openai/gpt-4.1"; custom = false; verified = false };
     { Tui.value = "google/gemini-2.5-pro"; custom = false; verified = false } |];
