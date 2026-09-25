@@ -1,6 +1,7 @@
 type api = Openai_completions | Local_chat | Anthropic_messages | Openai_responses
-  | Azure_responses | Ollama_chat | Gemini_direct | Vertex_generate
-  | Bedrock_converse | Codex_responses | Copilot_chat
+  | Azure_responses | Bedrock_mantle_responses | Ollama_chat | Gemini_direct
+  | Vertex_generate | Bedrock_converse | Xai_chat | Nvidia_chat
+  | Codex_responses | Copilot_chat
 type authentication = Api_key | OAuth
 type config = { endpoint : string; api_key : string; model : string; api : api }
 type credentials = {
@@ -344,8 +345,8 @@ let curl_options ~local ~endpoint ~headers ~body_path =
   ^ option "data-binary" ("@" ^ body_path)
   ^ option "connect-timeout" "10"
   ^ option "max-time" "120"
-  ^ option "proto" (if local && String.starts_with ~prefix:"http://" endpoint
-    then "=http" else if local then "=https" else "=http,https")
+  ^ option "proto" (if String.starts_with ~prefix:"https://" endpoint
+    then "=https" else "=http")
   ^ (if local then option "proxy" "" ^ option "noproxy" "*" ^
       option "max-redirs" "0" else "")
 
@@ -512,6 +513,30 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage 
                  check_cancel cancel;
                  Option.iter report (Openai_stream.usage stream));
             reply))
+  | Xai_chat | Nvidia_chat ->
+      let headers, body, parse_reply =
+        if config.api = Xai_chat then
+          (try Xai_api.chat_headers ~endpoint:config.endpoint ~api_key,
+            Xai_api.request ~model:config.model messages tools,
+            Xai_api.parse_completion
+           with Invalid_argument reason -> raise (Provider_error reason))
+        else
+          (try Nvidia_api.chat_headers ~endpoint:config.endpoint ~api_key,
+            Nvidia_api.request ~model:config.model messages tools,
+            Protocol.parse_completion
+           with Invalid_argument reason -> raise (Provider_error reason)) in
+      let json = post_json ~local:true ?cancel ~endpoint:config.endpoint
+        ~headers ~secret:api_key body in
+      let reply = parse (fun () -> parse_reply json) in
+      (match on_usage with
+      | None -> ()
+      | Some report ->
+          check_cancel cancel;
+          Option.iter report (Protocol.completion_usage json));
+      (match on_text, reply.content with
+      | Some emit, Some text -> check_cancel cancel; emit text
+      | _ -> ());
+      reply
   | Anthropic_messages ->
       let body = parse (fun () ->
         Anthropic_wire.request ~model:config.model ~max_tokens:4096 messages tools) in
@@ -551,11 +576,18 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage 
                  check_cancel cancel;
                  Option.iter report (Anthropic_stream.usage stream));
             reply))
-  | Openai_responses | Azure_responses ->
+  | Openai_responses | Azure_responses | Bedrock_mantle_responses ->
       let endpoint, headers =
         if config.api = Azure_responses then
           (try Azure_wire.resolve ~endpoint:config.endpoint
              ~deployment:config.model ~api_key
+           with Invalid_argument message -> raise (Provider_error message))
+        else if config.api = Bedrock_mantle_responses then
+          (try
+             let requested = if config.endpoint = "" then
+               (Bedrock_mantle.endpoint ~region:(Bedrock_mantle.region ()) ()).url
+               else config.endpoint in
+             Bedrock_mantle.resolve ~endpoint:requested ~api_key ()
            with Invalid_argument message -> raise (Provider_error message))
         else config.endpoint,
           (if api_key = "" then [] else [ "Authorization: Bearer " ^ api_key ]) in
@@ -620,11 +652,20 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage 
       | _ -> ());
       reply
   | Ollama_chat ->
+      let cloud = api_key <> "" in
+      if cloud && config.endpoint <> "https://ollama.com/api/chat" then
+        raise (Provider_error "Ollama Cloud token requires the official cloud endpoint");
+      if cloud && (String.length api_key > 8192 ||
+        not (String.for_all (fun c -> Char.code c > 32 &&
+          Char.code c < 127) api_key)) then
+        raise (Provider_error "invalid Ollama Cloud API key");
+      let headers = if cloud then [ "Authorization: Bearer " ^ api_key ] else [] in
       let body = parse (fun () ->
         Ollama_wire.request ~model:config.model messages tools) in
       (match on_text with
       | None ->
-          let json = post_json ?cancel ~endpoint:config.endpoint ~headers:[] ~secret:"" body in
+          let json = post_json ?cancel ~endpoint:config.endpoint ~headers
+            ~secret:api_key body in
           let reply = parse (fun () -> Ollama_wire.parse_completion json) in
           (match on_usage with
            | None -> ()
@@ -639,7 +680,7 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage 
                 `Assoc (("stream", `Bool true) :: List.remove_assoc "stream" fields)
             | _ -> assert false in
           parse (fun () ->
-            post_stream ?cancel ~endpoint:config.endpoint ~headers:[] ~secret:""
+            post_stream ?cancel ~endpoint:config.endpoint ~headers ~secret:api_key
               body ~on_chunk:(Ollama_stream.feed stream)
               ~is_done:(fun () -> Ollama_stream.is_done stream)
               ~is_finished:(fun () -> Ollama_stream.is_finished stream);
