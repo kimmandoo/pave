@@ -79,6 +79,10 @@ let api_key (descriptor : Pave.Provider_catalog.descriptor) =
       (match Sys.getenv_opt "FUGU_API_KEY" with
       | Some key when key <> "" -> Some key
       | _ -> None)
+  | None when descriptor.id = "abliteration" ->
+      (match Sys.getenv_opt "ABLIT_KEY" with
+      | Some key when key <> "" -> Some key
+      | _ -> None)
   | None -> None
 let resolve_authentication ~(descriptor : Pave.Provider_catalog.descriptor)
     ~(route : Pave.Provider_catalog.route) ~endpoint =
@@ -90,6 +94,11 @@ let resolve_authentication ~(descriptor : Pave.Provider_catalog.descriptor)
         (if endpoint = "" then route.endpoint else endpoint));
       let key = api_key descriptor in
       Pave.Provider.Api_key, Option.value ~default:"" key, None)
+    else if route.wire = Pave.Provider.Vertex_generate ||
+            route.wire = Pave.Provider.Bedrock_converse then (
+      if endpoint <> "" then
+        failwith "cloud credentials require the provider's derived regional endpoint";
+      Pave.Provider.Api_key, "", None)
     else
     let env_key = api_key descriptor in
     let authentication, api_key, resolve_credential =

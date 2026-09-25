@@ -42,6 +42,16 @@ let builtins = [
       endpoint = "https://generativelanguage.googleapis.com/v1beta/models" } ];
     default_route = "generate";
     api_key_env = Some "GEMINI_API_KEY"; oauth = None };
+  { id = "google-vertex"; display_name = "Google Vertex AI (configured project)";
+    routes = [ { name = "generate"; wire = Provider.Vertex_generate;
+      endpoint = "" } ];
+    default_route = "generate";
+    api_key_env = None; oauth = None };
+  { id = "amazon-bedrock"; display_name = "Amazon Bedrock Converse (configured region)";
+    routes = [ { name = "converse"; wire = Provider.Bedrock_converse;
+      endpoint = "" } ];
+    default_route = "converse";
+    api_key_env = None; oauth = None };
   { id = "deepseek"; display_name = "DeepSeek";
     routes = [ { name = "chat"; wire = Provider.Openai_completions;
       endpoint = "https://api.deepseek.com/chat/completions" } ];
@@ -112,6 +122,19 @@ let builtins = [
       endpoint = "https://api.aiand.com/v1/chat/completions" } ];
     default_route = "chat";
     api_key_env = Some "AIAND_API_KEY"; oauth = None };
+  { id = "gmi-cloud"; display_name = "GMI Cloud";
+    routes = [ { name = "chat"; wire = Provider.Openai_completions;
+      endpoint = "https://api.gmi-serving.com/v1/chat/completions" } ];
+    default_route = "chat";
+    api_key_env = Some "GMI_API_KEY"; oauth = None };
+  { id = "abliteration"; display_name = "Abliteration AI";
+    routes = [
+      { name = "responses"; wire = Provider.Openai_responses;
+        endpoint = "https://api.abliteration.ai/v1/responses" };
+      { name = "chat"; wire = Provider.Openai_completions;
+        endpoint = "https://api.abliteration.ai/v1/chat/completions" } ];
+    default_route = "responses";
+    api_key_env = Some "ABLITERATION_API_KEY"; oauth = None };
   { id = "sakana"; display_name = "Sakana AI";
     routes = [ { name = "responses"; wire = Provider.Openai_responses;
       endpoint = Sakana_api.sakana_responses_endpoint } ];

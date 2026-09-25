@@ -46,6 +46,8 @@ let fireworks_url = "https://api.fireworks.ai/v1/accounts/fireworks/models"
 let baseten_url = "https://inference.baseten.co/v1/models"
 let huggingface_url = "https://router.huggingface.co/v1/models"
 let nanogpt_url = "https://api.nano-gpt.com/api/v1/models?detailed=true"
+let abliteration_url = "https://api.abliteration.ai/v1/models"
+let gmi_cloud_url = "https://api.gmi-serving.com/v1/models"
 let codex_urls = List.map (fun path ->
   "https://chatgpt.com/backend-api" ^ path ^ "?client_version=" ^
     Codex_wire.client_version) ["/codex/models"; "/models"]
@@ -314,10 +316,47 @@ let discover_local ?http ?cancel ~provider credential =
                   "request failed or timed out"
               | Local_compat.Http_error code -> Http_error code
               | Local_compat.Invalid_response detail -> Invalid_response detail))
+let discover_bedrock ?http ?cancel credential =
+  match credential with
+  | Some _ -> Error Invalid_credential
+  | None ->
+      (try
+        Provider.check_cancel cancel;
+        let region = Aws_auth.region () in
+        let keys = Aws_auth.resolve () in
+        let target = Bedrock_wire.discovery_endpoint ~region () in
+        let signed = Aws_auth.sign ~content_type:false ~credentials:keys
+          ~region ~amz_date:(Aws_auth.amz_date ()) ~method_:"GET"
+          ~host:target.host ~path:target.path ~body:"" () in
+        let http = match http with
+          | Some http -> http
+          | None -> fun ~url ~headers ->
+              default_http ?cancel ~url ~headers () in
+        let response = http ~url:target.url ~headers:signed in
+        Provider.check_cancel cancel;
+        match response with
+        | Error failure -> Error failure
+        | Ok (status, _) when status < 200 || status >= 300 ->
+            Error (Http_error status)
+        | Ok (_, body) when String.length body > max_response_bytes ->
+            Error (Invalid_response "listing exceeds size limit")
+        | Ok (_, body) ->
+            let json = Yojson.Basic.from_string body in
+            (try Ok (Bedrock_wire.parse_models json)
+             with Protocol.Invalid_response reason ->
+               Error (Invalid_response reason))
+       with
+       | Invalid_argument reason -> Error (Invalid_response reason)
+       | Yojson.Json_error _ -> Error (Invalid_response "malformed model listing JSON")
+       | Provider.Cancelled -> raise Provider.Cancelled
+       | Provider.Provider_error _ | Unix.Unix_error _ | Sys_error _ ->
+           Error (Transport_error "request failed or timed out"))
 
 let discover ?http ?cancel ~provider ?credential () =
   if Local_compat.engine provider <> None then
     discover_local ?http ?cancel ~provider credential
+  else if provider = "amazon-bedrock" then
+    discover_bedrock ?http ?cancel credential
   else if provider = "openai-codex" then discover_codex ?http ?cancel credential
   else if provider = "sakana" then (
     let credential = match credential with
@@ -388,6 +427,8 @@ let discover ?http ?cancel ~provider ?credential () =
     | "baseten" -> Some (baseten_url, "data", "id", include_baseten)
     | "huggingface" -> Some (huggingface_url, "data", "id", include_huggingface)
     | "nanogpt" -> Some (nanogpt_url, "data", "id", include_nanogpt)
+    | "abliteration" -> Some (abliteration_url, "data", "id", include_all)
+    | "gmi-cloud" -> Some (gmi_cloud_url, "data", "id", include_all)
     | _ -> None in
   match target with
   | None -> Error (Unsupported_provider provider)
@@ -398,7 +439,8 @@ let discover ?http ?cancel ~provider ?credential () =
         | ("openai" | "google" | "openrouter" | "anthropic" |
            "deepseek" | "groq" | "mistral" | "together" |
            "cerebras" | "venice" | "deepinfra" | "fireworks" |
-           "baseten" | "huggingface" | "nanogpt"), Some (Api_key key)
+           "baseten" | "huggingface" | "nanogpt" | "abliteration" |
+           "gmi-cloud"), Some (Api_key key)
         | "github-copilot", Some (Copilot_oauth key) ->
             if valid_secret key then Ok (Some key) else Error Invalid_credential
         | _, None -> Error Missing_credential
@@ -412,7 +454,8 @@ let discover ?http ?cancel ~provider ?credential () =
             | "google", Some key -> ["x-goog-api-key", key]
             | ("deepseek" | "groq" | "mistral" | "together" |
                "cerebras" | "venice" | "deepinfra" | "fireworks" |
-               "baseten" | "huggingface" | "nanogpt"), Some key ->
+               "baseten" | "huggingface" | "nanogpt" | "abliteration" |
+               "gmi-cloud"), Some key ->
                 ["Authorization", "Bearer " ^ key]
             | "anthropic", Some key ->
                 ["x-api-key", key; "anthropic-version", "2023-06-01"]

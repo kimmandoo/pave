@@ -395,4 +395,28 @@ let () =
       assert (headers = gemini_headers);
       Ok (200, {|{"models":[],"nextPageToken":"repeat"}|})) in
   expect_error is_invalid_response (discover ~http ~provider:"google" ~credential:(Api_key gemini_key) ());
+  let abliteration_headers =
+    ["Authorization", "Bearer private-abliteration"] in
+  let http, calls = fixed_http abliteration_url abliteration_headers (Ok (200,
+    {|{"object":"list","data":[{"id":"future-ablit-701"},{"id":"future-ablit-702"},{"id":"future-ablit-701"}]}|})) in
+  expect_models ["future-ablit-701"; "future-ablit-702"]
+    (discover ~http ~provider:"abliteration"
+      ~credential:(Api_key "private-abliteration") ());
+  assert (!calls = 1);
+  let unused ~url:_ ~headers:_ = failwith "invalid key reached vendor endpoint" in
+  expect_error wrong_credential
+    (discover ~http:unused ~provider:"abliteration"
+      ~credential:(Api_key "injected\r\nHeader: stolen") ());
+  let http, _ = fixed_http abliteration_url abliteration_headers (Ok (200,
+    {|{"object":"list","data":[{"id":"future-ablit-701"},{"id":null}]}|})) in
+  expect_error is_invalid_response
+    (discover ~http ~provider:"abliteration"
+      ~credential:(Api_key "private-abliteration") ());
+  let gmi_headers = ["Authorization", "Bearer private-gmi"] in
+  let http, calls = fixed_http gmi_cloud_url gmi_headers (Ok (200,
+    {|{"object":"list","data":[{"id":"account-model-alpha"},{"id":"account-model-beta"}]}|})) in
+  expect_models ["account-model-alpha"; "account-model-beta"]
+    (discover ~http ~provider:"gmi-cloud"
+      ~credential:(Api_key "private-gmi") ());
+  assert (!calls = 1);
   print_endline "credentialed model discovery: ok"
