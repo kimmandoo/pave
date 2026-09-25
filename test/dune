@@ -41,6 +41,11 @@
  (libraries pave unix yojson))
 
 (test
+ (name test_tool_scheduler)
+ (modules test_tool_scheduler)
+ (libraries pave unix yojson threads))
+
+(test
  (name test_session_journal)
  (modules test_session_journal)
  (libraries pave unix yojson))

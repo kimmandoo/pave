@@ -1,6 +1,7 @@
 # Changelog
 
 ## 2026-09-25
+- feat(agent): scheduled bounded shared/exclusive tool execution with owner-thread preflight, lifecycle settlement and ordered results. At most four contiguous read-only calls ran concurrently; exclusive mutations and shell commands waited for shared groups, and cancellation prevented pending calls from executing. A barrier regression verified the overlap cap, exclusive ordering and callback thread affinity; a local HTTP agent fixture verified provider-order results. Full suite, install build and opam lint passed.
 - feat(tools): validated tool-call arguments against the advertised schemas before approval or execution, rejecting missing, duplicate, unknown, mistyped and out-of-range fields. Recomputed dynamic tool availability for each provider request and rechecked it at dispatch; a loopback HTTP agent regression confirmed stale disabled writes receive ordered error results without filesystem effects, and malformed shell calls never reached approval. The first full-suite run exposed a scoped-rules fixture attaching a write-only `content` field to `read_file`; the fixture now matches its advertised schema. Focused tests, the full suite, install build and opam lint passed.
 
 - fix(tui): made picker and account-handoff input ownership explicit. Ctrl+C now closes a picker and cancels its cancellable model listing; terminal type-ahead is discarded on restore, and Ctrl+C during browser/device sign-in returns to the TUI without exiting. Help distinguishes picker from composer behavior.
