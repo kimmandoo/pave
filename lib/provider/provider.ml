@@ -567,7 +567,7 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage 
         "chatgpt-account-id: " ^ account_id;
         "OpenAI-Beta: responses=experimental";
         "originator: pave";
-        "version: 0.155.1";
+        "version: " ^ Codex_wire.client_version;
         "x-codex-routing-hint: model=" ^ config.model;
         "Accept: text/event-stream" ] @
         (match credential.residency with

@@ -64,6 +64,45 @@ let () =
   expect_models ["models/gemini-2.5-pro"; "models/gemini-2.5-flash"]
     (discover ~http ~provider:"google" ~credential:(Api_key gemini_key) ());
   assert (!calls = 2);
+  let codex_credential = Codex_oauth ("private-codex", "account-123") in
+  let codex_headers = [
+    "Authorization", "Bearer private-codex";
+    "chatgpt-account-id", "account-123";
+    "OpenAI-Beta", "responses=experimental";
+    "originator", "pave";
+    "version", "0.155.1";
+    "Accept", "application/json" ] in
+  let http, calls = fixed_http (List.hd codex_urls) codex_headers
+    (Ok (200, {|{"models":[{"slug":"gpt-6-sol"},{"slug":"internal","visibility":"hide"},{"id":"gpt-5.1-codex"},{"slug":"gpt-6-sol"}]}|})) in
+  expect_models ["gpt-6-sol"; "gpt-5.1-codex"]
+    (discover ~http ~provider:"openai-codex"
+      ~credential:codex_credential ());
+  assert (!calls = 1);
+  let calls = ref 0 in
+  let http ~url ~headers =
+    assert (headers = codex_headers);
+    incr calls;
+    if !calls = 1 then (assert (url = List.hd codex_urls); Ok (404, ""))
+    else (assert (url = List.nth codex_urls 1);
+      Ok (200, {|{"data":[{"slug":"gpt-6-luna"}]}|})) in
+  expect_models ["gpt-6-luna"]
+    (discover ~http ~provider:"openai-codex"
+      ~credential:codex_credential ());
+  assert (!calls = 2);
+  let http, calls = fixed_http (List.hd codex_urls) codex_headers
+    (Ok (401, "revoked")) in
+  expect_error unavailable (discover ~http ~provider:"openai-codex"
+    ~credential:codex_credential ());
+  assert (!calls = 1);
+  let http, calls = fixed_http (List.hd codex_urls) codex_headers
+    (Ok (302, {|{"location":"https://untrusted.example/models"}|})) in
+  expect_error unavailable (discover ~http ~provider:"openai-codex"
+    ~credential:codex_credential ());
+  assert (!calls = 1);
+  let http, _ = fixed_http (List.hd codex_urls) codex_headers
+    (Ok (200, {|{"models":[{"slug":12}]}|})) in
+  expect_error is_invalid_response (discover ~http ~provider:"openai-codex"
+    ~credential:codex_credential ());
   let unused ~url:_ ~headers:_ = failwith "invalid credentials initiated a request" in
   expect_error no_credential (discover ~http:unused ~provider:"openai" ());
   expect_error no_credential (discover ~http:unused ~provider:"github-copilot" ());
@@ -75,9 +114,14 @@ let () =
     (discover ~http:unused ~provider:"ollama" ~credential:(Api_key openai_key) ());
   expect_error wrong_credential
     (discover ~http:unused ~provider:"openai" ~credential:(Api_key "bad\nheader") ());
-  expect_error (function Unsupported_provider "openai-codex" -> true | _ -> false)
+  expect_error no_credential
+    (discover ~http:unused ~provider:"openai-codex" ());
+  expect_error wrong_credential
     (discover ~http:unused ~provider:"openai-codex"
        ~credential:(Copilot_oauth github_token) ());
+  expect_error wrong_credential
+    (discover ~http:unused ~provider:"openai-codex"
+       ~credential:(Codex_oauth ("bad\nheader", "account-123")) ());
   let http, _ = fixed_http openai_url openai_headers (Ok (200, {|{"data":[{"id":"ok"}|})) in
   expect_error is_invalid_response (discover ~http ~provider:"openai" ~credential:(Api_key openai_key) ());
   let http, _ = fixed_http openai_url openai_headers (Ok (200, {|{"data":[{"id":12}]}|})) in

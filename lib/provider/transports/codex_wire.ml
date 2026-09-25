@@ -1,5 +1,7 @@
 open Protocol
 
+let client_version = "0.155.1"
+
 let invalid detail = raise (Invalid_response ("invalid Codex response: " ^ detail))
 
 let required_string key json = match member key json with
