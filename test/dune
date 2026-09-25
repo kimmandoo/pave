@@ -2,134 +2,167 @@
 
 (test
  (name test_protocol)
+ (modules test_protocol)
  (libraries pave unix yojson))
 
 (test
  (name test_tools)
+ (modules test_tools)
  (libraries pave unix yojson))
 
 (test
  (name test_agent)
+ (modules test_agent)
  (libraries pave unix yojson))
 
 (test
  (name test_openai_stream)
+ (modules test_openai_stream)
  (libraries pave unix yojson))
 
 (test
  (name test_anthropic_wire)
+ (modules test_anthropic_wire)
  (libraries pave unix yojson))
 
 (test
  (name test_provider_http)
+ (modules test_provider_http)
  (libraries pave unix yojson))
 
 (test
  (name test_anthropic_stream)
+ (modules test_anthropic_stream)
  (libraries pave unix yojson))
 
 (test
  (name test_agent_stream)
+ (modules test_agent_stream)
  (libraries pave unix yojson))
 
 (test
  (name test_session_journal)
+ (modules test_session_journal)
  (libraries pave unix yojson))
 
 (test
  (name test_session_compaction)
+ (modules test_session_compaction)
  (libraries pave unix yojson))
 
 (test
  (name test_composer)
+ (modules test_composer)
  (libraries pave unix yojson))
 
 (test
  (name test_interaction)
+ (modules test_interaction)
  (libraries pave unix yojson))
 
 (test
  (name test_openai_responses_wire)
+ (modules test_openai_responses_wire)
  (libraries pave unix yojson))
 
 (test
  (name test_openai_responses_stream)
+ (modules test_openai_responses_stream)
  (libraries pave unix yojson))
 
 (test
  (name test_ollama_wire)
+ (modules test_ollama_wire)
  (libraries pave unix yojson))
 
 (test
  (name test_ollama_stream)
+ (modules test_ollama_stream)
  (libraries pave unix yojson))
 
 (test
  (name test_oauth_store)
+ (modules test_oauth_store)
  (libraries pave unix yojson))
 
 (test
  (name test_oauth_device)
+ (modules test_oauth_device)
  (libraries pave unix yojson))
 
 (test
  (name test_gemini_wire)
+ (modules test_gemini_wire)
  (libraries pave unix yojson))
 
 (test
  (name test_gemini_stream)
+ (modules test_gemini_stream)
  (libraries pave unix yojson))
 
 (test
  (name test_oauth_flow)
+ (modules test_oauth_flow)
  (libraries pave unix yojson))
 
 (test
  (name test_codex_oauth)
+ (modules test_codex_oauth)
  (libraries pave unix yojson))
 
 (test
  (name test_codex_wire)
+ (modules test_codex_wire)
  (libraries pave unix yojson))
 
 (test
  (name test_codex_stream)
+ (modules test_codex_stream)
  (libraries pave unix yojson))
 
 (test
  (name test_openrouter_oauth)
+ (modules test_openrouter_oauth)
  (libraries pave unix yojson))
 
 (test
  (name test_github_copilot_oauth)
+ (modules test_github_copilot_oauth)
  (libraries pave unix yojson))
 
 (test
  (name test_github_copilot_wire)
+ (modules test_github_copilot_wire)
  (libraries pave unix yojson))
 
 (test
  (name test_turn_runner)
+ (modules test_turn_runner)
  (libraries pave unix threads))
 
 (test
  (name test_settings)
+ (modules test_settings)
  (libraries pave unix yojson))
 
 (test
  (name test_project_context)
+ (modules test_project_context)
  (libraries pave unix yojson))
 
 (test
  (name test_model_discovery)
+ (modules test_model_discovery)
  (libraries pave unix yojson))
 
 (test
  (name test_system_prompt)
+ (modules test_system_prompt)
  (libraries pave unix))
 
 (test
  (name test_scoped_rules)
+ (modules test_scoped_rules)
  (libraries pave unix yojson))
 
 (copy_files ../bin/ui/tui.ml)
@@ -143,10 +176,12 @@
 
 (test
  (name test_model_discovery_cancel)
+ (modules test_model_discovery_cancel)
  (libraries pave unix threads))
 
 (test
  (name test_session_store)
+ (modules test_session_store)
  (libraries pave unix))
 
 (test
@@ -156,28 +191,55 @@
 
 (test
  (name test_session_tree)
+ (modules test_session_tree)
  (libraries pave))
 
 (test
  (name test_local_compat)
+ (modules test_local_compat)
  (libraries pave unix yojson))
 
 (test
  (name test_azure_wire)
+ (modules test_azure_wire)
  (libraries pave unix yojson))
 
 (test
  (name test_tool_gateways)
+ (modules test_tool_gateways)
  (libraries pave unix yojson))
 
 (test
  (name test_sakana_api)
+ (modules test_sakana_api)
  (libraries pave unix yojson))
 
 (test
  (name test_vertex_wire)
+ (modules test_vertex_wire)
  (libraries pave unix yojson))
 
 (test
  (name test_bedrock_wire)
+ (modules test_bedrock_wire)
+ (libraries pave unix yojson))
+
+(test
+ (name test_ollama_cloud)
+ (modules test_ollama_cloud)
+ (libraries pave unix yojson))
+
+(test
+ (name test_bedrock_mantle)
+ (modules test_bedrock_mantle)
+ (libraries pave unix yojson))
+
+(test
+ (name test_xai_api)
+ (modules test_xai_api)
+ (libraries pave unix yojson))
+
+(test
+ (name test_nvidia_api)
+ (modules test_nvidia_api)
  (libraries pave unix yojson))

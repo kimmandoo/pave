@@ -83,6 +83,12 @@ let api_key (descriptor : Pave.Provider_catalog.descriptor) =
       (match Sys.getenv_opt "ABLIT_KEY" with
       | Some key when key <> "" -> Some key
       | _ -> None)
+  | None when descriptor.id = "moonshot" ->
+      (match Sys.getenv_opt "KIMI_API_KEY" with
+      | Some key when key <> "" -> Some key
+      | _ -> None)
+  | None when descriptor.id = "ollama-cloud" ->
+      Pave.Ollama_cloud.env_api_key ()
   | None -> None
 let resolve_authentication ~(descriptor : Pave.Provider_catalog.descriptor)
     ~(route : Pave.Provider_catalog.route) ~endpoint =
@@ -99,6 +105,17 @@ let resolve_authentication ~(descriptor : Pave.Provider_catalog.descriptor)
       if endpoint <> "" then
         failwith "cloud credentials require the provider's derived regional endpoint";
       Pave.Provider.Api_key, "", None)
+    else if route.wire = Pave.Provider.Bedrock_mantle_responses then (
+      if endpoint <> "" then
+        failwith "Mantle bearer token requires the derived regional endpoint";
+      let key = Option.value ~default:"" (api_key descriptor) in
+      let target = Pave.Bedrock_mantle.endpoint
+        ~region:(Pave.Bedrock_mantle.region ()) () in
+      let _, headers = Pave.Bedrock_mantle.resolve
+        ~endpoint:target.url ~api_key:key () in
+      match headers with
+      | [ _ ] -> Pave.Provider.Api_key, key, None
+      | _ -> assert false)
     else
     let env_key = api_key descriptor in
     let authentication, api_key, resolve_credential =

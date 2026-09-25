@@ -48,6 +48,7 @@ let huggingface_url = "https://router.huggingface.co/v1/models"
 let nanogpt_url = "https://api.nano-gpt.com/api/v1/models?detailed=true"
 let abliteration_url = "https://api.abliteration.ai/v1/models"
 let gmi_cloud_url = "https://api.gmi-serving.com/v1/models"
+let moonshot_url = "https://api.moonshot.ai/v1/models"
 let codex_urls = List.map (fun path ->
   "https://chatgpt.com/backend-api" ^ path ^ "?client_version=" ^
     Codex_wire.client_version) ["/codex/models"; "/models"]
@@ -352,11 +353,142 @@ let discover_bedrock ?http ?cancel credential =
        | Provider.Provider_error _ | Unix.Unix_error _ | Sys_error _ ->
            Error (Transport_error "request failed or timed out"))
 
+let discover_mantle ?http ?cancel credential =
+  let key = match credential with
+    | Some (Api_key key) when valid_secret key -> Ok key
+    | Some _ -> Error Invalid_credential
+    | None -> Error Missing_credential in
+  match key with
+  | Error _ as failure -> failure
+  | Ok key ->
+      (try
+        let target = Bedrock_mantle.discovery_endpoint
+          ~region:(Bedrock_mantle.region ()) () in
+        let http = match http with
+          | Some http -> http
+          | None -> fun ~url ~headers ->
+              default_http ?cancel ~url ~headers () in
+        Provider.check_cancel cancel;
+        let response = http ~url:target.url
+          ~headers:["Authorization", "Bearer " ^ key] in
+        Provider.check_cancel cancel;
+        match response with
+        | Error failure -> Error failure
+        | Ok (status, _) when status < 200 || status >= 300 ->
+            Error (Http_error status)
+        | Ok (_, body) when String.length body > max_response_bytes ->
+            Error (Invalid_response "listing exceeds size limit")
+        | Ok (_, body) ->
+            (try Ok (Bedrock_mantle.parse_models (Yojson.Basic.from_string body))
+             with Yojson.Json_error _ ->
+               Error (Invalid_response "malformed model listing JSON")
+                | Protocol.Invalid_response reason ->
+               Error (Invalid_response reason))
+       with
+       | Invalid_argument reason -> Error (Invalid_response reason)
+       | Provider.Cancelled -> raise Provider.Cancelled
+       | Provider.Provider_error _ | Unix.Unix_error _ | Sys_error _ ->
+           Error (Transport_error "request failed or timed out"))
+
+let discover_ollama_cloud ?http ?cancel credential =
+  match credential with
+  | None -> Error Missing_credential
+  | Some (Api_key key) ->
+      let http = Option.map (fun http ~url ~headers ->
+        match http ~url ~headers with
+        | Ok response -> Ok response
+        | Error Invalid_credential -> Error Ollama_cloud.Invalid_credential
+        | Error (Http_error status) -> Error (Ollama_cloud.Http_error status)
+        | Error (Invalid_response reason) ->
+            Error (Ollama_cloud.Invalid_response reason)
+        | Error _ -> Error Ollama_cloud.Transport_error) http in
+      (match Ollama_cloud.discover ?http ?cancel ~api_key:key () with
+      | Ok ids -> Ok ids
+      | Error Ollama_cloud.Invalid_credential -> Error Invalid_credential
+      | Error Ollama_cloud.Transport_error ->
+          Error (Transport_error "request failed or timed out")
+      | Error (Ollama_cloud.Http_error status) -> Error (Http_error status)
+      | Error (Ollama_cloud.Invalid_response reason) ->
+          Error (Invalid_response reason))
+  | Some _ -> Error Invalid_credential
+
+let discover_xai ?http ?cancel credential =
+  match credential with
+  | None -> Error Missing_credential
+  | Some (Api_key key) ->
+      let source = match http with
+        | Some callback -> callback
+        | None -> fun ~url ~headers -> default_http ?cancel ~url ~headers () in
+      let http ~url ~headers = match source ~url ~headers with
+        | Ok response -> Ok response
+        | Error Invalid_credential -> Error Xai_api.Invalid_credential
+        | Error (Http_error status) -> Error (Xai_api.Http_error status)
+        | Error (Invalid_response reason) ->
+            Error (Xai_api.Invalid_response reason)
+        | Error _ -> Error Xai_api.Transport_error in
+      (try
+        Provider.check_cancel cancel;
+        let result = Xai_api.discover ~http ~api_key:key () in
+        Provider.check_cancel cancel;
+        match result with
+        | Ok ids -> Ok ids
+        | Error Xai_api.Invalid_credential -> Error Invalid_credential
+        | Error Xai_api.Transport_error ->
+            Error (Transport_error "request failed or timed out")
+        | Error (Xai_api.Http_error status) -> Error (Http_error status)
+        | Error (Xai_api.Invalid_response reason) ->
+            Error (Invalid_response reason)
+       with
+       | Provider.Cancelled -> raise Provider.Cancelled
+       | Provider.Provider_error _ | Unix.Unix_error _ | Sys_error _ ->
+           Error (Transport_error "request failed or timed out"))
+  | Some _ -> Error Invalid_credential
+
+let discover_nvidia ?http ?cancel credential =
+  match credential with
+  | None -> Error Missing_credential
+  | Some (Api_key key) ->
+      let source = match http with
+        | Some callback -> callback
+        | None -> fun ~url ~headers -> default_http ?cancel ~url ~headers () in
+      let http ~url ~headers = match source ~url ~headers with
+        | Ok response -> Ok response
+        | Error Invalid_credential -> Error Nvidia_api.Invalid_credential
+        | Error (Http_error status) -> Error (Nvidia_api.Http_error status)
+        | Error (Invalid_response reason) ->
+            Error (Nvidia_api.Invalid_response reason)
+        | Error _ -> Error Nvidia_api.Transport_error in
+      (try
+        Provider.check_cancel cancel;
+        let result = Nvidia_api.discover ~http ~api_key:key () in
+        Provider.check_cancel cancel;
+        match result with
+        | Ok ids -> Ok ids
+        | Error Nvidia_api.Invalid_credential -> Error Invalid_credential
+        | Error Nvidia_api.Transport_error ->
+            Error (Transport_error "request failed or timed out")
+        | Error (Nvidia_api.Http_error status) -> Error (Http_error status)
+        | Error (Nvidia_api.Invalid_response reason) ->
+            Error (Invalid_response reason)
+       with
+       | Provider.Cancelled -> raise Provider.Cancelled
+       | Provider.Provider_error _ | Unix.Unix_error _ | Sys_error _ ->
+           Error (Transport_error "request failed or timed out"))
+  | Some _ -> Error Invalid_credential
+
 let discover ?http ?cancel ~provider ?credential () =
   if Local_compat.engine provider <> None then
     discover_local ?http ?cancel ~provider credential
   else if provider = "amazon-bedrock" then
     discover_bedrock ?http ?cancel credential
+  else if provider = "bedrock-mantle" then
+    discover_mantle ?http ?cancel credential
+  else if provider = "ollama-cloud" then
+    discover_ollama_cloud ?http ?cancel credential
+  else if provider = "xai" then
+    discover_xai ?http ?cancel credential
+  else if provider = "nvidia" then
+    discover_nvidia ?http ?cancel credential
   else if provider = "openai-codex" then discover_codex ?http ?cancel credential
   else if provider = "sakana" then (
     let credential = match credential with
@@ -429,6 +561,7 @@ let discover ?http ?cancel ~provider ?credential () =
     | "nanogpt" -> Some (nanogpt_url, "data", "id", include_nanogpt)
     | "abliteration" -> Some (abliteration_url, "data", "id", include_all)
     | "gmi-cloud" -> Some (gmi_cloud_url, "data", "id", include_all)
+    | "moonshot" -> Some (moonshot_url, "data", "id", include_all)
     | _ -> None in
   match target with
   | None -> Error (Unsupported_provider provider)
@@ -440,7 +573,7 @@ let discover ?http ?cancel ~provider ?credential () =
            "deepseek" | "groq" | "mistral" | "together" |
            "cerebras" | "venice" | "deepinfra" | "fireworks" |
            "baseten" | "huggingface" | "nanogpt" | "abliteration" |
-           "gmi-cloud"), Some (Api_key key)
+           "gmi-cloud" | "moonshot"), Some (Api_key key)
         | "github-copilot", Some (Copilot_oauth key) ->
             if valid_secret key then Ok (Some key) else Error Invalid_credential
         | _, None -> Error Missing_credential
@@ -455,7 +588,7 @@ let discover ?http ?cancel ~provider ?credential () =
             | ("deepseek" | "groq" | "mistral" | "together" |
                "cerebras" | "venice" | "deepinfra" | "fireworks" |
                "baseten" | "huggingface" | "nanogpt" | "abliteration" |
-               "gmi-cloud"), Some key ->
+               "gmi-cloud" | "moonshot"), Some key ->
                 ["Authorization", "Bearer " ^ key]
             | "anthropic", Some key ->
                 ["x-api-key", key; "anthropic-version", "2023-06-01"]
