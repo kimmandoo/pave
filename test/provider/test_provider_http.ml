@@ -190,7 +190,7 @@ let () =
     let anthropic : Pave.Provider.config = { endpoint; api_key = "mock-anthropic";
       model = "mock-claude"; api = Pave.Provider.Anthropic_messages } in
     let system : Pave.Protocol.message = { role = "system"; content = Some "mobile system";
-      tool_calls = []; tool_call_id = None; provider_state = None } in
+      tool_calls = []; tool_call_id = None; tool_result_content = None; provider_state = None } in
     let user = Pave.Protocol.user "inspect" in
     let credential_read = ref false in
     List.iter (fun endpoint ->

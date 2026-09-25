@@ -39,9 +39,34 @@ let call_block (call : tool_call) =
   `Assoc [ "type", `String "tool_use"; "id", `String call.id;
            "name", `String call.name; "input", call.arguments ]
 
+let image_block mime_type data =
+  if not (List.mem mime_type ["image/jpeg"; "image/png"; "image/gif"; "image/webp"]) then
+    invalid ("unsupported tool result image MIME type " ^ mime_type);
+  `Assoc [ "type", `String "image";
+    "source", `Assoc [ "type", `String "base64";
+      "media_type", `String mime_type; "data", `String data ] ]
+
+let tool_result_content (message : message) =
+  match message.tool_result_content with
+  | None ->
+      (match message.content with
+       | Some text -> `String text
+       | None -> invalid "malformed tool result")
+  | Some _ ->
+      let blocks = content_blocks_of_tool_result message in
+      if blocks = [] then invalid "malformed tool result";
+      let blocks = if text_of_content_blocks blocks = "" &&
+        List.exists (function Image _ -> true | Text _ -> false) blocks then
+        [Text "(see attached image)"] @
+          List.filter (function Image _ -> true | Text _ -> false) blocks
+        else blocks in
+      `List (List.map (function
+        | Text text -> text_block text
+        | Image { mime_type; data } -> image_block mime_type data) blocks)
+
 let tool_result_block id content =
   `Assoc [ "type", `String "tool_result"; "tool_use_id", `String id;
-           "content", `String content ]
+           "content", content ]
 
 let wire_message role content =
   `Assoc [ "role", `String role; "content", content ]
@@ -105,11 +130,10 @@ let request ~model ~max_tokens messages tools =
          | "tool" ->
              (* A whole run of tool results is one Anthropic user turn. *)
              let rec collect acc = function
-               | ({ role = "tool"; content = Some text; tool_call_id = Some id;
-                    tool_calls = []; _ } : message) :: remaining ->
-                   if not (List.mem id !pending) then invalid "unexpected or duplicate tool result";
-                   pending := List.filter (( <> ) id) !pending;
-                   collect (tool_result_block id text :: acc) remaining
+              | ({ role = "tool"; tool_call_id = Some id; tool_calls = []; _ } as result) :: remaining ->
+                  if not (List.mem id !pending) then invalid "unexpected or duplicate tool result";
+                  pending := List.filter (( <> ) id) !pending;
+                  collect (tool_result_block id (tool_result_content result) :: acc) remaining
                | ({ role = "tool"; _ } : message) :: _ -> invalid "malformed tool result"
                | remaining ->
                    if !pending <> [] then invalid "missing tool results";
@@ -163,5 +187,4 @@ let parse_response json =
   let content = match List.rev !texts with
     | [] -> None
     | texts -> Some (String.concat "" texts) in
-  { role = "assistant"; content; tool_calls; tool_call_id = None;
-    provider_state = None }
+  { role = "assistant"; content; tool_calls; tool_call_id = None; tool_result_content = None; provider_state = None }

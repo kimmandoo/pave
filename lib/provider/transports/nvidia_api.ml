@@ -37,7 +37,7 @@ let message_to_json (message : Protocol.message) =
 
 let request ~model messages tools =
   let fields = ["model", `String model;
-    "messages", `List (List.map message_to_json messages);
+    "messages", Protocol.chat_messages_to_json ~serialize:message_to_json messages;
     "stream", `Bool false] in
   let fields = if tools = [] then fields else fields @ ["tools", `List tools] in
   `Assoc fields

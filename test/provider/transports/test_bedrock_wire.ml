@@ -215,12 +215,48 @@ let () =
   expect_invalid (fun () -> Wire.parse_response (answer "end_turn" [
     `Assoc ["reasoningContent", `Assoc ["reasoningText", `Assoc [
       "text", `String "unpreserved"; "signature", `String "signed"]]]]));
-  let history : Pave.Protocol.message = {
-    role = "assistant"; content = None; tool_calls = [call];
-    tool_call_id = None; provider_state = None } in
+  let history : Pave.Protocol.message = { role = "assistant"; content = None; tool_calls = [call];
+  tool_call_id = None; tool_result_content = None; provider_state = None } in
   expect_invalid (fun () -> Wire.request
     [Pave.Protocol.user "Find alpha"; history;
       Pave.Protocol.tool_result call.id "value-alpha"] []);
   assert (Wire.usage final_answer = Some { Pave.Protocol.input_tokens = 12; output_tokens = 7 });
+  let typed_result blocks = Pave.Protocol.tool_result_blocks call.id blocks in
+  let assistant_message : Pave.Protocol.message = {
+    role = "assistant"; content = None; tool_calls = [call]; tool_call_id = None;
+    tool_result_content = None; provider_state = None } in
+  let png = "iVBORw0KGgo=" in
+  let mixed = Wire.request
+    [Pave.Protocol.user "Find alpha"; assistant_message;
+     typed_result [Pave.Protocol.Text "before";
+       Pave.Protocol.Image { mime_type = "image/png"; data = png };
+       Pave.Protocol.Text "after"]] [tool] in
+  assert (field "messages" mixed = `List [
+    `Assoc ["role", `String "user"; "content", `List [
+      `Assoc ["text", `String "Find alpha"]]];
+    `Assoc ["role", `String "assistant"; "content", `List [
+      `Assoc ["toolUse", `Assoc ["toolUseId", `String call.id;
+        "name", `String call.name; "input", arguments]]]];
+    `Assoc ["role", `String "user"; "content", `List [
+      `Assoc ["toolResult", `Assoc ["toolUseId", `String call.id;
+        "content", `List [
+          `Assoc ["text", `String "before"];
+          `Assoc ["image", `Assoc ["format", `String "png";
+            "source", `Assoc ["bytes", `String png]]];
+          `Assoc ["text", `String "after"]]]]]]]);
+  let image_only = Wire.request
+    [assistant_message;
+     typed_result [Pave.Protocol.Image { mime_type = "image/jpeg"; data = "/9j/2Q==" }]] [tool] in
+  assert (field "messages" image_only = `List [
+    `Assoc ["role", `String "assistant"; "content", `List [
+      `Assoc ["toolUse", `Assoc ["toolUseId", `String call.id;
+        "name", `String call.name; "input", arguments]]]];
+    `Assoc ["role", `String "user"; "content", `List [
+      `Assoc ["toolResult", `Assoc ["toolUseId", `String call.id;
+        "content", `List [`Assoc ["image", `Assoc ["format", `String "jpeg";
+          "source", `Assoc ["bytes", `String "/9j/2Q=="]]]]]]]]]);
+  expect_invalid (fun () -> Wire.request
+    [assistant_message; typed_result [Pave.Protocol.Image {
+      mime_type = "image/bmp"; data = "AA==" }]] [tool]);
   fixture ();
   print_endline "bedrock converse wire: ok"

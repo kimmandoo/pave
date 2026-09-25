@@ -10,6 +10,7 @@ let () =
   let lifecycle_path = Filename.concat dir "lifecycle.jsonl" in
   let lifecycle_fork = Filename.concat dir "lifecycle-fork.jsonl" in
   let terminal_path = Filename.concat dir "terminal.jsonl" in
+  let multimodal_path = Filename.concat dir "multimodal.jsonl" in
   Fun.protect ~finally:(fun () ->
     (try Sys.remove fork_path with Sys_error _ -> ());
     (try Sys.remove metadata_fork with Sys_error _ -> ());
@@ -17,6 +18,7 @@ let () =
     (try Sys.remove lifecycle_fork with Sys_error _ -> ());
     (try Sys.remove lifecycle_path with Sys_error _ -> ());
     (try Sys.remove terminal_path with Sys_error _ -> ());
+    (try Sys.remove multimodal_path with Sys_error _ -> ());
     (try Sys.remove path with Sys_error _ -> ());
     Unix.rmdir dir) (fun () ->
     let journal = Pave.Session.open_file path in
@@ -49,7 +51,7 @@ let () =
     let current = Pave.Session.open_file path in
     Pave.Session.branch current selected;
     let pending_id = Pave.Session.append current { role = "assistant"; content = None;
-      tool_calls = [ call ]; tool_call_id = None; provider_state = None } in
+      tool_calls = [ call ]; tool_call_id = None; tool_result_content = None; provider_state = None } in
     Pave.Session.record_tool_started current ~call_id:call.id ~name:call.name
     |> ignore;
     assert (Option.is_some
@@ -93,9 +95,8 @@ let () =
     let terminal_call : Pave.Protocol.tool_call = {
       id = "settled-call"; name = "write_file"; arguments = `Assoc [] } in
     ignore (Pave.Session.append terminal (message "terminal recovery"));
-    ignore (Pave.Session.append terminal {
-      role = "assistant"; content = None; tool_calls = [terminal_call];
-      tool_call_id = None; provider_state = None });
+    ignore (Pave.Session.append terminal { role = "assistant"; content = None; tool_calls = [terminal_call];
+    tool_call_id = None; tool_result_content = None; provider_state = None });
     Pave.Session.record_tool_started terminal
       ~call_id:terminal_call.id ~name:terminal_call.name |> ignore;
     Pave.Session.record_tool_settled terminal
@@ -121,9 +122,8 @@ let () =
       Pave.Session.Tool_settled { is_error = false }]);
     let aborted_call : Pave.Protocol.tool_call = {
       id = "aborted-recovery"; name = "run_command"; arguments = `Assoc [] } in
-    ignore (Pave.Session.append terminal {
-      role = "assistant"; content = None; tool_calls = [aborted_call];
-      tool_call_id = None; provider_state = None });
+    ignore (Pave.Session.append terminal { role = "assistant"; content = None; tool_calls = [aborted_call];
+    tool_call_id = None; tool_result_content = None; provider_state = None });
     Pave.Session.record_tool_started terminal
       ~call_id:aborted_call.id ~name:aborted_call.name |> ignore;
     Pave.Session.record_tool_aborted terminal
@@ -150,9 +150,8 @@ let () =
       Pave.Session.Tool_aborted { side_effects_may_have_occurred = true }]);
     let lifecycle = Pave.Session.open_file lifecycle_path in
     let lifecycle_user = Pave.Session.append lifecycle (message "lifecycle") in
-    let call_message (call : Pave.Protocol.tool_call) : Pave.Protocol.message = {
-      role = "assistant"; content = None; tool_calls = [call];
-      tool_call_id = None; provider_state = None } in
+    let call_message (call : Pave.Protocol.tool_call) : Pave.Protocol.message = { role = "assistant"; content = None; tool_calls = [call];
+    tool_call_id = None; tool_result_content = None; provider_state = None } in
     let finished_call : Pave.Protocol.tool_call = {
       id = "finished-call"; name = "read_file"; arguments = `Assoc [] } in
     ignore (Pave.Session.append lifecycle (call_message finished_call));
@@ -252,9 +251,8 @@ let () =
       [message "first"]);
     assert (Pave.Session.model copy = Some ("openai", "gpt-6-sol"));
     assert (Pave.Session.history copy = [message "first"]);
-    let assistant text : Pave.Protocol.message = {
-      role = "assistant"; content = Some text; tool_calls = [];
-      tool_call_id = None; provider_state = None } in
+    let assistant text : Pave.Protocol.message = { role = "assistant"; content = Some text; tool_calls = [];
+    tool_call_id = None; tool_result_content = None; provider_state = None } in
     let before = [message "first"; assistant "old"; message "retry me"] in
     assert (Pave.Session.retryable_history (before @ [assistant "answer"]) =
       Some ([message "first"; assistant "old"], "retry me"));
@@ -279,9 +277,8 @@ let () =
       Some ([], "interrupted request"));
     Pave.Session.branch copy completed_tip;
     ignore (Pave.Session.append copy (message "tool turn"));
-    ignore (Pave.Session.append copy {
-      role = "assistant"; content = None; tool_calls = [ call ];
-      tool_call_id = None; provider_state = None });
+    ignore (Pave.Session.append copy { role = "assistant"; content = None; tool_calls = [ call ];
+    tool_call_id = None; tool_result_content = None; provider_state = None });
     ignore (Pave.Session.append copy (Pave.Protocol.tool_result "call-1" "done"));
     assert (Pave.Session.retry_candidate copy = None);
     Pave.Session.branch copy prior;
@@ -303,6 +300,21 @@ let () =
     Pave.Session.branch copy route_tip;
     assert (Pave.Session.api (Pave.Session.open_file metadata_fork) =
       Some "messages");
+    let multimodal = Pave.Session.open_file multimodal_path in
+    let image_call : Pave.Protocol.tool_call = {
+      id = "image-call"; name = "inspect_image"; arguments = `Assoc [] } in
+    let image_assistant : Pave.Protocol.message = {
+      role = "assistant"; content = None; tool_result_content = None;
+      tool_calls = [image_call]; tool_call_id = None; provider_state = None } in
+    let image_result = Pave.Protocol.tool_result_blocks image_call.id [
+      Pave.Protocol.Text "Screenshot details";
+      Pave.Protocol.Image { mime_type = "image/png"; data = "aGVsbG8=" }
+    ] in
+    ignore (Pave.Session.append multimodal image_assistant);
+    ignore (Pave.Session.append multimodal image_result);
+    let multimodal_reopened = Pave.Session.open_file multimodal_path in
+    assert (Pave.Session.history multimodal_reopened =
+      [image_assistant; image_result]);
     (match Pave.Session.set_model ~api:"invalid route" copy
        ~provider:"commandcode" ~model:"future-model" with
      | exception Pave.Protocol.Invalid_response _ -> ()

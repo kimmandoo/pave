@@ -86,9 +86,8 @@ let () =
     "provider", `String "openai-codex";
     "model", `String "codex-model-a";
     "output", `List [] ] in
-  let assistant : Pave.Protocol.message = {
-    role = "assistant"; content = Some "visible answer"; tool_calls = [];
-    tool_call_id = None; provider_state = Some native } in
+  let assistant : Pave.Protocol.message = { role = "assistant"; content = Some "visible answer"; tool_calls = [];
+  tool_call_id = None; tool_result_content = None; provider_state = Some native } in
   let history = [ Pave.Protocol.user "original prompt"; assistant ] in
   let same = history_for_model ~wire:Pave.Provider.Codex_responses
     ~model:"codex-model-a" history in

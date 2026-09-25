@@ -183,6 +183,19 @@ let () =
   assert (second.content = Some "Six times seven is 42.");
   assert (D.cascade_id (continued @ [second]) = cascade);
   assert (!turn = 2);
+  let image_attempts = ref 0 in
+  let image_http ~url:_ ~headers:_ ~body:_ ~on_chunk:_ =
+    incr image_attempts; Ok 200 in
+  let image_result = P.tool_result_blocks call_id [
+    P.Text "chart attached";
+    P.Image { mime_type = "image/png"; data = "c2VjcmV0LWJhc2U2NA==" }] in
+  expect_error (function
+    | D.Invalid_response message ->
+        message = "Devin protobuf transport does not support image tool results"
+    | _ -> false)
+    (D.complete ~http:image_http ~api_key:key ~model:router_uid
+      ~cascade_id:cascade ~router:false [P.user "Inspect this"; image_result] [tool]);
+  assert (!image_attempts = 0);
   let attempts = ref 0 in
   let hostile_http ~url ~headers:_ ~body:_ ~on_chunk =
     incr attempts;

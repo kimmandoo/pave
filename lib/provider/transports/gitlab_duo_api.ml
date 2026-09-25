@@ -231,7 +231,7 @@ let request ?(stream=false) ~route ~model ~max_tokens messages tools =
           msg.provider_state <> None) messages then
           invalid "signed state on Chat Completions route";
         let fields = ["model", `String model;
-          "messages", `List (List.map Protocol.message_to_json messages)] in
+          "messages", Protocol.chat_messages_to_json messages] in
         let fields = if tools = [] then fields else fields @ ["tools", `List tools] in
         `Assoc (if stream then fields @ ["stream", `Bool true] else fields) in
   match route with

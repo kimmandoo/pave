@@ -107,7 +107,7 @@ let run ?(max_turns = 20) ?cancel t text =
       String.concat "\n\n" scoped in
     let system : Protocol.message =
       { role = "system"; content = Some system_text; tool_calls = [];
-        tool_call_id = None; provider_state = None } in
+        tool_call_id = None; tool_result_content = None; provider_state = None } in
     let definitions =
       Tools.available_for ~allow_shell:t.allow_shell ~enabled:t.tool_available in
     (match t.on_phase with None -> () | Some notify -> notify Model);
@@ -144,10 +144,13 @@ let run ?(max_turns = 20) ?cancel t text =
           for index = start to Array.length calls - 1 do
             let call = calls.(index) in
             abort call result false;
-            append t (Protocol.tool_result call.id result)
+            append t (Protocol.tool_result_blocks call.id [Protocol.Text result])
           done in
         let cancellation_requested = ref false and scheduler_failure = ref None in
-        let make_task (call : Protocol.tool_call) : string Tool_scheduler.task =
+        let make_task (call : Protocol.tool_call) :
+            Protocol.content_block list Tool_scheduler.task =
+          let complete result =
+            Tool_scheduler.Complete [Protocol.Text result] in
           let prepared = ref None in
           let on_progress = match call.name, t.on_tool_event with
             | "run_command", Some _ ->
@@ -167,27 +170,26 @@ let run ?(max_turns = 20) ?cancel t text =
             try
               match Tools.prepare ~root:t.root ~name:call.name
                 ~args:call.arguments () with
-              | Error result -> Tool_scheduler.Complete result
+              | Error result -> complete result
               | Ok execute ->
                   if call.name = "run_command" && not t.allow_shell then
-                    Tool_scheduler.Complete
-                      "Error: shell execution disabled; ask the user to restart with --allow-shell"
+                    complete "Error: shell execution disabled; ask the user to restart with --allow-shell"
                   else if not (t.tool_available call.name) then
-                    Tool_scheduler.Complete "Error: tool is no longer available"
+                    complete "Error: tool is no longer available"
                   else if call.name = "write_file" || call.name = "edit_file" ||
                     call.name = "read_file" then
                     (match file_scope t call with
-                     | Error message -> Tool_scheduler.Complete message
+                     | Error message -> complete message
                      | Ok (path, scoped) ->
                          if scoped <> "" && List.assoc_opt path visible <> Some scoped then
                            if queue_scope t path scoped then
                              if call.name = "read_file" then (
                                prepared := Some execute;
                                Tool_scheduler.Run)
-                             else Tool_scheduler.Complete
+                             else complete
                                ("Error: file mutation withheld until path-scoped instructions " ^
                                 "are presented as system context; retry this tool call next turn")
-                           else Tool_scheduler.Complete
+                           else complete
                              ("Error: scoped instructions exceed the per-turn context limit; " ^
                               "file operation not executed")
                          else (
@@ -199,8 +201,7 @@ let run ?(max_turns = 20) ?cancel t text =
             with
             | Provider.Cancelled -> raise Provider.Cancelled
             | Tools.Cancelled -> raise Tools.Cancelled
-            | exn -> Tool_scheduler.Complete
-                ("Error: " ^ Printexc.to_string exn) in
+            | exn -> complete ("Error: " ^ Printexc.to_string exn) in
           let run () =
             let execute = match !prepared with
               | Some execute -> execute
@@ -213,42 +214,44 @@ let run ?(max_turns = 20) ?cancel t text =
                  | `String command when t.approve_command command ->
                      Provider.check_cancel cancel;
                      execute ?cancel ?on_progress ()
-                 | `String _ -> "Error: command not approved"
-                 | _ -> "Error: missing command")
+                 | `String _ -> [Protocol.Text "Error: command not approved"]
+                 | _ -> [Protocol.Text "Error: missing command"])
               else execute ?cancel ?on_progress ()
             with
             | Provider.Cancelled -> raise Provider.Cancelled
             | Tools.Cancelled -> raise Tools.Cancelled
-            | exn -> "Error: " ^ Printexc.to_string exn in
+            | exn -> [Protocol.Text ("Error: " ^ Printexc.to_string exn)] in
           { Tool_scheduler.mode = Tools.execution_mode call.name;
             prepare; run } in
         let tasks = Array.map make_task calls in
         let on_complete index outcome =
           let (call : Protocol.tool_call) = calls.(index) in
           match outcome with
-          | Tool_scheduler.Completed result ->
+          | Tool_scheduler.Completed content ->
+              let result = Protocol.display_content_blocks content in
               emit_tool_event t (Tool_settled {
                 call_id = call.id; name = call.name; result;
                 is_error = String.starts_with ~prefix:"Error:" result
               });
-              append t (Protocol.tool_result call.id result)
+              append t (Protocol.tool_result_blocks call.id content)
           | Tool_scheduler.Failed Tools.Cancelled ->
               cancellation_requested := true;
               let result =
                 "Error: command cancelled while running; side effects may have occurred" in
               abort call result true;
-              append t (Protocol.tool_result call.id result)
+              append t (Protocol.tool_result_blocks call.id [Protocol.Text result])
           | Tool_scheduler.Failed Provider.Cancelled ->
               cancellation_requested := true;
               abort call cancellation_result false;
-              append t (Protocol.tool_result call.id cancellation_result)
+              append t (Protocol.tool_result_blocks call.id
+                [Protocol.Text cancellation_result])
           | Tool_scheduler.Failed exn ->
               scheduler_failure := Some exn;
               let result = "Error: " ^ Printexc.to_string exn in
               emit_tool_event t (Tool_settled {
                 call_id = call.id; name = call.name; result; is_error = true
               });
-              append t (Protocol.tool_result call.id result)
+              append t (Protocol.tool_result_blocks call.id [Protocol.Text result])
           | Tool_scheduler.Skipped -> () in
         let cancelled () = match cancel with
           | Some check -> check ()

@@ -1,5 +1,20 @@
 # Troubleshooting
 
+### [2026-09-25] Chat wrappers double-wrapped the multimodal message list
+
+- **Context / Symptom:** Compilation failed in Chat provider wrappers after they wrapped `Protocol.chat_messages_to_json` in another JSON `List`.
+- **Root Cause:** The shared helper already returned the complete JSON list value; callers treated it as the list's element sequence and introduced an incompatible nested shape.
+- **Solution:** Passed the helper result directly from all 26 Chat-completions wrapper boundaries. The full regression suite then compiled and passed.
+- **Prevention / Reference:** Confirm helper return types at provider adapter boundaries before adding wire-level constructors.
+
+### [2026-09-25] Chat image serialization reversed tool-result order
+
+- **Context / Symptom:** `test_protocol` found the first serialized tool result did not retain its text projection when contiguous image-bearing results were grouped for Chat Completions.
+- **Root Cause:** The reversed accumulator applied `List.rev_append` to an already reversed result group, inverting provider call order.
+- **Solution:** Accumulated each serialized result directly into the reversed output while collecting its image blocks; the final reversal now preserves model call order. The protocol regression, full suite, install build and opam lint passed.
+- **Prevention / Reference:** Assert exact wire ordering with results returned in reverse arrival order when serializing concurrent tool calls.
+
+
 ### [2026-09-25] Modified Enter keys did not queue follow-ups
 
 - **Context / Symptom:** A 70×18 PTY sent Kitty's `ESC[13;5u` for Ctrl+Enter during a streaming turn, but no follow-up was queued.

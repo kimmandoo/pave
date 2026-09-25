@@ -67,7 +67,7 @@ let () =
   assert (response = { Protocol.role = "assistant"; content = Some "Hello world";
     tool_calls = [ { Protocol.id = "call_1"; name = "read_file";
       arguments = `Assoc [ "path", `String "a.txt" ] } ];
-    tool_call_id = None; provider_state = None });
+    tool_call_id = None; tool_result_content = None; provider_state = None });
   assert (Openai_responses_stream.usage t = None);
   let metered = Openai_responses_stream.create ~on_text:(fun _ -> ()) in
   let measured = event "response.completed" [ "response", `Assoc [

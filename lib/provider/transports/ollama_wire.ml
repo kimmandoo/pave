@@ -61,12 +61,20 @@ let request ~model messages tools =
           if calls = [] then [] else [ "tool_calls", `List calls ])
     | "tool" ->
         (match msg.tool_call_id, msg.content, msg.tool_calls with
-         | Some id, Some content, [] ->
+         | Some id, Some _, [] ->
              let name = match List.assoc_opt id !pending with
                | Some name -> name | None -> invalid "unexpected or duplicate tool result" in
              pending := List.remove_assoc id !pending;
-             `Assoc [ "role", `String "tool"; "content", `String content;
-               "tool_name", `String name ]
+             let blocks = content_blocks_of_tool_result msg in
+             let text = text_of_content_blocks blocks in
+             let images = List.filter_map (function
+               | Image { data; _ } -> Some (`String data)
+               | Text _ -> None) blocks in
+             let text = if text = "" && images <> []
+               then "Tool result contained image(s)." else text in
+             `Assoc ([ "role", `String "tool"; "content", `String text;
+               "tool_name", `String name ] @
+               if images = [] then [] else [ "images", `List images ])
          | _ -> invalid "malformed tool result")
     | _ -> invalid "unsupported transcript role" in
   let converted = List.map convert messages in
@@ -101,8 +109,7 @@ let parse_message json =
   let tool_calls = parse_calls (field "tool_calls" json) in
   if tool_calls = [] && (content = None || content = Some "") then
     invalid "empty assistant response";
-  { role = "assistant"; content; tool_calls; tool_call_id = None;
-    provider_state = None }
+  { role = "assistant"; content; tool_calls; tool_call_id = None; tool_result_content = None; provider_state = None }
 
 let check_done_reason json has_calls =
   match field "done_reason" json with

@@ -4,11 +4,10 @@ let expect_invalid f = match f () with
   | _ -> failwith "expected invalid Ollama response"
 
 let assistant content calls : Pave.Protocol.message =
-  { role = "assistant"; content; tool_calls = calls; tool_call_id = None;
-    provider_state = None }
+  { role = "assistant"; content; tool_calls = calls; tool_call_id = None; tool_result_content = None; provider_state = None }
 let system content : Pave.Protocol.message =
   { role = "system"; content = Some content; tool_calls = [];
-    tool_call_id = None; provider_state = None }
+    tool_call_id = None; tool_result_content = None; provider_state = None }
 let native_call name arguments = `Assoc [ "type", `String "function";
   "function", `Assoc [ "name", `String name; "arguments", arguments ] ]
 let native_message role content extras =
@@ -44,6 +43,21 @@ let () =
     native_message "tool" "京都 result" [ "tool_name", `String "search" ];
     native_message "tool" "東京 result" [ "tool_name", `String "search" ];
     native_message "assistant" "完了" [] ]);
+  let image_request = Pave.Ollama_wire.request ~model:"qwen" [
+    assistant (Some "Searching") [ first; second ];
+    tool_result_blocks second.id [ Text "京都 result"; Image {
+      mime_type = "image/png"; data = "c2Vjb25k" }; Text "continued";
+      Image { mime_type = "image/jpeg"; data = "dGhpcmQ=" } ];
+    tool_result_blocks first.id [ Image { mime_type = "image/jpeg"; data = "Zmlyc3Q=" } ] ] [] in
+  assert (field "messages" image_request = `List [
+    native_message "assistant" "Searching" [ "tool_calls", `List [
+      native_call "search" first.arguments; native_call "search" second.arguments ] ];
+    native_message "tool" "京都 result\ncontinued" [
+      "tool_name", `String "search";
+      "images", `List [ `String "c2Vjb25k"; `String "dGhpcmQ=" ] ];
+    native_message "tool" "Tool result contained image(s)." [
+      "tool_name", `String "search";
+      "images", `List [ `String "Zmlyc3Q=" ] ] ]);
   expect_invalid (fun () -> Pave.Ollama_wire.request ~model:"qwen"
     [ assistant None [first; second]; tool_result first.id "one" ] []);
   expect_invalid (fun () -> Pave.Ollama_wire.request ~model:"qwen"

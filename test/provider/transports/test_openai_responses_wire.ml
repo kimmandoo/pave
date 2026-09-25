@@ -5,11 +5,10 @@ let invalid f = match f () with
   | exception Protocol.Invalid_response _ -> ()
   | _ -> failwith "expected invalid Responses response"
 let assistant content calls : Protocol.message =
-  { role = "assistant"; content; tool_calls = calls; tool_call_id = None;
-    provider_state = None }
+  { role = "assistant"; content; tool_calls = calls; tool_call_id = None; tool_result_content = None; provider_state = None }
 let system content : Protocol.message =
   { role = "system"; content = Some content; tool_calls = [];
-    tool_call_id = None; provider_state = None }
+    tool_call_id = None; tool_result_content = None; provider_state = None }
 let call id name arguments : Protocol.tool_call = { id; name; arguments }
 let item kind fields = `Assoc (("type", `String kind) :: fields)
 let completed outputs = `Assoc [ "status", `String "completed"; "output", `List outputs ]
@@ -19,6 +18,9 @@ let message content = item "message" [ "role", `String "assistant";
 let function_call id name arguments = item "function_call" [
   "status", `String "completed"; "call_id", `String id;
   "name", `String name; "arguments", `String arguments ]
+let image_result id blocks = Protocol.tool_result_blocks id blocks
+
+
 
 let () =
   let args = `Assoc [ "path", `String "alpha.txt" ] in
@@ -45,6 +47,26 @@ let () =
       "arguments", `String (Yojson.Basic.to_string args) ];
     item "function_call_output" [ "call_id", `String use.id; "output", `String "Contents" ];
     `Assoc [ "role", `String "assistant"; "content", `String "Found it" ] ]);
+  let typed_result = image_result use.id [
+    Protocol.Text "before"; Protocol.Image { mime_type = "image/png"; data = "AQID" };
+    Protocol.Text "after" ] in
+  let typed_wire = Openai_responses_wire.request ~model:"gpt-test"
+    [assistant None [use]; typed_result] [] in
+  assert (field "input" typed_wire = `List [
+    item "function_call" [ "call_id", `String use.id; "name", `String use.name;
+      "arguments", `String (Yojson.Basic.to_string args) ];
+    item "function_call_output" [ "call_id", `String use.id; "output", `List [
+      item "input_text" ["text", `String "before"];
+      item "input_image" ["image_url", `String "data:image/png;base64,AQID"];
+      item "input_text" ["text", `String "after"] ] ] ]);
+  let image_only = image_result use.id [
+    Protocol.Image { mime_type = "image/jpeg"; data = "BAUG" } ] in
+  let image_only_wire = Openai_responses_wire.request ~model:"gpt-test"
+    [assistant None [use]; image_only] [] in
+  assert (field "output" (match field "input" image_only_wire with
+    | `List [_; output] -> output | _ -> assert false) = `List [
+      item "input_image" ["image_url", `String "data:image/jpeg;base64,BAUG"];
+      item "input_text" ["text", `String "(see attached image)"] ]);
   assert (field "stream" (Openai_responses_wire.request ~stream:true
     ~model:"gpt-test" [] []) = `Bool true);
   let response = completed [ message [ text "Hello "; text "world" ] ] in

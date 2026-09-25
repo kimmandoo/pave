@@ -225,27 +225,40 @@ let request ~model messages tools =
              add (content "model" parts);
              pending := List.map (fun (call : tool_call) -> call.id, call.name) msg.tool_calls;
              convert rest
-         | "tool" ->
-             (* Gemini 2 omits function IDs: response parts must follow call order,
-                even if independent tools completed in a different order. *)
-             let ordered_ids = List.map fst !pending in
-             let rec collect parts = function
-               | ({ role = "tool"; content = Some text; tool_call_id = Some id;
-                    tool_calls = []; _ } : message) :: remaining ->
-                   let name = match List.assoc_opt id !pending with
-                     | Some name -> name
-                     | None -> invalid "unexpected or duplicate tool result" in
-                   pending := List.remove_assoc id !pending;
-                   let response = [ "name", `String name;
-                     "response", `Assoc [ "output", `String text ] ] in
-                   collect ((id, `Assoc [ "functionResponse", `Assoc response ]) :: parts) remaining
-               | ({ role = "tool"; _ } : message) :: _ -> invalid "malformed tool result"
-               | remaining ->
-                   if !pending <> [] then invalid "missing tool results";
-                   add (content "user" (List.map (fun id -> List.assoc id parts) ordered_ids));
-                   convert remaining
-             in
-             collect [] (msg :: rest)
+        | "tool" ->
+            (* Gemini 2 omits function IDs: response parts must follow call order,
+               even if independent tools completed in a different order. *)
+            let ordered_ids = List.map fst !pending in
+            let rec collect results = function
+              | ({ role = "tool"; content = Some _; tool_call_id = Some id;
+                   tool_calls = []; _ } as result : message) :: remaining ->
+                  let name = match List.assoc_opt id !pending with
+                    | Some name -> name
+                    | None -> invalid "unexpected or duplicate tool result" in
+                  pending := List.remove_assoc id !pending;
+                  let blocks = content_blocks_of_tool_result result in
+                  let text = text_of_content_blocks blocks in
+                  let text = if text = "" && List.exists (function Image _ -> true | _ -> false) blocks
+                    then "Tool result contained image(s)." else text in
+                  let response = [ "name", `String name;
+                    "response", `Assoc [ "output", `String text ] ] in
+                  let images = List.filter_map (function
+                    | Image { mime_type; data } ->
+                        Some (`Assoc [ "inlineData", `Assoc [
+                          "mimeType", `String mime_type; "data", `String data ] ])
+                    | Text _ -> None) blocks in
+                  collect ((id, `Assoc [ "functionResponse", `Assoc response ], images) :: results) remaining
+              | ({ role = "tool"; _ } : message) :: _ -> invalid "malformed tool result"
+              | remaining ->
+                  if !pending <> [] then invalid "missing tool results";
+                  let ordered_results = List.map (fun id ->
+                    List.find (fun (result_id, _, _) -> result_id = id) results) ordered_ids in
+                  add (content "user" (List.map (fun (_, response, _) -> response) ordered_results));
+                  let images = List.concat_map (fun (_, _, images) -> images) ordered_results in
+                  if images <> [] then add (content "user" images);
+                  convert remaining
+            in
+            collect [] (msg :: rest)
          | _ -> invalid "unsupported transcript role")
   in
   convert messages;
@@ -280,8 +293,7 @@ let parse_candidate ~model candidate =
   let signed = has_signature parts in
   if tool_calls <> [] && not signed then
     invalid "Gemini tool turn lacks native thought signature";
-  { role = "assistant"; content; tool_calls; tool_call_id = None;
-    provider_state = (if signed then Some (native_state ~model parts) else None) }
+  { role = "assistant"; content; tool_calls; tool_call_id = None; tool_result_content = None; provider_state = (if signed then Some (native_state ~model parts) else None) }
 
 let parse_completion ~model json =
   (match field "error" json with

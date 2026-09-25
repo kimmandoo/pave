@@ -657,10 +657,14 @@ let show_history t (messages : Pave.Protocol.message list) =
             | Some (name, group) -> name, Some group
             | None -> "tool", None)
           | None -> "tool", None in
+        let result = match message.tool_result_content with
+          | Some blocks -> Some
+              (Pave.Protocol.display_content_blocks blocks)
+          | None -> message.content in
         Option.iter (fun result ->
           Transcript_view.tool_result ?group t.transcript name result;
           Option.iter (Hashtbl.remove names) message.tool_call_id)
-          message.content
+          result
     | _ -> ()) messages;
   Hashtbl.iter (fun _ (name, group) ->
     Transcript_view.interrupt_tool t.transcript name group) names;
