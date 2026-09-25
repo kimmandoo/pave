@@ -53,7 +53,10 @@ let summary (entry : Session.entry) =
       Printf.sprintf "session exit · %s · %d pending tool%s"
         kind count (if count = 1 then "" else "s")
   | Session.Message message ->
-      let content = match message.content with
+      let content = match message.tool_result_content with
+        | Some blocks -> Some (Protocol.display_content_blocks blocks)
+        | None -> message.content in
+      let content = match content with
         | None | Some "" when message.tool_calls <> [] -> "tool calls"
         | None -> ""
         | Some text -> first_line text in

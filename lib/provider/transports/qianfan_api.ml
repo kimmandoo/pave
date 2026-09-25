@@ -96,7 +96,7 @@ let request ~model messages tools =
         `Assoc (fields @ ["content", `String ""])
     | _ -> json in
   let fields = ["model", `String model;
-    "messages", `List (List.map message messages);
+    "messages", Protocol.chat_messages_to_json ~serialize:message messages;
     "stream", `Bool false] in
   `Assoc (if tools = [] then fields
     else fields @ ["tools", `List tools; "tool_choice", `String "auto"])

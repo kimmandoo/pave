@@ -347,6 +347,8 @@ let () =
          assert (match result.content with
            | Some text -> String.starts_with ~prefix:"Error: unexpected argument" text
            | None -> false);
+         assert (result.tool_result_content =
+           Some [Pave.Protocol.Text (Option.get result.content)]);
          assert (final.role = "assistant")
      | _ -> failwith "invalid tool arguments reached approval or execution");
     let parallel_events = ref [] in
@@ -362,6 +364,10 @@ let () =
            assistant.tool_calls = ["parallel-first"; "parallel-second"]);
          assert (first.tool_call_id = Some "parallel-first");
          assert (second.tool_call_id = Some "parallel-second");
+         assert (first.tool_result_content =
+           Some [Pave.Protocol.Text (Option.get first.content)]);
+         assert (second.tool_result_content =
+           Some [Pave.Protocol.Text (Option.get second.content)]);
          assert (final.role = "assistant")
      | _ -> failwith "parallel tool results did not preserve provider order");
     (match List.rev !parallel_events with

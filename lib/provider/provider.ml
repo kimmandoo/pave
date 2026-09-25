@@ -507,7 +507,7 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage 
   let result = match config.api with
   | Openai_completions | Local_chat | Copilot_chat ->
       let fields = [ "model", `String config.model;
-                     "messages", `List (List.map Protocol.message_to_json messages) ] in
+                     "messages", Protocol.chat_messages_to_json messages ] in
       let fields = if tools = [] then fields else fields @ [ "tools", `List tools ] in
       if config.api = Local_chat &&
          (String.length api_key > 8192 ||

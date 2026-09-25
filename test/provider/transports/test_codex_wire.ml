@@ -6,11 +6,9 @@ let invalid f = match f () with
   | exception Protocol.Invalid_response _ -> ()
   | _ -> failwith "expected invalid Codex response"
 let system text : Protocol.message =
-  { role = "system"; content = Some text; tool_calls = []; tool_call_id = None;
-    provider_state = None }
+  { role = "system"; content = Some text; tool_calls = []; tool_call_id = None; tool_result_content = None; provider_state = None }
 let developer text : Protocol.message =
-  { role = "developer"; content = Some text; tool_calls = []; tool_call_id = None;
-    provider_state = None }
+  { role = "developer"; content = Some text; tool_calls = []; tool_call_id = None; tool_result_content = None; provider_state = None }
 let completed model output = `Assoc ["status", `String "completed";
   "model", `String model; "output", `List output]
 let reasoning = item "reasoning" ["id", `String "rs_1";
@@ -62,6 +60,24 @@ let () =
       "output", `String "README contents"];
     `Assoc ["role", `String "user"; "content", `List [
       item "input_text" ["text", `String "Summarize"]]]]);
+  let typed_result = Protocol.tool_result_blocks "call_1" [
+    Protocol.Text "before"; Protocol.Image { mime_type = "image/png"; data = "AQID" };
+    Protocol.Text "after" ] in
+  let typed_body = Codex_wire.request ~model
+    [answer; typed_result] [] in
+  assert (field "input" typed_body = `List [
+    without_id reasoning; without_id message; without_id call;
+    item "function_call_output" ["call_id", `String "call_1"; "output", `List [
+      item "input_text" ["text", `String "before"];
+      item "input_image" ["image_url", `String "data:image/png;base64,AQID"];
+      item "input_text" ["text", `String "after"] ] ] ]);
+  let image_only = Protocol.tool_result_blocks "call_1" [
+    Protocol.Image { mime_type = "image/jpeg"; data = "BAUG" } ] in
+  let image_only_body = Codex_wire.request ~model [answer; image_only] [] in
+  assert (field "output" (match field "input" image_only_body with
+    | `List [ _; _; _; output ] -> output | _ -> assert false) = `List [
+      item "input_image" ["image_url", `String "data:image/jpeg;base64,BAUG"];
+      item "input_text" ["text", `String "(see attached image)"] ]);
   let strict_tool = item "function" ["function", `Assoc [
     "name", `String "read_file"; "parameters", schema; "strict", `Bool false]] in
   assert (field "strict" (match field "tools" (Codex_wire.request ~model [] [strict_tool]) with
@@ -102,7 +118,7 @@ let () =
     arguments = `Assoc [] } in
   let long_body = Codex_wire.request ~model [
     { role = "assistant"; content = None; tool_calls = [long_call];
-      tool_call_id = None; provider_state = None };
+      tool_call_id = None; tool_result_content = None; provider_state = None };
     Protocol.tool_result long_id "out"] [] in
   (match field "input" long_body with
   | `List [call; output] ->
@@ -116,7 +132,7 @@ let () =
     { role = "assistant"; content = None; tool_calls = [
       { long_call with id = "same|first" };
       { long_call with id = "same|second" } ];
-      tool_call_id = None; provider_state = None };
+      tool_call_id = None; tool_result_content = None; provider_state = None };
     Protocol.tool_result "same|first" "out";
     Protocol.tool_result "same|second" "out"] []);
   print_endline "Codex wire: ok"

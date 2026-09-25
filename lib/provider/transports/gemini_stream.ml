@@ -149,9 +149,7 @@ let finish t =
     invalid "empty response";
   if t.calls <> [] && not t.signature_seen then
     invalid "Gemini tool turn lacks native thought signature";
-  { Protocol.role = "assistant";
-    content = (if t.text_seen then Some (Buffer.contents t.content) else None);
-    tool_calls = List.rev t.calls; tool_call_id = None;
-    provider_state = (if t.signature_seen then
-      Some (Gemini_wire.native_state ~model:t.model (List.rev t.parts))
-      else None) }
+  { Protocol.role = "assistant"; content = (if t.text_seen then Some (Buffer.contents t.content) else None);
+  tool_calls = List.rev t.calls; tool_call_id = None; tool_result_content = None; provider_state = (if t.signature_seen then
+    Some (Gemini_wire.native_state ~model:t.model (List.rev t.parts))
+    else None) }

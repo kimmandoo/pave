@@ -845,7 +845,8 @@ let validate_arguments ~name ~args =
           | _ -> assert false) fields
 
 type prepared_execution =
-  ?cancel:(unit -> bool) -> ?on_progress:(int -> unit) -> unit -> string
+  ?cancel:(unit -> bool) -> ?on_progress:(int -> unit) -> unit ->
+  Protocol.content_block list
 
 let prepare ~root ~name ~args () =
   try
@@ -853,22 +854,24 @@ let prepare ~root ~name ~args () =
     validate_arguments ~name ~args;
     let execute ?cancel ?on_progress () =
       try
-        match name with
-        | "read_file" -> read_file root args
-        | "list_files" -> list_files root args
-        | "search" -> search root args
-        | "glob" -> glob root args
-        | "grep" -> grep root args
-        | "write_file" -> write_file root args
-        | "edit_file" -> edit_file root args
-        | "run_command" -> run_command ?cancel ?on_progress root args
-        | "mobile_project" -> mobile_project root
-        | _ -> assert false
+        let result = match name with
+          | "read_file" -> read_file root args
+          | "list_files" -> list_files root args
+          | "search" -> search root args
+          | "glob" -> glob root args
+          | "grep" -> grep root args
+          | "write_file" -> write_file root args
+          | "edit_file" -> edit_file root args
+          | "run_command" -> run_command ?cancel ?on_progress root args
+          | "mobile_project" -> mobile_project root
+          | _ -> assert false in
+        [Protocol.Text result]
       with
-      | Tool_error message -> "Error: " ^ message
+      | Tool_error message -> [Protocol.Text ("Error: " ^ message)]
       | Unix.Unix_error (code, operation, path) ->
-          Printf.sprintf "Error: %s %s: %s" operation path (Unix.error_message code)
-      | Sys_error message -> "Error: " ^ message in
+          [Protocol.Text (Printf.sprintf "Error: %s %s: %s" operation path
+            (Unix.error_message code))]
+      | Sys_error message -> [Protocol.Text ("Error: " ^ message)] in
     Ok execute
   with
   | Tool_error message -> Error ("Error: " ^ message)
@@ -877,6 +880,8 @@ let prepare ~root ~name ~args () =
   | Sys_error message -> Error ("Error: " ^ message)
 
 let execute ?cancel ?on_progress ?preflight ~root ~name ~args () =
+  let display execute = Protocol.display_content_blocks
+    (execute ?cancel ?on_progress ()) in
   match prepare ~root ~name ~args () with
   | Error result -> result
   | Ok execute ->
@@ -885,8 +890,8 @@ let execute ?cancel ?on_progress ?preflight ~root ~name ~args () =
         | Some check ->
             (match check () with
              | Some message -> message
-             | None -> execute ?cancel ?on_progress ())
-        | None -> execute ?cancel ?on_progress ()
+             | None -> display execute)
+        | None -> display execute
       with
       | Tool_error message -> "Error: " ^ message
       | Unix.Unix_error (code, operation, path) ->

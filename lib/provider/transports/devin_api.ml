@@ -243,6 +243,16 @@ let discover ?http ?cancel ~api_key () = protect (fun () ->
   | Error error, _ -> Error error
   | _, Ok [] -> Error (Invalid_response "empty Devin account model catalog"))
 
+(* The Devin Prompt wire message carries text (field 3), call references and
+   metadata, but has no image/content-block field. Reject typed images before
+   any RPC rather than silently dropping them or stringifying base64 as text. *)
+let reject_image_tool_results messages =
+  if List.exists (fun (message : Protocol.message) ->
+    match message.tool_result_content with
+    | Some blocks -> List.exists (function Protocol.Image _ -> true | _ -> false) blocks
+    | None -> false) messages then
+    bad "Devin protobuf transport does not support image tool results"
+
 let prompt ?(message_id="") ?(source=1) ?(call_id="") ?(is_error=false)
     ?(thinking="") ?(signature="") ?(calls=[]) value =
   buf (fun b -> string b 1 message_id; number b 2 source; string b 3 value;
@@ -369,6 +379,7 @@ let assign ?http ?cancel ~api_key ~model ~cascade_id messages =
       else Ok (actual,jwt)
 let request ?(max_tokens=64000) ?(supports_parallel_tool_calls=false)
     ~api_key ~jwt ~model ~selected_model ~cascade_id ?assignment messages tools =
+  reject_image_tool_results messages;
   if not (valid_id model && valid_uuid cascade_id) then bad "invalid Devin model or cascade ID";
   if max_tokens < 1 || max_tokens > 1_000_000 then bad "invalid Devin max tokens";
   buf (fun b ->
@@ -480,12 +491,13 @@ let parse_stream ?(assigned_model="") ?(selected_model="") ?(cascade_id="") body
     "signature", `String !signature;
     "actual_model", `String !actual_model]) in
   ({ role = "assistant"; content = (if content = "" then None else Some content);
-    tool_calls; tool_call_id = None; provider_state } : Protocol.message), !usage
+    tool_result_content = None; tool_calls; tool_call_id = None; provider_state } : Protocol.message), !usage
 
 let complete ?http ?cancel ?(max_tokens=64000)
     ?(supports_parallel_tool_calls=false) ~api_key ~model ~cascade_id ~router
     messages tools =
   protect (fun () ->
+    reject_image_tool_results messages;
     if not (valid_text api_key) then Error Invalid_credential
     else if not (valid_id model && valid_uuid cascade_id) then
       Error (Invalid_response "invalid Devin model or cascade ID")

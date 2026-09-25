@@ -1,6 +1,6 @@
 let message role text : Pave.Protocol.message =
   { role; content = Some text; tool_calls = []; tool_call_id = None;
-    provider_state = None }
+    tool_result_content = None; provider_state = None }
 
 let entry id parent_id message : Pave.Session.entry =
   { id; parent_id; timestamp = "2026-09-25T00:00:00Z";
@@ -45,6 +45,11 @@ let () =
   assert (Pave.Session_tree.summary tool = "tool · read_file · started");
   assert (Pave.Session_tree.summary exit =
     "session exit · fatal · 1 pending tool");
+  let image_result = Pave.Protocol.tool_result_blocks "image-call" [
+    Pave.Protocol.Image { mime_type = "image/png"; data = "secret-base64" }
+  ] in
+  assert (Pave.Session_tree.summary (entry "image" None image_result) =
+    "tool · [image/png image]");
   let entries = List.init 1030 (fun n -> entry (string_of_int n)
     (if n = 0 then None else Some (string_of_int (n - 1)))
     (message "user" (String.make 512 'x'))) in

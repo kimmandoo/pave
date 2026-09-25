@@ -7,11 +7,10 @@ let expect_invalid f =
 
 let call id name arguments : Pave.Protocol.tool_call = { id; name; arguments }
 let assistant content calls : Pave.Protocol.message =
-  { role = "assistant"; content; tool_calls = calls; tool_call_id = None;
-    provider_state = None }
+  { role = "assistant"; content; tool_calls = calls; tool_call_id = None; tool_result_content = None; provider_state = None }
 let system text : Pave.Protocol.message =
   { role = "system"; content = Some text; tool_calls = [];
-    tool_call_id = None; provider_state = None }
+    tool_call_id = None; tool_result_content = None; provider_state = None }
 let block kind fields = `Assoc (("type", `String kind) :: fields)
 let message role blocks = `Assoc [ "role", `String role; "content", `List blocks ]
 let response stop blocks =
@@ -51,6 +50,38 @@ let () =
       block "tool_result" [ "tool_use_id", `String "use-1";
         "content", `String "alpha body" ] ];
     message "assistant" [ block "text" [ "text", `String "Done" ] ] ]);
+  let png = "iVBORw0KGgo=" in
+  let typed_result id blocks = tool_result_blocks id blocks in
+  let image_request = Pave.Anthropic_wire.request ~model:"claude-test" ~max_tokens:4096
+    [assistant None [first; second];
+     typed_result second.id [Text "before"; Image { mime_type = "image/png"; data = png };
+       Text "after"];
+     typed_result first.id [Image { mime_type = "image/jpeg"; data = "/9j/2Q==" }]] [] in
+  let expected_images = `List [
+    message "assistant" [
+      block "tool_use" ["id", `String first.id; "name", `String first.name;
+        "input", first.arguments];
+      block "tool_use" ["id", `String second.id; "name", `String second.name;
+        "input", second.arguments]];
+    message "user" [
+      block "tool_result" [
+        "tool_use_id", `String second.id;
+        "content", `List [
+          block "text" ["text", `String "before"];
+          block "image" ["source", `Assoc ["type", `String "base64";
+            "media_type", `String "image/png"; "data", `String png]];
+          block "text" ["text", `String "after"]]];
+      block "tool_result" [
+        "tool_use_id", `String first.id;
+        "content", `List [
+          block "text" ["text", `String "(see attached image)"];
+          block "image" ["source", `Assoc ["type", `String "base64";
+            "media_type", `String "image/jpeg"; "data", `String "/9j/2Q=="]]]]]]
+  in
+  assert (field "messages" image_request = expected_images);
+  expect_invalid (fun () -> Pave.Anthropic_wire.request ~model:"claude-test"
+    ~max_tokens:4096 [assistant None [first];
+      typed_result first.id [Image { mime_type = "image/bmp"; data = "AA==" }]] []);
   expect_invalid (fun () -> Pave.Anthropic_wire.request ~model:"claude-test"
     ~max_tokens:4096 [ assistant None [ first; second ]; tool_result first.id "ok" ] []);
   expect_invalid (fun () -> Pave.Anthropic_wire.request ~model:"claude-test"

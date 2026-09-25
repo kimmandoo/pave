@@ -4,11 +4,10 @@ let expect_invalid f = match f () with
   | _ -> failwith "expected invalid Gemini response"
 let call id name arguments : Pave.Protocol.tool_call = { id; name; arguments }
 let assistant content tool_calls : Pave.Protocol.message =
-  { role = "assistant"; content; tool_calls; tool_call_id = None;
-    provider_state = None }
+  { role = "assistant"; content; tool_calls; tool_call_id = None; tool_result_content = None; provider_state = None }
 let system text : Pave.Protocol.message =
   { role = "system"; content = Some text; tool_calls = [];
-    tool_call_id = None; provider_state = None }
+    tool_call_id = None; tool_result_content = None; provider_state = None }
 let item role parts = `Assoc [ "role", `String role; "parts", `List parts ]
 let text value = `Assoc [ "text", `String value ]
 let fn name args = `Assoc [ "functionCall", `Assoc [ "name", `String name; "args", args ] ]
@@ -60,6 +59,22 @@ let () =
       `Assoc [ "functionResponse", `Assoc [ "name", `String "read_file";
         "response", `Assoc [ "output", `String "café content" ] ] ] ];
     item "model" [ text "All done" ] ]);
+  let image mime_type data = Image { mime_type; data } in
+  let image_request = Pave.Gemini_wire.request ~model:"gemini-2.5-flash" [
+    signed_turn;
+    tool_result_blocks second.id [ Text "second result"; image "image/png" "c2Vjb25k" ];
+    tool_result_blocks first.id [ image "image/jpeg" "Zmlyc3Q=" ] ] [] in
+  let image_part mime_type data = `Assoc [ "inlineData", `Assoc [
+    "mimeType", `String mime_type; "data", `String data ] ] in
+  assert (field "contents" image_request = `List [
+    item "model" signed_parts;
+    item "user" [
+      `Assoc [ "functionResponse", `Assoc [ "name", `String "read_file";
+        "response", `Assoc [ "output", `String "Tool result contained image(s)." ] ] ];
+      `Assoc [ "functionResponse", `Assoc [ "name", `String "read_file";
+        "response", `Assoc [ "output", `String "second result" ] ] ] ];
+    item "user" [ image_part "image/jpeg" "Zmlyc3Q=";
+      image_part "image/png" "c2Vjb25k" ] ]);
   expect_invalid (fun () -> Pave.Gemini_wire.request ~model:"gemini-3-pro"
     [ user "Inspect"; assistant None [ first ]; tool_result first.id "ok" ] []);
   assert (field "contents" (Pave.Gemini_wire.request ~model:"gemini-3-pro"

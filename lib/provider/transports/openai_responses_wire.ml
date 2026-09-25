@@ -34,6 +34,19 @@ let tool_schema json =
         | _ -> invalid "invalid tool description" in
       `Assoc fields
   | _ -> invalid "invalid tool definition"
+let tool_result_output (msg : message) =
+  let blocks = content_blocks_of_tool_result msg in
+  if List.exists (function Image _ -> true | Text _ -> false) blocks then
+    let blocks = if text_of_content_blocks blocks = "" then
+      List.filter (function Image _ -> true | Text _ -> false) blocks @
+        [Text "(see attached image)"] else blocks in
+    `List (List.map (function
+      | Text text -> `Assoc ["type", `String "input_text"; "text", `String text]
+      | Image { mime_type; data } -> `Assoc ["type", `String "input_image";
+          "image_url", `String ("data:" ^ mime_type ^ ";base64," ^ data)]) blocks)
+  else `String (text_of_content_blocks blocks)
+
+
 
 let request ?(stream = false) ~model messages tools =
   if model = "" then invalid_arg "empty Responses model";
@@ -73,10 +86,10 @@ let request ?(stream = false) ~model messages tools =
             "arguments", `String (Yojson.Basic.to_string call.arguments) ])) msg.tool_calls
     | "tool" ->
         (match msg.content, msg.tool_call_id, msg.tool_calls with
-         | Some text, Some id, [] when List.mem id !pending ->
+         | Some _, Some id, [] when List.mem id !pending ->
              pending := List.filter (( <> ) id) !pending;
              emit (`Assoc [ "type", `String "function_call_output";
-               "call_id", `String id; "output", `String text ])
+               "call_id", `String id; "output", tool_result_output msg ])
          | _ -> invalid "unexpected or malformed tool result")
     | _ -> invalid "unsupported transcript role") messages;
   if !pending <> [] then invalid "missing tool results";
@@ -130,4 +143,4 @@ let parse_completion json =
     | _ -> invalid "unsupported output item") outputs;
   { role = "assistant"; content = (match List.rev !texts with
       | [] -> None | texts -> Some (String.concat "" texts));
-    tool_calls = List.rev !calls; tool_call_id = None; provider_state = None }
+    tool_calls = List.rev !calls; tool_call_id = None; tool_result_content = None; provider_state = None }

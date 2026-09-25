@@ -35,6 +35,28 @@ let endpoint ?base_url ~region ~model () =
 
 let text text = `Assoc ["text", `String text]
 let wire_message role blocks = `Assoc ["role", `String role; "content", `List blocks]
+let image mime_type data =
+  let format = match mime_type with
+    | "image/jpeg" -> "jpeg"
+    | "image/png" -> "png"
+    | "image/gif" -> "gif"
+    | "image/webp" -> "webp"
+    | _ -> invalid ("unsupported tool result image MIME type " ^ mime_type) in
+  `Assoc ["image", `Assoc ["format", `String format;
+    "source", `Assoc ["bytes", `String data]]]
+
+let tool_result_content (message : message) =
+  match message.tool_result_content with
+  | None ->
+      (match message.content with
+       | Some content -> [text content]
+       | None -> invalid "malformed tool result")
+  | Some _ ->
+      let blocks = content_blocks_of_tool_result message in
+      if blocks = [] then invalid "malformed tool result";
+      List.map (function
+        | Text content -> text content
+        | Image { mime_type; data } -> image mime_type data) blocks
 let tool_use (call : tool_call) =
   if call.id = "" || call.name = "" then invalid "empty tool use ID or name";
   (match call.arguments with `Assoc _ -> () | _ -> invalid "tool input must be an object");
@@ -94,12 +116,12 @@ let request messages tools =
             replay rest
         | "tool" ->
             let rec gather acc = function
-              | ({ role = "tool"; content = Some content; tool_call_id = Some id;
-                   tool_calls = []; _ } : message) :: tail ->
+              | ({ role = "tool"; tool_call_id = Some id; tool_calls = []; _ } as result) :: tail ->
                   if not (List.mem id !pending) then invalid "unexpected or duplicate tool result";
                   pending := List.filter ((<>) id) !pending;
+                  let content = tool_result_content result in
                   gather (`Assoc ["toolResult", `Assoc ["toolUseId", `String id;
-                    "content", `List [text content]]] :: acc) tail
+                    "content", `List content]] :: acc) tail
               | ({ role = "tool"; _ } : message) :: _ -> invalid "malformed tool result"
               | tail ->
                   if !pending <> [] then invalid "missing tool results";
@@ -152,7 +174,7 @@ let parse_response json =
     | [] -> None
     | chunks -> Some (String.concat "" chunks) in
   { role = "assistant"; content; tool_calls = calls;
-    tool_call_id = None; provider_state = None }
+    tool_call_id = None; tool_result_content = None; provider_state = None }
 
 let usage json =
   let reported = member "usage" json in
