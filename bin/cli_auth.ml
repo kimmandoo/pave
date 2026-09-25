@@ -70,6 +70,18 @@ let handle_action ~login ~login_manual ~logout =
 
 let resolve_authentication ~(descriptor : Pave.Provider_catalog.descriptor)
     ~(route : Pave.Provider_catalog.route) ~endpoint =
+    if route.wire = Pave.Provider.Local_chat then (
+      if not (List.mem descriptor.id ["lm-studio"; "llama.cpp"; "vllm"]) ||
+         descriptor.oauth <> None then
+        failwith "unsupported local provider authentication";
+      ignore (Pave.Provider.local_endpoint
+        (if endpoint = "" then route.endpoint else endpoint));
+      let key = Option.bind descriptor.api_key_env (fun name ->
+        match Sys.getenv_opt name with
+        | Some value when value <> "" -> Some value
+        | _ -> None) in
+      Pave.Provider.Api_key, Option.value ~default:"" key, None)
+    else
     let env_key = Option.bind descriptor.api_key_env (fun name ->
       match Sys.getenv_opt name with
       | Some key when key <> "" -> Some key

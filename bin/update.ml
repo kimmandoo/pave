@@ -77,7 +77,12 @@ let run () =
   (* The mutable /latest/download redirect can lag behind the release API.
      Pin both archive and checksum fetches to the same validated tag. *)
   let target = latest_version () in
-  ignore (version_number target);
+  let installed = Embedded_installer.version in
+  if installed = "source" then
+    fail "this build has no published release version; install an official native release";
+  if Stdlib.compare (version_number target) (version_number installed) < 0 then
+    fail ("published latest " ^ target ^ " is older than installed " ^
+      installed ^ "; refusing to downgrade");
   let script, output = Filename.open_temp_file ~mode:[ Open_binary ]
     "pave-update-" ".sh" in
   Fun.protect ~finally:(fun () ->

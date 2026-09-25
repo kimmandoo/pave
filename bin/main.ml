@@ -72,6 +72,10 @@ let () =
             (fun (route : Pave.Provider_catalog.route) -> route.name) entry.routes))
           (match entry.api_key_env, entry.oauth with
            | Some env, Some _ -> env ^ " or OAuth login"
+           | Some env, None when List.exists
+               (fun (route : Pave.Provider_catalog.route) ->
+                 route.wire = Pave.Provider.Local_chat) entry.routes ->
+               env ^ " (optional; local)"
            | Some env, None -> env
            | None, Some _ -> "OAuth login required"
            | None, None -> "no API key required")) (Pave.Provider_catalog.all ());

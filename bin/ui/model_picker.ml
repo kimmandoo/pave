@@ -3,7 +3,8 @@
 let credential (descriptor : Pave.Provider_catalog.descriptor) =
   match descriptor.id with
   | "openai" | "google" | "anthropic" | "deepseek" | "groq" | "mistral"
-  | "together" | "cerebras" | "venice" ->
+  | "together" | "cerebras" | "venice" | "deepinfra" | "fireworks"
+  | "baseten" | "lm-studio" | "llama.cpp" | "vllm" ->
       Option.bind descriptor.api_key_env (fun name ->
         match Sys.getenv_opt name with
         | Some key when key <> "" -> Some (Pave.Model_discovery.Api_key key)

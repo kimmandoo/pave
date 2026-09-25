@@ -157,3 +157,7 @@
 (test
  (name test_session_tree)
  (libraries pave))
+
+(test
+ (name test_local_compat)
+ (libraries pave unix yojson))

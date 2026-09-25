@@ -41,6 +41,9 @@ let mistral_url = "https://api.mistral.ai/v1/models"
 let together_url = "https://api.together.ai/v1/models"
 let cerebras_url = "https://api.cerebras.ai/v1/models"
 let venice_url = "https://api.venice.ai/api/v1/models?type=text"
+let deepinfra_url = "https://api.deepinfra.com/v1/openai/models?filter=with_meta"
+let fireworks_url = "https://api.fireworks.ai/v1/accounts/fireworks/models"
+let baseten_url = "https://inference.baseten.co/v1/models"
 let codex_urls = List.map (fun path ->
   "https://chatgpt.com/backend-api" ^ path ^ "?client_version=" ^
     Codex_wire.client_version) ["/codex/models"; "/models"]
@@ -156,6 +159,29 @@ let include_venice row = match extract_field "type" row with
   | Some (`String _) -> Ok false
   | _ -> invalid "missing or invalid Venice model type"
 
+let include_deepinfra row = match extract_field "metadata" row with
+  | Some (`Assoc _ as metadata) ->
+      (match extract_field "tags" metadata with
+      | Some (`List tags) ->
+          Ok (List.mem (`String "chat") tags)
+      | _ -> invalid "missing DeepInfra model tags")
+  | _ -> invalid "missing DeepInfra model metadata"
+
+let include_baseten row = match extract_field "supported_features" row with
+  | Some (`List features) -> Ok (List.mem (`String "tools") features)
+  | _ -> invalid "missing Baseten supported features"
+
+let include_fireworks row =
+  let available = extract_field "supportsServerless" row = Some (`Bool true)
+    && extract_field "supportsTools" row = Some (`Bool true)
+    && (match extract_field "state" row with
+       | None | Some (`String "READY") -> true
+       | _ -> false) in
+  match extract_field "name" row with
+  | Some (`String name) ->
+      Ok (available &&
+        String.starts_with ~prefix:"accounts/fireworks/models/" name)
+  | _ -> invalid "missing Fireworks model resource name"
 let add_unique seen result ids =
   List.iter (fun id -> if not (Hashtbl.mem seen id) then (
     Hashtbl.add seen id (); result := id :: !result)) ids
@@ -235,8 +261,43 @@ let discover_codex ?http ?cancel credential =
       try request codex_urls with
       | Provider.Provider_error _ | Unix.Unix_error _ | Sys_error _ ->
           Error (Transport_error "request failed or timed out")
+let discover_local ?http ?cancel ~provider credential =
+  let key = match credential with
+    | None -> Ok None
+    | Some (Api_key key) -> Ok (Some key)
+    | Some _ -> Error Invalid_credential in
+  match key with
+  | Error _ as failure -> failure
+  | Ok key ->
+      let endpoint = try Ok (Local_compat.endpoint ~provider ())
+        with Provider.Provider_error _ -> Error
+          (Invalid_response "invalid local provider endpoint") in
+      (match endpoint with
+      | Error _ as failure -> failure
+      | Ok endpoint ->
+          let http = Option.map (fun http ~url ~headers ->
+            match http ~url ~headers with
+            | Ok _ as response -> response
+            | Error failure -> Error (match failure with
+                | Invalid_credential -> Local_compat.Invalid_credential
+                | Http_error code -> Local_compat.Http_error code
+                | Invalid_response detail -> Local_compat.Invalid_response detail
+                | _ -> Local_compat.Transport_error)) http in
+          match Local_compat.discover ?http ?cancel ~provider ~endpoint ?key () with
+          | Ok _ as models -> models
+          | Error failure -> Error (match failure with
+              | Local_compat.Invalid_endpoint ->
+                  Invalid_response "invalid local provider endpoint"
+              | Local_compat.Invalid_credential -> Invalid_credential
+              | Local_compat.Transport_error -> Transport_error
+                  "request failed or timed out"
+              | Local_compat.Http_error code -> Http_error code
+              | Local_compat.Invalid_response detail -> Invalid_response detail))
+
 let discover ?http ?cancel ~provider ?credential () =
-  if provider = "openai-codex" then discover_codex ?http ?cancel credential
+  if Local_compat.engine provider <> None then
+    discover_local ?http ?cancel ~provider credential
+  else if provider = "openai-codex" then discover_codex ?http ?cancel credential
   else
   let target = match provider with
     | "openai" -> Some (openai_url, "data", "id", include_all)
@@ -251,6 +312,9 @@ let discover ?http ?cancel ~provider ?credential () =
     | "together" -> Some (together_url, "", "id", include_together)
     | "cerebras" -> Some (cerebras_url, "data", "id", include_all)
     | "venice" -> Some (venice_url, "data", "id", include_venice)
+    | "deepinfra" -> Some (deepinfra_url, "data", "id", include_deepinfra)
+    | "fireworks" -> Some (fireworks_url, "models", "name", include_fireworks)
+    | "baseten" -> Some (baseten_url, "data", "id", include_baseten)
     | _ -> None in
   match target with
   | None -> Error (Unsupported_provider provider)
@@ -260,7 +324,8 @@ let discover ?http ?cancel ~provider ?credential () =
         | "ollama", Some _ -> Error Invalid_credential
         | ("openai" | "google" | "openrouter" | "anthropic" |
            "deepseek" | "groq" | "mistral" | "together" |
-           "cerebras" | "venice"), Some (Api_key key)
+           "cerebras" | "venice" | "deepinfra" | "fireworks" |
+           "baseten"), Some (Api_key key)
         | "github-copilot", Some (Copilot_oauth key) ->
             if valid_secret key then Ok (Some key) else Error Invalid_credential
         | _, None -> Error Missing_credential
@@ -273,7 +338,8 @@ let discover ?http ?cancel ~provider ?credential () =
             | "openrouter", Some key -> ["Authorization", "Bearer " ^ key]
             | "google", Some key -> ["x-goog-api-key", key]
             | ("deepseek" | "groq" | "mistral" | "together" |
-               "cerebras" | "venice"), Some key ->
+               "cerebras" | "venice" | "deepinfra" | "fireworks" |
+               "baseten"), Some key ->
                 ["Authorization", "Bearer " ^ key]
             | "anthropic", Some key ->
                 ["x-api-key", key; "anthropic-version", "2023-06-01"]
@@ -293,6 +359,11 @@ let discover ?http ?cancel ~provider ?credential () =
             Provider.check_cancel cancel;
             if page >= 50 then invalid "too many model listing pages"
             else let page_url = match provider, token with
+              | "fireworks", token ->
+                  url ^ "?pageSize=200&filter=supports_serverless%3Dtrue" ^
+                  (match token with
+                   | None -> ""
+                   | Some next -> "&pageToken=" ^ Oauth_flow.url_encode next)
               | "anthropic", None -> url ^ "?limit=100"
               | "anthropic", Some token ->
                   url ^ "?limit=100&after_id=" ^ Oauth_flow.url_encode token
@@ -340,6 +411,18 @@ let discover ?http ?cancel ~provider ?credential () =
                                         | _ -> invalid "invalid or repeated last_id")
                                     | _ -> invalid "missing last_id")
                                 | _ -> invalid "invalid or missing has_more")
+                              else if provider = "fireworks" then
+                                (match extract_field "nextPageToken" json with
+                                | None | Some (`String "") -> Ok (List.rev !result)
+                                | Some (`String next) when next <> "" &&
+                                    String.length next <= 4096 &&
+                                    not (Hashtbl.mem visited next) &&
+                                    String.for_all
+                                      (fun c -> Char.code c >= 32 && Char.code c < 127)
+                                      next ->
+                                    Hashtbl.add visited next ();
+                                    pages (page + 1) (Some next)
+                                | _ -> invalid "invalid or repeated nextPageToken")
                               else if provider <> "google" then Ok (List.rev !result)
                               else match extract_field "nextPageToken" json with
                               | None -> Ok (List.rev !result)
