@@ -161,3 +161,7 @@
 (test
  (name test_local_compat)
  (libraries pave unix yojson))
+
+(test
+ (name test_azure_wire)
+ (libraries pave unix yojson))

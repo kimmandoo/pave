@@ -1,5 +1,5 @@
 type api = Openai_completions | Local_chat | Anthropic_messages | Openai_responses
-  | Ollama_chat | Gemini_direct | Codex_responses | Copilot_chat
+  | Azure_responses | Ollama_chat | Gemini_direct | Codex_responses | Copilot_chat
 type authentication = Api_key | OAuth
 type config = { endpoint : string; api_key : string; model : string; api : api }
 type credentials = {
@@ -550,14 +550,19 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage 
                  check_cancel cancel;
                  Option.iter report (Anthropic_stream.usage stream));
             reply))
-  | Openai_responses ->
+  | Openai_responses | Azure_responses ->
+      let endpoint, headers =
+        if config.api = Azure_responses then
+          (try Azure_wire.resolve ~endpoint:config.endpoint
+             ~deployment:config.model ~api_key
+           with Invalid_argument message -> raise (Provider_error message))
+        else config.endpoint,
+          (if api_key = "" then [] else [ "Authorization: Bearer " ^ api_key ]) in
       let body = parse (fun () ->
         Openai_responses_wire.request ~model:config.model messages tools) in
-      let headers = if api_key = "" then [] else
-        [ "Authorization: Bearer " ^ api_key ] in
       (match on_text with
       | None ->
-          let json = post_json ?cancel ~endpoint:config.endpoint ~headers ~secret:api_key body in
+          let json = post_json ?cancel ~endpoint ~headers ~secret:api_key body in
           let reply = parse (fun () -> Openai_responses_wire.parse_completion json) in
           (match on_usage with
            | None -> ()
@@ -571,7 +576,7 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage 
             Openai_responses_wire.request ~stream:true
               ~model:config.model messages tools) in
           parse (fun () ->
-            post_stream ?cancel ~endpoint:config.endpoint ~headers ~secret:api_key
+            post_stream ?cancel ~endpoint ~headers ~secret:api_key
               body ~on_chunk:(Openai_responses_stream.feed stream)
               ~is_done:(fun () -> Openai_responses_stream.is_done stream)
               ~is_finished:(fun () -> Openai_responses_stream.is_finished stream);

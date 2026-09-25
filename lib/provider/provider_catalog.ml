@@ -92,6 +92,16 @@ let builtins = [
       endpoint = "https://inference.baseten.co/v1/chat/completions" } ];
     default_route = "chat";
     api_key_env = Some "BASETEN_API_KEY"; oauth = None };
+  { id = "huggingface"; display_name = "Hugging Face Inference";
+    routes = [ { name = "chat"; wire = Provider.Openai_completions;
+      endpoint = "https://router.huggingface.co/v1/chat/completions" } ];
+    default_route = "chat";
+    api_key_env = Some "HF_TOKEN"; oauth = None };
+  { id = "nanogpt"; display_name = "NanoGPT";
+    routes = [ { name = "chat"; wire = Provider.Openai_completions;
+      endpoint = "https://api.nano-gpt.com/api/v1/chat/completions" } ];
+    default_route = "chat";
+    api_key_env = Some "NANO_GPT_API_KEY"; oauth = None };
   { id = "lm-studio"; display_name = "LM Studio (local)";
     routes = [ { name = "chat"; wire = Provider.Local_chat;
       endpoint = "http://127.0.0.1:1234/v1/chat/completions" } ];
@@ -107,6 +117,11 @@ let builtins = [
       endpoint = "http://127.0.0.1:8000/v1/chat/completions" } ];
     default_route = "chat";
     api_key_env = Some "VLLM_API_KEY"; oauth = None };
+  { id = "azure"; display_name = "Azure OpenAI (configured resource)";
+    routes = [ { name = "responses"; wire = Provider.Azure_responses;
+      endpoint = "" } ];
+    default_route = "responses";
+    api_key_env = Some "AZURE_OPENAI_API_KEY"; oauth = None };
   { id = "github-copilot"; display_name = "GitHub Copilot Chat (public github.com)";
     routes = [ { name = "chat"; wire = Provider.Copilot_chat;
       endpoint = Github_copilot_wire.endpoint } ];
@@ -122,4 +137,6 @@ let route provider name =
   match List.find_opt (fun entry -> entry.name = name) provider.routes with
   | Some entry when Local_compat.engine provider.id <> None ->
       Some { entry with endpoint = Local_compat.endpoint ~provider:provider.id () }
+  | Some entry when provider.id = "azure" ->
+      Some { entry with endpoint = Azure_wire.endpoint () }
   | route -> route
