@@ -45,6 +45,24 @@ let () =
           Thread.delay 0.001
         done;
         Pave.Turn_runner.message runner "follow-up-complete"
+    | "steering-source" | "dequeue-source" ->
+        let label = if text = "steering-source" then "steering-source-ready"
+          else "dequeue-source-ready" in
+        Pave.Turn_runner.message runner label;
+        while not (cancel ()) do Thread.delay 0.001 done;
+        raise Pave.Provider.Cancelled
+    | "steered" -> Pave.Turn_runner.message runner "steered-complete"
+    | "after-steer" ->
+        Pave.Turn_runner.message runner "after-steer-complete"
+    | "dequeue-removed" ->
+        Pave.Turn_runner.message runner "dequeue-removed-ran"
+    | "dequeue-retained" ->
+        Pave.Turn_runner.message runner "dequeue-retained-complete"
+
+    | "boundary-source" ->
+        Pave.Turn_runner.message runner "boundary-source-ready";
+        while not (Atomic.get release_follow_up) do Thread.delay 0.001 done;
+        Pave.Turn_runner.message runner "boundary-source-complete"
     | "cancel-return" ->
         Pave.Turn_runner.message runner "cancel-return-ready";
         while not (Atomic.get release_follow_up) do Thread.delay 0.001 done
@@ -135,6 +153,19 @@ let () =
         assert (ready <> []);
         Pave.Turn_runner.drain runner;
         until_idle ()) in
+    let count value values =
+      List.length (List.filter ((=) value) values) in
+    let after prior =
+      let rec drop remaining = function
+        | _ :: rest when remaining > 0 -> drop (remaining - 1) rest
+        | rest -> rest in
+      drop prior (List.rev !events) in
+    let position value values =
+      let rec find index = function
+        | [] -> failwith ("missing event: " ^ value)
+        | item :: rest ->
+            if item = value then index else find (index + 1) rest in
+      find 0 values in
     Pave.Turn_runner.submit runner "hang";
     until "message:working";
     Pave.Turn_runner.submit runner "approve";
@@ -195,5 +226,48 @@ let () =
     until_idle ();
     assert (List.length (List.filter
       ((=) "tool-abort:aborted-call:false") !events) = 1);
+    let prior = List.length !events in
+    Pave.Turn_runner.submit runner "steering-source";
+    until "message:steering-source-ready";
+    Pave.Turn_runner.follow_up runner "after-steer";
+    Pave.Turn_runner.steer runner "steered";
+    until_idle ();
+    let sequence = after prior in
+    assert (count "start:steered" sequence = 1);
+    assert (count "start:after-steer" sequence = 1);
+    assert (position "start:steered" sequence <
+      position "start:after-steer" sequence);
+    let prior = List.length !events in
+    Atomic.set release_follow_up false;
+    Pave.Turn_runner.submit runner "boundary-source";
+    until "message:boundary-source-ready";
+    Pave.Turn_runner.follow_up runner "after-boundary";
+    Thread.delay 0.01;
+    let sequence = after prior in
+    assert (Pave.Turn_runner.busy runner);
+    assert (not (List.mem "cancelled" sequence));
+    assert (count "start:after-boundary" sequence = 0);
+    Atomic.set release_follow_up true;
+    until_idle ();
+    let sequence = after prior in
+    assert (count "start:after-boundary" sequence = 1);
+    assert (position "completed" sequence <
+      position "start:after-boundary" sequence);
+    let prior = List.length !events in
+    Pave.Turn_runner.submit runner "dequeue-source";
+    until "message:dequeue-source-ready";
+    Pave.Turn_runner.follow_up runner "dequeue-retained";
+    Pave.Turn_runner.steer runner "dequeue-removed";
+    let removed = Option.get (Pave.Turn_runner.dequeue_last runner) in
+    assert (removed.kind = Pave.Turn_runner.Steering);
+    assert (removed.prompt = "dequeue-removed");
+    Pave.Turn_runner.restore_dequeued runner removed;
+    let removed_again = Option.get (Pave.Turn_runner.dequeue_last runner) in
+    assert (removed_again = removed);
+    until_idle ();
+    let sequence = after prior in
+    assert (count "start:dequeue-removed" sequence = 0);
+    assert (count "start:dequeue-retained" sequence = 1);
+    assert (count "message:dequeue-retained-complete" sequence = 1);
   );
   print_endline "turn runner: ok"

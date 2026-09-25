@@ -6,6 +6,15 @@ let measure cluster = Notty.I.width (Notty.I.string Notty.A.empty cluster)
 let rendered t width = layout t ~columns:width ~measure
 let lines t width = Array.to_list (Array.map (fun visual -> visual.text) (rendered t width))
 let has text lines = List.exists (String.equal text) lines
+let has_tool_state t name status =
+  let prefix = name ^ " · " ^ status in
+  let rec find index =
+    if index = t.count then false
+    else
+      let row = t.rows.(index) in
+      (row.kind = Tool && row.style = Tool_state &&
+       String.starts_with ~prefix row.text) || find (index + 1) in
+  find 0
 let heading_count t kind =
   let count = ref 0 in
   for i = 0 to t.count - 1 do
@@ -36,7 +45,7 @@ let () =
   expect "tool settled state and first preview visible"
     (has "http_request · completed" initial &&
     not (has "http_request · running" initial) &&
-    has "http_request · done · Alt+O expand" initial &&
+    has_tool_state transcript "http_request" "done" &&
     has "HTTP/1.1 200 OK" initial);
   expect "collapsed output hides remaining lines" (not (has "secret later line" initial));
   expect "tool expansion chooses current tool"
@@ -52,7 +61,8 @@ let () =
   expect "cancel retracts both assistant segments" (heading_count transcript Assistant = 0 &&
     not (has "Building a client" after) &&
     not (has "Final **response**" after));
-  expect "completed tool execution remains visible" (has "http_request · done · Alt+O expand" after);
+  expect "completed tool execution remains visible"
+    (has_tool_state transcript "http_request" "done");
   error transcript "Error: provider unavailable";
   expect "errors distinguished" (heading_count transcript Error = 1);
   let narrow = rendered transcript 8 in

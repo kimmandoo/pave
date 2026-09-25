@@ -10,6 +10,13 @@ type event =
   | Turn_cancelled of { turn_id : int }
   | Turn_failed of { turn_id : int; error : exn }
 
+type submission_kind = Steering | Follow_up
+
+type queued_submission = {
+  kind : submission_kind;
+  prompt : string;
+}
+
 type turn = {
   id : int;
   cancelled : bool Atomic.t;
@@ -38,7 +45,8 @@ type t = {
   guard : Mutex.t;
   notices : notice Queue.t;
   mutable approvals : approval list;
-  pending : string Queue.t;
+  steering : queued_submission Queue.t;
+  follow_ups : queued_submission Queue.t;
   mutable worker : Thread.t option;
   mutable active_turn : turn option;
   mutable next_turn_id : int;
@@ -62,12 +70,15 @@ let create ~run ~on_event ~on_approve ~on_queued () =
   { read_fd; write_fd; wake_byte = Bytes.of_string "x";
     drain_bytes = Bytes.create 256;
     guard = Mutex.create (); notices = Queue.create (); approvals = [];
-    pending = Queue.create (); worker = None; active_turn = None;
+    steering = Queue.create (); follow_ups = Queue.create ();
+    worker = None; active_turn = None;
     next_turn_id = 0; closed = false;
     run; on_event; on_approve; on_queued }
-
 let fd t = t.read_fd
 let busy t = t.worker <> None
+
+let queued_count t = Queue.length t.steering + Queue.length t.follow_ups
+
 
 let emit_finish t turn_id = function
   | Completed -> t.on_event (Turn_completed { turn_id })
@@ -183,12 +194,14 @@ let start t text =
        | _ -> ());
      emit_finish t turn.id (Failed exn))
 
-let submit t text =
+let follow_up t text =
   if t.closed then invalid_arg "turn runner closed";
   if busy t then (
-    Queue.add text t.pending;
-    t.on_queued (Queue.length t.pending))
+    Queue.add { kind = Follow_up; prompt = text } t.follow_ups;
+    t.on_queued (queued_count t))
   else start t text
+
+let submit = follow_up
 
 let cancel t =
   let requests = with_guard t (fun () ->
@@ -196,6 +209,40 @@ let cancel t =
     t.approvals) in
   List.iter (fun request -> answer request false) requests
 
+let steer t text =
+  if t.closed then invalid_arg "turn runner closed";
+  if busy t then (
+    Queue.add { kind = Steering; prompt = text } t.steering;
+    t.on_queued (queued_count t);
+    cancel t)
+  else start t text
+
+let pop_last queue =
+  if Queue.is_empty queue then None
+  else (
+    let earlier = Queue.create () in
+    while Queue.length queue > 1 do
+      Queue.add (Queue.take queue) earlier
+    done;
+    let last = Queue.take queue in
+    Queue.iter (fun queued -> Queue.add queued queue) earlier;
+    Some last)
+
+let dequeue_last t =
+  let queued = match pop_last t.steering with
+    | Some queued -> Some queued
+    | None -> pop_last t.follow_ups in
+  (match queued with
+  | None -> ()
+  | Some _ -> t.on_queued (queued_count t));
+  queued
+
+let restore_dequeued t queued =
+  if t.closed then invalid_arg "turn runner closed";
+  (match queued.kind with
+  | Steering -> Queue.add queued t.steering
+  | Follow_up -> Queue.add queued t.follow_ups);
+  t.on_queued (queued_count t)
 let drain_pipe t =
   let bytes = t.drain_bytes in
   let rec read () =
@@ -244,22 +291,28 @@ let drain t =
         handle ()
     | Some (Finished (id, outcome)) ->
         (match active_turn t id with
-         | None -> ()
-         | Some _ ->
-             (match t.worker with Some worker -> Thread.join worker | None -> ());
-             t.worker <- None;
-             with_guard t (fun () -> t.active_turn <- None);
-             emit_finish t id outcome;
-             if not t.closed && not (Queue.is_empty t.pending) then (
-               start t (Queue.take t.pending);
-               t.on_queued (Queue.length t.pending)));
+        | None -> ()
+        | Some _ ->
+            (match t.worker with Some worker -> Thread.join worker | None -> ());
+            t.worker <- None;
+            with_guard t (fun () -> t.active_turn <- None);
+            emit_finish t id outcome;
+            if not t.closed then (
+              let queued = if not (Queue.is_empty t.steering) then
+                  Some (Queue.take t.steering)
+                else if not (Queue.is_empty t.follow_ups) then
+                  Some (Queue.take t.follow_ups)
+                else None in
+              Option.iter (fun queued ->
+                start t queued.prompt;
+                t.on_queued (queued_count t)) queued));
         handle () in
   handle ()
 
 let close t =
   if not t.closed then (
-    Queue.clear t.pending;
-    cancel t;
+    Queue.clear t.steering;
+    Queue.clear t.follow_ups;
     (match t.worker with Some worker -> Thread.join worker | None -> ());
     t.worker <- None;
     with_guard t (fun () -> t.active_turn <- None);

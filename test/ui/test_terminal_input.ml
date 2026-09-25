@@ -52,6 +52,10 @@ let () =
   feed d "\027x";
   check "Alt ASCII delivered" [ `Key (`ASCII 'x', [ `Meta ]) ] (drain d);
 
+  feed d "\027\r\027\n";
+  check "Alt+Enter control forms are preserved"
+    [ `Key (`ASCII 'M', [ `Meta; `Ctrl ]); `Key (`Enter, [ `Meta ]) ]
+    (drain d);
   feed d "\027";
   Terminal_input.flush_ascii d;
   check "standalone Escape awaits timeout" [] (drain d);

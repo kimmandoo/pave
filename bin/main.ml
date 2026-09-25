@@ -562,7 +562,7 @@ let () =
           let names = List.map (fun (item : Pave.Interaction.shortcut) ->
             item.name) choices in
           match Tui.choose ?wake_fd ?on_wake ~dynamic:false screen
-            ~title:"Commands · search, Enter insert, Esc keep draft"
+            ~title:("Commands · search, " ^ Tui.enter_key ^ " insert, Esc keep draft")
             ~choices:names with
           | None -> None
           | Some name ->
@@ -579,18 +579,33 @@ let () =
               ~on_interrupt:(fun () ->
                 if Pave.Turn_runner.busy active then (
                   Pave.Turn_runner.cancel active;
-                  Tui.alert screen "Cancelling current turn…")) with
-             | Some text -> text
+                  Tui.alert screen "Cancelling turn · draft preserved; queued prompts continue";
+                  true)
+                else false)
+              ~on_dequeue:(fun () ->
+                match Pave.Turn_runner.dequeue_last active with
+                | None -> Tui.alert screen "No queued prompt to restore"
+                | Some queued ->
+                    if Tui.prepend_prompt screen queued.prompt then
+                      Tui.alert screen ("Restored queued prompt · " ^
+                        Tui.meta_key ^ "+" ^ Tui.enter_key ^
+                        " to queue, " ^ Tui.enter_key ^ " to steer")
+                    else (
+                      Pave.Turn_runner.restore_dequeued active queued;
+                      Tui.alert screen "Draft is full · queued prompt remains pending"))
+              with
+             | Some submission -> submission.text, submission.follow_up
              | None -> raise End_of_file)
         | Some screen, None ->
             (match Tui.read screen
               ~on_completion:(complete_command screen) with
-             | Some text -> text | None -> raise End_of_file)
+             | Some submission -> submission.text, submission.follow_up
+             | None -> raise End_of_file)
         | None, _ ->
             print_string "pave> "; flush stdout;
-            read_line () in
+            read_line (), true in
       try while true do
-        let line = input () in
+        let line, follow_up = input () in
         (try
          let command = Pave.Interaction.parse line in
          let busy = match !runner with
@@ -609,7 +624,10 @@ let () =
               | _ -> on_event "No active turn to cancel.")
          | Pave.Interaction.Help ->
              if busy then
-               feedback "Commands: /cancel · /quit · type to queue a follow-up; /help when idle shows the rest"
+               feedback ("Commands: /cancel · /quit · " ^ Tui.enter_key ^
+                 " steers and interrupts; " ^ Tui.meta_key ^ "+" ^
+                 Tui.enter_key ^ " or /queue MESSAGE queues a follow-up; " ^
+                 Tui.meta_key ^ "+↑ restores the last queued prompt")
              else (
                let lines = "Commands · type / then Tab to search" ::
                  Pave.Interaction.help () in
@@ -620,6 +638,14 @@ let () =
              (match !ui with
               | Some screen -> Tui.events screen Tui.hotkeys
               | None -> on_event "Hotkeys require the interactive terminal; use /help for commands")
+         | Pave.Interaction.Queue_prompt text ->
+             (match !runner with
+              | Some active -> Pave.Turn_runner.follow_up active text
+              | None -> send text);
+             (match busy, !ui with
+              | true, Some screen ->
+                  Tui.alert screen "Follow-up queued for after the active turn."
+              | _ -> ())
          | _ when busy && (match command with
              | Pave.Interaction.Prompt _ -> false
              | _ -> true) ->
@@ -880,6 +906,15 @@ let () =
             on_event "Unknown command; use /help to list available commands"
         | Pave.Interaction.Prompt text when text <> "" ->
             (match !runner with
+             | Some active when busy ->
+                 (match !ui with
+                 | Some screen when follow_up ->
+                     Pave.Turn_runner.follow_up active line;
+                     Tui.alert screen "Follow-up queued for after this turn."
+                 | Some screen ->
+                     Pave.Turn_runner.steer active line;
+                     Tui.alert screen "Steering queued; interrupting the current turn."
+                 | None -> Pave.Turn_runner.submit active line)
              | Some active -> Pave.Turn_runner.submit active line
              | None -> send line)
         | Pave.Interaction.Prompt _ -> ()
@@ -961,12 +996,7 @@ let () =
                 Tui.clear_live screen;
                 Tui.event screen ("Error: " ^ error_message error))
           ~on_approve:(Tui.confirm screen)
-          ~on_queued:(fun count ->
-            Tui.set_queue screen count;
-            if count > 0 then
-              Tui.alert screen (Printf.sprintf
-                "Queued %d follow-up%s · /cancel stops the current turn"
-                count (if count = 1 then "" else "s"))) () in
+          ~on_queued:(Tui.set_queue screen) () in
         runner := Some active;
         interact ()))
     else (

@@ -258,6 +258,20 @@ let insert t value =
       replace t ~start:t.cursor ~stop:t.cursor ~value ~position:pos);
     if t.paste = None then
       record t ~start ~removed:"" ~inserted:value ~before:start)
+let prepend t value =
+  let value = safe_input value in
+  let inserted = String.length value in
+  if value = "" then true
+  else if String.length t.text + inserted > 16_384 then false
+  else (
+    let before = t.cursor in
+    t.journal.grouping <- false;
+    set_at t (value ^ t.text) (before + inserted);
+    t.recall <- None;
+    t.draft_journal <- None;
+    record t ~start:0 ~removed:"" ~inserted:value ~before;
+    t.journal.grouping <- false;
+    true)
 
 let erase t =
   let start = previous t in

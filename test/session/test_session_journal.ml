@@ -271,6 +271,13 @@ let () =
     assert (Pave.Session.history copy =
       [message "first"; assistant "old answer";
        message "retry me"; assistant "new answer"]);
+    let completed_tip = Option.get (Pave.Session.leaf_id copy) in
+    ignore (Pave.Session.append copy (message "interrupted request"));
+    assert (Pave.Session.retry_candidate copy =
+      Some (completed_tip, "interrupted request"));
+    assert (Pave.Session.retryable_history [message "interrupted request"] =
+      Some ([], "interrupted request"));
+    Pave.Session.branch copy completed_tip;
     ignore (Pave.Session.append copy (message "tool turn"));
     ignore (Pave.Session.append copy {
       role = "assistant"; content = None; tool_calls = [ call ];

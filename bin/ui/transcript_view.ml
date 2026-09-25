@@ -193,7 +193,7 @@ let tool_result ?group:existing ?(aborted = false) ?(is_error = false) t name re
   add_line t ~kind:(if error then Error else Tool) ~group:id
     ~provisional:false ~style:Tool_state
     (name ^ (if aborted then " · aborted" else
-      if failed then " · error" else " · done") ^ " · Alt+O expand");
+      if failed then " · error" else " · done") ^ " · details hidden");
   let position = ref 0 in
   for index = 0 to min (length - 1) (max_tool_lines - 1) do
     let stop = match String.index_from_opt result !position '\n' with
@@ -325,15 +325,15 @@ let toggle t ~first:_ ~last =
       for i = 0 to t.count - 1 do
         let row = t.rows.(i) in
         if row.group = id && row.style = Tool_state &&
-          String.ends_with ~suffix:" · Alt+O expand" row.text then
+          String.ends_with ~suffix:" · details hidden" row.text then
           row.text <- String.sub row.text 0
-            (String.length row.text - String.length " · Alt+O expand") ^
-            " · Alt+O collapse"
+            (String.length row.text - String.length " · details hidden") ^
+            " · details shown"
         else if row.group = id && row.style = Tool_state &&
-          String.ends_with ~suffix:" · Alt+O collapse" row.text then
+          String.ends_with ~suffix:" · details shown" row.text then
           row.text <- String.sub row.text 0
-            (String.length row.text - String.length " · Alt+O collapse") ^
-            " · Alt+O expand"
+            (String.length row.text - String.length " · details shown") ^
+            " · details hidden"
       done;
       t.revision <- t.revision + 1;
       Some id

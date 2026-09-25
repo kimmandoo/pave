@@ -26,6 +26,12 @@ let () =
   (match parse "/tools read_file" with
    | Tools (Some "read_file") -> ()
    | _ -> fail "tool detail selection");
+  (match parse "/queue inspect the active branch" with
+   | Queue_prompt "inspect the active branch" -> ()
+   | _ -> fail "queued follow-up parsing");
+  if not (List.exists (fun item -> item.name = "/queue") (suggestions "/q")) then
+    fail "queued follow-up is missing from command completion";
+  invalid "missing queued prompt" (fun () -> parse "/queue");
   if suggestions "/model/foo" <> [] then fail "slash completion matched invalid prefix";
   invalid "multiple model arguments" (fun () -> parse "/model openai/gpt-5 extra");
   invalid "missing branch ID" (fun () -> parse "/branch");

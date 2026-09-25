@@ -17,11 +17,12 @@ type command =
   | Usage
   | Hotkeys
   | Entries
+  | Queue_prompt of string
   | Prompt of string
   | Unknown of string
 
 type action =
-  | A_model | A_settings | A_setup | A_new | A_resume | A_cancel
+  | A_model | A_settings | A_setup | A_new | A_resume | A_cancel | A_queue
   | A_entries | A_tree | A_tools | A_context | A_usage | A_hotkeys | A_branch | A_fork
   | A_compact | A_retry | A_help | A_quit
 
@@ -33,6 +34,7 @@ let commands = [
   { name = "/setup"; usage = ""; summary = "Connect and save your user default model"; action = A_setup };
   { name = "/new"; usage = ""; summary = "Start a private saved session"; action = A_new };
   { name = "/resume"; usage = "[PATH]"; summary = "Search or reopen saved sessions"; action = A_resume };
+  { name = "/queue"; usage = "MESSAGE"; summary = "Queue a follow-up without interrupting the active turn"; action = A_queue };
   { name = "/cancel"; usage = ""; summary = "Cancel the active turn"; action = A_cancel };
   { name = "/retry"; usage = ""; summary = "Retry the last turn only if no tools ran"; action = A_retry };
   { name = "/tools"; usage = "[NAME]"; summary = "List or inspect enabled tools"; action = A_tools };
@@ -111,6 +113,10 @@ let parse line =
     | Some A_setup -> no_args (); Setup
     | Some A_new -> no_args (); New
     | Some A_resume -> Resume (Option.map (require_path name) argument)
+    | Some A_queue ->
+        (match argument with
+        | Some text -> Queue_prompt text
+        | None -> invalid_argument (name ^ " requires a nonempty prompt"))
     | Some A_compact -> no_args (); Compact
     | Some A_retry -> no_args (); Retry
     | Some A_branch -> Branch (require_single_argument name
