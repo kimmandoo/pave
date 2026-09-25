@@ -1,9 +1,25 @@
+type tool_state =
+  | Tool_started
+  | Tool_settled of { is_error : bool }
+  | Tool_aborted of { side_effects_may_have_occurred : bool }
+type tool_lifecycle = { call_id : string; name : string; state : tool_state }
+type pending_state =
+  | Unknown
+  | Started
+  | Settled
+  | Aborted of { side_effects_may_have_occurred : bool }
+type pending_tool_call = {
+  call_id : string; name : string; state : pending_state
+}
+type exit_kind = Normal | Signal | Fatal | Process_exit
 type kind =
   | Message of Protocol.message
   | Compaction of { summary : string; first_kept_id : string }
   | Model of { provider : string; model : string; api : string option }
   | Usage of { provider : string; model : string; tokens : Protocol.usage }
   | Branch
+  | Tool_lifecycle of tool_lifecycle
+  | Session_exit of { kind : exit_kind; pending_tool_calls : pending_tool_call list }
 type entry = { id : string; parent_id : string option; timestamp : string; kind : kind }
 
 type t = {
@@ -50,9 +66,11 @@ let new_header cwd =
            "cwd", `String cwd ]
 
 let entry_json entry =
-  let fields = [ "type", `String (match entry.kind with
+  let type_name = match entry.kind with
     | Message _ -> "message" | Compaction _ -> "compaction"
-    | Model _ -> "model" | Usage _ -> "usage" | Branch -> "branch");
+    | Model _ -> "model" | Usage _ -> "usage" | Branch -> "branch"
+    | Tool_lifecycle _ -> "tool" | Session_exit _ -> "exit" in
+  let fields = [ "type", `String type_name;
     "id", `String entry.id; "parentId", option_json entry.parent_id;
     "timestamp", `String entry.timestamp ] in
   match entry.kind with
@@ -69,6 +87,31 @@ let entry_json entry =
         "inputTokens", `Int tokens.input_tokens;
         "outputTokens", `Int tokens.output_tokens])
   | Branch -> `Assoc fields
+  | Tool_lifecycle { call_id; name; state } ->
+      let state_fields = match state with
+        | Tool_started -> ["state", `String "started"]
+        | Tool_settled { is_error } ->
+            ["state", `String "settled"; "isError", `Bool is_error]
+        | Tool_aborted { side_effects_may_have_occurred } ->
+            ["state", `String "aborted";
+             "sideEffectsMayHaveOccurred", `Bool side_effects_may_have_occurred] in
+      `Assoc (fields @ ["toolCallId", `String call_id;
+        "toolName", `String name] @ state_fields)
+  | Session_exit { kind; pending_tool_calls } ->
+      let pending = List.map (fun call ->
+        let state_fields = match call.state with
+          | Unknown -> ["state", `String "unknown"]
+          | Started -> ["state", `String "started"]
+          | Settled -> ["state", `String "settled"]
+          | Aborted { side_effects_may_have_occurred } ->
+              ["state", `String "aborted";
+               "sideEffectsMayHaveOccurred", `Bool side_effects_may_have_occurred] in
+        `Assoc (["toolCallId", `String call.call_id;
+          "toolName", `String call.name] @ state_fields)) pending_tool_calls in
+      `Assoc (fields @ ["exitKind", `String (match kind with
+        | Normal -> "normal" | Signal -> "signal"
+        | Fatal -> "fatal" | Process_exit -> "process_exit");
+        "pendingToolCalls", `List pending])
 
 let write_all fd text =
   let rec loop offset =
@@ -114,6 +157,27 @@ let parse_entry json =
     | `Null -> None | _ -> invalid "invalid parent ID" in
   let timestamp = match get "timestamp" with `String value -> value
     | _ -> invalid "entry timestamp missing" in
+  let pending_tool_call json =
+    let call_id = Protocol.member "toolCallId" json
+    and name = Protocol.member "toolName" json
+    and state = Protocol.member "state" json in
+    match call_id, name, state with
+    | `String call_id, `String name, `String "unknown"
+      when valid_model_field call_id && valid_model_field name ->
+        { call_id; name; state = Unknown }
+    | `String call_id, `String name, `String "started"
+      when valid_model_field call_id && valid_model_field name ->
+        { call_id; name; state = Started }
+    | `String call_id, `String name, `String "settled"
+      when valid_model_field call_id && valid_model_field name ->
+        { call_id; name; state = Settled }
+    | `String call_id, `String name, `String "aborted"
+      when valid_model_field call_id && valid_model_field name ->
+        (match Protocol.member "sideEffectsMayHaveOccurred" json with
+         | `Bool side_effects_may_have_occurred ->
+             { call_id; name; state = Aborted { side_effects_may_have_occurred } }
+         | _ -> invalid "invalid pending tool state")
+    | _ -> invalid "invalid pending tool call" in
   let kind = match get "type" with
     | `String "message" -> Message (Protocol.message_from_json (get "message"))
     | `String "compaction" ->
@@ -142,6 +206,36 @@ let parse_entry json =
              Usage { provider; model; tokens = { input_tokens; output_tokens } }
          | _ -> invalid "invalid provider token usage")
     | `String "branch" -> Branch
+    | `String "tool" ->
+        (match get "toolCallId", get "toolName", get "state" with
+         | `String call_id, `String name, `String "started"
+           when valid_model_field call_id && valid_model_field name ->
+             Tool_lifecycle { call_id; name; state = Tool_started }
+         | `String call_id, `String name, `String "settled"
+           when valid_model_field call_id && valid_model_field name ->
+             (match get "isError" with
+              | `Bool is_error ->
+                  Tool_lifecycle { call_id; name; state = Tool_settled { is_error } }
+              | _ -> invalid "invalid settled tool event")
+         | `String call_id, `String name, `String "aborted"
+           when valid_model_field call_id && valid_model_field name ->
+             (match get "sideEffectsMayHaveOccurred" with
+              | `Bool side_effects_may_have_occurred ->
+                  Tool_lifecycle { call_id; name; state =
+                    Tool_aborted { side_effects_may_have_occurred } }
+              | _ -> invalid "invalid aborted tool event")
+         | _ -> invalid "invalid tool lifecycle event")
+    | `String "exit" ->
+        let kind = match get "exitKind" with
+          | `String "normal" -> Normal
+          | `String "signal" -> Signal
+          | `String "fatal" -> Fatal
+          | `String "process_exit" -> Process_exit
+          | _ -> invalid "invalid session exit kind" in
+        let pending_tool_calls = match get "pendingToolCalls" with
+          | `List calls -> List.map pending_tool_call calls
+          | _ -> invalid "invalid pending tool calls" in
+        Session_exit { kind; pending_tool_calls }
     | _ -> invalid "unsupported journal entry type" in
   { id; parent_id; timestamp; kind }
 
@@ -165,7 +259,8 @@ let model_at t leaf =
           with Not_found -> invalid ("missing parent entry: " ^ id) in
         match entry.kind with
         | Model { provider; model; _ } -> Some (provider, model)
-        | Message _ | Compaction _ | Usage _ | Branch -> find entry.parent_id in
+        | Message _ | Compaction _ | Usage _ | Branch
+        | Tool_lifecycle _ | Session_exit _ -> find entry.parent_id in
   find leaf
 let model t = model_at t t.leaf
 let api_at t leaf =
@@ -176,7 +271,8 @@ let api_at t leaf =
           with Not_found -> invalid ("missing parent entry: " ^ id) in
         match entry.kind with
         | Model { api; _ } -> api
-        | Message _ | Compaction _ | Usage _ | Branch -> find entry.parent_id in
+        | Message _ | Compaction _ | Usage _ | Branch
+        | Tool_lifecycle _ | Session_exit _ -> find entry.parent_id in
   find leaf
 let api t = api_at t t.leaf
 let usage t =
@@ -185,7 +281,8 @@ let usage t =
         (match total with
          | None -> Some tokens
          | Some previous -> Some (Protocol.add_usage previous tokens))
-    | Message _ | Compaction _ | Model _ | Branch -> total)
+    | Message _ | Compaction _ | Model _ | Branch
+    | Tool_lifecycle _ | Session_exit _ -> total)
     None (branch_entries t)
 module Usage_models = Map.Make (struct
   type t = string * string
@@ -199,14 +296,15 @@ let usage_by_model t =
         Usage_models.update key (function
           | None -> Some tokens
           | Some previous -> Some (Protocol.add_usage previous tokens)) models
-    | Message _ | Compaction _ | Model _ | Branch -> models)
+    | Message _ | Compaction _ | Model _ | Branch
+    | Tool_lifecycle _ | Session_exit _ -> models)
     Usage_models.empty (branch_entries t) in
   Usage_models.bindings models
 let messages entries =
   List.filter_map (fun entry -> match entry.kind with
     | Message message -> Some message
-    | Compaction _ | Model _ | Usage _ | Branch -> None) entries
-
+    | Compaction _ | Model _ | Usage _ | Branch
+    | Tool_lifecycle _ | Session_exit _ -> None) entries
 let history t = messages (branch_entries t)
 let retryable_history history =
   let rec find safe = function
@@ -227,7 +325,9 @@ let retry_candidate t =
         parent_id = Some parent; _ } :: _ when String.trim text <> "" ->
         Some (parent, text)
     | { kind = Message { role = "assistant"; tool_calls = []; _ }; _ } :: rest
-    | { kind = Usage _; _ } :: rest -> find rest
+    | { kind = Usage _; _ } :: rest
+    | { kind = Tool_lifecycle _; _ } :: rest
+    | { kind = Session_exit _; _ } :: rest -> find rest
     | _ -> None in
   find (List.rev (branch_entries t))
 
@@ -235,7 +335,8 @@ let context t =
   let path = branch_entries t in
   let latest = List.fold_left (fun found entry -> match entry.kind with
     | Compaction { summary; first_kept_id } -> Some (entry.id, summary, first_kept_id)
-    | Message _ | Model _ | Usage _ | Branch -> found) None path in
+    | Message _ | Model _ | Usage _ | Branch
+    | Tool_lifecycle _ | Session_exit _ -> found) None path in
   match latest with
   | None -> messages path
   | Some (marker_id, summary, first_kept_id) ->
@@ -268,48 +369,114 @@ let compaction_plan t =
       if List.length prefix < 2 then invalid "nothing to compact";
       first_kept_id, prefix
 
-let missing_results messages =
-  let pending = List.fold_left (fun pending (msg : Protocol.message) ->
-    match msg.role with
-    | "assistant" ->
-        if pending <> [] then invalid "assistant before outstanding tool results";
-        List.map (fun (call : Protocol.tool_call) -> call.id) msg.tool_calls
-    | "tool" ->
-        (match msg.tool_call_id with
-        | Some id when List.mem id pending -> List.filter ((<>) id) pending
-        | _ -> invalid "orphan tool result")
-    | "user" ->
-        if pending <> [] then invalid "user before outstanding tool results";
-        []
-    | _ -> invalid "unsupported transcript role") [] messages in
-  List.map (fun id -> Protocol.tool_result id
-    "Error: previous process stopped before this tool result; do not assume it executed") pending
+let unresolved_tool_calls entries =
+  let pending = ref [] in
+  let update call_id state =
+    pending := List.map (fun call ->
+      if call.call_id = call_id then { call with state } else call) !pending in
+  let remove call_id =
+    if not (List.exists (fun call -> call.call_id = call_id) !pending) then
+      invalid "orphan tool result";
+    pending := List.filter (fun call -> call.call_id <> call_id) !pending in
+  List.iter (fun entry -> match entry.kind with
+    | Message { role = "assistant"; tool_calls; _ } ->
+        if !pending <> [] then invalid "assistant before outstanding tool results";
+        pending := List.map (fun (call : Protocol.tool_call) ->
+          { call_id = call.id; name = call.name; state = Unknown }) tool_calls
+    | Message { role = "tool"; tool_call_id = Some call_id; _ } -> remove call_id
+    | Message { role = "user"; _ } ->
+        if !pending <> [] then invalid "user before outstanding tool results"
+    | Message _ -> invalid "unsupported transcript role"
+    | Tool_lifecycle { call_id; state = Tool_started; _ } ->
+        update call_id Started
+    | Tool_lifecycle { call_id; state = Tool_settled _; _ } ->
+        update call_id Settled
+    | Tool_lifecycle { call_id; state = Tool_aborted { side_effects_may_have_occurred }; _ } ->
+        update call_id (Aborted { side_effects_may_have_occurred })
+    | Compaction _ | Model _ | Usage _ | Branch | Session_exit _ -> ()) entries;
+  List.rev !pending
+
+let missing_results entries = unresolved_tool_calls entries
+
+let append_entry t kind =
+  let entry = { id = fresh_id (); parent_id = t.leaf; timestamp = timestamp (); kind } in
+  append_line t (entry_json entry);
+  t.records_rev <- entry :: t.records_rev;
+  Hashtbl.add t.by_id entry.id entry;
+  t.leaf <- Some entry.id;
+  entry
+
+let recovery_result (call : pending_tool_call) =
+  match call.state with
+  | Unknown ->
+      "Error: prior process stopped before a durable tool result was recorded; " ^
+      "execution status is unknown and side effects may have occurred. " ^
+      "Do not rerun this call automatically.",
+      Some (Tool_aborted { side_effects_may_have_occurred = true })
+  | Started ->
+      "Error: prior process stopped while this tool was running; side effects may " ^
+      "have occurred. Do not rerun this call automatically.",
+      Some (Tool_aborted { side_effects_may_have_occurred = true })
+  | Settled ->
+      "Error: tool execution was recorded as settled but its result was missing; " ^
+      "side effects may have occurred. Do not rerun this call automatically.",
+      None
+  | Aborted { side_effects_may_have_occurred } ->
+      (if side_effects_may_have_occurred then
+         "Error: tool was aborted while running; side effects may have occurred. " ^
+         "Do not rerun this call automatically."
+       else
+         "Error: tool was aborted before execution; no side effects were recorded. " ^
+         "Do not rerun this call automatically."),
+      None
+
+let recover_pending_tools t =
+  List.iter (fun call ->
+    let result, recovery_state = recovery_result call in
+    ignore (append_entry t (Message (Protocol.tool_result call.call_id result)));
+    Option.iter (fun state -> ignore (append_entry t (Tool_lifecycle {
+      call_id = call.call_id; name = call.name; state
+    }))) recovery_state) (missing_results (branch_entries t))
 
 let compact t ~summary ~first_kept_id =
   if String.trim summary = "" then invalid "empty compaction summary";
   let planned_id, _ = compaction_plan t in
   if planned_id <> first_kept_id then invalid "compaction must retain the latest user turn";
-  if missing_results (history t) <> [] then invalid "unresolved tool results";
-  let entry = { id = fresh_id (); parent_id = t.leaf; timestamp = timestamp ();
-                kind = Compaction { summary; first_kept_id } } in
-  append_line t (entry_json entry);
-  t.records_rev <- entry :: t.records_rev;
-  Hashtbl.add t.by_id entry.id entry;
-  t.leaf <- Some entry.id;
-  entry.id
+  if missing_results (branch_entries t) <> [] then invalid "unresolved tool results";
+  (append_entry t (Compaction { summary; first_kept_id })).id
 
 let append t message =
   (match message.Protocol.role, message.content, message.tool_calls, message.tool_call_id with
    | "user", Some _, [], None | "assistant", _, _, None
    | "tool", Some _, [], Some _ -> ()
    | _ -> invalid "unsupported message");
-  let entry = { id = fresh_id (); parent_id = t.leaf; timestamp = timestamp ();
-                kind = Message message } in
-  append_line t (entry_json entry);
-  t.records_rev <- entry :: t.records_rev;
-  Hashtbl.add t.by_id entry.id entry;
-  t.leaf <- Some entry.id;
-  entry.id
+  (append_entry t (Message message)).id
+
+let record_tool_event t ~call_id ~name state =
+  if not (valid_model_field call_id && valid_model_field name) then
+    invalid "invalid tool lifecycle event";
+  (append_entry t (Tool_lifecycle { call_id; name; state })).id
+
+let record_tool_started t ~call_id ~name =
+  record_tool_event t ~call_id ~name Tool_started
+
+let record_tool_settled t ~call_id ~name ~is_error =
+  record_tool_event t ~call_id ~name (Tool_settled { is_error })
+
+let record_tool_aborted t ~call_id ~name ~side_effects_may_have_occurred =
+  record_tool_event t ~call_id ~name
+    (Tool_aborted { side_effects_may_have_occurred })
+
+let pending_tool_calls t = unresolved_tool_calls (branch_entries t)
+
+let record_exit t ~kind =
+  let path = branch_entries t in
+  if List.exists (function
+    | { kind = Message { role = "assistant"; _ }; _ } -> true
+    | _ -> false) path then
+    let pending_tool_calls = unresolved_tool_calls path in
+    Some (append_entry t (Session_exit { kind; pending_tool_calls })).id
+  else None
 
 let set_model ?api t ~provider ~model:selected =
   if not (valid_model_field provider && valid_model_field selected) ||
@@ -343,9 +510,7 @@ let branch t id =
   t.records_rev <- marker :: t.records_rev;
   Hashtbl.add t.by_id marker.id marker;
   t.leaf <- Some id;
-  List.iter (fun message -> ignore (append t message))
-    (missing_results (history t))
-
+  recover_pending_tools t
 let load_journal path =
   let ic = open_in_bin path in
   Fun.protect ~finally:(fun () -> close_in_noerr ic) (fun () ->
@@ -377,7 +542,7 @@ let load_journal path =
            invalid ("entry has missing parent: " ^ parent)
        | _ -> ());
       (match entry.kind with
-       | Message _ | Model _ | Usage _ ->
+       | Message _ | Model _ | Usage _ | Tool_lifecycle _ | Session_exit _ ->
            Hashtbl.add by_id entry.id entry; leaf := Some entry.id
        | Compaction { first_kept_id; _ } ->
            let rec ancestor = function
@@ -457,8 +622,7 @@ let rec open_file ?(cwd = Unix.getcwd ()) path =
       open_file ~cwd path)
     else (
       let session = load_journal path in
-      List.iter (fun message -> ignore (append session message))
-        (missing_results (history session));
+      recover_pending_tools session;
       session))
 
 let fork session path =

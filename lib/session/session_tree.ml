@@ -35,6 +35,23 @@ let summary (entry : Session.entry) =
       Printf.sprintf "usage · %s · %d in / %d out"
         (first_line (provider ^ "/" ^ model))
         tokens.input_tokens tokens.output_tokens
+  | Session.Tool_lifecycle { name; state; _ } ->
+      let state = match state with
+        | Session.Tool_started -> "started"
+        | Session.Tool_settled { is_error = false } -> "settled"
+        | Session.Tool_settled { is_error = true } -> "failed"
+        | Session.Tool_aborted { side_effects_may_have_occurred = false } ->
+            "aborted"
+        | Session.Tool_aborted { side_effects_may_have_occurred = true } ->
+            "aborted · side effects possible" in
+      "tool · " ^ first_line name ^ " · " ^ state
+  | Session.Session_exit { kind; pending_tool_calls } ->
+      let kind = match kind with
+        | Session.Normal -> "normal" | Session.Signal -> "signal"
+        | Session.Fatal -> "fatal" | Session.Process_exit -> "process exit" in
+      let count = List.length pending_tool_calls in
+      Printf.sprintf "session exit · %s · %d pending tool%s"
+        kind count (if count = 1 then "" else "s")
   | Session.Message message ->
       let content = match message.content with
         | None | Some "" when message.tool_calls <> [] -> "tool calls"

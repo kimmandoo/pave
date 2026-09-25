@@ -24,6 +24,27 @@ let () =
   assert (not (String.contains (List.hd (List.rev labels)) '\n'));
   assert (Pave.Session_tree.first_line "safe\226\128\174unsafe" =
     "safe unsafe");
+  let tool = {
+    Pave.Session.id = "tool-entry"; parent_id = Some "a";
+    timestamp = "2026-09-25T00:00:01Z";
+    kind = Pave.Session.Tool_lifecycle {
+      call_id = "call-1"; name = "read_file";
+      state = Pave.Session.Tool_started
+    }
+  } in
+  let exit = {
+    Pave.Session.id = "exit-entry"; parent_id = Some "tool-entry";
+    timestamp = "2026-09-25T00:00:02Z";
+    kind = Pave.Session.Session_exit {
+      kind = Pave.Session.Fatal;
+      pending_tool_calls = [{
+        call_id = "call-1"; name = "read_file"; state = Pave.Session.Started
+      }]
+    }
+  } in
+  assert (Pave.Session_tree.summary tool = "tool · read_file · started");
+  assert (Pave.Session_tree.summary exit =
+    "session exit · fatal · 1 pending tool");
   let entries = List.init 1030 (fun n -> entry (string_of_int n)
     (if n = 0 then None else Some (string_of_int (n - 1)))
     (message "user" (String.make 512 'x'))) in

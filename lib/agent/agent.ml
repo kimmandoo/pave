@@ -127,6 +127,7 @@ let run ?(max_turns = 20) ?cancel t text =
         append t reply;
         (match reply.content with Some s -> s | None -> "")
     | calls ->
+        append t reply;
         let cancellation_result =
           "Error: turn cancelled before this tool ran; do not assume it executed" in
         let abort (call : Protocol.tool_call) result side_effects_may_have_occurred =
@@ -136,9 +137,9 @@ let run ?(max_turns = 20) ?cancel t text =
           }) in
         let skipped pending =
           List.iter (fun (call : Protocol.tool_call) ->
-            append t (Protocol.tool_result call.id cancellation_result);
-            abort call cancellation_result false) pending in
-        let rec execute first = function
+            abort call cancellation_result false;
+            append t (Protocol.tool_result call.id cancellation_result)) pending in
+        let rec execute = function
           | [] -> turn (remaining - 1)
           | (call : Protocol.tool_call) :: rest as pending ->
               emit_tool_event t (Tool_started {
@@ -146,13 +147,9 @@ let run ?(max_turns = 20) ?cancel t text =
               });
               (match cancel with
                | Some cancelled when cancelled () ->
-                   if first then
-                     List.iter (fun (call : Protocol.tool_call) ->
-                       abort call cancellation_result false) pending
-                   else skipped pending;
+                   skipped pending;
                    raise Provider.Cancelled
                | _ -> ());
-              if first then append t reply;
               (match t.on_phase with
                | None -> ()
                | Some notify -> notify (Tool call.name));
@@ -202,20 +199,21 @@ let run ?(max_turns = 20) ?cancel t text =
                 | Tools.Cancelled ->
                     let result =
                       "Error: command cancelled while running; side effects may have occurred" in
-                    append t (Protocol.tool_result call.id result);
                     abort call result true;
+                    append t (Protocol.tool_result call.id result);
                     skipped rest;
                     raise Provider.Cancelled
                 | Provider.Cancelled ->
                     skipped pending;
                     raise Provider.Cancelled in
-              append t (Protocol.tool_result call.id result);
               emit_tool_event t (Tool_settled {
                 call_id = call.id; name = call.name; result;
                 is_error = String.starts_with ~prefix:"Error:" result
               });
-              execute false rest in
-        execute true calls
+              append t (Protocol.tool_result call.id result);
+              execute rest
+        in
+        execute calls
   in
   try turn max_turns with exn ->
     t.scoped_pending <- [];

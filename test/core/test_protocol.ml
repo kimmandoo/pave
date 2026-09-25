@@ -52,8 +52,10 @@ let () =
      | result :: _ ->
          assert (result.role = "tool");
          assert (result.tool_call_id = Some "call-1");
-         assert (result.content = Some
-           "Error: previous process stopped before this tool result; do not assume it executed")
+         assert (match result.content with
+           | Some text -> String.starts_with ~prefix:"Error:" text &&
+               String.ends_with ~suffix:"Do not rerun this call automatically." text
+           | None -> false)
      | [] -> assert false);
     assert (Pave.Session.history (Pave.Session.open_file path) =
       Pave.Session.history recovered));
