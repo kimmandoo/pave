@@ -14,7 +14,7 @@
 <p align="center"><a href="#install">Install</a> · <a href="#use">Use</a> · <a href="#providers">Providers</a> · <a href="#features">Features</a> · <a href="#contribute">Contribute</a></p>
 
 > [!NOTE]
-> Pave is in active development. Ten provider descriptors and six wire payload formats, four sign-in paths, an append-only session journal and a cancellable interactive terminal work in local fixtures. Live vendor entitlements, LSP/DAP, subagents, plugins and a full model catalog are not verified or implemented. See [TASKS.md](TASKS.md) for the remaining work.
+> Pave is under active development. Its 65 provider routes, seven wire payload formats, account sign-in paths, branching session journal and cancellable terminal have fixture coverage—not blanket live vendor entitlement. LSP/DAP, subagents, plugins and a complete model catalog remain open. See [the feature plan](TASKS.md).
 
 ## Install
 
@@ -24,21 +24,31 @@
 curl -fsSL https://raw.githubusercontent.com/kimmandoo/pave/main/install.sh | sh
 ```
 
-The [installer](install.sh) verifies the release archive against its published SHA-256 manifest, then installs the binary to `~/.local/bin/pave` and its notices and native-install marker to `~/.local/share/licenses/pave`. If prompted, add `~/.local/bin` to your `PATH`. Inspect the script before running it if you prefer not to pipe downloads into a shell. For installer-owned binaries:
+The [installer](install.sh) checks the downloaded archive against its published SHA-256 manifest. It writes:
+
+- The executable to `~/.local/bin/pave` (add that directory to `PATH` if needed).
+- Licenses and a native-install marker to `~/.local/share/licenses/pave`.
+
+Inspect the script first if you prefer not to pipe a download into a shell. Installed binaries can update themselves:
 
 ```sh
 pave update --check  # Compare embedded release version against GitHub's latest published tag; no files changed.
 pave update          # Upgrade to the latest release.
 ```
-After a successful install, `pave update` prints the completed transition, for example `Updated Pave v0.1.40 → v0.1.41.` Reinstalling the current release is labeled `Reinstalled` instead; a failed checksum/install never prints a success transition.
+A successful upgrade prints the version transition (`Updated Pave v0.1.40 → v0.1.41.`). A same-version install says `Reinstalled`; a checksum or installation failure never reports success.
 
-The native binary executes its **embedded** copy of the checksum-verifying installer; it does not fetch a new shell script. `--check` requires a release built with embedded version metadata (`v0.1.6` or later); an unavailable/rate-limited GitHub API fails with an error rather than guessing. Updates validate the latest release tag from GitHub's API and pin both archive and checksum downloads to that tag, including when you are already up to date. This avoids a stale `/latest/download` redirect reinstalling an old version. Updates preserve a custom install directory and the separate private login store at `${XDG_CONFIG_HOME:-~/.config}/pave/oauth.json`, but intentionally ignore `PAVE_VERSION` and `PAVE_INSTALL_DIR` overrides from your environment. A binary installed before the native-install marker was introduced (through `v0.1.4`) needs the one-command installer run **once more** before `pave update` is available. Source/opam installs do not self-update; use the package-manager steps below.
+**Update safeguards**
+
+- The native binary runs its **embedded** checksum-verifying installer, not a newly downloaded script. It resolves the latest GitHub release tag and pins both archive and checksum to that tag, avoiding stale `/latest/download` redirects.
+- `--check` changes no files and requires embedded version metadata (available since `v0.1.6`). Unavailable or rate-limited GitHub metadata produces an error rather than a guessed result.
+- Updates retain the original installation directory and separate private login store at `${XDG_CONFIG_HOME:-~/.config}/pave/oauth.json`; they ignore environment `PAVE_VERSION` and `PAVE_INSTALL_DIR` overrides.
+- For binaries installed through `v0.1.4`, rerun the installer once to add the native-install marker. Source/opam installs use their package manager instead.
 
 <details>
 <summary>Version pinning, custom destination and removal</summary>
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/kimmandoo/pave/main/install.sh | PAVE_VERSION=v0.1.5 sh
+curl -fsSL https://raw.githubusercontent.com/kimmandoo/pave/main/install.sh | PAVE_VERSION=v0.1.41 sh
 curl -fsSL https://raw.githubusercontent.com/kimmandoo/pave/main/install.sh | PAVE_INSTALL_DIR="$HOME/tools/bin" sh
 ```
 
@@ -66,7 +76,13 @@ The switch belongs to the checkout; prefix commands with `opam exec --` without 
 
 ## Use
 
-The default provider uses `OPENAI_API_KEY` when making a request. The interactive terminal opens before credentials are configured; use `/setup` to connect an account or choose a saved default, then `/model` to change this conversation. `pave --providers` lists available routes; `pave --provider ID --models` queries pinned provider listings rather than a bundled model catalog. The `/model` picker gathers IDs from all configured API keys and saved sign-ins concurrently; `[listed · API unverified]` means the account returned an ID but did not certify Chat, tool support or route compatibility. Anthropic OAuth has no documented account model-list endpoint: provide `ANTHROPIC_API_KEY` to list IDs, or type an Anthropic model ID. No built-in model ID or model-family wire-route guess is used. Keep API keys out of checked-in config and session files.
+Start `pave` for interactive setup; no credentials are needed just to open the terminal. The default provider reads `OPENAI_API_KEY` only when making a request.
+
+1. Use `/setup` to connect an account or choose a saved default; use `/model` to switch the current conversation.
+2. Run `pave --providers` for routes or `pave --provider ID --models` for pinned, account-scoped model listings. No model IDs or wire routes are guessed from names.
+3. Treat `[listed · API unverified]` as an account-listed ID, **not** proof of Chat, tool support or compatible wire routes. Anthropic OAuth cannot list models without `ANTHROPIC_API_KEY`; type an Anthropic model ID instead if needed.
+
+Keep API keys out of checked-in config and session files.
 
 ```sh
 # Interactive: resize-aware TUI, prompt history and a persistent session.
@@ -95,41 +111,86 @@ pave --provider github-copilot --model "$COPILOT_MODEL" --prompt 'Inspect this p
 pave --provider ollama --model "$LOCAL_MODEL" --prompt 'Inspect this project'
 ```
 
-Moonshot AI global uses `MOONSHOT_API_KEY` (or `KIMI_API_KEY`) with its credentialed `/v1/models` and Chat Completions API. Ollama Cloud uses `OLLAMA_CLOUD_API_KEY` (or `OLLAMA_API_KEY`) against the fixed hosted `/api/tags` and native `/api/chat` endpoints; local Ollama never receives that credential. Bedrock Mantle uses `AWS_BEARER_TOKEN_BEDROCK` and `AWS_REGION` with a validated regional Responses endpoint and distinct bearer-key model listing; it does not share Bedrock Converse's SigV4 credentials. Its model listing does not prove a listed ID supports Responses. These routes were exercised using isolated fake HTTPS endpoints and real local tool-result turns; live provider entitlement was not verified.
+### Provider-specific notes
 
-xAI uses `XAI_API_KEY` with account-scoped `/v1/language-models` and pinned Chat Completions; native Chat replays provider-reported `reasoning_content` with tool calls. NVIDIA hosted NIM uses `NVIDIA_API_KEY` with its `/v1/models` and pinned Chat route. NVIDIA's listing omits per-model tool capability and hosted model schemas differ; no model name is used to infer compatibility. Both routes currently buffer validated completions before TUI text emission, not incremental SSE. Isolated native CLI scenarios verified real workspace tool results, not live vendor account entitlement.
+The [provider table](#providers) lists credentials and CLI flags. Additional route caveats:
 
-Novita AI uses `NOVITA_API_KEY` with a fixed hosted Chat endpoint and dynamic `/models`; interleaved reasoning fields are replayed unchanged when returned. SiliconFlow uses `SILICONFLOW_API_KEY` for the global host and `SILICONFLOW_CN_API_KEY` for its separately pinned China host; both use documented text/chat-filtered model listings and native Chat, without cross-region token forwarding. SiliconFlow documents a model-specific thinking switch needed for some tool calls; no model ID heuristic or default switch is bundled, so those combinations remain unsupported without an explicit capability setting. These routes buffer validated completions before TUI emission. Native CLI fake-HTTPS turns verified real workspace tool-result replay; neither listing certifies each model's tool support or live entitlement.
+- **Moonshot / Ollama Cloud:** Moonshot (`MOONSHOT_API_KEY` or `KIMI_API_KEY`) lists models on its global `/v1/models` and uses Chat. Ollama Cloud (`OLLAMA_CLOUD_API_KEY` or `OLLAMA_API_KEY`) uses fixed hosted `/api/tags` and `/api/chat`; the local Ollama route never receives its key.
+- **Bedrock Mantle:** `AWS_BEARER_TOKEN_BEDROCK` with `AWS_REGION` selects a validated regional Responses endpoint and bearer-key model listing, separate from SigV4 Bedrock Converse. A listed model is not guaranteed to support Responses.
+- **xAI / NVIDIA:** `XAI_API_KEY` lists account models at `/v1/language-models`; native Chat preserves reported `reasoning_content` on tool replay. `NVIDIA_API_KEY` lists `/v1/models`, but listings omit per-model tool support and hosted schemas vary; Pave does not infer compatibility from names. Both buffer validated completions before displaying text, not incremental SSE.
+- **Novita / SiliconFlow:** Novita (`NOVITA_API_KEY`) uses a fixed hosted Chat endpoint, dynamic `/models` and unchanged interleaved reasoning replay. SiliconFlow uses separate global `SILICONFLOW_API_KEY` and China `SILICONFLOW_CN_API_KEY` hosts, text/chat-filtered listings and native Chat; credentials never cross regions. Some models need a vendor-specific thinking switch for tools: no default switch or model-name heuristic is bundled. These routes buffer validated completions.
+- **StepFun:** `STEPFUN_API_KEY` is sent only to `api.stepfun.ai`, not the separate `.com` platform. Its `/v1/models` mixes Chat and audio without capability flags; `--models` calls IDs unclassified and `/model` marks them `[listed · API unverified]`. Select only a known compatible ID. Complete StepFun tool calls may end with its documented `finish_reason: "stop"`; other Chat routes retain strict finish validation.
+- **CoreWeave Serverless:** W&B Inference's fixed host accepts `COREWEAVE_API_KEY` or `WANDB_API_KEY` for native Chat and account `/v1/models`. A CoreWeave control-plane credential is not interchangeable.
 
-StepFun international uses `STEPFUN_API_KEY` only on `api.stepfun.ai`, not the distinct `.com` platform. Its `/v1/models` mixes Chat and audio IDs without capability flags: `--models` labels them unclassified, and `/model` labels them `[listed · API unverified]`, not verified Chat choices. Select only an ID known to support the selected API. The native transport accepts StepFun's documented `finish_reason: "stop"` with complete tool calls without weakening other Chat providers' strict finish validation. CoreWeave Serverless uses W&B Inference's fixed host, `COREWEAVE_API_KEY` or `WANDB_API_KEY`, and authenticated account `/v1/models`; a CoreWeave control-plane credential is not interchangeable with a W&B Inference key. Both routes passed isolated native CLI two-turn workspace tool-result scenarios; live vendor account support was not verified.
+These routes passed isolated fake-HTTPS/native workspace tool-result scenarios; no live vendor account entitlement or per-model tool support was verified.
 
-Inside a running Pave terminal, `/setup` offers **Connect account only** (no default or active-model change) or **Choose user default** (guided provider → access → API/model selection). After sign-in, you may pick a model for this conversation or keep the current one. `/model` independently switches the conversation's model; `/settings` edits project defaults for the next launch. API-key providers use environment variables rather than a browser sign-in. Browser URLs and device codes appear on the normal terminal while the full-screen UI is suspended, then the transcript/editor returns. `/model` gathers available IDs from connected providers into one searchable picker; use arrows and Enter, or type `PROVIDER/MODEL_ID`. A `[listed · API unverified]` row may be non-Chat or lack tool support. Providers with multiple incompatible APIs require `/model PROVIDER@API/MODEL_ID` (or an API selection in setup/settings); `/model commandcode@messages/MODEL_ID` is one example. A bare model ID retains the current provider and API, and saved sessions restore route selection. Escape cancels listing without submitting the draft. Switching models preserves conversation; signed provider output is retained only for a matching provider, model and API.
+### Accounts and model selection
 
-For a remote browser, use `pave --login-manual PROVIDER` and paste the full callback URL; OpenRouter also accepts its authorization code alone. The callback state must match for GitLab Duo, Devin, Anthropic and Codex. GitLab Duo login requires a user-registered OAuth application with `GITLAB_CLIENT_ID` and its matching loopback `GITLAB_REDIRECT_URI`; its upstream model ID and API route remain manual. Devin uses its pinned CLI authorization and native account-scoped Connect model roster. GitHub Copilot and Kilo use device approval: run `pave --login PROVIDER`, open the displayed verification URL and enter its code (`--login-manual` does not apply). Kilo's public catalog does not verify Chat/tool compatibility. `pave --logout PROVIDER` removes a stored credential. The private store is **unencrypted** at `${XDG_CONFIG_HOME:-~/.config}/pave/oauth.json` (0700 directory, 0600 file); OpenRouter's browser exchange stores an API key there. Environment API keys take precedence where available. Browser/device-derived tokens cannot be sent to a custom `--endpoint`.
+| Command | Scope |
+| --- | --- |
+| `/setup` → **Connect account only** | Sign in without changing the current model or saved default; optionally pick a model afterward. |
+| `/setup` → **Choose user default** | Guided provider → access → API/model selection, saved for later launches. |
+| `/model` | Search models across connected providers and switch **this conversation only**. |
+| `/settings` | Edit project defaults for the **next launch**. |
 
-`--api NAME` selects an explicit registered wire route; `--endpoint URL` overrides a completion endpoint only for routes permitting custom hosts. Provider-bound bearer/ADC/SigV4 routes (including xAI, NVIDIA, Ollama Cloud and Bedrock Mantle) reject untrusted overrides. OpenAI uses Responses unless `--api chat` explicitly requests Chat Completions. No provider ships a default model ID: first-run setup lists models from the selected provider, saved user/project/session defaults are respected, and noninteractive prompts require `--model ID` or a saved default. Personal Copilot uses only its pinned public Chat transport and requires an account-supported Chat model. `--models` refuses a custom `--endpoint` to avoid sending a private gateway key to a public listing endpoint. Redirected input/output uses a plain line-oriented CLI with the same slash commands instead of the full-screen interface.
+API-key providers read environment variables, never keys typed into the TUI. Browser URLs and device codes appear on the regular terminal while the full-screen UI is suspended; the transcript and draft return afterward.
 
-Completion requests require HTTPS except on loopback addresses or explicitly validated local engines. In particular, a credentialed `--endpoint http://remote-host` fails before sending a request; local HTTP development endpoints remain available on loopback.
+In `/model`, use arrows and Enter to choose a discovered ID, or type `PROVIDER/MODEL_ID`. Unclassified IDs may not support Chat or tools. For incompatible API routes, enter `PROVIDER@API/MODEL_ID` (for example, `/model commandcode@messages/MODEL_ID`) or choose the route in setup/settings. A bare ID keeps the current provider and API. Saved sessions restore their route; switching models keeps conversation text but retains signed provider state **only** when provider, model and API all match. Escape cancels discovery without submitting the draft.
 
-On a fresh interactive terminal launch without an explicit provider/model/session or existing configured default, Pave opens a keyboard-operated **SETUP** screen before the normal editor. Choose a provider, select a supported model and confirm the default; OAuth-capable providers offer their real sign-in flow, while API-key providers show the required environment variable without collecting or echoing a key. You can skip setup, including a missing-key step, and return with `/setup`; a skipped key cannot be used until its environment variable is set. Choices persist privately under `${XDG_CONFIG_HOME:-~/.config}/pave/` as user defaults and a versioned setup status. Existing configured defaults, explicit CLI selection, resumed `--session` and noninteractive `--prompt` bypass onboarding. `/settings` remains the project-level editor.
+**Sign-in details**
 
-Setup uses the same searchable keyboard picker and asynchronous pinned model discovery as `/model`, scoped to the chosen provider. Use Up/Down and Enter to select an account-listed ID; unclassified listings are marked `[listed · API unverified]` rather than claiming Chat/tool compatibility. If listing fails, type a route-compatible `PROVIDER/MODEL_ID` explicitly. Anthropic requires an API key to list models even when its OAuth subscription is signed in. Connected Devin CLI uses its native account model roster; signed-in Codex, Copilot and OpenRouter use account-scoped listings. GitLab Duo has no authoritative non-agentic upstream-model listing and needs an explicit model/API. Other supported key-backed discovery includes OpenAI, Google, DeepSeek, Groq, Mistral, Together, Cerebras, Venice, DeepInfra, Fireworks, Baseten, Hugging Face, NanoGPT, AIML API, ai&, Sakana, Abliteration, GMI Cloud, Moonshot, Ollama Cloud, xAI, NVIDIA, Novita, SiliconFlow, CoreWeave, StepFun, local engines and other registered routes. Model listings never certify account invocation or tool support unless the provider supplies that metadata. Bounded cursor pages fail closed instead of showing partial results. Resize preserves the active choice.
+- Remote browser: `pave --login-manual PROVIDER` accepts a full callback URL; OpenRouter also accepts its authorization code alone. GitLab Duo, Devin, Anthropic and Codex require matching callback state.
+- GitLab Duo requires a user-registered `GITLAB_CLIENT_ID` and matching loopback `GITLAB_REDIRECT_URI`; choose its upstream model and API manually. Devin uses its pinned CLI authorization and account-scoped Connect model roster.
+- GitHub Copilot and Kilo use device approval: `pave --login PROVIDER`, then open the shown verification URL and enter its code. `--login-manual` is not supported for either; Kilo's public models do not certify Chat/tool support.
+- `pave --logout PROVIDER` removes a saved credential. The private store at `${XDG_CONFIG_HOME:-~/.config}/pave/oauth.json` is **unencrypted** (0700 directory, 0600 file); OpenRouter's browser exchange stores an API key. Environment keys take precedence where available. Browser/device-derived credentials cannot be sent to a custom `--endpoint`.
 
-The full-screen TUI shows the existing pixel-art Pave mark as colored ASCII art when the normal editor has an empty transcript. It is an empty-transcript placeholder, not a journal entry; the first message replaces it. Conversation roles, Markdown headings/lists/code, tool progress and folded tool results use distinct blocks; `Alt+O` expands the latest visible tool result. The model header distinguishes a saved session from an unsaved conversation, with a separate activity/usage indicator; searchable pickers highlight the selected row and keep provider-list errors visible. Typing `/` immediately shows a small, filtered list of actual commands with descriptions; `/re` narrows it, Up/Down moves, Tab or Enter inserts the selected command **without executing**, and Escape closes the hints without losing the draft. Enter again submits; `/help` lists the same catalog. Small terminals show a compact `PAVE` label, `NO_COLOR=1` removes colored text, and redirected output uses the plain, noninteractive path.
+**Routes and network boundaries**
 
-Bracketed paste stays in the editor until its closing delimiter, inserts at most the remaining 16 KiB of draft capacity as a single undoable edit, converts pasted Tab to a space and preserves newlines without submitting. `Ctrl+Z` undoes the whole paste; `Ctrl+Y` restores it. Search-query paste is limited to its remaining 512-byte capacity.
+- `--api NAME` selects a registered wire route. OpenAI defaults to Responses; `--api chat` selects Chat Completions.
+- `--endpoint URL` works only for routes allowing custom hosts. Bound bearer/ADC/SigV4 routes—including xAI, NVIDIA, Ollama Cloud and Bedrock Mantle—reject untrusted overrides; `--models` rejects custom endpoints so private gateway keys never reach a public listing.
+- Completion requests require HTTPS except for loopback or explicitly validated local engines. Credentialed `--endpoint http://remote-host` fails before a request; loopback HTTP remains available for development.
+- No provider bundles a model ID. Noninteractive prompts need `--model ID` or a saved selection; first-run setup can query models. Personal Copilot needs an account-supported Chat model on its pinned public route. Redirected I/O uses a plain line-oriented CLI with the same slash commands, not the full-screen interface.
 
-The header switches from `Working` to the current tool name during a tool call, then back to model work for the next request. Its elapsed-turn timer advances during slow responses and shell approval without polling while idle; shell commands still require a visible command and a separate `y` decision. Idle measured usage replaces activity and elapsed time only after the turn finishes.
+### First run
 
-Known provider, authentication and tool failures display their message in a readable TUI error block; incomplete streaming answers are removed instead of staying in the transcript as successful turns. Unknown exceptions retain their diagnostic text.
+Without an explicit provider/model/session or configured default, an interactive launch opens keyboard-operated **SETUP** before the editor:
 
-The idle header shows measured cumulative input/output tokens for the selected journal branch, or the current unsaved conversation. It hides the badge while a turn is active and when usage is unavailable; `/usage` gives provider/model details and the untracked-cost caveat.
+1. Pick a provider and access method. OAuth-capable providers offer real sign-in; API-key providers show the environment variable without collecting or echoing its value.
+2. Pick an account-listed model and confirm the default, or skip—including a missing-key step—and return later with `/setup`. A skipped key is unusable until its environment variable is set.
 
-Typed settings live in `${XDG_CONFIG_HOME:-~/.config}/pave/settings.json` and `<workspace>/.pave/settings.json`. Supported keys: `default_provider`, `default_model` (requires its provider), `default_api` (registered route for its provider), `max_turns` (1–100), `disable_shell` (boolean). Explicit CLI flags override saved session selections, then project defaults and user defaults; a saved session's API route is restored with its model. `disable_shell: true` in **either** scope denies `--allow-shell`. Invalid, duplicate, oversized or symlinked files are reported and skipped. `/settings` edits project defaults with atomic private-file replacement for the **next** launch.
+User defaults and the versioned setup state are private under `${XDG_CONFIG_HOME:-~/.config}/pave/`. Configured defaults, explicit CLI choices, resumed `--session` and noninteractive `--prompt` bypass onboarding. `/settings` edits project defaults.
 
-User and ancestor `AGENTS.md` files load below the fixed mobile safety prompt, with bounded relative `@file.md` imports. Workspace `.pave/rules/*.md` files with `---`, `paths: src/**/*.swift`, `---` headers apply only to matching file-tool paths. Before a new scoped rule can affect `write_file` or `edit_file`, the first call is **withheld and journaled as unexecuted**; the rule enters the next model request's system context and the model must retry. Unsafe rule imports or target paths fail closed. Project guidance is not a sandbox, and approved shell commands can modify files outside these scoped operations.
+The searchable setup picker queries the chosen provider asynchronously. Use Up/Down and Enter; `[listed · API unverified]` does not certify Chat or tools. On listing failure, type a route-compatible `PROVIDER/MODEL_ID`. Resize keeps the active choice.
 
-For optional prompt customization, use `<workspace>/.pave/SYSTEM.md`, `SYSTEM_TEMPLATE.md`, or `APPEND_SYSTEM.md`; user-level files under `${XDG_CONFIG_HOME:-~/.config}/pave/` are fallback. In each scope, `SYSTEM.md` wins over `SYSTEM_TEMPLATE.md`; project wins over user. `--system-prompt TEXT` or strict `--system-prompt-template FILE` overrides the discovered custom source; these flags conflict. `--append-system-prompt TEXT` overrides discovered append text. Templates support `{{root}}` for the workspace path; unknown placeholders are errors for explicit files and diagnostics with fallback for discovered files. Sources are bounded UTF-8 regular files, read once at launch. The mobile safety prompt and `AGENTS.md` remain in place regardless of a custom override; no tool output becomes system instructions.
+- **Sign-in listings:** Devin's native roster and signed-in Codex, Copilot and OpenRouter are account-scoped. Anthropic OAuth needs `ANTHROPIC_API_KEY` to list models; GitLab Duo has no authoritative non-agentic upstream-model listing and needs an explicit model/API.
+- **Key-backed listings:** OpenAI, Google, DeepSeek, Groq, Mistral, Together, Cerebras, Venice, DeepInfra, Fireworks, Baseten, Hugging Face, NanoGPT, AIML API, ai&, Sakana, Abliteration, GMI Cloud, Moonshot, Ollama Cloud, xAI, NVIDIA, Novita, SiliconFlow, CoreWeave, StepFun, local engines and other registered routes. Listings never prove invocation/tool entitlement unless that metadata is supplied. Bounded cursor pages fail closed instead of showing incomplete IDs.
+
+### Terminal experience
+
+- **Conversation:** Pixel-art Pave appears only in an empty transcript; the first message replaces it. Roles, Markdown, tool progress and folded results use distinct blocks. `Alt+O` toggles the latest visible tool result.
+- **Navigation:** Type `/` for filtered slash-command hints (`/re` narrows them). Up/Down selects, Tab or Enter inserts **without executing**, Escape keeps the draft, and a second Enter submits. `/help` shows the catalog.
+- **Status:** The model row identifies saved versus unsaved sessions; activity switches from `Working` to the running tool and back. Elapsed time advances through slow responses and shell approval without idle polling. Idle usage shows measured branch/conversation input and output tokens when available; `/usage` details models and untracked cost.
+- **Failures:** Provider, auth and tool errors appear as readable error blocks. Failed or cancelled streaming text is removed; unknown exceptions retain diagnostic text. Approving a visible shell command still requires a separate `y`.
+- **Display:** Pickers highlight the active row and keep provider-list errors visible. Narrow terminals show compact `PAVE`; `NO_COLOR=1` removes colors. Redirected I/O uses the plain CLI.
+- **Paste:** Bracketed paste waits for its closing delimiter, inserts up to the remaining 16 KiB draft capacity as one undoable edit and converts Tab to space. Newlines do not submit. `Ctrl+Z` undoes the whole paste; `Ctrl+Y` restores it. Search-query paste has a separate 512-byte limit.
+
+### Configuration and safety
+
+Settings live in `${XDG_CONFIG_HOME:-~/.config}/pave/settings.json` (user) and `<workspace>/.pave/settings.json` (project):
+
+| Key | Meaning |
+| --- | --- |
+| `default_provider`, `default_model`, `default_api` | The model requires its provider; the API must be a registered route for that provider. |
+| `max_turns` | Integer from 1 to 100. |
+| `disable_shell` | `true` in **either** scope denies `--allow-shell`. |
+
+Explicit CLI flags override session choices, then project and user defaults. A session restores its saved API with its model. Invalid, duplicate, oversized or symlinked settings are reported and skipped; `/settings` atomically replaces private project settings for the **next** launch.
+
+**Project instructions:** User and ancestor `AGENTS.md` files load below the fixed mobile safety prompt, with bounded relative `@file.md` imports. Workspace `.pave/rules/*.md` scopes paths with frontmatter such as `---`, `paths: src/**/*.swift`, `---`. The first `write_file`/`edit_file` affected by a new rule is **withheld and journaled as unexecuted**; the rule enters the next model request and the model must retry. Unsafe imports/paths fail closed. Project instructions are not a sandbox; approved shell commands can modify files outside these scoped operations.
+
+**Prompt customization:** Place `SYSTEM.md`, `SYSTEM_TEMPLATE.md` or `APPEND_SYSTEM.md` in `<workspace>/.pave/`, with `${XDG_CONFIG_HOME:-~/.config}/pave/` as fallback. `SYSTEM.md` wins over `SYSTEM_TEMPLATE.md` within a scope; project wins over user. `--system-prompt TEXT` and strict `--system-prompt-template FILE` override discovered system content but conflict with each other; `--append-system-prompt TEXT` overrides discovered append content. Templates support `{{root}}`; unknown placeholders fail for explicit files and are diagnosed with fallback for discovered files. Sources are bounded UTF-8 regular files read once at launch. Neither customization nor tool output replaces the mobile safety prompt or `AGENTS.md`.
+
+### Keyboard and slash-command reference
 
 | In the TUI | Action |
 | --- | --- |
@@ -153,13 +214,21 @@ For optional prompt customization, use `<workspace>/.pave/SYSTEM.md`, `SYSTEM_TE
 | `/tree` · `/branch ID` · `/fork /path/new.jsonl` | Search recent journal ancestry and select a branch · choose an exact entry ID · copy the selected conversation |
 | `/compact` · `/quit` | Summarize older turns manually · exit |
 
-The input remains responsive during network calls and approved commands. Prompts submitted while a turn runs are queued and appear in the transcript only when their own turn begins; `/cancel` stops the active turn without discarding queued prompts or an unsent draft. Transient streamed text from a cancelled or failed turn is removed. In-memory scrollback keeps the latest 10,000 logical rows; a saved journal retains the full durable conversation and `/resume` restores its visible history without replacing the current editor draft. Plain startup conversations are ephemeral; `/new` asks before discarding an unsaved one.
+### Sessions and long-running turns
 
-Sessions are private append-only JSONL journals on creation, **not encrypted**. `/new` opts into storage at `${XDG_STATE_HOME:-~/.local/state}/pave/sessions/<SHA-256 of canonical workspace path>/<random>.jsonl` (0700 directories, 0600 files). `/resume` lists up to 100 recent journals from the current workspace only, skipping symlinks, foreign owners and permissive files; an explicit path is subject to the same checks. `--session PATH` continues to support an explicitly chosen journal and shows its restored transcript at startup. Selected provider/model changes are recorded as branch-local metadata, not provider messages; `/resume`, `--session` and `/branch` restore the saved selection and status, while explicit `--provider`, `--model`, `--api` or `--endpoint` flags take precedence. Credentials and custom endpoints are never stored as model metadata; a removed provider/route must be overridden explicitly on reopen. Keep journals outside version control: Gemini 3 native replay may persist model-issued thought text and signatures alongside visible conversation content. Reopening a session marks interrupted tool calls as failed rather than rerunning them. `/compact` preserves the full journal; model summarization may fail if the provider's context limit is exceeded.
-
-The `/tree` picker displays parent-linked entries (including model changes), highlights the active tip and searches both preview text and IDs. It bounds the list to the most recent 1,024 entries; `/branch ID` remains available for older entries. Selecting an entry restores only that branch's visible history and saved model; Escape keeps the current branch and draft.
+- **During a turn:** Network and approved commands leave the editor responsive. Later prompts queue until their turn starts; `/cancel` stops the active turn without dropping queued prompts or the draft. Failed/cancelled partial text is removed.
+- **Scrollback:** Memory retains the newest 10,000 logical rows; a saved journal retains its complete durable history. `/resume` restores that history without replacing the editor draft. New startup conversations are ephemeral; `/new` asks before discarding an unsaved one.
+- **Private journals:** `/new` creates an **unencrypted** append-only JSONL file under `${XDG_STATE_HOME:-~/.local/state}/pave/sessions/<SHA-256 of canonical workspace path>/<random>.jsonl` (0700 directories, 0600 files). `/resume` shows at most 100 recent journals for the current workspace, rejecting symlinks, foreign owners and permissive files, including explicit paths. `--session PATH` reopens a chosen journal.
+- **Branch metadata:** Provider/model/API changes belong to branches, not provider messages. `/resume`, `--session` and `/branch` restore them; explicit `--provider`, `--model`, `--api` or `--endpoint` wins. Credentials and custom endpoints are not stored as model metadata, and a removed route must be overridden on reopen.
+- **Recovery and privacy:** Reopening marks interrupted tool calls failed instead of rerunning them. Keep journals out of version control: Gemini 3 replay can persist model-issued thought text and signatures. `/compact` retains the entire journal, but summarization can fail when the provider context limit is exceeded.
+- **Tree picker:** `/tree` shows parent-linked entries and model changes, searches preview text and IDs, highlights the active tip and limits the list to 1,024 recent entries. `/branch ID` selects older entries; Escape leaves the branch and draft intact.
 
 ## Providers
+
+Use `pave --providers` for the live list. This reference separates wire transport, credentials and model selection; **a listed model is not proof of account access or tool support**.
+
+<details>
+<summary>Show provider routes, credentials and CLI examples</summary>
 
 | Provider | Transport | Authentication | CLI selection |
 | --- | --- | --- | --- |
@@ -225,15 +294,24 @@ The `/tree` picker displays parent-linked entries (including model changes), hig
 | GitLab Duo Direct Access | account-bound token exchange then Anthropic, Responses or Chat proxy | `GITLAB_TOKEN` PAT or `--login gitlab-duo` (registered `GITLAB_CLIENT_ID` + `GITLAB_REDIRECT_URI`) | `--provider gitlab-duo --api messages|responses|chat --model KNOWN_UPSTREAM_MODEL_ID` |
 | Devin CLI | pinned protobuf/Connect Chat and account-scoped models | `DEVIN_API_KEY` session token or `--login devin` (PKCE) | `--provider devin --models`, then `--model ACCOUNT_MODEL_ID` |
 
-Interactive Copilot sessions may select a discovered Chat model from `/model`; one-shot prompts require `--model` or a saved default. The pinned provider endpoint rejects unauthorized model IDs.
+</details>
 
-Local LM Studio, llama.cpp and vLLM use keyless Chat Completions unless their optional `LM_STUDIO_API_KEY`, `LLAMA_CPP_API_KEY` or `VLLM_API_KEY` is set. The respective `LM_STUDIO_BASE_URL`, `LLAMA_CPP_BASE_URL` and `VLLM_BASE_URL` can select a self-hosted private LAN address; only numeric private/loopback addresses and `localhost` are accepted, and a supplied key on plain HTTP travels unencrypted to that selected host. Defaults use loopback ports 1234, 8080 and 8000. The same validated host serves `/v1/models` and `/v1/chat/completions`; provider model discovery ignores `--endpoint`, disables proxies and does not follow redirects. Configure a trusted HTTPS LAN endpoint when sending a key across a network.
+### Deployment and catalog caveats
 
-Azure Responses requires `AZURE_OPENAI_ENDPOINT=https://<resource>.openai.azure.com` and `AZURE_OPENAI_API_KEY`; `--model DEPLOYMENT_ID` is the exact deployment name supplied by you, not a bundled model ID. Optionally set `AZURE_OPENAI_API_VERSION=v1` or `preview`; without it the `/openai/v1/responses` default version is used. Pave sends the key only to that exact public-cloud Azure resource Responses path and rejects custom/non-Azure hosts; neither Azure Chat Completions nor Azure deployment discovery nor Microsoft Entra authentication is implemented. It never translates a model name into a deployment ID.
+- **Copilot:** Interactive `/model` can choose a discovered Chat ID; headless prompts need `--model` or a saved default. The pinned endpoint rejects unauthorized model IDs.
 
-Google Vertex requires `GOOGLE_CLOUD_PROJECT` and `GOOGLE_VERTEX_LOCATION` (or their documented aliases) plus `--model` with an explicitly chosen publisher model ID; Pave derives the Google-owned regional Gemini SSE URL and rejects `--endpoint`. Use `gcloud auth application-default login` for local ADC, a Google workload's metadata identity, or an explicit `GOOGLE_CLOUD_ACCESS_TOKEN`; no bundled OAuth client or model ID exists. Amazon Bedrock requires `AWS_REGION` or `AWS_DEFAULT_REGION`, AWS access/secret keys with optional session token or a static shared credentials/config profile, and an explicit model ID (foundation or inference-profile ID); Pave signs and sends only regional `/converse` requests, rejects CLI `--endpoint` and emits a buffered answer only after completion. `--models` lists active on-demand text foundations but not inference profiles or account Invoke permissions. Azure, Vertex and Bedrock are separate wire/auth routes; none forwards their credential to a caller-supplied host.
+- **Local LM Studio / llama.cpp / vLLM:** Keyless Chat by default; optional `LM_STUDIO_API_KEY`, `LLAMA_CPP_API_KEY` or `VLLM_API_KEY`. Matching `*_BASE_URL` variables allow numeric private/loopback addresses or `localhost` (default ports 1234, 8080, 8000). Listing and chat use the same validated host; discovery ignores `--endpoint`, disables proxies and follows no redirects. A key over plain LAN HTTP is unencrypted: use trusted HTTPS across a network.
+- **Azure Responses:** Set `AZURE_OPENAI_ENDPOINT=https://<resource>.openai.azure.com`, `AZURE_OPENAI_API_KEY`, and exact `--model DEPLOYMENT_ID`. `AZURE_OPENAI_API_VERSION=v1` or `preview` is optional; the default is `/openai/v1/responses`. Only that Azure resource path receives the key. Azure Chat, deployment discovery, Entra auth, custom/non-Azure hosts and model-name-to-deployment translation are unsupported.
+- **Google Vertex:** Set `GOOGLE_CLOUD_PROJECT`, `GOOGLE_VERTEX_LOCATION` (or documented aliases) and an explicit publisher model. Authenticate via `gcloud auth application-default login`, workload metadata or `GOOGLE_CLOUD_ACCESS_TOKEN`. Pave derives the regional Google Gemini SSE endpoint and rejects `--endpoint`; no bundled OAuth client or model IDs.
+- **Amazon Bedrock:** Set `AWS_REGION` or `AWS_DEFAULT_REGION`, AWS access/secret keys (optionally a session token) or a static shared profile, and a foundation/inference-profile ID. SigV4 signs only regional `/converse`; answers are buffered and custom endpoints rejected. `--models` lists on-demand text foundations, not inference profiles or Invoke rights. Azure, Vertex and Bedrock never forward credentials to caller-supplied hosts.
 
-These 65 local providers have isolated wire and tool-result fixtures; the first 15 post-v0.1.39 additions also passed native CLI fake-HTTPS two-turn workspace `read_file` scenarios. The sibling rules declare 83 provider identities, leaving 18 unimplemented; fixtures do not prove live account entitlements. SingularityAPI reserved has no authenticated response proof; Fire Pass requires a complete router resource; OpenCode catalogs do not prove plan access; Cloudflare requires an account/gateway with BYOK or Unified Billing and has no documented account-specific model listing. Command Code's public catalog lists supported endpoints per model but does not validate a Studio key: select `--api` explicitly; GitLab Duo Direct Access has no authoritative non-agentic upstream-model listing, so select route/model explicitly. Listings without verified tool/route capability remain unclassified in `/model`. Alibaba Coding Plan requires `--api china|intl`; Xiaomi/MiniMax keys are region-bound. Cursor's native bidirectional Connect and GitLab Duo Agent's WebSocket workflow remain unsupported. Google [Antigravity terms](https://antigravity.google/terms/) prohibit third-party OAuth clients; xAI has no published reusable third-party subscription OAuth registration. Zhipu Coding Plan excludes unofficial clients; Pave does not mislabel standard API keys as plan credentials.
+**Coverage and limits**
+
+- The 65 local routes have isolated wire/tool-result fixtures; the first 15 added after v0.1.39 also passed native fake-HTTPS two-turn `read_file` scenarios. The sibling inventory has 83 identities, leaving 18 unimplemented. Fixtures do **not** prove live entitlement.
+- SingularityAPI reserved has no authenticated response proof; Fire Pass needs a full router resource; OpenCode catalogs do not prove plan access. Cloudflare needs an account/gateway with BYOK or Unified Billing and lacks a documented account-specific listing.
+- Command Code catalogs describe endpoints but cannot validate a Studio key: choose `--api`. GitLab Duo has no authoritative non-agentic upstream-model roster: supply route and model. Unverified listings stay unclassified in `/model`.
+- Alibaba Coding Plan needs `--api china|intl`; Xiaomi and MiniMax keys are region-bound. Cursor bidirectional Connect and GitLab Duo Agent WebSocket remain unsupported.
+- Google's [Antigravity terms](https://antigravity.google/terms/) prohibit third-party OAuth clients; xAI has no published reusable subscription OAuth registration. Zhipu Coding Plan excludes unofficial clients. Standard API keys are not mislabeled as plan credentials.
 
 ## Features
 
