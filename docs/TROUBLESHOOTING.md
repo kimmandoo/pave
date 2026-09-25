@@ -41,3 +41,10 @@
 - **Root Cause:** `Turn_runner` originally queued untagged notices and checked only the runner's mutable current cancellation flag; the dispatcher had no way to distinguish a prior turn's producer from the active one.
 - **Solution:** Tagged notices with a per-turn ID, accepted nonterminal events only from the owning worker thread, gated dispatch on that owner's cancellation flag, and serialized cancellation against successful completion. A normal return after a winning cancel now produces `Cancelled`; terminal outcomes still dispatch once. Red/green tests forced same-turn late notices, detached old-turn notices during a blocked follow-up, and normal return after cancellation. A local HTTP 70×18 PTY confirmed Ctrl+C removed provisional output and suppressed a delayed provider chunk.
 - **Prevention / Reference:** Keep terminal mutations on the UI thread, require each event to match its owner ID/thread, and serialize cancel versus completion; do not clear the owner without delivering one terminal outcome.
+
+### [2026-09-25] Concurrent Dune commands contended for the workspace lock
+
+- **Context / Symptom:** A focused `dune exec test/test_agent_stream.exe` invocation failed with a Dune global-lock error while another Dune test command was still running.
+- **Root Cause:** Independent Dune processes were started concurrently in the same workspace and contended for the shared `_build` lock.
+- **Solution:** Serialized the focused tests, full `dune runtest --force`, and `dune build @install`; subsequent commands passed.
+- **Prevention / Reference:** Run one Dune command at a time in this workspace. Put parallelism inside one Dune invocation instead of launching multiple Dune processes.

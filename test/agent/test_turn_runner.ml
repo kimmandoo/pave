@@ -22,13 +22,20 @@ let () =
         Pave.Turn_runner.delta runner "late";
         Pave.Turn_runner.message runner "late";
         Pave.Turn_runner.phase runner (Pave.Agent.Tool "stale");
+        Pave.Turn_runner.tool runner (Pave.Agent.Tool_updated {
+          call_id = "late-call"; name = "run_command"; received_bytes = 5
+        });
         raise Pave.Provider.Cancelled
     | "spawn-late" ->
         late_thread := Some (Thread.create (fun () ->
           while not (Atomic.get release_late_events) do Thread.delay 0.001 done;
           Pave.Turn_runner.message runner "old-turn-message";
           Pave.Turn_runner.delta runner "old-turn-delta";
-          Pave.Turn_runner.phase runner (Pave.Agent.Tool "old-turn-tool")) ());
+          Pave.Turn_runner.phase runner (Pave.Agent.Tool "old-turn-tool");
+          Pave.Turn_runner.tool runner (Pave.Agent.Tool_settled {
+            call_id = "old-call"; name = "read_file"; result = "stale";
+            is_error = false
+          })) ());
         Pave.Turn_runner.message runner "old-turn-ready";
         while not (cancel ()) do Thread.delay 0.001 done;
         raise Pave.Provider.Cancelled
@@ -45,6 +52,18 @@ let () =
         if Pave.Turn_runner.approve runner "printf approved" then
           Pave.Turn_runner.delta runner "approved"
     | "fail" -> failwith "expected turn failure"
+    | "cancel-abort" ->
+        Pave.Turn_runner.tool runner (Pave.Agent.Tool_started {
+          call_id = "aborted-call"; name = "read_file"
+        });
+        Pave.Turn_runner.message runner "cancel-abort-ready";
+        while not (cancel ()) do Thread.delay 0.001 done;
+        Pave.Turn_runner.tool runner (Pave.Agent.Tool_aborted {
+          call_id = "aborted-call"; name = "read_file";
+          result = "Error: turn canceled before execution";
+          side_effects_may_have_occurred = false
+        });
+        raise Pave.Provider.Cancelled
     | _ -> failwith "unexpected turn" in
   let runner = Pave.Turn_runner.create ~run
     ~on_event:(fun turn_event ->
@@ -67,6 +86,19 @@ let () =
           event ("phase:" ^ match phase with
             | Pave.Agent.Model -> "model"
             | Pave.Agent.Tool name -> name)
+      | Pave.Turn_runner.Tool_event { turn_id; event = tool_event } ->
+          require_owner turn_id;
+          (match tool_event with
+           | Pave.Agent.Tool_started { call_id; name } ->
+               event ("tool-start:" ^ call_id ^ ":" ^ name)
+           | Pave.Agent.Tool_updated { call_id; received_bytes; _ } ->
+               event (Printf.sprintf "tool-update:%s:%d" call_id received_bytes)
+           | Pave.Agent.Tool_settled { call_id; _ } ->
+               event ("tool-settled:" ^ call_id)
+           | Pave.Agent.Tool_aborted { call_id;
+               side_effects_may_have_occurred; _ } ->
+               event ("tool-abort:" ^ call_id ^ ":" ^
+                 string_of_bool side_effects_may_have_occurred))
       | Pave.Turn_runner.Turn_completed { turn_id } ->
           require_owner turn_id;
           active_turn_id := None;
@@ -156,5 +188,12 @@ let () =
     assert (List.length (List.filter
       (String.starts_with ~prefix:"failure:") !events) = failures_before + 1);
     assert (!active_turn_id = None);
+    Pave.Turn_runner.submit runner "cancel-abort";
+    until "message:cancel-abort-ready";
+    Pave.Turn_runner.cancel runner;
+    until "tool-abort:aborted-call:false";
+    until_idle ();
+    assert (List.length (List.filter
+      ((=) "tool-abort:aborted-call:false") !events) = 1);
   );
   print_endline "turn runner: ok"

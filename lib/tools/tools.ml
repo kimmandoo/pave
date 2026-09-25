@@ -623,7 +623,7 @@ let mobile_project root =
     "No supported mobile project manifests found at workspace root."
   else "Detected mobile project stacks and suggested commands (not executed):\n" ^ Buffer.contents output
 
-let run_command ?cancel root args =
+let run_command ?cancel ?on_progress root args =
   let cancelled () = match cancel with Some check -> check () | None -> false in
   if cancelled () then raise Cancelled;
   let command = required_string "command" args in
@@ -649,6 +649,18 @@ let run_command ?cancel root args =
   Unix.close writer;
   let captured = Bytes.create max_command_bytes in
   let used = ref 0 and truncated = ref false and timed_out = ref false in
+  let received = ref 0 and reported = ref 0 and last_reported_at = ref 0. in
+  let report_progress force = match on_progress with
+    | None -> ()
+    | Some callback ->
+        let count = !received in
+        let now = Unix.gettimeofday () in
+        if count > !reported &&
+          (force || !reported = 0 || count - !reported >= 65_536 ||
+            now -. !last_reported_at >= 0.25) then (
+          callback count;
+          reported := count;
+          last_reported_at := now) in
   let deadline = Unix.gettimeofday () +. float_of_int timeout in
   let chunk = Bytes.create 8192 in
   let status = ref None and eof = ref false and completed = ref false in
@@ -677,6 +689,8 @@ let run_command ?cancel root args =
           let n = Unix.read reader chunk 0 (Bytes.length chunk) in
           if n = 0 then eof := true
           else (
+            received := if !received > max_int - n then max_int else !received + n;
+            report_progress false;
             if !used + n > max_command_bytes then truncated := true;
             let retained = min n max_command_bytes in
             let overflow = max 0 (!used + retained - max_command_bytes) in
@@ -692,6 +706,7 @@ let run_command ?cancel root args =
         if Unix.gettimeofday () >= deadline then (timed_out := true; terminate ())
         else ignore (Unix.select [] [] [] 0.05)
     done;
+    report_progress true;
     let result =
       if !timed_out then "timed out"
       else match !status with
@@ -764,7 +779,7 @@ let definitions_without_shell = List.filter (fun json ->
 let available ~allow_shell =
   if allow_shell then definitions else definitions_without_shell
 
-let execute ?cancel ~root ~name ~args () =
+let execute ?cancel ?on_progress ~root ~name ~args () =
   try
     let root = root_path root in
     (match args with `Assoc _ -> () | _ -> fail "arguments must be a JSON object");
@@ -776,7 +791,7 @@ let execute ?cancel ~root ~name ~args () =
     | "grep" -> grep root args
     | "write_file" -> write_file root args
     | "edit_file" -> edit_file root args
-    | "run_command" -> run_command ?cancel root args
+    | "run_command" -> run_command ?cancel ?on_progress root args
     | "mobile_project" -> mobile_project root
     | _ -> fail ("unknown tool: " ^ name)
   with

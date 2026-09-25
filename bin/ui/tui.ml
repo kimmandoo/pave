@@ -29,6 +29,7 @@ type t = {
   mutable session : bool;
   editor : Pave.Composer.t;
   transcript : Transcript_view.t;
+  tool_groups : (string, int) Hashtbl.t;
   mutable scroll : int;
   mutable chooser : chooser option;
   mutable hint_draft : string;
@@ -547,7 +548,8 @@ let create ~root ~model ~session =
   let term = Notty_unix.Term.create ~mouse:false ~bpaste:true () in
   let t = { term; input = Terminal_input.create term;
     root; model; session; editor = Pave.Composer.create ();
-    transcript = Transcript_view.create (); scroll = 0; chooser = None;
+    transcript = Transcript_view.create (); tool_groups = Hashtbl.create 8;
+    scroll = 0; chooser = None;
     hint_draft = ""; hint_selected = 0; hint_offset = 0;
     hint_suppressed = None;
     revision = 0; body_cache = None; layout_cache = None;
@@ -607,6 +609,7 @@ let set_queue t count =
   paint t
 
 let show_history t (messages : Pave.Protocol.message list) =
+  Hashtbl.clear t.tool_groups;
   let names = Hashtbl.create 32 in
   Transcript_view.clear t.transcript;
   List.iter (fun (message : Pave.Protocol.message) ->
@@ -643,6 +646,7 @@ let show_history t (messages : Pave.Protocol.message list) =
 
 let finish_live t =
   change_transcript t (fun () -> Transcript_view.finish t.transcript);
+  Hashtbl.clear t.tool_groups;
   t.status <- idle_status;
   paint t
 
@@ -655,6 +659,38 @@ let sent t text =
 let event t text =
   change_transcript t (fun () -> Transcript_view.event t.transcript text);
   paint t
+
+let tool_started t call_id name =
+  change_transcript t (fun () ->
+    Hashtbl.replace t.tool_groups call_id
+      (Transcript_view.start_tool t.transcript name));
+  let activity = Some ("Tool: " ^ single_line name) in
+  if t.activity = activity then paint t else set_activity t activity
+
+let format_received_bytes bytes =
+  if bytes < 1024 then Printf.sprintf "%d B" bytes
+  else if bytes < 1024 * 1024 then Printf.sprintf "%d KiB" (bytes / 1024)
+  else Printf.sprintf "%d MiB" (bytes / (1024 * 1024))
+
+let tool_updated t call_id name received_bytes =
+  if Hashtbl.mem t.tool_groups call_id then
+    set_activity t (Some (Printf.sprintf "Tool: %s · %s"
+      (single_line name) (format_received_bytes received_bytes)))
+
+let finish_tool ?(aborted = false) ?(is_error = false)
+    t call_id name result =
+  let group = Hashtbl.find_opt t.tool_groups call_id in
+  Hashtbl.remove t.tool_groups call_id;
+  change_transcript t (fun () ->
+    Transcript_view.tool_result ?group ~aborted ~is_error
+      t.transcript name result);
+  paint t
+
+let tool_settled t call_id name result is_error =
+  finish_tool ~is_error t call_id name result
+
+let tool_aborted t call_id name result =
+  finish_tool ~aborted:true t call_id name result
 
 let events t lines =
   (match lines with
@@ -671,6 +707,7 @@ let delta t chunk =
 
 let clear_live t =
   change_transcript t (fun () -> Transcript_view.rollback t.transcript);
+  Hashtbl.clear t.tool_groups;
   t.status <- idle_status;
   paint t
 

@@ -1,5 +1,18 @@
 type phase = Model | Tool of string
 
+type tool_event =
+  | Tool_started of { call_id : string; name : string }
+  | Tool_updated of { call_id : string; name : string; received_bytes : int }
+  | Tool_settled of {
+      call_id : string; name : string; result : string; is_error : bool
+    }
+  | Tool_aborted of {
+      call_id : string;
+      name : string;
+      result : string;
+      side_effects_may_have_occurred : bool;
+    }
+
 type t = {
   provider : Provider.config;
   authentication : Provider.authentication;
@@ -16,21 +29,33 @@ type t = {
   on_change : Protocol.message -> unit;
   on_usage : (Protocol.usage -> unit) option;
   on_phase : (phase -> unit) option;
+  on_tool_event : (tool_event -> unit) option;
 }
 
 let create ~provider ~root ~system ?(authentication = Provider.Api_key)
     ?resolve_credential ?(allow_shell = false) ?(stream = false)
     ?(approve_command = fun _ -> false) ?(history = [])
-    ?on_usage ?on_phase ?(on_change = fun _ -> ()) ?(on_delta = fun _ -> ())
-    ~on_event () =
+    ?on_usage ?on_phase ?on_tool_event ?(on_change = fun _ -> ())
+    ?(on_delta = fun _ -> ()) ~on_event () =
   { provider; authentication; resolve_credential; root; system; allow_shell; stream;
     approve_command; history_rev = List.rev history; scoped_pending = [];
-    on_change; on_delta; on_event; on_usage; on_phase }
+    on_change; on_delta; on_event; on_usage; on_phase; on_tool_event }
 
 let messages t = List.rev t.history_rev
 let append t message =
   t.on_change message;
   t.history_rev <- message :: t.history_rev
+
+let emit_tool_event t event =
+  match t.on_tool_event with
+  | Some notify -> notify event
+  | None ->
+      (match event with
+       | Tool_started { name; _ } -> t.on_event ("[" ^ name ^ "]")
+       | Tool_updated _ -> ()
+       | Tool_settled { name; result; _ }
+       | Tool_aborted { name; result; _ } ->
+           t.on_event ("[" ^ name ^ "] " ^ result))
 
 let max_scoped_context_bytes = Project_context.max_total_bytes
 
@@ -102,23 +127,45 @@ let run ?(max_turns = 20) ?cancel t text =
         append t reply;
         (match reply.content with Some s -> s | None -> "")
     | calls ->
+        let cancellation_result =
+          "Error: turn cancelled before this tool ran; do not assume it executed" in
+        let abort (call : Protocol.tool_call) result side_effects_may_have_occurred =
+          emit_tool_event t (Tool_aborted {
+            call_id = call.id; name = call.name; result;
+            side_effects_may_have_occurred
+          }) in
         let skipped pending =
           List.iter (fun (call : Protocol.tool_call) ->
-            append t (Protocol.tool_result call.id
-              "Error: turn cancelled before this tool ran; do not assume it executed")) pending in
+            append t (Protocol.tool_result call.id cancellation_result);
+            abort call cancellation_result false) pending in
         let rec execute first = function
           | [] -> turn (remaining - 1)
           | (call : Protocol.tool_call) :: rest as pending ->
-              t.on_event ("[" ^ call.name ^ "]");
+              emit_tool_event t (Tool_started {
+                call_id = call.id; name = call.name
+              });
               (match cancel with
                | Some cancelled when cancelled () ->
-                   if not first then skipped pending;
+                   if first then
+                     List.iter (fun (call : Protocol.tool_call) ->
+                       abort call cancellation_result false) pending
+                   else skipped pending;
                    raise Provider.Cancelled
                | _ -> ());
               if first then append t reply;
               (match t.on_phase with
                | None -> ()
                | Some notify -> notify (Tool call.name));
+              let on_progress = match call.name, t.on_tool_event with
+                | "run_command", Some _ ->
+                    Some (fun received_bytes ->
+                      emit_tool_event t (Tool_updated {
+                        call_id = call.id; name = call.name; received_bytes
+                      }))
+                | _ -> None in
+              let execute_tool () =
+                Tools.execute ?cancel ?on_progress ~root:t.root
+                  ~name:call.name ~args:call.arguments () in
               let result =
                 try
                   Provider.check_cancel cancel;
@@ -129,7 +176,7 @@ let run ?(max_turns = 20) ?cancel t text =
                        else (match Protocol.member "command" call.arguments with
                          | `String command when t.approve_command command ->
                              Provider.check_cancel cancel;
-                             Tools.execute ?cancel ~root:t.root ~name:call.name ~args:call.arguments ()
+                             execute_tool ()
                          | `String _ -> "Error: command not approved"
                          | _ -> "Error: missing command")
                      else if call.name = "write_file" || call.name = "edit_file" ||
@@ -139,30 +186,34 @@ let run ?(max_turns = 20) ?cancel t text =
                         | Ok (path, scoped) ->
                           if scoped <> "" && List.assoc_opt path visible <> Some scoped then
                             if queue_scope t path scoped then
-                              if call.name = "read_file" then
-                                Tools.execute ~root:t.root ~name:call.name ~args:call.arguments ()
+                              if call.name = "read_file" then execute_tool ()
                               else
                                 "Error: file mutation withheld until path-scoped instructions " ^
                                 "are presented as system context; retry this tool call next turn"
                             else "Error: scoped instructions exceed the per-turn context limit; " ^
                               "file operation not executed"
-                          else Tools.execute ~root:t.root ~name:call.name ~args:call.arguments ())
-                     else Tools.execute ~root:t.root ~name:call.name ~args:call.arguments ()
+                          else execute_tool ())
+                     else execute_tool ()
                    with
                    | Provider.Cancelled -> raise Provider.Cancelled
                    | Tools.Cancelled -> raise Tools.Cancelled
                    | exn -> "Error: " ^ Printexc.to_string exn)
                 with
                 | Tools.Cancelled ->
-                    append t (Protocol.tool_result call.id
-                      "Error: command cancelled while running; side effects may have occurred");
+                    let result =
+                      "Error: command cancelled while running; side effects may have occurred" in
+                    append t (Protocol.tool_result call.id result);
+                    abort call result true;
                     skipped rest;
                     raise Provider.Cancelled
                 | Provider.Cancelled ->
                     skipped pending;
                     raise Provider.Cancelled in
               append t (Protocol.tool_result call.id result);
-              t.on_event ("[" ^ call.name ^ "] " ^ result);
+              emit_tool_event t (Tool_settled {
+                call_id = call.id; name = call.name; result;
+                is_error = String.starts_with ~prefix:"Error:" result
+              });
               execute false rest in
         execute true calls
   in
