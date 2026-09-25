@@ -14,6 +14,14 @@
 - **Solution:** `Tui.suspend` temporarily maps SIGINT to `Sys.Break`, restores the terminal in `Fun.protect`, ignores SIGINT during reinitialization, flushes `TCIFLUSH`, then restores the prior handler. Account flows handle cancellation without exiting; chooser Ctrl+C returns only from the top picker, allowing cancellable model discovery to stop and join. Local 70×18 PTYs verified a canceled Ollama listing, OpenRouter loopback sign-in with a URL-restricted fake `curl`, discarded handoff type-ahead, composer input after both return paths and clean exit.
 - **Prevention / Reference:** Exercise suspended terminal flows with a controlling PTY, local callback and local model-listing endpoint; a direct key-decoder test does not verify signal mode or the kernel input queue.
 
+### [2026-09-25] Strict tool schema rejected an overbroad scoped-rules fixture
+
+- **Context / Symptom:** The first `opam exec -- dune runtest --force` after tool argument validation failed in `test_scoped_rules` with an assertion and `Pave.Provider.Provider_error("curl failed (exit status 52)")`.
+- **Root Cause:** The local HTTP fixture helper attached both `path` and `content` to every tool call, so `read_file` received a property absent from its `additionalProperties: false` schema. The fixture asserted on the resulting tool error and closed the connection before returning a response.
+- **Solution:** The helper now emits only `path` for `read_file`; the isolated scoped-rules executable and full suite passed.
+- **Prevention / Reference:** Keep fixture arguments aligned with the exact `Tools.definitions` schema; unknown fields are rejected before execution.
+
+
 ### [2026-09-25] OCaml Unix lacks a no-follow open flag
 
 - **Context / Symptom:** `dune runtest` rejected `Unix.O_NOFOLLOW` as an unbound constructor while building typed user/project settings on the OCaml 5.5.1 switch.

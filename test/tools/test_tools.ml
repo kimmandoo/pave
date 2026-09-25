@@ -132,6 +132,15 @@ let () =
           | Some (`Assoc desc) -> List.assoc_opt "name" desc = Some (`String "glob")
           | _ -> false)
       | _ -> false) Pave.Tools.definitions);
+    assert (rejected (fun () -> tool_json root "read_file"
+      ["path", `String "App.swift"; "unexpected", `Bool true]));
+    assert (rejected (fun () -> tool_json root "read_file" []));
+    assert (rejected (fun () -> tool_json root "read_file"
+      ["path", `Int 7]));
+    assert (rejected (fun () -> tool_json root "read_file"
+      ["path", `String "App.swift"; "path", `String "missing.swift"]));
+    assert (rejected (fun () -> tool_json root "glob"
+      ["pattern", `String "*.swift"; "limit", `Int 501]));
     create "pages.txt" "first\nsecond\nthird\n";
     let first = tool_json root "read_file"
       ["path", `String "pages.txt"; "max_lines", `Int 1] in

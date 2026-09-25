@@ -772,28 +772,94 @@ let definitions = [
      "timeout_seconds", integer_field "Deadline in seconds (default 60, maximum 300)" 1 300] ["command"]
 ]
 
-let definitions_without_shell = List.filter (fun json ->
+let function_name json =
   Protocol.member "name" (Protocol.member "function" json)
-    <> `String "run_command") definitions
+
+let definitions_without_shell = List.filter (fun json ->
+  function_name json <> `String "run_command") definitions
 
 let available ~allow_shell =
   if allow_shell then definitions else definitions_without_shell
 
-let execute ?cancel ?on_progress ~root ~name ~args () =
+let available_for ~allow_shell ~enabled =
+  List.filter (fun json ->
+    match function_name json with
+    | `String "run_command" when not allow_shell -> false
+    | `String name -> enabled name
+    | _ -> false) definitions
+
+let validate_arguments ~name ~args =
+  let parameters =
+    match List.find_opt (fun json -> function_name json = `String name) definitions with
+    | Some json -> Protocol.member "parameters" (Protocol.member "function" json)
+    | None -> fail ("unknown tool: " ^ name) in
+  let properties = match Protocol.member "properties" parameters with
+    | `Assoc fields -> fields
+    | _ -> fail "invalid tool parameter schema" in
+  let fields = match args with
+    | `Assoc fields -> fields
+    | _ -> fail "arguments must be a JSON object" in
+  let names = List.map fst fields in
+  if List.length names <> List.length (List.sort_uniq String.compare names) then
+    fail "duplicate argument field";
+  let required = match Protocol.member "required" parameters with
+    | `List values -> List.map (function
+        | `String value -> value
+        | _ -> fail "invalid tool parameter schema") values
+    | _ -> fail "invalid tool parameter schema" in
+  List.iter (fun name ->
+    if not (List.mem_assoc name fields) then
+      fail ("missing required argument: " ^ name)) required;
+  let additional = Protocol.member "additionalProperties" parameters in
+  List.iter (fun (name, value) ->
+    match List.assoc_opt name properties with
+    | None ->
+        if additional = `Bool false then fail ("unexpected argument: " ^ name)
+    | Some property ->
+        let type_name = match Protocol.member "type" property with
+          | `String value -> value
+          | _ -> fail "invalid tool parameter schema" in
+        let valid = match type_name, value with
+          | "string", `String _ | "integer", `Int _ | "boolean", `Bool _
+          | "object", `Assoc _ | "array", `List _ | "null", `Null
+          | "number", (`Int _ | `Float _) -> true
+          | _ -> false in
+        if not valid then fail (name ^ " must be a " ^ type_name);
+        if type_name = "integer" then
+          match value with
+          | `Int number ->
+              let bound key = match Protocol.member key property with
+                | `Int number -> Some number
+                | `Null -> None
+                | _ -> fail "invalid tool parameter schema" in
+              let minimum = bound "minimum" in
+              let maximum = bound "maximum" in
+              if (match minimum with Some limit -> number < limit | None -> false) ||
+                (match maximum with Some limit -> number > limit | None -> false)
+              then fail (name ^ " is outside its allowed range")
+          | _ -> assert false) fields
+
+let execute ?cancel ?on_progress ?preflight ~root ~name ~args () =
   try
     let root = root_path root in
-    (match args with `Assoc _ -> () | _ -> fail "arguments must be a JSON object");
-    match name with
-    | "read_file" -> read_file root args
-    | "list_files" -> list_files root args
-    | "search" -> search root args
-    | "glob" -> glob root args
-    | "grep" -> grep root args
-    | "write_file" -> write_file root args
-    | "edit_file" -> edit_file root args
-    | "run_command" -> run_command ?cancel ?on_progress root args
-    | "mobile_project" -> mobile_project root
-    | _ -> fail ("unknown tool: " ^ name)
+    validate_arguments ~name ~args;
+    let dispatch () = match name with
+      | "read_file" -> read_file root args
+      | "list_files" -> list_files root args
+      | "search" -> search root args
+      | "glob" -> glob root args
+      | "grep" -> grep root args
+      | "write_file" -> write_file root args
+      | "edit_file" -> edit_file root args
+      | "run_command" -> run_command ?cancel ?on_progress root args
+      | "mobile_project" -> mobile_project root
+      | _ -> assert false in
+    match preflight with
+    | Some check ->
+        (match check () with
+         | Some message -> message
+         | None -> dispatch ())
+    | None -> dispatch ()
   with
   | Tool_error message -> "Error: " ^ message
   | Unix.Unix_error (code, operation, path) ->
