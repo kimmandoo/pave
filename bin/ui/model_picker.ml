@@ -7,6 +7,16 @@ let credential (descriptor : Pave.Provider_catalog.descriptor) =
         match Sys.getenv_opt name with
         | Some key when key <> "" -> Some (Pave.Model_discovery.Api_key key)
         | _ -> None)
+  | "openrouter" ->
+      (match descriptor.routes with
+      | [] -> None
+      | route :: _ ->
+          let _, key, resolve = Cli_auth.resolve_authentication
+            ~descriptor ~route ~endpoint:route.endpoint in
+          if key <> "" then Some (Pave.Model_discovery.Api_key key)
+          else Option.map (fun resolve ->
+            let (credential : Pave.Provider.credentials) = resolve () in
+            Pave.Model_discovery.Api_key credential.access) resolve)
   | "github-copilot" ->
       Option.map (fun (stored : Pave.Oauth_store.credential) ->
         Pave.Model_discovery.Copilot_oauth stored.access)

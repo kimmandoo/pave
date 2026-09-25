@@ -64,6 +64,24 @@ let () =
   expect_models ["models/gemini-2.5-pro"; "models/gemini-2.5-flash"]
     (discover ~http ~provider:"google" ~credential:(Api_key gemini_key) ());
   assert (!calls = 2);
+  let router_key = "sk-or-fixture" in
+  let router_headers = ["Authorization", "Bearer " ^ router_key] in
+  let http, calls = fixed_http openrouter_url router_headers
+    (Ok (200, {|{"data":[{"id":"anthropic/claude-sonnet-4"},{"id":"openai/gpt-6-sol"},{"id":"anthropic/claude-sonnet-4"}]}|})) in
+  expect_models ["anthropic/claude-sonnet-4"; "openai/gpt-6-sol"]
+    (discover ~http ~provider:"openrouter"
+      ~credential:(Api_key router_key) ());
+  assert (!calls = 1);
+  let http, calls = fixed_http openrouter_url router_headers
+    (Ok (403, "forbidden")) in
+  expect_error unavailable (discover ~http ~provider:"openrouter"
+    ~credential:(Api_key router_key) ());
+  assert (!calls = 1);
+  let http, calls = fixed_http openrouter_url router_headers
+    (Ok (302, {|{"location":"https://other.example/"}|})) in
+  expect_error unavailable (discover ~http ~provider:"openrouter"
+    ~credential:(Api_key router_key) ());
+  assert (!calls = 1);
   let codex_credential = Codex_oauth ("private-codex", "account-123") in
   let codex_headers = [
     "Authorization", "Bearer private-codex";

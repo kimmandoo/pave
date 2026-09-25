@@ -33,10 +33,14 @@ let openai_url = "https://api.openai.com/v1/models"
 let google_url = "https://generativelanguage.googleapis.com/v1beta/models"
 let ollama_url = "http://127.0.0.1:11434/api/tags"
 let copilot_url = "https://api.githubcopilot.com/models"
+let openrouter_url = "https://openrouter.ai/api/v1/models/user"
 let codex_urls = List.map (fun path ->
   "https://chatgpt.com/backend-api" ^ path ^ "?client_version=" ^
     Codex_wire.client_version) ["/codex/models"; "/models"]
 let max_response_bytes = 1_048_576
+let response_limit url =
+  if url = openrouter_url then 4 * max_response_bytes
+  else max_response_bytes
 
 let default_http ?cancel ~url ~headers () =
   (* This transport is private. The public callback is for isolated fixtures;
@@ -52,7 +56,7 @@ let default_http ?cancel ~url ~headers () =
       ^ option "write-out" "%{http_code}"
       ^ option "connect-timeout" "4"
       ^ option "max-time" "12"
-      ^ option "max-filesize" (string_of_int max_response_bytes)
+      ^ option "max-filesize" (string_of_int (response_limit url))
       ^ option "proto" (if url = ollama_url then "=http" else "=https")
       ^ option "proxy" ""
       ^ String.concat "" (List.map (fun (name, value) ->
@@ -68,8 +72,8 @@ let default_http ?cancel ~url ~headers () =
           let input = open_in_bin path in
           Fun.protect ~finally:(fun () -> close_in_noerr input) (fun () ->
             let length = in_channel_length input in
-            if length > max_response_bytes then
-              Error (Invalid_response "listing exceeds 1 MiB")
+            if length > response_limit url then
+              Error (Invalid_response "listing exceeds size limit")
             else Ok (code, really_input_string input length)))
 
 let valid_secret secret =
@@ -213,6 +217,7 @@ let discover ?http ?cancel ~provider ?credential () =
     | "google" -> Some (google_url, "models", "name", include_gemini)
     | "ollama" -> Some (ollama_url, "models", "name", include_all)
     | "github-copilot" -> Some (copilot_url, "data", "id", include_copilot)
+    | "openrouter" -> Some (openrouter_url, "data", "id", include_all)
     | _ -> None in
   match target with
   | None -> Error (Unsupported_provider provider)
@@ -220,7 +225,7 @@ let discover ?http ?cancel ~provider ?credential () =
       let secret = match provider, credential with
         | "ollama", None -> Ok None
         | "ollama", Some _ -> Error Invalid_credential
-        | ("openai" | "google"), Some (Api_key key)
+        | ("openai" | "google" | "openrouter"), Some (Api_key key)
         | "github-copilot", Some (Copilot_oauth key) ->
             if valid_secret key then Ok (Some key) else Error Invalid_credential
         | _, None -> Error Missing_credential
@@ -230,6 +235,7 @@ let discover ?http ?cancel ~provider ?credential () =
       | Ok secret ->
           let headers = match provider, secret with
             | "openai", Some key -> ["Authorization", "Bearer " ^ key]
+            | "openrouter", Some key -> ["Authorization", "Bearer " ^ key]
             | "google", Some key -> ["x-goog-api-key", key]
             | "github-copilot", Some key ->
                 ["Authorization", "Bearer " ^ key;
@@ -256,8 +262,8 @@ let discover ?http ?cancel ~provider ?credential () =
             | Ok (status, _) when status < 200 || status >= 300 ->
                 Error (Http_error status)
             | Ok (_, body) ->
-                if String.length body > max_response_bytes then
-                  invalid "listing exceeds 1 MiB"
+                if String.length body > response_limit url then
+                  invalid "listing exceeds size limit"
                 else
                   let json = try Some (Yojson.Basic.from_string body)
                     with Yojson.Json_error _ -> None in
