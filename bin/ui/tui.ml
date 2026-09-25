@@ -81,7 +81,7 @@ let hotkeys = [
   "Ctrl+A/E line ends · " ^ meta_key ^ "+B/F move by word · Ctrl+W erase word";
   "Ctrl+Z/Y undo/redo · Ctrl+K/U kill line · " ^ meta_key ^ "+Y yank";
   meta_key ^ "+O tool details · PgUp/Dn scroll · Ctrl+Home/End transcript";
-  "Ctrl+C interrupts without losing the draft; idle clears the draft";
+  "Ctrl+C closes a picker; in the composer it interrupts without losing the draft; idle clears it";
   "Bracketed paste inserts atomically; pasted " ^ enter_key ^ " does not send";
 ]
 
@@ -571,17 +571,25 @@ let create ~root ~model ~session =
 let close t = Notty_unix.Term.release t.term
 
 let suspend t callback =
-  Notty_unix.Term.release t.term;
-  Fun.protect callback ~finally:(fun () ->
-    let term = Notty_unix.Term.create ~mouse:false ~bpaste:true () in
-    t.term <- term;
-    t.input <- Terminal_input.create term;
-    t.previous <- None;
-    t.cursor_position <- None;
-    t.body_cache <- None;
-    t.paste <- false;
-    Buffer.clear t.paste_buffer;
-    paint t)
+  let previous_sigint = Sys.signal Sys.sigint
+    (Sys.Signal_handle (fun _ -> raise Sys.Break)) in
+  Fun.protect (fun () ->
+    Notty_unix.Term.release t.term;
+    callback ()) ~finally:(fun () ->
+    Sys.set_signal Sys.sigint Sys.Signal_ignore;
+    Fun.protect (fun () ->
+      let term = Notty_unix.Term.create ~mouse:false ~bpaste:true () in
+      let input_fd, _ = Notty_unix.Term.fds term in
+      Unix.tcflush input_fd Unix.TCIFLUSH;
+      t.term <- term;
+      t.input <- Terminal_input.create term;
+      t.previous <- None;
+      t.cursor_position <- None;
+      t.body_cache <- None;
+      t.paste <- false;
+      Buffer.clear t.paste_buffer;
+      paint t) ~finally:(fun () ->
+        Sys.set_signal Sys.sigint previous_sigint))
 
 let reset_status t =
   t.status <- idle_status;
@@ -1074,6 +1082,7 @@ let choose ?(allow_custom = false) ?(intro = []) ?(plain = [])
       | `Paste `Start -> t.paste <- true; loop ()
       | `Paste `End -> t.paste <- false; paint t; loop ()
       | `Key (`Escape, _) when not t.paste -> None
+      | `Key (`ASCII 'C', [ `Ctrl ]) when not t.paste -> None
       | `Key (`Enter, _) when not t.paste ->
           (match selected () with Some _ as choice -> choice | None -> loop ())
       | `Key (`Arrow `Up, _) ->

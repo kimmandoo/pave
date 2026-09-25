@@ -484,18 +484,25 @@ let () =
           let descriptor = match Pave.Provider_catalog.find id with
             | Some value when value.oauth <> None -> value
             | _ -> failwith ("account sign-in unavailable for " ^ id) in
-          Tui.suspend screen (fun () ->
-            ignore (Cli_auth.handle_action ~login:descriptor.id
-              ~login_manual:"" ~logout:""));
-          (match Tui.choose screen
-            ~intro:["Account connected; your active model has not changed.";
-              "Choose a model now for this conversation only.";
-              "Use /setup again to save a default for future sessions."]
-            ~title:("SETUP · Connected to " ^ descriptor.id)
-            ~choices:["Choose model now"; "Keep current model"] with
-           | Some "Choose model now" ->
-               choose_model ~preferred:descriptor None
-           | _ -> on_event ("Signed in to " ^ id ^ "; active model unchanged.")) in
+          let connected =
+            try
+              Tui.suspend screen (fun () ->
+                ignore (Cli_auth.handle_action ~login:descriptor.id
+                  ~login_manual:"" ~logout:""));
+              true
+            with Sys.Break -> false in
+          if not connected then
+            Tui.alert screen "Sign-in cancelled; active model unchanged."
+          else
+            (match Tui.choose screen
+              ~intro:["Account connected; your active model has not changed.";
+                "Choose a model now for this conversation only.";
+                "Use /setup again to save a default for future sessions."]
+              ~title:("SETUP · Connected to " ^ descriptor.id)
+              ~choices:["Choose model now"; "Keep current model"] with
+             | Some "Choose model now" ->
+                 choose_model ~preferred:descriptor None
+             | _ -> on_event ("Signed in to " ^ id ^ "; active model unchanged.")) in
     let run_setup screen ~first_run =
       match Setup_view.run screen with
       | Setup_view.Skipped ->

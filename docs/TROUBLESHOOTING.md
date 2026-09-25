@@ -7,6 +7,13 @@
 - **Solution:** Decoded ESC-prefixed Return/Line Feed as Meta+Enter events, mapped Option/Alt+Enter to queued follow-ups, and added `/queue MESSAGE` as an explicit terminal-independent submission boundary. Help now labels Option/Return on macOS and Alt/Enter elsewhere. A local fake-provider PTY verified queue, dequeue, steering, draft retention and retry.
 - **Prevention / Reference:** Exercise key bytes through the real TUI PTY and installed decoder; do not assume Kitty CSI-u support. On macOS, configure Option to send Escape/Meta or use `/queue MESSAGE`.
 
+### [2026-09-25] Account handoff lost Ctrl+C and queued type-ahead
+
+- **Context / Symptom:** Ctrl+C during browser sign-in after the TUI released the terminal could terminate Pave instead of restoring the screen. Input queued during the handoff could be replayed by the next picker.
+- **Root Cause:** Notty release restores canonical terminal signal mode, where the default OCaml SIGINT disposition exits the process; catching `Sys.Break` at the caller alone cannot intercept that signal. Recreating the Notty terminal also leaves the kernel input queue intact.
+- **Solution:** `Tui.suspend` temporarily maps SIGINT to `Sys.Break`, restores the terminal in `Fun.protect`, ignores SIGINT during reinitialization, flushes `TCIFLUSH`, then restores the prior handler. Account flows handle cancellation without exiting; chooser Ctrl+C returns only from the top picker, allowing cancellable model discovery to stop and join. Local 70×18 PTYs verified a canceled Ollama listing, OpenRouter loopback sign-in with a URL-restricted fake `curl`, discarded handoff type-ahead, composer input after both return paths and clean exit.
+- **Prevention / Reference:** Exercise suspended terminal flows with a controlling PTY, local callback and local model-listing endpoint; a direct key-decoder test does not verify signal mode or the kernel input queue.
+
 ### [2026-09-25] OCaml Unix lacks a no-follow open flag
 
 - **Context / Symptom:** `dune runtest` rejected `Unix.O_NOFOLLOW` as an unbound constructor while building typed user/project settings on the OCaml 5.5.1 switch.

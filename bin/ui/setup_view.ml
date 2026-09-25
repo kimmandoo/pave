@@ -77,6 +77,9 @@ let run screen =
                ~login_manual:"" ~logout:""));
            model descriptor None
          with
+         | Sys.Break ->
+             Tui.alert screen "Sign-in cancelled; choose an account action.";
+             authentication descriptor
          | Pave.Oauth_flow.OAuth_error _
          | Pave.Oauth_device.OAuth_error _
          | Pave.Oauth_store.Storage_error _
