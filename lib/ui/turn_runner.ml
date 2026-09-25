@@ -1,5 +1,11 @@
 type completion = Completed | Cancelled | Failed of exn
 
+type turn = {
+  id : int;
+  cancelled : bool Atomic.t;
+  mutable thread_id : int option;
+}
+
 type approval = {
   mutex : Mutex.t;
   condition : Condition.t;
@@ -7,11 +13,11 @@ type approval = {
 }
 
 type notice =
-  | Message of string
-  | Delta of string
-  | Phase of Agent.phase
-  | Approve of string * approval * (unit -> bool)
-  | Finished of completion
+  | Message of int * string
+  | Delta of int * string
+  | Phase of int * Agent.phase
+  | Approve of int * string * approval * (unit -> bool)
+  | Finished of int * completion
 
 type t = {
   read_fd : Unix.file_descr;
@@ -23,7 +29,8 @@ type t = {
   mutable approvals : approval list;
   pending : string Queue.t;
   mutable worker : Thread.t option;
-  mutable cancel_flag : bool Atomic.t option;
+  mutable active_turn : turn option;
+  mutable next_turn_id : int;
   mutable closed : bool;
   run : cancel:(unit -> bool) -> string -> unit;
   on_message : string -> unit;
@@ -49,18 +56,45 @@ let create ~run ~on_message ~on_delta ~on_approve ~on_start ~on_finish
   { read_fd; write_fd; wake_byte = Bytes.of_string "x";
     drain_bytes = Bytes.create 256;
     guard = Mutex.create (); notices = Queue.create (); approvals = [];
-    pending = Queue.create (); worker = None; cancel_flag = None; closed = false;
+    pending = Queue.create (); worker = None; active_turn = None;
+    next_turn_id = 0; closed = false;
     run; on_message; on_delta; on_phase; on_approve; on_start; on_finish; on_queued }
 
 let fd t = t.read_fd
 let busy t = t.worker <> None
 
-let notify t notice =
+let active_turn t id =
+  with_guard t (fun () ->
+    match t.active_turn with
+    | Some turn when turn.id = id -> Some turn
+    | _ -> None)
+
+let cancel_requested t id = match active_turn t id with
+  | Some turn -> Atomic.get turn.cancelled
+  | None -> true
+
+(* Notices belong to the thread executing this turn. Detached producers cannot
+   borrow the current owner or have late callbacks mislabeled as follow-ups. *)
+let worker_turn t =
+  let thread_id = Thread.id (Thread.self ()) in
+  with_guard t (fun () ->
+    match t.active_turn with
+    | Some turn when turn.thread_id = Some thread_id -> Some turn
+    | _ -> None)
+
+(* Completion enqueue and cancellation share the guard, so the first one wins. *)
+let notify t turn notice =
   let wake = with_guard t (fun () ->
-    if t.closed then false else (
-      let empty = Queue.is_empty t.notices in
-      Queue.add notice t.notices;
-      empty)) in
+    match t.active_turn with
+    | Some active when not t.closed && active.id = turn.id ->
+        let notice = match notice with
+          | Finished (id, Completed) when Atomic.get turn.cancelled ->
+              Finished (id, Cancelled)
+          | _ -> notice in
+        let empty = Queue.is_empty t.notices in
+        Queue.add notice t.notices;
+        empty
+    | _ -> false) in
   if wake then (
     let rec write () =
       try ignore (Unix.write t.write_fd t.wake_byte 0 1)
@@ -69,10 +103,18 @@ let notify t notice =
       | Unix.Unix_error (Unix.EAGAIN, _, _) -> () in
     write ())
 
-let message t text = notify t (Message text)
-let delta t text = notify t (Delta text)
+let message t text =
+  Option.iter (fun turn -> notify t turn (Message (turn.id, text)))
+    (worker_turn t)
 
-let phase t value = notify t (Phase value)
+let delta t text =
+  Option.iter (fun turn -> notify t turn (Delta (turn.id, text)))
+    (worker_turn t)
+
+let phase t value =
+  Option.iter (fun turn -> notify t turn (Phase (turn.id, value)))
+    (worker_turn t)
+
 let answer request result =
   Mutex.lock request.mutex;
   (match request.answer with
@@ -81,14 +123,15 @@ let answer request result =
   Mutex.unlock request.mutex
 
 let approve t command =
-  let cancel () = match t.cancel_flag with
-    | Some flag -> Atomic.get flag
-    | None -> true in
+  let turn = match worker_turn t with
+    | Some turn -> turn
+    | None -> raise Provider.Cancelled in
+  let cancel () = Atomic.get turn.cancelled in
   if cancel () then raise Provider.Cancelled;
   let request = { mutex = Mutex.create (); condition = Condition.create ();
     answer = None } in
   with_guard t (fun () -> t.approvals <- request :: t.approvals);
-  notify t (Approve (command, request, cancel));
+  notify t turn (Approve (turn.id, command, request, cancel));
   Mutex.lock request.mutex;
   let rec await () = match request.answer with
     | Some result -> result
@@ -102,17 +145,27 @@ let approve t command =
 let start t text =
   if t.closed then invalid_arg "turn runner closed";
   t.on_start text;
-  let flag = Atomic.make false in
-  t.cancel_flag <- Some flag;
-  t.worker <- Some (Thread.create (fun () ->
-    let cancel () = Atomic.get flag in
-    let outcome = try
-      t.run ~cancel text;
-      Completed
-    with
-    | Provider.Cancelled -> Cancelled
-    | exn -> Failed exn in
-    notify t (Finished outcome)) ())
+  let turn = { id = t.next_turn_id; cancelled = Atomic.make false;
+    thread_id = None } in
+  t.next_turn_id <- t.next_turn_id + 1;
+  with_guard t (fun () -> t.active_turn <- Some turn);
+  (try
+     t.worker <- Some (Thread.create (fun () ->
+       with_guard t (fun () -> turn.thread_id <- Some (Thread.id (Thread.self ())));
+       let cancel () = Atomic.get turn.cancelled in
+       let outcome = try
+         t.run ~cancel text;
+         if cancel () then Cancelled else Completed
+       with
+       | Provider.Cancelled -> Cancelled
+       | exn -> Failed exn in
+       notify t turn (Finished (turn.id, outcome))) ())
+   with exn ->
+     with_guard t (fun () ->
+       match t.active_turn with
+       | Some active when active.id = turn.id -> t.active_turn <- None
+       | _ -> ());
+     t.on_finish (Failed exn))
 
 let submit t text =
   if t.closed then invalid_arg "turn runner closed";
@@ -122,8 +175,9 @@ let submit t text =
   else start t text
 
 let cancel t =
-  (match t.cancel_flag with None -> () | Some flag -> Atomic.set flag true);
-  let requests = with_guard t (fun () -> t.approvals) in
+  let requests = with_guard t (fun () ->
+    Option.iter (fun turn -> Atomic.set turn.cancelled true) t.active_turn;
+    t.approvals) in
   List.iter (fun request -> answer request false) requests
 
 let drain_pipe t =
@@ -142,24 +196,34 @@ let drain t =
       if Queue.is_empty t.notices then None else Some (Queue.take t.notices)) in
     match notice with
     | None -> ()
-    | Some (Message text) -> t.on_message text; handle ()
-    | Some (Delta text) -> t.on_delta text; handle ()
-    | Some (Phase phase) -> t.on_phase phase; handle ()
-    | Some (Approve (command, request, cancelled)) ->
-        if cancelled () then answer request false
+    | Some (Message (id, text)) ->
+        if not (cancel_requested t id) then t.on_message text;
+        handle ()
+    | Some (Delta (id, text)) ->
+        if not (cancel_requested t id) then t.on_delta text;
+        handle ()
+    | Some (Phase (id, phase)) ->
+        if not (cancel_requested t id) then t.on_phase phase;
+        handle ()
+    | Some (Approve (id, command, request, cancelled)) ->
+        if cancelled () || cancel_requested t id then answer request false
         else (try answer request (t.on_approve command)
           with exn ->
             answer request false;
-            t.on_message ("Error: shell approval failed: " ^ Printexc.to_string exn));
+            if not (cancel_requested t id) then
+              t.on_message ("Error: shell approval failed: " ^ Printexc.to_string exn));
         handle ()
-    | Some (Finished outcome) ->
-        (match t.worker with Some worker -> Thread.join worker | None -> ());
-        t.worker <- None;
-        t.cancel_flag <- None;
-        t.on_finish outcome;
-        if not t.closed && not (Queue.is_empty t.pending) then (
-          start t (Queue.take t.pending);
-          t.on_queued (Queue.length t.pending));
+    | Some (Finished (id, outcome)) ->
+        (match active_turn t id with
+         | None -> ()
+         | Some _ ->
+             (match t.worker with Some worker -> Thread.join worker | None -> ());
+             t.worker <- None;
+             with_guard t (fun () -> t.active_turn <- None);
+             t.on_finish outcome;
+             if not t.closed && not (Queue.is_empty t.pending) then (
+               start t (Queue.take t.pending);
+               t.on_queued (Queue.length t.pending)));
         handle () in
   handle ()
 
@@ -169,6 +233,7 @@ let close t =
     cancel t;
     (match t.worker with Some worker -> Thread.join worker | None -> ());
     t.worker <- None;
+    with_guard t (fun () -> t.active_turn <- None);
     t.closed <- true;
     Unix.close t.read_fd;
     Unix.close t.write_fd)
