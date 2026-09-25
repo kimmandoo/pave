@@ -94,18 +94,14 @@ let run screen =
     | Some "Back · authentication" -> authentication descriptor
     | _ -> skip
   and model (descriptor : Pave.Provider_catalog.descriptor) missing_key =
-    let models = Pave.Provider_catalog.known_models descriptor in
-    let models = match descriptor.default_model with
-      | Some default when not (List.mem default models) -> default :: models
-      | _ -> models in
-    let choices = List.map (fun id -> descriptor.id ^ "/" ^ id) models in
+    let choices = ["Back · authentication"; "Skip setup"] in
     match Model_picker.choose screen ~descriptor
       ~plain:["Back · authentication"; "Skip setup"]
       ~intro:["03 / 03  ·  MODEL";
         "Use arrows and Enter to choose an available model.";
         "Type an ID only if the model you need is not listed."]
       ~title:"SETUP · Select model"
-      ~choices:(choices @ ["Back · authentication"; "Skip setup"]) () with
+      ~choices () with
     | None | Some "Skip setup" -> skip
     | Some "Back · authentication" -> authentication descriptor
     | Some choice ->

@@ -1,14 +1,15 @@
 (* Public GitHub Copilot Chat only. Never send a GitHub OAuth bearer token to a
-   configured host, an Enterprise endpoint, or an unsupported model route. *)
+   configured host or an Enterprise endpoint. The pinned service decides which
+   discovered Chat model IDs the authenticated account may invoke. *)
 let endpoint = "https://api.githubcopilot.com/chat/completions"
-let supported_models = ["gpt-4.1"; "gpt-4o"]
-let supported_model model = List.mem model supported_models
 
 let fail message = invalid_arg ("GitHub Copilot Chat: " ^ message)
 
 let validate ~endpoint:target ~model ~token =
   if target <> endpoint then fail "unsupported endpoint";
-  if not (supported_model model) then fail "unsupported model";
+  if model = "" || String.length model > 256 ||
+    String.exists (fun c -> Char.code c <= 32 || Char.code c = 127) model
+  then fail "invalid model ID";
   if token = "" || String.length token > 8192 ||
      String.exists (fun c -> Char.code c <= 32 || Char.code c = 127) token
   then fail "invalid OAuth bearer token"

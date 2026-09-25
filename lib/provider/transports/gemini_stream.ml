@@ -69,7 +69,7 @@ let handle_chunk t json =
                        t.signature_seen <- true
                    | _ -> ());
                   (match field "functionCall" part with
-                   | `Assoc _ as fn when Gemini_wire.gemini_three t.model ->
+                   | `Assoc _ as fn ->
                        if Hashtbl.mem t.native_calls fn then
                          invalid "repeated native function call";
                        Hashtbl.add t.native_calls fn ()
@@ -147,8 +147,8 @@ let finish t =
   if not t.finished then invalid "missing finish reason";
   if (not t.text_seen || Buffer.length t.content = 0) && t.calls = [] then
     invalid "empty response";
-  if Gemini_wire.gemini_three t.model && t.calls <> [] && not t.signature_seen then
-    invalid "Gemini 3 tool turn lacks native thought signature";
+  if t.calls <> [] && not t.signature_seen then
+    invalid "Gemini tool turn lacks native thought signature";
   { Protocol.role = "assistant";
     content = (if t.text_seen then Some (Buffer.contents t.content) else None);
     tool_calls = List.rev t.calls; tool_call_id = None;

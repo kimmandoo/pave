@@ -71,10 +71,9 @@ let choose screen ~(descriptor : Pave.Provider_catalog.descriptor) ?(intro = [])
       Mutex.unlock lock;
       match answer with
       | Some (`Listing (Ok ids)) ->
-          let verified = List.filter_map (fun id ->
-            match Pave.Provider_catalog.route descriptor ~model:id "" with
-            | Some _ -> Some (descriptor.id ^ "/" ^ id)
-            | None -> None) ids in
+          let verified = match Pave.Provider_catalog.route descriptor "" with
+            | None -> []
+            | Some _ -> List.map (fun id -> descriptor.id ^ "/" ^ id) ids in
           let status = Printf.sprintf "%s: %d live routable model%s"
             descriptor.display_name (List.length verified)
             (if List.length verified = 1 then "" else "s") in
@@ -84,7 +83,7 @@ let choose screen ~(descriptor : Pave.Provider_catalog.descriptor) ?(intro = [])
             ~status:(Pave.Model_discovery.message error) ()
       | Some `Unavailable ->
           Tui.update_choices screen ~verified:[]
-            ~status:"Model listing unavailable; offline suggestions remain" ()
+            ~status:"Model listing unavailable; type an ID or retry" ()
       | Some `Cancelled | None -> () in
     Tui.choose screen ~allow_custom:true ~intro ~plain
       ~initial_status:"Loading available models…" ~wake_fd:read_fd

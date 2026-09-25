@@ -363,9 +363,6 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage 
     raise (Provider_error "Codex subscription inference requires OAuth");
   if config.api = Copilot_chat && authentication <> OAuth then
     raise (Provider_error "GitHub Copilot inference requires a device grant");
-  if config.api = Copilot_chat &&
-     not (Github_copilot_wire.supported_model config.model) then
-    raise (Provider_error "unsupported GitHub Copilot Chat model");
   let credential = match resolve_credential with
     | Some get -> get ()
     | None -> { access = config.api_key; account_id = None; residency = None } in

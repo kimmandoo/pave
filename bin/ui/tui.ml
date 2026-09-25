@@ -865,8 +865,8 @@ let read ?wake_fd ?on_wake ?on_interrupt ?on_completion t =
     t.paste <- false;
     Buffer.clear paste_buffer) loop
 
-(* The chooser is updated only on the UI thread (typically from on_wake). The
-   initial offline suggestions remain available when verified IDs arrive. *)
+(* Update verified choices only on the UI thread (typically from on_wake);
+   preserve an explicit selection while fresh provider IDs arrive. *)
 let update_chooser chooser ~verified ~status =
   let previous = matches chooser in
   let selected = if chooser.selected < Array.length previous then

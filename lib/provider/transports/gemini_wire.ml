@@ -25,10 +25,6 @@ let next_call_id () =
   incr call_sequence;
   "gemini_call_" ^ string_of_int !call_sequence
 
-let gemini_three model =
-  let model = if String.starts_with ~prefix:"models/" model then
-    String.sub model 7 (String.length model - 7) else model in
-  String.starts_with ~prefix:"gemini-3" model
 let part text = `Assoc [ "text", `String text ]
 let content role parts = `Assoc [ "role", `String role; "parts", `List parts ]
 let native_state ~model parts = `Assoc [
@@ -208,8 +204,8 @@ let request ~model messages tools =
              let native_parts = match msg.provider_state with
                | Some state -> Some (replay_parts ~model msg state)
                | None -> None in
-             if gemini_three model && msg.tool_calls <> [] && native_parts = None then
-               invalid "Gemini 3 tool turns require native thought signatures";
+             if msg.tool_calls <> [] && native_parts = None then
+               invalid "Gemini tool turns require native thought signatures";
              let ids = List.map (fun (call : tool_call) ->
                if call.id = "" || call.name = "" then invalid "empty function call id or name";
                (match call.arguments with `Assoc _ -> () | _ -> invalid "function arguments must be an object");
@@ -282,8 +278,8 @@ let parse_candidate ~model candidate =
   let content, tool_calls = parse_parts parts in
   if (content = None || content = Some "") && tool_calls = [] then invalid "empty candidate";
   let signed = has_signature parts in
-  if gemini_three model && tool_calls <> [] && not signed then
-    invalid "Gemini 3 tool turn lacks native thought signature";
+  if tool_calls <> [] && not signed then
+    invalid "Gemini tool turn lacks native thought signature";
   { role = "assistant"; content; tool_calls; tool_call_id = None;
     provider_state = (if signed then Some (native_state ~model parts) else None) }
 

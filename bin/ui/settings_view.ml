@@ -30,19 +30,18 @@ let open_view screen ~root =
                save (fun current -> { current with
                  default_provider = Some id; default_model = None }))
          else if choice = model then (
-           let choices = List.concat_map
-             (fun (entry : Pave.Provider_catalog.descriptor) ->
-               List.map (fun id -> entry.id ^ "/" ^ id)
-                 (Pave.Provider_catalog.known_models entry))
-             (Pave.Provider_catalog.all ()) in
-           match Tui.choose screen ~allow_custom:true
-             ~title:"Default model · type PROVIDER/MODEL_ID for custom"
-             ~choices with
+           let provider_id = Option.value ~default:"openai"
+             values.default_provider in
+           let descriptor = match Pave.Provider_catalog.find provider_id with
+             | Some descriptor -> descriptor
+             | None -> invalid_arg "unknown configured provider" in
+           match Model_picker.choose screen ~descriptor
+             ~title:"Default model · live IDs (type an ID if unavailable)"
+             ~choices:[] () with
            | None -> ()
            | Some selector ->
                let descriptor, model, _ = Pave.Interaction.resolve_model
-                 ~current_provider:(Option.value ~default:"openai"
-                   values.default_provider) ~input:selector in
+                 ~current_provider:descriptor.id ~input:selector in
                save (fun current -> { current with
                  default_provider = Some descriptor.id;
                  default_model = Some model }))
