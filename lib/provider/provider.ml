@@ -1,4 +1,4 @@
-type api = Openai_completions | Anthropic_messages | Openai_responses
+type api = Openai_completions | Local_chat | Anthropic_messages | Openai_responses
   | Ollama_chat | Gemini_direct | Codex_responses | Copilot_chat
 type authentication = Api_key | OAuth
 type config = { endpoint : string; api_key : string; model : string; api : api }
@@ -240,6 +240,88 @@ let gemini_model_path model =
     else Printf.bprintf result "%%%02X" code) model;
   Buffer.contents result
 
+(* Local Chat Completions never sends credentials to a DNS name other than
+   localhost, which is replaced with a numeric loopback address before curl.
+   Numeric LAN addresses are accepted only when explicitly configured. *)
+let local_endpoint endpoint =
+  let fail () = raise (Provider_error "invalid local Chat Completions endpoint") in
+  let length = String.length endpoint in
+  if length > 2048 then fail ();
+  reject_controls "local endpoint" endpoint;
+  let scheme, start =
+    if String.starts_with ~prefix:"http://" endpoint then "http://", 7
+    else if String.starts_with ~prefix:"https://" endpoint then "https://", 8
+    else fail () in
+  let slash = match String.index_from_opt endpoint start '/' with
+    | Some index -> index | None -> fail () in
+  let authority = String.sub endpoint start (slash - start) in
+  let path = String.sub endpoint slash (length - slash) in
+  if not (String.ends_with ~suffix:"/chat/completions" path) ||
+     String.length path < String.length "/chat/completions" ||
+     String.exists (fun c ->
+       not (match c with
+         | 'a'..'z' | 'A'..'Z' | '0'..'9' | '/' | '-' | '_' | '.' -> true
+         | _ -> false)) path ||
+     List.exists (fun segment -> segment = "." || segment = "..")
+       (String.split_on_char '/' path)
+  then fail ();
+  let host, port =
+    if String.starts_with ~prefix:"[" authority then
+      let closing = match String.index_opt authority ']' with
+        | Some index -> index | None -> fail () in
+      let host = String.sub authority 1 (closing - 1) in
+      let port = String.sub authority (closing + 1)
+        (String.length authority - closing - 1) in
+      if port <> "" && port.[0] <> ':' then fail ();
+      "[" ^ host ^ "]", port
+    else
+      match String.index_opt authority ':' with
+      | Some index ->
+          String.sub authority 0 index,
+          String.sub authority index (String.length authority - index)
+      | None -> authority, "" in
+  if port <> "" then (
+    let digits = String.sub port 1 (String.length port - 1) in
+    if digits = "" || String.length digits > 5 ||
+       not (String.for_all (function '0'..'9' -> true | _ -> false) digits)
+    then fail ();
+    let number = int_of_string digits in
+    if number < 1 || number > 65535 then fail ());
+  let canonical_host =
+    if String.lowercase_ascii host = "localhost" then "127.0.0.1"
+    else if String.starts_with ~prefix:"[" host then (
+      let numeric = String.sub host 1 (String.length host - 2) in
+      if not (String.contains numeric ':') ||
+         not (String.for_all (function
+           | '0'..'9' | 'a'..'f' | 'A'..'F' | ':' | '.' -> true
+           | _ -> false) numeric)
+      then fail ();
+      let normalized = try Unix.string_of_inet_addr
+        (Unix.inet_addr_of_string numeric)
+        with Failure _ | Invalid_argument _ -> fail () in
+      let normalized = String.lowercase_ascii normalized in
+      if normalized <> "::1" &&
+         not (String.starts_with ~prefix:"fc" normalized ||
+              String.starts_with ~prefix:"fd" normalized)
+      then fail ();
+      "[" ^ normalized ^ "]")
+    else (
+      let octets = String.split_on_char '.' host in
+      let number part =
+        if part = "" || String.length part > 3 ||
+           (String.length part > 1 && part.[0] = '0') ||
+           not (String.for_all (function '0'..'9' -> true | _ -> false) part)
+        then fail ();
+        let value = int_of_string part in
+        if value > 255 then fail ();
+        value in
+      match List.map number octets with
+      | [127; _; _; _] | [10; _; _; _]
+      | [192; 168; _; _] -> host
+      | [172; second; _; _] when second >= 16 && second <= 31 -> host
+      | _ -> fail ()) in
+  scheme ^ canonical_host ^ port ^ path
+
 let request_body ~endpoint ~headers body_json =
   if not (String.starts_with ~prefix:"https://" endpoint
           || String.starts_with ~prefix:"http://" endpoint) then
@@ -251,7 +333,7 @@ let request_body ~endpoint ~headers body_json =
     raise (Provider_error "conversation request exceeds 8 MiB; start a new session");
   body
 
-let curl_options ~endpoint ~headers ~body_path =
+let curl_options ~local ~endpoint ~headers ~body_path =
   let option name value = name ^ " = " ^ quote_config value ^ "\n" in
   "silent\n"
   ^ option "url" endpoint
@@ -261,9 +343,12 @@ let curl_options ~endpoint ~headers ~body_path =
   ^ option "data-binary" ("@" ^ body_path)
   ^ option "connect-timeout" "10"
   ^ option "max-time" "120"
-  ^ option "proto" "=http,https"
+  ^ option "proto" (if local && String.starts_with ~prefix:"http://" endpoint
+    then "=http" else if local then "=https" else "=http,https")
+  ^ (if local then option "proxy" "" ^ option "noproxy" "*" ^
+      option "max-redirs" "0" else "")
 
-let post_json ?cancel ~endpoint ~headers ~secret body_json =
+let post_json ?(local = false) ?cancel ~endpoint ~headers ~secret body_json =
   let body = request_body ~endpoint ~headers body_json in
   with_temp_file (fun body_path body_output ->
     output_string body_output body;
@@ -272,7 +357,7 @@ let post_json ?cancel ~endpoint ~headers ~secret body_json =
       close_out response_output;
       let option name value = name ^ " = " ^ quote_config value ^ "\n" in
       let configuration =
-        curl_options ~endpoint ~headers ~body_path
+        curl_options ~local ~endpoint ~headers ~body_path
         ^ option "output" response_path
         ^ option "write-out" "%{http_code}" in
       let status = run_curl ?cancel configuration in
@@ -307,7 +392,7 @@ let status_from_headers headers =
       | _ -> current
     else current) None (String.split_on_char '\n' headers)
 
-let post_stream ?cancel ~endpoint ~headers ~secret body_json ~on_chunk ~is_done ~is_finished =
+let post_stream ?(local = false) ?cancel ~endpoint ~headers ~secret body_json ~on_chunk ~is_done ~is_finished =
   let body = request_body ~endpoint ~headers body_json in
   with_temp_file (fun body_path body_output ->
     output_string body_output body;
@@ -316,7 +401,7 @@ let post_stream ?cancel ~endpoint ~headers ~secret body_json ~on_chunk ~is_done 
       close_out header_output;
       let option name value = name ^ " = " ^ quote_config value ^ "\n" in
       let configuration =
-        curl_options ~endpoint ~headers ~body_path
+        curl_options ~local ~endpoint ~headers ~body_path
         ^ "no-buffer\n"
         ^ option "dump-header" header_path
         ^ option "speed-time" "30"
@@ -352,6 +437,8 @@ let post_stream ?cancel ~endpoint ~headers ~secret body_json ~on_chunk ~is_done 
 let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage ?cancel
     config messages tools =
   check_cancel cancel;
+  let config = if config.api = Local_chat then
+    { config with endpoint = local_endpoint config.endpoint } else config in
   if authentication = OAuth &&
      not (match config.api, config.endpoint with
        | Anthropic_messages, "https://api.anthropic.com/v1/messages"
@@ -375,10 +462,15 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage 
     | Protocol.Invalid_response message ->
         raise (Provider_error ("invalid completion response: " ^ redact api_key message)) in
   let result = match config.api with
-  | Openai_completions | Copilot_chat ->
+  | Openai_completions | Local_chat | Copilot_chat ->
       let fields = [ "model", `String config.model;
                      "messages", `List (List.map Protocol.message_to_json messages) ] in
       let fields = if tools = [] then fields else fields @ [ "tools", `List tools ] in
+      if config.api = Local_chat &&
+         (String.length api_key > 8192 ||
+          not (String.for_all (fun c -> Char.code c > 32 &&
+            Char.code c < 127) api_key))
+      then raise (Provider_error "invalid local API key");
       let headers = match config.api with
         | Copilot_chat ->
             (try Github_copilot_wire.headers ~endpoint:config.endpoint
@@ -388,7 +480,8 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage 
             [ "Authorization: Bearer " ^ api_key ] in
       (match on_text with
       | None ->
-          let json = post_json ?cancel ~endpoint:config.endpoint ~headers ~secret:api_key
+          let json = post_json ~local:(config.api = Local_chat) ?cancel
+            ~endpoint:config.endpoint ~headers ~secret:api_key
             (`Assoc fields) in
           let reply = parse (fun () -> Protocol.parse_completion json) in
           (match on_usage with
@@ -406,7 +499,8 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage 
             else fields in
           let body = `Assoc fields in
           parse (fun () ->
-            post_stream ?cancel ~endpoint:config.endpoint ~headers ~secret:api_key
+            post_stream ~local:(config.api = Local_chat) ?cancel
+              ~endpoint:config.endpoint ~headers ~secret:api_key
               body ~on_chunk:(Openai_stream.feed stream)
               ~is_done:(fun () -> Openai_stream.is_done stream)
               ~is_finished:(fun () -> Openai_stream.is_finished stream);

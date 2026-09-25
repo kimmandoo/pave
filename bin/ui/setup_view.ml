@@ -52,7 +52,10 @@ let run screen =
       (if not key_is_set then Option.to_list key_label else []) @
       (if oauth then [login_label] else []) @
       ["Back · providers"; "Skip setup"] in
-    if key = None && not oauth then model descriptor None
+    let local = List.exists (fun (route : Pave.Provider_catalog.route) ->
+      route.wire = Pave.Provider.Local_chat) descriptor.routes in
+    if (key = None || (local && not key_is_set)) && not oauth then
+      model descriptor None
     else match Tui.choose screen
       ~intro:["02 / 03  ·  ACCESS";
         "Use an existing key or sign in; secrets stay out of chat.";
@@ -94,16 +97,23 @@ let run screen =
     | Some "Back · authentication" -> authentication descriptor
     | _ -> skip
   and model (descriptor : Pave.Provider_catalog.descriptor) missing_key =
-    let choices = ["Back · authentication"; "Skip setup"] in
+    let local_without_key = List.exists
+      (fun (route : Pave.Provider_catalog.route) ->
+        route.wire = Pave.Provider.Local_chat) descriptor.routes &&
+      Option.value ~default:"" (Option.bind descriptor.api_key_env Sys.getenv_opt) = "" in
+    let back = if local_without_key then "Back · providers"
+      else "Back · authentication" in
+    let choices = [back; "Skip setup"] in
     match Model_picker.choose screen ~descriptor
-      ~plain:["Back · authentication"; "Skip setup"]
+      ~plain:choices
       ~intro:["03 / 03  ·  MODEL";
         "Use arrows and Enter to choose an available model.";
         "Type an ID only if the model you need is not listed."]
       ~title:"SETUP · Select model"
       ~choices () with
     | None | Some "Skip setup" -> skip
-    | Some "Back · authentication" -> authentication descriptor
+    | Some choice when choice = back ->
+        if local_without_key then provider () else authentication descriptor
     | Some choice ->
         (try
            let selected, id, route = Pave.Interaction.resolve_model

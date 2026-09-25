@@ -45,6 +45,40 @@ let () =
     {|{"models":[{"name":"qwen2.5:7b","size":500},{"name":"llama3:latest"},{"name":"qwen2.5:7b"}]}|})) in
   expect_models ["qwen2.5:7b"; "llama3:latest"]
     (discover ~http ~provider:"ollama" ());
+  List.iter (fun (provider, key) ->
+    let endpoint = Pave.Local_compat.endpoint ~provider () in
+    let url = Pave.Local_compat.listing_url ~endpoint in
+    let descriptor = Option.get (Pave.Provider_catalog.find provider) in
+    let route = Option.get (Pave.Provider_catalog.route descriptor "") in
+    assert (route.wire = Pave.Provider.Local_chat);
+    assert (route.endpoint = endpoint);
+    let headers = if key = "" then [] else ["Authorization", "Bearer " ^ key] in
+    let http, calls = fixed_http url headers (Ok (200,
+      {|{"data":[{"id":"served-now"},{"id":"served-next"},{"id":"served-now"}]}|})) in
+    expect_models ["served-now"; "served-next"]
+      (if key = "" then discover ~http ~provider ()
+       else discover ~http ~provider ~credential:(Api_key key) ());
+    assert (!calls = 1);
+    expect_error wrong_credential (discover ~http ~provider
+      ~credential:(Copilot_oauth "not-a-local-key") ());
+    assert (!calls = 1)) [
+      "lm-studio", "";
+      "llama.cpp", "local-private";
+      "vllm", "vllm-private" ];
+  let local_url = Pave.Local_compat.listing_url
+    ~endpoint:(Pave.Local_compat.endpoint ~provider:"llama.cpp" ()) in
+  let local_headers = ["Authorization", "Bearer local-private"] in
+  let http, calls = fixed_http local_url local_headers (Ok (401, "unauthorized")) in
+  expect_error unavailable (discover ~http ~provider:"llama.cpp"
+    ~credential:(Api_key "local-private") ());
+  assert (!calls = 1);
+  let http, _ = fixed_http local_url local_headers (Ok (200,
+    {|{"data":[{"id":"broken\nmodel"}]}|})) in
+  expect_error is_invalid_response (discover ~http ~provider:"llama.cpp"
+    ~credential:(Api_key "local-private") ());
+  let unused ~url:_ ~headers:_ = failwith "unsafe local credential sent" in
+  expect_error wrong_credential (discover ~http:unused ~provider:"llama.cpp"
+    ~credential:(Api_key "bad\nheader") ());
   let http, _ = fixed_http copilot_url copilot_headers (Ok (200,
     {|{"data":[{"id":"gpt-4.1","capabilities":{"type":"chat"}},{"id":"embed","capabilities":{"type":"embeddings"}},{"id":"gpt-4o"}]}|})) in
   expect_models ["gpt-4.1"; "gpt-4o"]
@@ -129,6 +163,66 @@ let () =
   expect_error unavailable (discover ~http ~provider:"venice"
     ~credential:(Api_key key) ());
   assert (!calls = 1);
+  let http, calls = fixed_http deepinfra_url bearer (Ok (200,
+    {|{"data":[{"id":"chat/one","metadata":{"tags":["chat","reasoning"]}},{"id":"image/one","metadata":{"tags":["image-gen"]}},{"id":"chat/two","metadata":{"tags":["chat"]}},{"id":"chat/one","metadata":{"tags":["chat"]}}]}|})) in
+  expect_models ["chat/one"; "chat/two"]
+    (discover ~http ~provider:"deepinfra" ~credential:(Api_key key) ());
+  assert (!calls = 1);
+  let http, _ = fixed_http deepinfra_url bearer (Ok (200,
+    {|{"data":[{"id":"unknown","metadata":{}}]}|})) in
+  expect_error is_invalid_response (discover ~http ~provider:"deepinfra"
+    ~credential:(Api_key key) ());
+  let http, calls = fixed_http baseten_url bearer (Ok (200,
+    {|{"data":[{"id":"tool/one","supported_features":["tools","reasoning"]},{"id":"embed/one","supported_features":["embeddings"]},{"id":"tool/two","supported_features":["tools"]},{"id":"tool/one","supported_features":["tools"]}]}|})) in
+  expect_models ["tool/one"; "tool/two"]
+    (discover ~http ~provider:"baseten" ~credential:(Api_key key) ());
+  assert (!calls = 1);
+  let http, _ = fixed_http baseten_url bearer (Ok (200,
+    {|{"data":[{"id":"unknown"}]}|})) in
+  expect_error is_invalid_response (discover ~http ~provider:"baseten"
+    ~credential:(Api_key key) ());
+  let fireworks_first =
+    fireworks_url ^ "?pageSize=200&filter=supports_serverless%3Dtrue" in
+  let calls = ref 0 in
+  let http ~url ~headers =
+    incr calls;
+    assert (headers = bearer);
+    if !calls = 1 then (
+      assert (url = fireworks_first);
+      Ok (200, {|{"models":[{"name":"accounts/fireworks/models/tool-one","supportsServerless":true,"supportsTools":true,"state":"READY"},{"name":"accounts/fireworks/models/embed-one","supportsServerless":true,"supportsTools":false},{"name":"accounts/other/models/private","supportsServerless":true,"supportsTools":true}],"nextPageToken":"next /?"}|}))
+    else (
+      assert (!calls = 2);
+      assert (url = fireworks_first ^ "&pageToken=next%20%2F%3F");
+      Ok (200, {|{"models":[{"name":"accounts/fireworks/models/tool-two","supportsServerless":true,"supportsTools":true},{"name":"accounts/fireworks/models/tool-one","supportsServerless":true,"supportsTools":true},{"name":"accounts/fireworks/models/not-serving","supportsServerless":false,"supportsTools":true}]}|})) in
+  expect_models ["accounts/fireworks/models/tool-one";
+    "accounts/fireworks/models/tool-two"]
+    (discover ~http ~provider:"fireworks" ~credential:(Api_key key) ());
+  assert (!calls = 2);
+  let http, _ = fixed_http fireworks_first bearer (Ok (200,
+    {|{"models":[{"name":"accounts/fireworks/models/tool-one","supportsServerless":true,"supportsTools":true}],"nextPageToken":"bad\npage"}|})) in
+  expect_error is_invalid_response (discover ~http ~provider:"fireworks"
+    ~credential:(Api_key key) ());
+  let unused ~url:_ ~headers:_ = failwith "unauthorized new provider listing attempted" in
+  List.iter (fun provider ->
+    expect_error no_credential (discover ~http:unused ~provider ());
+    expect_error wrong_credential (discover ~http:unused ~provider
+      ~credential:(Codex_oauth (key, "account")) ());
+    expect_error wrong_credential (discover ~http:unused ~provider
+      ~credential:(Api_key "unsafe\nkey") ()))
+    ["deepinfra"; "fireworks"; "baseten"];
+  List.iter (fun (provider, url) ->
+    let http, calls = fixed_http url bearer (Ok (401, "private")) in
+    expect_error unavailable (discover ~http ~provider
+      ~credential:(Api_key key) ());
+    assert (!calls = 1);
+    let http, calls = fixed_http url bearer (Ok (302,
+      {|{"Location":"https://attacker.example/models"}|})) in
+    expect_error unavailable (discover ~http ~provider
+      ~credential:(Api_key key) ());
+    assert (!calls = 1)) [
+      "deepinfra", deepinfra_url;
+      "fireworks", fireworks_first;
+      "baseten", baseten_url ];
   let headers = ["x-api-key", key; "anthropic-version", "2023-06-01"] in
   let calls = ref 0 in
   let http ~url ~headers:actual =

@@ -77,6 +77,36 @@ let builtins = [
       endpoint = "https://api.venice.ai/api/v1/chat/completions" } ];
     default_route = "chat";
     api_key_env = Some "VENICE_API_KEY"; oauth = None };
+  { id = "deepinfra"; display_name = "DeepInfra";
+    routes = [ { name = "chat"; wire = Provider.Openai_completions;
+      endpoint = "https://api.deepinfra.com/v1/openai/chat/completions" } ];
+    default_route = "chat";
+    api_key_env = Some "DEEPINFRA_API_KEY"; oauth = None };
+  { id = "fireworks"; display_name = "Fireworks AI";
+    routes = [ { name = "chat"; wire = Provider.Openai_completions;
+      endpoint = "https://api.fireworks.ai/inference/v1/chat/completions" } ];
+    default_route = "chat";
+    api_key_env = Some "FIREWORKS_API_KEY"; oauth = None };
+  { id = "baseten"; display_name = "Baseten";
+    routes = [ { name = "chat"; wire = Provider.Openai_completions;
+      endpoint = "https://inference.baseten.co/v1/chat/completions" } ];
+    default_route = "chat";
+    api_key_env = Some "BASETEN_API_KEY"; oauth = None };
+  { id = "lm-studio"; display_name = "LM Studio (local)";
+    routes = [ { name = "chat"; wire = Provider.Local_chat;
+      endpoint = "http://127.0.0.1:1234/v1/chat/completions" } ];
+    default_route = "chat";
+    api_key_env = Some "LM_STUDIO_API_KEY"; oauth = None };
+  { id = "llama.cpp"; display_name = "llama.cpp (local)";
+    routes = [ { name = "chat"; wire = Provider.Local_chat;
+      endpoint = "http://127.0.0.1:8080/v1/chat/completions" } ];
+    default_route = "chat";
+    api_key_env = Some "LLAMA_CPP_API_KEY"; oauth = None };
+  { id = "vllm"; display_name = "vLLM (local)";
+    routes = [ { name = "chat"; wire = Provider.Local_chat;
+      endpoint = "http://127.0.0.1:8000/v1/chat/completions" } ];
+    default_route = "chat";
+    api_key_env = Some "VLLM_API_KEY"; oauth = None };
   { id = "github-copilot"; display_name = "GitHub Copilot Chat (public github.com)";
     routes = [ { name = "chat"; wire = Provider.Copilot_chat;
       endpoint = Github_copilot_wire.endpoint } ];
@@ -89,4 +119,7 @@ let find id = List.find_opt (fun provider -> provider.id = id) builtins
 
 let route provider name =
   let name = if name = "" then provider.default_route else name in
-  List.find_opt (fun entry -> entry.name = name) provider.routes
+  match List.find_opt (fun entry -> entry.name = name) provider.routes with
+  | Some entry when Local_compat.engine provider.id <> None ->
+      Some { entry with endpoint = Local_compat.endpoint ~provider:provider.id () }
+  | route -> route

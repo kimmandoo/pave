@@ -92,11 +92,14 @@ let serve client step signal_write closed_write =
         (if step = 7 then
            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}]}\n\n"
          else {|{"choices":[{"message":{"role":"assistant","content":"partial|})
-    | 8 | 9 | 10 | 11 | 12 | 13 ->
+    | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19 ->
         let provider, key = match (step - 8) / 2 with
           | 0 -> "together", "mock-together"
           | 1 -> "cerebras", "mock-cerebras"
-          | _ -> "venice", "mock-venice" in
+          | 2 -> "venice", "mock-venice"
+          | 3 -> "deepinfra", "mock-deepinfra"
+          | 4 -> "fireworks", "mock-fireworks"
+          | _ -> "baseten", "mock-baseten" in
         assert (path = "/chat/completions");
         assert (has_header ("authorization: bearer " ^ key) headers);
         assert (member "model" request = `String "discovered-next-model");
@@ -166,7 +169,7 @@ let () =
   if child = 0 then (
     Unix.close signal_read;
     Unix.close closed_read;
-    (try for step = 0 to 13 do
+    (try for step = 0 to 19 do
        let client, _ = Unix.accept socket in serve client step signal_write closed_write
      done with exn -> prerr_endline (Printexc.to_string exn); exit 2);
     exit 0);
@@ -312,5 +315,8 @@ let () =
       assert (second.tool_calls = [])) [
         "together", "https://api.together.ai/v1/chat/completions", "TOGETHER_API_KEY";
         "cerebras", "https://api.cerebras.ai/v1/chat/completions", "CEREBRAS_API_KEY";
-        "venice", "https://api.venice.ai/api/v1/chat/completions", "VENICE_API_KEY" ]);
+        "venice", "https://api.venice.ai/api/v1/chat/completions", "VENICE_API_KEY";
+        "deepinfra", "https://api.deepinfra.com/v1/openai/chat/completions", "DEEPINFRA_API_KEY";
+        "fireworks", "https://api.fireworks.ai/inference/v1/chat/completions", "FIREWORKS_API_KEY";
+        "baseten", "https://inference.baseten.co/v1/chat/completions", "BASETEN_API_KEY" ]);
   print_endline "provider HTTP: ok"
