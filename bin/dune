@@ -12,5 +12,5 @@
 (executable
  (name main)
  (public_name pave)
- (modules main cli_auth tui transcript_view terminal_input settings_view setup_view update embedded_installer)
+ (modules main cli_auth tui transcript_view terminal_input settings_view setup_view model_picker update embedded_installer)
  (libraries pave unix notty-community notty-community.unix uutf yojson threads))
