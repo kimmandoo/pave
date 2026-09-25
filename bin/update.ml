@@ -27,29 +27,6 @@ let rec wait_for pid =
   try snd (Unix.waitpid [] pid) with
   | Unix.Unix_error (Unix.EINTR, _, _) -> wait_for pid
 
-let run () =
-  let directory = native_install_dir () in
-  let script, output = Filename.open_temp_file ~mode:[ Open_binary ]
-    "pave-update-" ".sh" in
-  Fun.protect ~finally:(fun () ->
-    close_out_noerr output;
-    try Sys.remove script with Sys_error _ -> ()) (fun () ->
-    output_string output Embedded_installer.script;
-    close_out output;
-    let keep entry =
-      not (String.starts_with ~prefix:"PAVE_INSTALL_DIR=" entry ||
-           String.starts_with ~prefix:"PAVE_VERSION=" entry) in
-    let environment = Array.of_list
-      (("PAVE_INSTALL_DIR=" ^ directory) ::
-        List.filter keep (Array.to_list (Unix.environment ()))) in
-    let pid = Unix.create_process_env "/bin/sh" [| "/bin/sh"; script |]
-      environment Unix.stdin Unix.stdout Unix.stderr in
-    match wait_for pid with
-    | Unix.WEXITED 0 -> ()
-    | Unix.WEXITED code -> fail (Printf.sprintf "installer exited with status %d; inspect the installation before retrying" code)
-    | Unix.WSIGNALED signal | Unix.WSTOPPED signal ->
-        fail (Printf.sprintf "installer terminated with signal %d; check the installation before retrying" signal))
-
 let version_number tag =
   if String.length tag < 6 || String.length tag > 48 || tag.[0] <> 'v' then
     fail "invalid release version";
@@ -94,6 +71,34 @@ let latest_version () =
     match Pave.Protocol.member "tag_name" json with
     | `String tag -> tag
     | _ -> fail "release metadata has no tag_name")
+
+let run () =
+  let directory = native_install_dir () in
+  (* The mutable /latest/download redirect can lag behind the release API.
+     Pin both archive and checksum fetches to the same validated tag. *)
+  let target = latest_version () in
+  ignore (version_number target);
+  let script, output = Filename.open_temp_file ~mode:[ Open_binary ]
+    "pave-update-" ".sh" in
+  Fun.protect ~finally:(fun () ->
+    close_out_noerr output;
+    try Sys.remove script with Sys_error _ -> ()) (fun () ->
+    output_string output Embedded_installer.script;
+    close_out output;
+    let keep entry =
+      not (String.starts_with ~prefix:"PAVE_INSTALL_DIR=" entry ||
+           String.starts_with ~prefix:"PAVE_VERSION=" entry) in
+    let environment = Array.of_list
+      (("PAVE_INSTALL_DIR=" ^ directory) :: ("PAVE_VERSION=" ^ target) ::
+        List.filter keep (Array.to_list (Unix.environment ()))) in
+    let pid = Unix.create_process_env "/bin/sh" [| "/bin/sh"; script |]
+      environment Unix.stdin Unix.stdout Unix.stderr in
+    match wait_for pid with
+    | Unix.WEXITED 0 -> ()
+    | Unix.WEXITED code -> fail (Printf.sprintf "installer exited with status %d; inspect the installation before retrying" code)
+    | Unix.WSIGNALED signal | Unix.WSTOPPED signal ->
+        fail (Printf.sprintf "installer terminated with signal %d; check the installation before retrying" signal))
+
 
 let check () =
   ignore (native_install_dir ());

@@ -31,7 +31,7 @@ pave update --check  # Compare embedded release version against GitHub's latest 
 pave update          # Upgrade to the latest release.
 ```
 
-The native binary executes its **embedded** copy of the checksum-verifying installer; it does not fetch a new shell script. `--check` requires a release built with embedded version metadata (`v0.1.6` or later); an unavailable/rate-limited GitHub API fails with an error rather than guessing. Updates reinstall the latest release, including when you are already up to date. This command preserves a custom install directory, but intentionally ignores `PAVE_VERSION` and `PAVE_INSTALL_DIR` overrides from your environment. A binary installed before the native-install marker was introduced (through `v0.1.4`) needs the one-command installer run **once more** before `pave update` is available. Source/opam installs do not self-update; use the package-manager steps below.
+The native binary executes its **embedded** copy of the checksum-verifying installer; it does not fetch a new shell script. `--check` requires a release built with embedded version metadata (`v0.1.6` or later); an unavailable/rate-limited GitHub API fails with an error rather than guessing. Updates validate the latest release tag from GitHub's API and pin both archive and checksum downloads to that tag, including when you are already up to date. This avoids a stale `/latest/download` redirect reinstalling an old version. Updates preserve a custom install directory and the separate private login store at `${XDG_CONFIG_HOME:-~/.config}/pave/oauth.json`, but intentionally ignore `PAVE_VERSION` and `PAVE_INSTALL_DIR` overrides from your environment. A binary installed before the native-install marker was introduced (through `v0.1.4`) needs the one-command installer run **once more** before `pave update` is available. Source/opam installs do not self-update; use the package-manager steps below.
 
 <details>
 <summary>Version pinning, custom destination and removal</summary>
@@ -65,14 +65,14 @@ The switch belongs to the checkout; prefix commands with `opam exec --` without 
 
 ## Use
 
-The default provider uses `OPENAI_API_KEY` when making a request. The interactive terminal opens before credentials are configured; use `/login` and `/model` from there. `pave --providers` lists available routes. `pave --provider ollama --models` lists local tags; `--models` also queries pinned authenticated OpenAI, Gemini, Anthropic (API key), DeepSeek, Groq, Mistral, Codex, OpenRouter and personal Copilot listings. No model ID is built into the provider catalog. The cancellable `/model` picker displays discovered account/local IDs; if discovery is unavailable, type a model ID explicitly. A listing does not guarantee account entitlement or every model capability. Keep API keys out of checked-in config and session files.
+The default provider uses `OPENAI_API_KEY` when making a request. The interactive terminal opens before credentials are configured; use `/login` and `/model` from there. `pave --providers` lists available routes. `pave --provider ollama --models` lists local tags; `--models` also queries pinned authenticated OpenAI, Gemini, Anthropic (API key), DeepSeek, Groq, Mistral, Together, Cerebras, Venice, Codex, OpenRouter and personal Copilot listings. No model ID is built into the provider catalog. The cancellable `/model` picker displays discovered account/local IDs; if discovery is unavailable, type a model ID explicitly. A listing does not guarantee account entitlement or every model capability. Keep API keys out of checked-in config and session files.
 
 ```sh
 # Interactive: resize-aware TUI, prompt history and a persistent session.
 pave --root /path/to/mobile/repo --session /private/path/pave.jsonl
 
-# One-shot streaming reply; OpenAI defaults to GPT-6 Sol on Responses.
-pave --provider openai --prompt 'Inspect the Android build failure' --stream
+# One-shot streaming reply; choose an ID from `pave --provider openai --models`.
+pave --provider openai --model "$MODEL_ID" --prompt 'Inspect the Android build failure' --stream
 
 # Anthropic: API key, or explicit browser-based OAuth login for a subscription.
 pave --login anthropic
@@ -88,7 +88,7 @@ pave --provider openrouter --model "$ROUTER_MODEL" --prompt 'Inspect this projec
 
 # GitHub Copilot personal account: device-code login; public Chat route only.
 pave --login github-copilot
-pave --provider github-copilot --model gpt-4.1 --prompt 'Inspect this project'
+pave --provider github-copilot --model "$COPILOT_MODEL" --prompt 'Inspect this project'
 
 # Local Ollama; pull a model with Ollama before invoking Pave.
 pave --provider ollama --model "$LOCAL_MODEL" --prompt 'Inspect this project'
@@ -102,7 +102,7 @@ For a remote browser, use `pave --login-manual PROVIDER` for browser-based provi
 
 On a fresh interactive terminal launch without an explicit provider/model/session or existing configured default, Pave opens a keyboard-operated **SETUP** screen before the normal editor. Choose a provider, select a supported model and confirm the default; OAuth-capable providers offer their real sign-in flow, while API-key providers show the required environment variable without collecting or echoing a key. You can skip setup, including a missing-key step, and return with `/setup`; a skipped key cannot be used until its environment variable is set. Choices persist privately under `${XDG_CONFIG_HOME:-~/.config}/pave/` as user defaults and a versioned setup status. Existing configured defaults, explicit CLI selection, resumed `--session` and noninteractive `--prompt` bypass onboarding. `/settings` remains the project-level editor.
 
-Setup uses the same searchable keyboard picker and asynchronous account/local model discovery as `/model`. After authentication, the chooser lists returned live IDs first; use Up/Down and Enter to select one without typing an ID. If discovery is unsupported or fails, the status says why and you may type a route-compatible `PROVIDER/MODEL_ID` explicitly; its entitlement remains unverified. Available discovery covers API-key OpenAI/Google/Anthropic/DeepSeek/Groq/Mistral, local Ollama, signed-in personal Copilot, account-scoped Codex subscription OAuth and OpenRouter's authenticated user-filtered catalog; Anthropic's OAuth sign-in does not currently list models, but an API key can. Anthropic model pages use a bounded cursor; an incomplete or malformed page fails rather than displaying partial results. Codex listing reuses inference's locked token refresh and sends its bearer/account ID only to pinned ChatGPT backend routes. OpenRouter prefers a configured environment key; otherwise its stored OAuth-exchanged API key is used only on the pinned `/api/v1/models/user` route. Resize preserves the active choice; wide terminals show step guidance and narrow terminals stay compact.
+Setup uses the same searchable keyboard picker and asynchronous account/local model discovery as `/model`. After authentication, the chooser lists returned live IDs first; use Up/Down and Enter to select one without typing an ID. If discovery is unsupported or fails, the status says why and you may type a route-compatible `PROVIDER/MODEL_ID` explicitly; its entitlement remains unverified. Available discovery covers API-key OpenAI/Google/Anthropic/DeepSeek/Groq/Mistral/Together/Cerebras/Venice, local Ollama, signed-in personal Copilot, account-scoped Codex subscription OAuth and OpenRouter's authenticated user-filtered catalog; Anthropic's OAuth sign-in does not currently list models, but an API key can. Together lists only its reported chat models, and Venice filters for text models advertising function calls. Anthropic model pages use a bounded cursor; an incomplete or malformed page fails rather than displaying partial results. Codex listing reuses inference's locked token refresh and sends its bearer/account ID only to pinned ChatGPT backend routes. OpenRouter prefers a configured environment key; otherwise its stored OAuth-exchanged API key is used only on the pinned `/api/v1/models/user` route. Resize preserves the active choice; wide terminals show step guidance and narrow terminals stay compact.
 
 The full-screen TUI shows the existing pixel-art Pave mark as colored ASCII art when the normal editor has an empty transcript. It is an empty-transcript placeholder, not a journal entry; the first message replaces it. Conversation roles, Markdown headings/lists/code, tool progress and folded tool results use distinct blocks; `Alt+O` expands the latest visible tool result. Typing `/` immediately shows a small, filtered list of actual commands with descriptions; `/re` narrows it, Up/Down moves, Tab or Enter inserts the selected command **without executing**, and Escape closes the hints without losing the draft. Enter again submits; `/help` lists the same catalog. Small terminals show a compact `PAVE` label, `NO_COLOR=1` removes colored text, and redirected output remains plain text.
 
@@ -152,7 +152,7 @@ The `/tree` picker displays parent-linked entries (including model changes), hig
 
 | Provider | Transport | Authentication | CLI selection |
 | --- | --- | --- | --- |
-| OpenAI | Chat Completions, Responses | `OPENAI_API_KEY` | `--provider openai`; GPT-6/GPT-5/o-series auto-route to Responses |
+| OpenAI | Chat Completions, Responses | `OPENAI_API_KEY` | `--provider openai --model MODEL_ID` (Responses by default; `--api chat` for Chat-only models) |
 | OpenAI Codex subscription | account-scoped Codex Responses | `--login openai-codex` (PKCE; refresh) | `--provider openai-codex --model MODEL_ID` |
 | Anthropic | Messages | `ANTHROPIC_API_KEY` or `--login anthropic` | `--provider anthropic --model MODEL_ID` |
 | Ollama | native `/api/chat` | none (local server) | `--provider ollama --model MODEL_ID` |
@@ -161,11 +161,14 @@ The `/tree` picker displays parent-linked entries (including model changes), hig
 | Groq | Chat Completions | `GROQ_API_KEY` | `--provider groq --model MODEL_ID` |
 | Mistral | Chat Completions | `MISTRAL_API_KEY` | `--provider mistral --model MODEL_ID` |
 | OpenRouter | Chat Completions | `OPENROUTER_API_KEY` or `--login openrouter` (PKCE exchanges for API key) | `--provider openrouter --model MODEL_ID` |
+| Together AI | Chat Completions | `TOGETHER_API_KEY` | `--provider together --model MODEL_ID` |
+| Cerebras | Chat Completions | `CEREBRAS_API_KEY` | `--provider cerebras --model MODEL_ID` |
+| Venice | Chat Completions | `VENICE_API_KEY` | `--provider venice --model MODEL_ID` |
 | GitHub Copilot (personal github.com) | pinned public Chat Completions endpoint | `--login github-copilot` (device code, `read:user`) | `--provider github-copilot --models` then `--model MODEL_ID` |
 
 Interactive Copilot sessions may select a discovered Chat model from `/model`; one-shot prompts require `--model` or a saved default. The pinned provider endpoint rejects unauthorized model IDs.
 
-All ten entries completed **isolated CLI fixtures**, not live vendor calls. The Codex scenario exercised a real loopback callback, JWT account routing, refresh, SSE tool turns, encrypted reasoning replay through a reopened session and enterprise residency headers; OpenRouter exercised its state-less PKCE exception, key exchange, stored-key inference and logout. Gemini buffered and SSE scenarios exercised signed tool calls, function-result replay and reopened journals; unsigned Gemini tool calls now fail closed for every model ID, including older models that may not emit `thoughtSignature`. Copilot's GitHub device-code grant exercised private token storage, pinned Chat tool turns, in-session `/login` and `/model`, and logout with fake HTTPS responses. Auth fixtures intercepted HTTPS with a local subprocess, so public OAuth client registration, live account entitlement, model support and actual vendor responses remain **unverified**. Copilot currently uses only the personal `https://api.githubcopilot.com/chat/completions` route; Enterprise, Responses and Anthropic transports are **not** supported. Other reference auth policies, proprietary gateway transports and full model semantics are still missing. A compatible endpoint does not imply every model feature works.
+These thirteen entries completed **isolated CLI fixtures**, not live vendor calls; the sibling provider registry currently has 83 distinct provider declarations, so 70 remain unimplemented and Pave does **not** yet provide parity. Together, Cerebras and Venice completed authenticated local HTTP tool-call/result turns and pinned listing fixtures; a native Together setup PTY saved a dynamically listed Chat model. The Codex scenario exercised a real loopback callback, JWT account routing, refresh, SSE tool turns, encrypted reasoning replay through a reopened session and enterprise residency headers; OpenRouter exercised its state-less PKCE exception, key exchange, stored-key inference and logout. Gemini buffered and SSE scenarios exercised signed tool calls, function-result replay and reopened journals; unsigned Gemini tool calls now fail closed for every model ID, including older models that may not emit `thoughtSignature`. Copilot's GitHub device-code grant exercised private token storage, pinned Chat tool turns, in-session `/login` and `/model`, and logout with fake HTTPS responses. Auth fixtures intercepted HTTPS with a local subprocess, so public OAuth client registration, live account entitlement, model support and actual vendor responses remain **unverified**. Copilot currently uses only the personal `https://api.githubcopilot.com/chat/completions` route; Enterprise, Responses and Anthropic transports are **not** supported. Other reference auth policies, proprietary gateway transports and full model semantics are still missing. A compatible endpoint does not imply every model feature works.
 
 ## Features
 

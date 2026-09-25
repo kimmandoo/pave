@@ -38,6 +38,9 @@ let anthropic_url = "https://api.anthropic.com/v1/models"
 let deepseek_url = "https://api.deepseek.com/models"
 let groq_url = "https://api.groq.com/openai/v1/models"
 let mistral_url = "https://api.mistral.ai/v1/models"
+let together_url = "https://api.together.ai/v1/models"
+let cerebras_url = "https://api.cerebras.ai/v1/models"
+let venice_url = "https://api.venice.ai/api/v1/models?type=text"
 let codex_urls = List.map (fun path ->
   "https://chatgpt.com/backend-api" ^ path ^ "?client_version=" ^
     Codex_wire.client_version) ["/codex/models"; "/models"]
@@ -134,6 +137,25 @@ let include_copilot row = match extract_field "capabilities" row with
       | _ -> invalid "invalid Copilot model capability")
   | _ -> invalid "invalid Copilot model capabilities"
 
+let include_together row = match extract_field "type" row with
+  | Some (`String "chat") -> Ok true
+  | Some (`String _) -> Ok false
+  | _ -> invalid "missing or invalid Together model type"
+
+let include_venice row = match extract_field "type" row with
+  | Some (`String "text") ->
+      (match extract_field "model_spec" row with
+      | Some spec ->
+          (match extract_field "capabilities" spec with
+          | Some capabilities ->
+              (match extract_field "supportsFunctionCalling" capabilities with
+              | Some (`Bool supported) -> Ok supported
+              | _ -> invalid "missing Venice function calling capability")
+          | _ -> invalid "missing Venice model capabilities")
+      | _ -> invalid "missing Venice model specification")
+  | Some (`String _) -> Ok false
+  | _ -> invalid "missing or invalid Venice model type"
+
 let add_unique seen result ids =
   List.iter (fun id -> if not (Hashtbl.mem seen id) then (
     Hashtbl.add seen id (); result := id :: !result)) ids
@@ -226,6 +248,9 @@ let discover ?http ?cancel ~provider ?credential () =
     | "deepseek" -> Some (deepseek_url, "data", "id", include_all)
     | "groq" -> Some (groq_url, "data", "id", include_all)
     | "mistral" -> Some (mistral_url, "data", "id", include_all)
+    | "together" -> Some (together_url, "", "id", include_together)
+    | "cerebras" -> Some (cerebras_url, "data", "id", include_all)
+    | "venice" -> Some (venice_url, "data", "id", include_venice)
     | _ -> None in
   match target with
   | None -> Error (Unsupported_provider provider)
@@ -234,7 +259,8 @@ let discover ?http ?cancel ~provider ?credential () =
         | "ollama", None -> Ok None
         | "ollama", Some _ -> Error Invalid_credential
         | ("openai" | "google" | "openrouter" | "anthropic" |
-           "deepseek" | "groq" | "mistral"), Some (Api_key key)
+           "deepseek" | "groq" | "mistral" | "together" |
+           "cerebras" | "venice"), Some (Api_key key)
         | "github-copilot", Some (Copilot_oauth key) ->
             if valid_secret key then Ok (Some key) else Error Invalid_credential
         | _, None -> Error Missing_credential
@@ -246,7 +272,8 @@ let discover ?http ?cancel ~provider ?credential () =
             | "openai", Some key -> ["Authorization", "Bearer " ^ key]
             | "openrouter", Some key -> ["Authorization", "Bearer " ^ key]
             | "google", Some key -> ["x-goog-api-key", key]
-            | ("deepseek" | "groq" | "mistral"), Some key ->
+            | ("deepseek" | "groq" | "mistral" | "together" |
+               "cerebras" | "venice"), Some key ->
                 ["Authorization", "Bearer " ^ key]
             | "anthropic", Some key ->
                 ["x-api-key", key; "anthropic-version", "2023-06-01"]
@@ -287,7 +314,11 @@ let discover ?http ?cancel ~provider ?credential () =
                   match json with
                   | None -> invalid "malformed or truncated JSON"
                   | Some json ->
-                      (match listing field json with
+                      (match (if provider = "together" then
+                        match json with
+                        | `List rows -> Ok rows
+                        | _ -> invalid "missing Together model array"
+                      else listing field json) with
                       | Error _ as failure -> failure
                       | Ok rows ->
                           match collect_rows ~id ~include_row rows with
