@@ -51,7 +51,10 @@ let codex_urls = List.map (fun path ->
     Codex_wire.client_version) ["/codex/models"; "/models"]
 let max_response_bytes = 1_048_576
 let response_limit url =
-  if url = openrouter_url || url = huggingface_url || url = nanogpt_url then
+  if url = openrouter_url || url = huggingface_url || url = nanogpt_url ||
+     List.exists (fun (spec : Tool_gateways.spec) ->
+       spec.models_url = url && spec.max_response_bytes > max_response_bytes)
+       Tool_gateways.all then
     4 * max_response_bytes
   else max_response_bytes
 
@@ -316,6 +319,56 @@ let discover ?http ?cancel ~provider ?credential () =
   if Local_compat.engine provider <> None then
     discover_local ?http ?cancel ~provider credential
   else if provider = "openai-codex" then discover_codex ?http ?cancel credential
+  else if provider = "sakana" then (
+    let credential = match credential with
+      | None -> Error Missing_credential
+      | Some (Api_key key) -> Ok key
+      | Some _ -> Error Invalid_credential in
+    match credential with
+    | Error _ as failure -> failure
+    | Ok key ->
+        let http = Option.map (fun http ~url ~headers ->
+          match http ~url ~headers with
+          | Ok value -> Ok value
+          | Error Invalid_credential -> Error Sakana_api.Invalid_credential
+          | Error (Http_error status) -> Error (Sakana_api.Http_error status)
+          | Error (Invalid_response reason) ->
+              Error (Sakana_api.Invalid_response reason)
+          | Error _ -> Error Sakana_api.Transport_error) http in
+        (match Sakana_api.discover_sakana ?http ?cancel ~credential:key () with
+        | Ok ids -> Ok ids
+        | Error Sakana_api.Invalid_credential -> Error Invalid_credential
+        | Error Sakana_api.Transport_error ->
+            Error (Transport_error "request failed or timed out")
+        | Error (Sakana_api.Http_error status) -> Error (Http_error status)
+        | Error (Sakana_api.Invalid_response reason) ->
+            Error (Invalid_response reason)))
+  else if Tool_gateways.find provider <> None then (
+    let spec = Option.get (Tool_gateways.find provider) in
+    match credential with
+    | None -> Error Missing_credential
+    | Some (Api_key key) when valid_secret key ->
+        let headers = ["Authorization", "Bearer " ^ key] in
+        let http = match http with
+          | Some http -> http
+          | None -> fun ~url ~headers -> default_http ?cancel ~url ~headers () in
+        (try
+          Provider.check_cancel cancel;
+          let result = http ~url:spec.models_url ~headers in
+          Provider.check_cancel cancel;
+          match result with
+          | Error failure -> Error failure
+          | Ok (status, _) when status < 200 || status >= 300 ->
+              Error (Http_error status)
+          | Ok (_, body) ->
+              (match Tool_gateways.parse_models ~provider body with
+              | Ok ids -> Ok ids
+              | Error reason -> Error (Invalid_response reason))
+         with
+         | Provider.Cancelled -> raise Provider.Cancelled
+         | Provider.Provider_error _ | Unix.Unix_error _ | Sys_error _ ->
+             Error (Transport_error "request failed or timed out"))
+    | Some _ -> Error Invalid_credential)
   else
   let target = match provider with
     | "openai" -> Some (openai_url, "data", "id", include_all)

@@ -165,3 +165,11 @@
 (test
  (name test_azure_wire)
  (libraries pave unix yojson))
+
+(test
+ (name test_tool_gateways)
+ (libraries pave unix yojson))
+
+(test
+ (name test_sakana_api)
+ (libraries pave unix yojson))
