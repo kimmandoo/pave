@@ -19,6 +19,7 @@ type t = {
   resolve_credential : (unit -> Provider.credentials) option;
   root : string;
   allow_shell : bool;
+  tool_available : string -> bool;
   stream : bool;
   approve_command : string -> bool;
   system : string;
@@ -33,11 +34,13 @@ type t = {
 }
 
 let create ~provider ~root ~system ?(authentication = Provider.Api_key)
-    ?resolve_credential ?(allow_shell = false) ?(stream = false)
+    ?resolve_credential ?(allow_shell = false)
+    ?(tool_available = fun _ -> true) ?(stream = false)
     ?(approve_command = fun _ -> false) ?(history = [])
     ?on_usage ?on_phase ?on_tool_event ?(on_change = fun _ -> ())
     ?(on_delta = fun _ -> ()) ~on_event () =
-  { provider; authentication; resolve_credential; root; system; allow_shell; stream;
+  { provider; authentication; resolve_credential; root; system; allow_shell;
+    tool_available; stream;
     approve_command; history_rev = List.rev history; scoped_pending = [];
     on_change; on_delta; on_event; on_usage; on_phase; on_tool_event }
 
@@ -105,7 +108,8 @@ let run ?(max_turns = 20) ?cancel t text =
     let system : Protocol.message =
       { role = "system"; content = Some system_text; tool_calls = [];
         tool_call_id = None; provider_state = None } in
-    let definitions = Tools.available ~allow_shell:t.allow_shell in
+    let definitions =
+      Tools.available_for ~allow_shell:t.allow_shell ~enabled:t.tool_available in
     (match t.on_phase with None -> () | Some notify -> notify Model);
     let transcript = system :: messages t in
     let reply =
@@ -160,37 +164,40 @@ let run ?(max_turns = 20) ?cancel t text =
                         call_id = call.id; name = call.name; received_bytes
                       }))
                 | _ -> None in
-              let execute_tool () =
-                Tools.execute ?cancel ?on_progress ~root:t.root
-                  ~name:call.name ~args:call.arguments () in
+              let preflight () =
+                if call.name = "run_command" && not t.allow_shell then
+                  Some "Error: shell execution disabled; ask the user to restart with --allow-shell"
+                else if not (t.tool_available call.name) then
+                  Some "Error: tool is no longer available"
+                else if call.name = "run_command" then
+                  (match Protocol.member "command" call.arguments with
+                   | `String command when t.approve_command command ->
+                       Provider.check_cancel cancel;
+                       None
+                   | `String _ -> Some "Error: command not approved"
+                   | _ -> Some "Error: missing command")
+                else if call.name = "write_file" || call.name = "edit_file" ||
+                  call.name = "read_file" then
+                  (match file_scope t call with
+                   | Error message -> Some message
+                   | Ok (path, scoped) ->
+                     if scoped <> "" && List.assoc_opt path visible <> Some scoped then
+                       if queue_scope t path scoped then
+                         if call.name = "read_file" then None
+                         else Some
+                           ("Error: file mutation withheld until path-scoped instructions " ^
+                            "are presented as system context; retry this tool call next turn")
+                       else Some
+                         ("Error: scoped instructions exceed the per-turn context limit; " ^
+                          "file operation not executed")
+                     else None)
+                else None in
               let result =
                 try
                   Provider.check_cancel cancel;
                   (try
-                     if call.name = "run_command" then
-                       if not t.allow_shell then
-                         "Error: shell execution disabled; ask the user to restart with --allow-shell"
-                       else (match Protocol.member "command" call.arguments with
-                         | `String command when t.approve_command command ->
-                             Provider.check_cancel cancel;
-                             execute_tool ()
-                         | `String _ -> "Error: command not approved"
-                         | _ -> "Error: missing command")
-                     else if call.name = "write_file" || call.name = "edit_file" ||
-                       call.name = "read_file" then
-                       (match file_scope t call with
-                        | Error message -> message
-                        | Ok (path, scoped) ->
-                          if scoped <> "" && List.assoc_opt path visible <> Some scoped then
-                            if queue_scope t path scoped then
-                              if call.name = "read_file" then execute_tool ()
-                              else
-                                "Error: file mutation withheld until path-scoped instructions " ^
-                                "are presented as system context; retry this tool call next turn"
-                            else "Error: scoped instructions exceed the per-turn context limit; " ^
-                              "file operation not executed"
-                          else execute_tool ())
-                     else execute_tool ()
+                     Tools.execute ?cancel ?on_progress ~preflight ~root:t.root
+                       ~name:call.name ~args:call.arguments ()
                    with
                    | Provider.Cancelled -> raise Provider.Cancelled
                    | Tools.Cancelled -> raise Tools.Cancelled

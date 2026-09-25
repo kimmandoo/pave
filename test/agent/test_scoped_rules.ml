@@ -13,9 +13,10 @@ let contains text fragment =
   find 0
 
 let tool id name path content =
-  let args = `Assoc ["path", `String path; "content", `String content] in
+  let arguments = if name = "read_file" then ["path", `String path]
+    else ["path", `String path; "content", `String content] in
   let fn = `Assoc ["name", `String name;
-    "arguments", `String (Yojson.Basic.to_string args)] in
+    "arguments", `String (Yojson.Basic.to_string (`Assoc arguments))] in
   `Assoc ["id", `String id; "type", `String "function"; "function", fn]
 
 let response calls =
