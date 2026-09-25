@@ -68,6 +68,18 @@ let handle_action ~login ~login_manual ~logout =
          true
      | _ -> assert false)
 
+let api_key (descriptor : Pave.Provider_catalog.descriptor) =
+  let configured = Option.bind descriptor.api_key_env (fun name ->
+    match Sys.getenv_opt name with
+    | Some key when key <> "" -> Some key
+    | _ -> None) in
+  match configured with
+  | Some _ -> configured
+  | None when descriptor.id = "sakana" ->
+      (match Sys.getenv_opt "FUGU_API_KEY" with
+      | Some key when key <> "" -> Some key
+      | _ -> None)
+  | None -> None
 let resolve_authentication ~(descriptor : Pave.Provider_catalog.descriptor)
     ~(route : Pave.Provider_catalog.route) ~endpoint =
     if route.wire = Pave.Provider.Local_chat then (
@@ -76,16 +88,10 @@ let resolve_authentication ~(descriptor : Pave.Provider_catalog.descriptor)
         failwith "unsupported local provider authentication";
       ignore (Pave.Provider.local_endpoint
         (if endpoint = "" then route.endpoint else endpoint));
-      let key = Option.bind descriptor.api_key_env (fun name ->
-        match Sys.getenv_opt name with
-        | Some value when value <> "" -> Some value
-        | _ -> None) in
+      let key = api_key descriptor in
       Pave.Provider.Api_key, Option.value ~default:"" key, None)
     else
-    let env_key = Option.bind descriptor.api_key_env (fun name ->
-      match Sys.getenv_opt name with
-      | Some key when key <> "" -> Some key
-      | _ -> None) in
+    let env_key = api_key descriptor in
     let authentication, api_key, resolve_credential =
       match env_key, descriptor.oauth with
       | Some key, _ -> Pave.Provider.Api_key, key, None
