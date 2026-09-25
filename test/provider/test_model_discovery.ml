@@ -181,6 +181,41 @@ let () =
     {|{"data":[{"id":"unknown"}]}|})) in
   expect_error is_invalid_response (discover ~http ~provider:"baseten"
     ~credential:(Api_key key) ());
+  let hf_key = "private-huggingface" in
+  let hf_headers = ["Authorization", "Bearer " ^ hf_key] in
+  let http, calls = fixed_http huggingface_url hf_headers (Ok (200,
+    {|{"data":[{"id":"vendor/chat-with-tools","providers":[{"provider":"novita","status":"live","supports_tools":true}]},{"id":"vendor/text-only","providers":[{"provider":"novita","status":"live","supports_tools":false}]},{"id":"vendor/unavailable","providers":[{"provider":"novita","status":"error","supports_tools":true}]},{"id":"vendor/other-chat","providers":[{"provider":"together","status":"live","supports_tools":true}]},{"id":"vendor/chat-with-tools","providers":[{"provider":"novita","status":"live","supports_tools":true}]}]}|})) in
+  expect_models ["vendor/chat-with-tools"; "vendor/other-chat"]
+    (discover ~http ~provider:"huggingface" ~credential:(Api_key hf_key) ());
+  assert (!calls = 1);
+  let nano_key = "private-nanogpt" in
+  let nano_headers = ["Authorization", "Bearer " ^ nano_key] in
+  let http, calls = fixed_http nanogpt_url nano_headers (Ok (200,
+    {|{"object":"list","data":[{"id":"vendor/chat-tool-1","capabilities":{"tool_calling":true}},{"id":"vendor/text-only","capabilities":{"tool_calling":false}},{"id":"vendor/chat-tool-2","capabilities":{"tool_calling":true}},{"id":"vendor/chat-tool-1","capabilities":{"tool_calling":true}}]}|})) in
+  expect_models ["vendor/chat-tool-1"; "vendor/chat-tool-2"]
+    (discover ~http ~provider:"nanogpt" ~credential:(Api_key nano_key) ());
+  assert (!calls = 1);
+  List.iter (fun (provider, url, headers) ->
+    let http, calls = fixed_http url headers (Ok (200,
+      {|{"data":[{"id":"unknown"}]}|})) in
+    expect_error is_invalid_response
+      (discover ~http ~provider ~credential:(Api_key
+        (if provider = "huggingface" then hf_key else nano_key)) ());
+    assert (!calls = 1);
+    let unused ~url:_ ~headers:_ = failwith "unsafe discovery credential sent" in
+    expect_error no_credential (discover ~http:unused ~provider ());
+    expect_error wrong_credential (discover ~http:unused ~provider
+      ~credential:(Copilot_oauth "foreign-oauth") ());
+    expect_error wrong_credential (discover ~http:unused ~provider
+      ~credential:(Api_key "unsafe\nkey") ());
+    let http, calls = fixed_http url headers (Ok (302,
+      {|{"Location":"https://untrusted.example/models"}|})) in
+    expect_error unavailable
+      (discover ~http ~provider ~credential:(Api_key
+        (if provider = "huggingface" then hf_key else nano_key)) ());
+    assert (!calls = 1))
+    ["huggingface", huggingface_url, hf_headers;
+     "nanogpt", nanogpt_url, nano_headers];
   let fireworks_first =
     fireworks_url ^ "?pageSize=200&filter=supports_serverless%3Dtrue" in
   let calls = ref 0 in

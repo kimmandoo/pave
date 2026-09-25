@@ -44,12 +44,15 @@ let venice_url = "https://api.venice.ai/api/v1/models?type=text"
 let deepinfra_url = "https://api.deepinfra.com/v1/openai/models?filter=with_meta"
 let fireworks_url = "https://api.fireworks.ai/v1/accounts/fireworks/models"
 let baseten_url = "https://inference.baseten.co/v1/models"
+let huggingface_url = "https://router.huggingface.co/v1/models"
+let nanogpt_url = "https://api.nano-gpt.com/api/v1/models?detailed=true"
 let codex_urls = List.map (fun path ->
   "https://chatgpt.com/backend-api" ^ path ^ "?client_version=" ^
     Codex_wire.client_version) ["/codex/models"; "/models"]
 let max_response_bytes = 1_048_576
 let response_limit url =
-  if url = openrouter_url then 4 * max_response_bytes
+  if url = openrouter_url || url = huggingface_url || url = nanogpt_url then
+    4 * max_response_bytes
   else max_response_bytes
 
 let default_http ?cancel ~url ~headers () =
@@ -170,6 +173,21 @@ let include_deepinfra row = match extract_field "metadata" row with
 let include_baseten row = match extract_field "supported_features" row with
   | Some (`List features) -> Ok (List.mem (`String "tools") features)
   | _ -> invalid "missing Baseten supported features"
+
+let include_huggingface row = match extract_field "providers" row with
+  | Some (`List providers) ->
+      let supported provider =
+        extract_field "status" provider = Some (`String "live") &&
+        extract_field "supports_tools" provider = Some (`Bool true) in
+      Ok (List.exists supported providers)
+  | _ -> invalid "missing Hugging Face provider capabilities"
+
+let include_nanogpt row = match extract_field "capabilities" row with
+  | Some (`Assoc capabilities) ->
+      (match List.assoc_opt "tool_calling" capabilities with
+      | Some (`Bool enabled) -> Ok enabled
+      | _ -> invalid "missing NanoGPT tool_calling capability")
+  | _ -> invalid "missing NanoGPT model capabilities"
 
 let include_fireworks row =
   let available = extract_field "supportsServerless" row = Some (`Bool true)
@@ -315,6 +333,8 @@ let discover ?http ?cancel ~provider ?credential () =
     | "deepinfra" -> Some (deepinfra_url, "data", "id", include_deepinfra)
     | "fireworks" -> Some (fireworks_url, "models", "name", include_fireworks)
     | "baseten" -> Some (baseten_url, "data", "id", include_baseten)
+    | "huggingface" -> Some (huggingface_url, "data", "id", include_huggingface)
+    | "nanogpt" -> Some (nanogpt_url, "data", "id", include_nanogpt)
     | _ -> None in
   match target with
   | None -> Error (Unsupported_provider provider)
@@ -325,7 +345,7 @@ let discover ?http ?cancel ~provider ?credential () =
         | ("openai" | "google" | "openrouter" | "anthropic" |
            "deepseek" | "groq" | "mistral" | "together" |
            "cerebras" | "venice" | "deepinfra" | "fireworks" |
-           "baseten"), Some (Api_key key)
+           "baseten" | "huggingface" | "nanogpt"), Some (Api_key key)
         | "github-copilot", Some (Copilot_oauth key) ->
             if valid_secret key then Ok (Some key) else Error Invalid_credential
         | _, None -> Error Missing_credential
@@ -339,7 +359,7 @@ let discover ?http ?cancel ~provider ?credential () =
             | "google", Some key -> ["x-goog-api-key", key]
             | ("deepseek" | "groq" | "mistral" | "together" |
                "cerebras" | "venice" | "deepinfra" | "fireworks" |
-               "baseten"), Some key ->
+               "baseten" | "huggingface" | "nanogpt"), Some key ->
                 ["Authorization", "Bearer " ^ key]
             | "anthropic", Some key ->
                 ["x-api-key", key; "anthropic-version", "2023-06-01"]
