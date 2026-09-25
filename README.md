@@ -202,7 +202,7 @@ Explicit CLI flags override session choices, then project and user defaults. A s
 | `Ctrl/Option+←/→` (macOS) · `Ctrl/Alt+←/→` (other terminals) · `Ctrl+W` | Move or delete by word; editor draft stays intact during model output |
 | `Ctrl+Z`/`Ctrl+Y` · `Ctrl+K`/`Ctrl+U` · `Option+Y` (macOS) / `Alt+Y` (other terminals) | Undo/redo a draft edit · kill after/before the cursor · yank killed text; bracketed paste is one undo step |
 | `PgUp`/`PgDn` · `Ctrl+Home`/`Ctrl+End` · `Option+O` (macOS) / `Alt+O` (other terminals) | Scroll the transcript, jump to its beginning/end, or expand/collapse the latest visible tool result |
-| `Ctrl+C` · `Ctrl+D` | Interrupt an active turn without losing the draft; when idle, clear a nonempty draft; `Ctrl+D` exits when empty. |
+| `Ctrl+C` · `Ctrl+D` | Close a picker or cancel account sign-in; in the composer, interrupt a turn without losing the draft or clear a nonempty idle draft; `Ctrl+D` exits when empty. |
 | `/` then `Tab` | Search available slash commands; Return (macOS) / Enter (other terminals) inserts a choice, Escape returns to the unchanged draft |
 | `/setup` · `/model [PROVIDER[@API]/MODEL_ID]` | Connect an account without changing defaults, or configure the user default · choose the active conversation model/API across connected providers |
 | `/cancel` · `/settings` | Stop the active request/command; edit typed project defaults for the next launch |
