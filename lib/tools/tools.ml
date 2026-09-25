@@ -5,6 +5,7 @@ let max_command_bytes = 65_536
 let max_walk_entries = 10_000
 let max_search_bytes = 16_777_216
 let max_matches = 100
+let max_regex_line = 4096
 
 exception Tool_error of string
 exception Cancelled
@@ -32,6 +33,12 @@ let optional_int name default ~minimum ~maximum args =
   | `Null -> default
   | `Int n when n >= minimum && n <= maximum -> n
   | _ -> fail (Printf.sprintf "%s must be an integer between %d and %d" name minimum maximum)
+
+let optional_bool name default args =
+  match field name args with
+  | `Null -> default
+  | `Bool value -> value
+  | _ -> fail (name ^ " must be a boolean")
 
 let within root path =
   path = root ||
@@ -128,24 +135,41 @@ let find_from text needle start =
     else scan (i + 1)
   in
   scan start
-(* Wildcards never cross directory separators, except for a whole ** segment.
-   This also keeps ignore rules and user globs on the same matching semantics. *)
+(* A segment cannot cross a separator; memoization also bounds repeated stars. *)
 let glob_segment pattern name =
   let plen = String.length pattern and nlen = String.length name in
-  let rec scan pi ni star retry =
-    if ni = nlen then
-      if pi = plen then true
-      else if pattern.[pi] = '*' then scan (pi + 1) ni star retry
-      else false
-    else if pi < plen && (pattern.[pi] = '?' || pattern.[pi] = name.[ni]) then
-      scan (pi + 1) (ni + 1) star retry
-    else if pi < plen && pattern.[pi] = '*' then
-      scan (pi + 1) ni pi ni
-    else if star >= 0 then
-      scan (star + 1) (retry + 1) star (retry + 1)
-    else false
+  let memo = Hashtbl.create 32 in
+  let rec matches pi ni =
+    match Hashtbl.find_opt memo (pi, ni) with
+    | Some result -> result
+    | None ->
+        let result =
+          if pi = plen then ni = nlen
+          else match pattern.[pi] with
+            | '*' -> matches (pi + 1) ni || (ni < nlen && matches pi (ni + 1))
+            | '?' -> ni < nlen && matches (pi + 1) (ni + 1)
+            | '\\' when pi + 1 < plen ->
+                ni < nlen && pattern.[pi + 1] = name.[ni] && matches (pi + 2) (ni + 1)
+            | '[' ->
+                let close = try String.index_from pattern (pi + 1) ']' with Not_found -> plen in
+                if close = plen then ni < nlen && name.[ni] = '[' && matches (pi + 1) (ni + 1)
+                else if ni >= nlen then false
+                else
+                  let first = pi + 1 in
+                  let invert = first < close && (pattern.[first] = '!' || pattern.[first] = '^') in
+                  let start = if invert then first + 1 else first in
+                  let rec member k =
+                    if k >= close then false
+                    else if k + 2 < close && pattern.[k + 1] = '-' then
+                      (name.[ni] >= pattern.[k] && name.[ni] <= pattern.[k + 2]) ||
+                      member (k + 3)
+                    else name.[ni] = pattern.[k] || member (k + 1) in
+                  start < close && (member start <> invert) && matches (close + 1) (ni + 1)
+            | char -> ni < nlen && char = name.[ni] && matches (pi + 1) (ni + 1) in
+        Hashtbl.add memo (pi, ni) result;
+        result
   in
-  scan 0 0 (-1) 0
+  matches 0 0
 
 let glob_parts pattern path =
   let patterns = Array.of_list (String.split_on_char '/' pattern) in
@@ -190,7 +214,15 @@ let ignore_rules absolute base =
     else
       let text = read_bounded path max_read_bytes in
       String.split_on_char '\n' text |> List.filter_map (fun line ->
-        let line = String.trim line in
+        let line =
+          if String.ends_with ~suffix:"\r" line then
+            String.sub line 0 (String.length line - 1) else line in
+        (* Only unescaped trailing spaces are insignificant in gitignore. *)
+        let rec end_of_pattern n =
+          if n > 0 && line.[n - 1] = ' ' &&
+             (n < 2 || line.[n - 2] <> '\\') then end_of_pattern (n - 1)
+          else n in
+        let line = String.sub line 0 (end_of_pattern (String.length line)) in
         if line = "" || line.[0] = '#' then None
         else
           let negated = line.[0] = '!' in
@@ -202,7 +234,8 @@ let ignore_rules absolute base =
             let anchored = String.length pattern > 0 && pattern.[0] = '/' in
             let pattern = if anchored then
               String.sub pattern 1 (String.length pattern - 1) else pattern in
-            if pattern = "" || String.length pattern > 512 then None
+            if String.length pattern > 512 then fail ("gitignore rule exceeds 512 bytes: " ^ path);
+            if pattern = "" then None
             else Some { base; pattern; directory_only; negated;
                         basename_only = not anchored && not (String.contains pattern '/') })
   with Unix.Unix_error (Unix.ENOENT, _, _) -> []
@@ -224,36 +257,38 @@ let ignored rules relative is_directory =
         if rule.directory_only && not is_directory then excluded
         else
           let matches =
-            if rule.basename_only then
-              List.exists (glob_segment rule.pattern) (String.split_on_char '/' local)
+            if rule.basename_only then glob_segment rule.pattern (Filename.basename local)
             else glob_parts rule.pattern local in
           if matches then not rule.negated else excluded) false rules
 
 let matching_glob pattern relative =
   if String.contains pattern '/' then glob_parts pattern relative
-  else List.exists (glob_segment pattern) (String.split_on_char '/' relative)
+  else glob_segment pattern (Filename.basename relative)
 
 let skip_directory = function
   | ".git" | ".hg" | ".svn" | "_build" | "build" | ".build" | "dist"
   | "node_modules" | "DerivedData" | ".gradle" | ".dart_tool" | "Pods" -> true
   | _ -> false
 
-let walk root relative visit =
+let walk ?(hidden = true) root relative visit =
   let starting = checked_path root relative in
   let relative =
     match List.filter (fun part -> part <> "" && part <> ".")
             (String.split_on_char '/' relative) with
     | [] -> "."
     | parts -> String.concat "/" parts in
-  if (Unix.stat starting).Unix.st_kind <> Unix.S_DIR then fail ("not a directory: " ^ relative);
+  if (Unix.lstat starting).Unix.st_kind <> Unix.S_DIR then fail ("not a directory: " ^ relative);
   let entries = ref 0 and truncated = ref false in
   let rec ancestors absolute prefix rules = function
     | [] -> rules
     | name :: rest ->
         let child = if prefix = "" then name else prefix ^ "/" ^ name in
-        if skip_directory name || ignored rules child true then
+        if skip_directory name || (not hidden && name.[0] = '.') ||
+           ignored rules child true then
           fail ("directory is excluded from listing/search: " ^ child);
         let absolute = Filename.concat absolute name in
+        if (Unix.lstat absolute).Unix.st_kind <> Unix.S_DIR then
+          fail ("not a directory: " ^ child);
         ancestors absolute child (rules @ ignore_rules absolute child) rest in
   let root_rules = ignore_rules root "" in
   let rules = if relative = "." then root_rules else
@@ -274,9 +309,11 @@ let walk root relative visit =
       try
         match (Unix.lstat child).Unix.st_kind with
         | Unix.S_DIR when not (skip_directory name) &&
+                          (hidden || name.[0] <> '.') &&
                           not (ignored rules relative true) ->
             directory child relative (rules @ ignore_rules child relative)
-        | Unix.S_REG when not (ignored rules relative false) ->
+        | Unix.S_REG when (hidden || name.[0] <> '.') &&
+                          not (ignored rules relative false) ->
             visit relative child
         | _ -> ()
       with Unix.Unix_error (Unix.ENOENT, _, _) -> ()) names
@@ -299,15 +336,44 @@ let list_files root args =
     else overflow := true) in
   if walk_limit || !overflow then Buffer.add_string output "[truncated; narrow the path]\n";
   if !count = 0 && not (walk_limit || !overflow) then "No files found" else Buffer.contents output
+(* Str's backtracking is not time-bounded. Limit candidate lines and allow
+   only one repetition operator; reject quantified groups and backreferences. *)
+let validate_regex pattern =
+  if String.length pattern > 512 then fail "regex exceeds 512-byte limit";
+  let length = String.length pattern in
+  let repetitions = ref 0 in
+  let rec scan i in_class =
+    if i >= length then (
+      if in_class then fail "invalid regex: unterminated character class")
+    else match pattern.[i] with
+      | '\\' ->
+          if i + 1 = length then fail "invalid regex: trailing escape";
+          (match pattern.[i + 1] with
+           | '0' .. '9' | '{' -> fail "regex backreferences and interval repetition are not supported"
+           | _ -> ());
+          scan (i + 2) in_class
+      | '[' when not in_class -> scan (i + 1) true
+      | ']' when in_class -> scan (i + 1) false
+      | ('*' | '+' | '?') when not in_class ->
+          incr repetitions;
+          if !repetitions > 1 ||
+             (i >= 2 && pattern.[i - 1] = ')' && pattern.[i - 2] = '\\') then
+            fail "regex has an unsafe repeated expression";
+          scan (i + 1) in_class
+      | _ -> scan (i + 1) in_class
+  in
+  scan 0 false
+
 
 let glob root args =
   let pattern = required_string "pattern" args in
   valid_glob pattern;
   let relative = optional_string "path" "." args in
   let limit = optional_int "limit" 100 ~minimum:1 ~maximum:500 args in
+  let hidden = optional_bool "hidden" false args in
   let output = Buffer.create 4096 in
   let count = ref 0 and overflow = ref false in
-  let walk_limit = walk root relative (fun name _ ->
+  let walk_limit = walk ~hidden root relative (fun name _ ->
     if matching_glob pattern name then
       if !count < limit && not !overflow then
         if append_bounded output (name ^ "\n") (max_read_bytes - 128) then incr count
@@ -319,17 +385,19 @@ let glob root args =
 let search_matches root args ~regex =
   let query = required_string "pattern" args in
   if query = "" || String.length query > 4096 then fail "pattern must contain 1 to 4096 bytes";
-  let compiled = if regex then
-    Some (try Str.regexp query with Failure reason -> fail ("invalid regex: " ^ reason))
+  let compiled = if regex then (
+    validate_regex query;
+    Some (try Str.regexp query with Failure reason -> fail ("invalid regex: " ^ reason)))
     else None in
   let relative = optional_string "path" "." args in
   let limit = optional_int "limit" max_matches ~minimum:1 ~maximum:max_matches args in
+  let hidden = optional_bool "hidden" (not regex) args in
   let output = Buffer.create 4096 in
   let matches = ref 0 and scanned = ref 0 and truncated = ref false in
-  let walk_limit = walk root relative (fun name path ->
+  let walk_limit = walk ~hidden root relative (fun name path ->
     let size = (Unix.stat path).Unix.st_size in
     if size > max_write_bytes then ()
-    else if !scanned + size > max_search_bytes then truncated := true
+    else if !scanned + size > (if regex then 262_144 else max_search_bytes) then truncated := true
     else if not !truncated then (
       scanned := !scanned + size;
       let contents = read_bounded path max_write_bytes in
@@ -338,19 +406,21 @@ let search_matches root args ~regex =
         let rec lines start number =
           if start < length && not !truncated then (
             let finish = try String.index_from contents start '\n' with Not_found -> length in
-            let line = String.sub contents start (finish - start) in
-            let matched = match compiled with
-              | None -> find_from line query 0 <> None
-              | Some expression ->
-                  (try ignore (Str.search_forward expression line 0); true
-                   with Not_found -> false) in
-            if matched then (
-              if !matches >= limit then truncated := true
-              else (
-                let preview = if String.length line > 240 then String.sub line 0 240 ^ "..." else line in
-                if append_bounded output (Printf.sprintf "%s:%d:%s\n" name number preview)
-                    (max_read_bytes - 128) then incr matches
-                else truncated := true));
+            if regex && finish - start > max_regex_line then truncated := true
+            else (
+              let line = String.sub contents start (finish - start) in
+              let matched = match compiled with
+                | None -> find_from line query 0 <> None
+                | Some expression ->
+                    (try ignore (Str.search_forward expression line 0); true
+                     with Not_found -> false) in
+              if matched then (
+                if !matches >= limit then truncated := true
+                else (
+                  let preview = if String.length line > 240 then String.sub line 0 240 ^ "..." else line in
+                  if append_bounded output (Printf.sprintf "%s:%d:%s\n" name number preview)
+                      (max_read_bytes - 128) then incr matches
+                  else truncated := true)));
             lines (finish + 1) (number + 1))
         in lines 0 1))) in
   if walk_limit || !truncated then Buffer.add_string output "[truncated; narrow the path or query]\n";
@@ -647,6 +717,8 @@ let string_field description = `Assoc ["type", `String "string"; "description", 
 let integer_field description minimum maximum =
   `Assoc ["type", `String "integer"; "description", `String description;
           "minimum", `Int minimum; "maximum", `Int maximum]
+let boolean_field description = `Assoc ["type", `String "boolean"; "description", `String description]
+
 
 let definitions = [
   schema "mobile_project" "Detect root mobile project manifests and suggest relevant build/test commands without executing anything."
@@ -659,17 +731,19 @@ let definitions = [
      "max_bytes", integer_field "Maximum page bytes (default 16384, capped to leave room for metadata)" 1 max_read_bytes] ["path"];
   schema "list_files" "Recursively list workspace files; respects .gitignore and excludes build/dependency/Git directories. Bounded output."
     ["path", string_field "Workspace-relative directory (default .)"] [];
-  schema "glob" "Discover workspace files matching * and ? within path segments, or ** across directories; respects .gitignore. Bounded output."
+  schema "glob" "Discover files with *, ?, character classes and ** directory segments; respects nested .gitignore. Bounded output."
     ["pattern", string_field "Workspace-relative glob, for example **/*.swift";
      "path", string_field "Workspace-relative directory (default .)";
+     "hidden", boolean_field "Include dotfiles and hidden directories (default false)";
      "limit", integer_field "Maximum matching paths (default 100)" 1 500] ["pattern"];
   schema "search" "Find literal case-sensitive text in workspace files, respecting .gitignore. Skips binary and files above 1 MiB; bounded output."
     ["pattern", string_field "Literal text to search for";
      "path", string_field "Workspace-relative directory (default .)";
      "limit", integer_field "Maximum matching lines (default 100)" 1 max_matches] ["pattern"];
-  schema "grep" "Find OCaml Str regular-expression matches per line, respecting .gitignore. Skips binary and files above 1 MiB; bounded output."
-    ["pattern", string_field "OCaml Str regular expression (case-sensitive)";
+  schema "grep" "Find bounded case-sensitive OCaml Str regex matches per line, respecting nested .gitignore. One repetition operator maximum; skips binary and files above 1 MiB."
+    ["pattern", string_field "Regex (up to 512 bytes; at most one repetition; no backreferences)";
      "path", string_field "Workspace-relative directory (default .)";
+     "hidden", boolean_field "Include dotfiles and hidden directories (default false)";
      "limit", integer_field "Maximum matching lines (default 100)" 1 max_matches] ["pattern"];
   schema "write_file" "Atomically create or replace a workspace file (maximum 1 MiB); parent directory must exist."
     ["path", string_field "Workspace-relative file path";

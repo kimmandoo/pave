@@ -78,6 +78,10 @@ let () =
                env ^ " (optional; local)"
            | Some env, None -> env
            | None, Some _ -> "OAuth login required"
+           | None, None when entry.id = "google-vertex" ->
+               "Google ADC + project/location required"
+           | None, None when entry.id = "amazon-bedrock" ->
+               "AWS credentials + region required"
            | None, None -> "no API key required")) (Pave.Provider_catalog.all ());
       exit 0);
     if Cli_auth.handle_action ~login:!login ~login_manual:!login_manual

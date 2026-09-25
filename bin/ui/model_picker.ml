@@ -5,7 +5,7 @@ let credential (descriptor : Pave.Provider_catalog.descriptor) =
   | "openai" | "google" | "anthropic" | "deepseek" | "groq" | "mistral"
   | "together" | "cerebras" | "venice" | "deepinfra" | "fireworks"
   | "baseten" | "huggingface" | "nanogpt" | "aimlapi" | "aiand"
-  | "sakana"
+  | "sakana" | "abliteration" | "gmi-cloud"
   | "lm-studio" | "llama.cpp" | "vllm" ->
       Option.map (fun key -> Pave.Model_discovery.Api_key key)
         (Cli_auth.api_key descriptor)

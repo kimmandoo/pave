@@ -173,3 +173,11 @@
 (test
  (name test_sakana_api)
  (libraries pave unix yojson))
+
+(test
+ (name test_vertex_wire)
+ (libraries pave unix yojson))
+
+(test
+ (name test_bedrock_wire)
+ (libraries pave unix yojson))

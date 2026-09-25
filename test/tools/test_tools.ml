@@ -57,21 +57,46 @@ let () =
         ["path", "escape.swift"; "content", "bad"]));
       assert (rejected (fun () -> tool root "write_file"
         ["path", "../outside.swift"; "content", "bad"])));
-    directory "src"; directory "ignored"; directory "build";
-    create ".gitignore" "ignored/\n*.tmp\n!keep.tmp\n";
-    create "src/.gitignore" "*.log\n!keep.log\n";
+    directory "src"; directory "src/nested"; directory "ignored"; directory "build";
+    directory ".private"; directory "src/Folder.swift";
+    create ".gitignore" "ignored/\n*.tmp\n!keep.tmp\n/root-only.swift\n\\#literal.swift\n";
+    create "src/.gitignore" "*.log\n!keep.log\nnested/*.swift\n!nested/Keep.swift\n";
     create "src/Match.swift" "needle-123\nquiet\nneedle-456\n";
     create "src/hidden.log" "needle-789\n";
     create "src/keep.log" "needle-555\n";
+    create "src/nested/Drop.swift" "needle-666\n";
+    create "src/nested/Keep.swift" "needle-333\n";
     create "ignored/Omit.swift" "needle-999\n";
     create "build/Omit.swift" "needle-888\n";
     create "hidden.tmp" "needle-777\n";
     create "keep.tmp" "needle-444\n";
+    create ".private/Visible.swift" "needle-222\n";
+    create ".secret.swift" "needle-111\n";
+    create "#literal.swift" "needle-000\n";
+    create "root-only.swift" "needle-222\n";
+    create "src/root-only.swift" "needle-223\n";
+    create "src/Folder.swift/inside.txt" "needle-001\n";
     let glob = tool root "glob" ["pattern", "**/*.swift"] in
     assert (contains glob "App.swift" && contains glob "src/Match.swift");
     assert (not (contains glob "ignored/Omit.swift"));
     assert (not (contains glob "build/Omit.swift"));
     assert (not (contains glob "escape.swift"));
+    assert (contains glob "src/nested/Keep.swift");
+    assert (contains glob "src/root-only.swift");
+    assert (not (contains glob "src/nested/Drop.swift"));
+    assert (not (List.mem "root-only.swift" (String.split_on_char '\n' glob)));
+    assert (not (contains glob "#literal.swift"));
+    assert (not (contains glob ".secret.swift"));
+    assert (not (contains glob ".private/Visible.swift"));
+    let with_hidden = tool_json root "glob"
+      ["pattern", `String "**/*.swift"; "hidden", `Bool true] in
+    assert (contains with_hidden ".secret.swift");
+    assert (contains with_hidden ".private/Visible.swift");
+    assert (not (contains with_hidden "#literal.swift"));
+    assert (contains (tool root "glob" ["pattern", "src/[MR]atch.swift"]) "src/Match.swift");
+    assert (not (contains (tool root "glob" ["pattern", "src/M[!a]tch.swift"]) "src/Match.swift"));
+    assert (not (contains (tool root "glob" ["pattern", "*.swift"])
+      "src/Folder.swift/inside.txt"));
     assert (contains (tool root "glob" ["pattern", "*.tmp"]) "keep.tmp");
     assert (not (contains (tool root "glob" ["pattern", "*.tmp"]) "hidden.tmp"));
     let matches = tool root "grep" ["pattern", "needle-[0-9][0-9][0-9]"] in
@@ -81,12 +106,26 @@ let () =
     assert (not (contains matches "ignored/Omit.swift"));
     assert (not (contains matches "build/Omit.swift"));
     assert (not (contains matches "outside secret"));
+    assert (contains matches "src/nested/Keep.swift:1:needle-333");
+    assert (not (contains matches "src/nested/Drop.swift"));
+    assert (not (contains matches ".secret.swift"));
+    assert (contains (tool_json root "grep"
+      ["pattern", `String "needle-[0-9]+"; "hidden", `Bool true]) ".secret.swift");
+    assert (rejected (fun () -> tool root "grep" ["pattern", "\\(a+\\)+"]));
+    assert (rejected (fun () -> tool root "grep" ["pattern", "a*a*"]));
+    assert (rejected (fun () -> tool root "grep" ["pattern", "\\1"]));
+    assert (rejected (fun () -> tool root "grep" ["pattern", "["]));
+    assert (rejected (fun () -> tool_json root "glob"
+      ["pattern", `String "*.swift"; "hidden", `String "yes"]));
     assert (contains (tool root "search" ["pattern", "needle-123"]) "src/Match.swift");
     assert (not (contains (tool root "search" ["pattern", "needle-[0-9]"]) "src/Match.swift"));
     assert (contains (tool_json root "grep"
       ["pattern", `String "needle"; "limit", `Int 1]) "[truncated;");
     assert (contains (tool_json root "glob"
       ["pattern", `String "*.swift"; "limit", `Int 1]) "[truncated;");
+    create "src/long-line.txt" (String.make 5000 'a' ^ "needle-333\n");
+    assert (contains (tool root "grep" ["pattern", "needle"; "path", "src"])
+      "[truncated;");
     assert (rejected (fun () -> tool root "glob" ["pattern", "*.swift"; "path", "ignored"]));
     assert (List.exists (function
       | `Assoc fields -> (match List.assoc_opt "function" fields with

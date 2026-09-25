@@ -1,5 +1,6 @@
 type api = Openai_completions | Local_chat | Anthropic_messages | Openai_responses
-  | Azure_responses | Ollama_chat | Gemini_direct | Codex_responses | Copilot_chat
+  | Azure_responses | Ollama_chat | Gemini_direct | Vertex_generate
+  | Bedrock_converse | Codex_responses | Copilot_chat
 type authentication = Api_key | OAuth
 type config = { endpoint : string; api_key : string; model : string; api : api }
 type credentials = {
@@ -587,6 +588,37 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage 
                  check_cancel cancel;
                  Option.iter report (Openai_responses_stream.usage stream));
             reply))
+  | Bedrock_converse ->
+      if authentication <> Api_key || api_key <> "" then
+        raise (Provider_error "Bedrock Converse uses AWS credentials, not an API key");
+      let region, keys =
+        try Aws_auth.region (), Aws_auth.resolve ()
+        with Invalid_argument reason -> raise (Provider_error reason) in
+      let target = try
+        Bedrock_wire.endpoint ~region ~model:config.model
+          ?base_url:(if config.endpoint = "" then None else Some config.endpoint) ()
+        with Invalid_argument reason -> raise (Provider_error reason) in
+      let body = parse (fun () -> Bedrock_wire.request messages tools) in
+      let serialized = Yojson.Basic.to_string body in
+      let signed = try
+        Aws_auth.sign ~credentials:keys ~region
+          ~amz_date:(Aws_auth.amz_date ()) ~method_:"POST"
+          ~host:target.host ~path:target.path ~body:serialized ()
+        with Invalid_argument reason -> raise (Provider_error reason) in
+      let headers = List.filter_map (fun (name, value) ->
+        if name = "content-type" then None else Some (name ^ ": " ^ value)) signed in
+      let json = post_json ~local:(config.endpoint <> "") ?cancel
+        ~endpoint:target.url ~headers ~secret:keys.access_key_id body in
+      let reply = parse (fun () -> Bedrock_wire.parse_response json) in
+      (match on_usage with
+      | None -> ()
+      | Some report ->
+          check_cancel cancel;
+          Option.iter report (Bedrock_wire.usage json));
+      (match on_text, reply.content with
+      | Some emit, Some text -> check_cancel cancel; emit text
+      | _ -> ());
+      reply
   | Ollama_chat ->
       let body = parse (fun () ->
         Ollama_wire.request ~model:config.model messages tools) in
@@ -652,6 +684,35 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage 
                  check_cancel cancel;
                  Option.iter report (Gemini_stream.usage stream));
             reply))
+  | Vertex_generate ->
+      if authentication <> Api_key || config.endpoint <> "" || api_key <> "" then
+        raise (Provider_error "Vertex uses scoped Google ADC and a derived Google endpoint");
+      let project, location, access =
+        try
+          let project, location = Vertex_wire.resolve_environment () in
+          project, location, Vertex_auth.access_token ()
+        with
+        | Invalid_argument reason -> raise (Provider_error reason)
+        | Vertex_auth.Authentication_error reason -> raise (Provider_error reason) in
+      let endpoint =
+        try Vertex_wire.endpoint ~project ~location ~model:config.model
+        with Invalid_argument reason -> raise (Provider_error reason) in
+      let body = parse (fun () -> Vertex_wire.request ~model:config.model messages tools) in
+      let emit = Option.value ~default:(fun _ -> ()) on_text in
+      let stream = Gemini_stream.create ~model:config.model ~on_text:emit in
+      parse (fun () ->
+        post_stream ?cancel ~endpoint
+          ~headers:["Authorization: Bearer " ^ access] ~secret:access
+          body ~on_chunk:(Gemini_stream.feed stream)
+          ~is_done:(fun () -> Gemini_stream.is_done stream)
+          ~is_finished:(fun () -> Gemini_stream.is_finished stream);
+        let reply = Vertex_wire.finish_stream ~model:config.model stream in
+        (match on_usage with
+        | None -> ()
+        | Some report ->
+            check_cancel cancel;
+            Option.iter report (Gemini_stream.usage stream));
+        reply)
   | Codex_responses ->
       let account_id = match credential.account_id with
         | Some id when id <> "" -> id
