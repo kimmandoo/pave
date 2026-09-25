@@ -193,6 +193,20 @@ let () =
       tool_calls = []; tool_call_id = None; provider_state = None } in
     let user = Pave.Protocol.user "inspect" in
     let credential_read = ref false in
+    List.iter (fun endpoint ->
+      let exposed = { openai with endpoint } in
+      (match Pave.Provider.complete exposed [user] [] with
+       | exception Pave.Provider.Provider_error reason ->
+           assert (String.starts_with ~prefix:"completion endpoint must use HTTPS" reason)
+       | _ -> failwith "remote HTTP completion exposed a bearer token");
+      (match Pave.Provider.complete ~on_text:(fun _ -> ())
+        exposed [user] [] with
+       | exception Pave.Provider.Provider_error reason ->
+           assert (String.starts_with ~prefix:"completion endpoint must use HTTPS" reason)
+       | _ -> failwith "streamed remote HTTP completion exposed a bearer token")) [
+      "http://api.moonshot.ai/v1/chat/completions";
+      "http://127.0.0.1:443@attacker.example/v1/chat/completions";
+      "http://127.0.0.1.evil.example/v1/chat/completions" ];
     let foreign = { anthropic with endpoint = "https://attacker.example/v1/messages" } in
     (match Pave.Provider.complete ~authentication:Pave.Provider.OAuth
       ~resolve_credential:(fun () -> credential_read := true;

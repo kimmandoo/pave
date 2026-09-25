@@ -6,7 +6,9 @@ let credential (descriptor : Pave.Provider_catalog.descriptor) =
   | "together" | "cerebras" | "venice" | "deepinfra" | "fireworks"
   | "baseten" | "huggingface" | "nanogpt" | "aimlapi" | "aiand"
   | "sakana" | "abliteration" | "gmi-cloud" | "moonshot" | "xai" | "nvidia"
-  | "ollama-cloud" | "bedrock-mantle" | "lm-studio" | "llama.cpp" | "vllm" ->
+  | "novita" | "siliconflow" | "siliconflow-cn" | "ollama-cloud"
+  | "bedrock-mantle" | "stepfun" | "coreweave"
+  | "lm-studio" | "llama.cpp" | "vllm" ->
       Option.map (fun key -> Pave.Model_discovery.Api_key key)
         (Cli_auth.api_key descriptor)
   | "openrouter" ->
@@ -72,6 +74,11 @@ let choose screen ~(descriptor : Pave.Provider_catalog.descriptor) ?(intro = [])
       let answer = !outcome in
       Mutex.unlock lock;
       match answer with
+      | Some (`Listing (Ok ids)) when descriptor.id = "stepfun" ->
+          Tui.update_choices screen ~verified:[]
+            ~status:(Printf.sprintf
+              "StepFun: %d unclassified IDs; type a known Chat model ID"
+              (List.length ids)) ()
       | Some (`Listing (Ok ids)) ->
           let verified = match Pave.Provider_catalog.route descriptor "" with
             | None -> []

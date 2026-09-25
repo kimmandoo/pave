@@ -1,7 +1,8 @@
 type api = Openai_completions | Local_chat | Anthropic_messages | Openai_responses
   | Azure_responses | Bedrock_mantle_responses | Ollama_chat | Gemini_direct
   | Vertex_generate | Bedrock_converse | Xai_chat | Nvidia_chat
-  | Codex_responses | Copilot_chat
+  | Novita_chat | Siliconflow_chat | Siliconflow_cn_chat
+  | Stepfun_chat | Coreweave_chat | Codex_responses | Copilot_chat
 type authentication = Api_key | OAuth
 type config = { endpoint : string; api_key : string; model : string; api : api }
 type credentials = {
@@ -324,10 +325,33 @@ let local_endpoint endpoint =
       | _ -> fail ()) in
   scheme ^ canonical_host ^ port ^ path
 
-let request_body ~endpoint ~headers body_json =
-  if not (String.starts_with ~prefix:"https://" endpoint
-          || String.starts_with ~prefix:"http://" endpoint) then
-    raise (Provider_error "endpoint must use HTTP or HTTPS");
+let loopback_http endpoint =
+  let prefix = "http://" in
+  if not (String.starts_with ~prefix endpoint) then false
+  else
+    let offset = String.length prefix in
+    let slash = match String.index_from_opt endpoint offset '/' with
+      | Some index -> index
+      | None -> String.length endpoint in
+    let authority = String.sub endpoint offset (slash - offset) in
+    let host, port =
+      if String.starts_with ~prefix:"127.0.0.1" authority then
+        "127.0.0.1", String.sub authority 9 (String.length authority - 9)
+      else if String.starts_with ~prefix:"[::1]" authority then
+        "[::1]", String.sub authority 5 (String.length authority - 5)
+      else "", "" in
+    host <> "" && (port = "" ||
+      (String.length port > 1 && port.[0] = ':' &&
+        (let digits = String.sub port 1 (String.length port - 1) in
+         String.length digits <= 5 &&
+         String.for_all (fun c -> c >= '0' && c <= '9') digits &&
+         let number = int_of_string digits in number > 0 && number <= 65535)))
+
+let request_body ~local ~endpoint ~headers body_json =
+  if not (String.starts_with ~prefix:"https://" endpoint ||
+    (String.starts_with ~prefix:"http://" endpoint &&
+      (local || loopback_http endpoint))) then
+    raise (Provider_error "completion endpoint must use HTTPS or validated local HTTP");
   reject_controls "endpoint" endpoint;
   List.iter (reject_controls "header") headers;
   let body = Yojson.Basic.to_string body_json in
@@ -351,7 +375,7 @@ let curl_options ~local ~endpoint ~headers ~body_path =
       option "max-redirs" "0" else "")
 
 let post_json ?(local = false) ?cancel ~endpoint ~headers ~secret body_json =
-  let body = request_body ~endpoint ~headers body_json in
+  let body = request_body ~local ~endpoint ~headers body_json in
   with_temp_file (fun body_path body_output ->
     output_string body_output body;
     close_out body_output;
@@ -395,7 +419,7 @@ let status_from_headers headers =
     else current) None (String.split_on_char '\n' headers)
 
 let post_stream ?(local = false) ?cancel ~endpoint ~headers ~secret body_json ~on_chunk ~is_done ~is_finished =
-  let body = request_body ~endpoint ~headers body_json in
+  let body = request_body ~local ~endpoint ~headers body_json in
   with_temp_file (fun body_path body_output ->
     output_string body_output body;
     close_out body_output;
@@ -513,18 +537,40 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage 
                  check_cancel cancel;
                  Option.iter report (Openai_stream.usage stream));
             reply))
-  | Xai_chat | Nvidia_chat ->
+  | Xai_chat | Nvidia_chat | Novita_chat | Siliconflow_chat
+  | Siliconflow_cn_chat | Stepfun_chat | Coreweave_chat ->
       let headers, body, parse_reply =
-        if config.api = Xai_chat then
-          (try Xai_api.chat_headers ~endpoint:config.endpoint ~api_key,
+        (try match config.api with
+        | Xai_chat ->
+            Xai_api.chat_headers ~endpoint:config.endpoint ~api_key,
             Xai_api.request ~model:config.model messages tools,
             Xai_api.parse_completion
-           with Invalid_argument reason -> raise (Provider_error reason))
-        else
-          (try Nvidia_api.chat_headers ~endpoint:config.endpoint ~api_key,
+        | Nvidia_chat ->
+            Nvidia_api.chat_headers ~endpoint:config.endpoint ~api_key,
             Nvidia_api.request ~model:config.model messages tools,
             Protocol.parse_completion
-           with Invalid_argument reason -> raise (Provider_error reason)) in
+        | Novita_chat ->
+            Novita_api.chat_headers ~endpoint:config.endpoint ~api_key,
+            Novita_api.request ~model:config.model messages tools,
+            Novita_api.parse_completion
+        | Siliconflow_chat ->
+            Siliconflow_api.chat_headers ~endpoint:config.endpoint ~api_key,
+            Siliconflow_api.request ~model:config.model messages tools,
+            Siliconflow_api.parse_completion
+        | Siliconflow_cn_chat ->
+            Siliconflow_api.cn_chat_headers ~endpoint:config.endpoint ~api_key,
+            Siliconflow_api.request ~model:config.model messages tools,
+            Siliconflow_api.parse_completion
+        | Stepfun_chat ->
+            Stepfun_api.chat_headers ~endpoint:config.endpoint ~api_key,
+            Stepfun_api.request ~model:config.model messages tools,
+            Stepfun_api.parse_completion
+        | Coreweave_chat ->
+            Coreweave_api.chat_headers ~endpoint:config.endpoint ~api_key,
+            Coreweave_api.request ~model:config.model messages tools,
+            Coreweave_api.parse_completion
+        | _ -> assert false
+        with Invalid_argument reason -> raise (Provider_error reason)) in
       let json = post_json ~local:true ?cancel ~endpoint:config.endpoint
         ~headers ~secret:api_key body in
       let reply = parse (fun () -> parse_reply json) in

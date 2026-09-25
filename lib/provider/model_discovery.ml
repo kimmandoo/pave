@@ -476,6 +476,38 @@ let discover_nvidia ?http ?cancel credential =
            Error (Transport_error "request failed or timed out"))
   | Some _ -> Error Invalid_credential
 
+let discover_stepfun ?http ?cancel credential =
+  match credential with
+  | None -> Error Missing_credential
+  | Some (Api_key key) ->
+      let source = match http with
+        | Some callback -> callback
+        | None -> fun ~url ~headers -> default_http ?cancel ~url ~headers () in
+      let http ~url ~headers = match source ~url ~headers with
+        | Ok response -> Ok response
+        | Error Invalid_credential -> Error Stepfun_api.Invalid_credential
+        | Error (Http_error status) -> Error (Stepfun_api.Http_error status)
+        | Error (Invalid_response reason) ->
+            Error (Stepfun_api.Invalid_response reason)
+        | Error _ -> Error Stepfun_api.Transport_error in
+      (try
+        Provider.check_cancel cancel;
+        let result = Stepfun_api.discover ~http ~api_key:key () in
+        Provider.check_cancel cancel;
+        match result with
+        | Ok ids -> Ok ids
+        | Error Stepfun_api.Invalid_credential -> Error Invalid_credential
+        | Error Stepfun_api.Transport_error ->
+            Error (Transport_error "request failed or timed out")
+        | Error (Stepfun_api.Http_error status) -> Error (Http_error status)
+        | Error (Stepfun_api.Invalid_response reason) ->
+            Error (Invalid_response reason)
+       with
+       | Provider.Cancelled -> raise Provider.Cancelled
+       | Provider.Provider_error _ | Unix.Unix_error _ | Sys_error _ ->
+           Error (Transport_error "request failed or timed out"))
+  | Some _ -> Error Invalid_credential
+
 let discover ?http ?cancel ~provider ?credential () =
   if Local_compat.engine provider <> None then
     discover_local ?http ?cancel ~provider credential
@@ -489,6 +521,8 @@ let discover ?http ?cancel ~provider ?credential () =
     discover_xai ?http ?cancel credential
   else if provider = "nvidia" then
     discover_nvidia ?http ?cancel credential
+  else if provider = "stepfun" then
+    discover_stepfun ?http ?cancel credential
   else if provider = "openai-codex" then discover_codex ?http ?cancel credential
   else if provider = "sakana" then (
     let credential = match credential with
@@ -562,6 +596,13 @@ let discover ?http ?cancel ~provider ?credential () =
     | "abliteration" -> Some (abliteration_url, "data", "id", include_all)
     | "gmi-cloud" -> Some (gmi_cloud_url, "data", "id", include_all)
     | "moonshot" -> Some (moonshot_url, "data", "id", include_all)
+    | "novita" -> Some (Novita_api.models_url, "data", "id", include_all)
+    | "siliconflow" ->
+        Some (Siliconflow_api.models_url, "data", "id", include_all)
+    | "siliconflow-cn" ->
+        Some (Siliconflow_api.cn_models_url, "data", "id", include_all)
+    | "coreweave" ->
+        Some (Coreweave_api.models_url, "data", "id", include_all)
     | _ -> None in
   match target with
   | None -> Error (Unsupported_provider provider)
@@ -573,7 +614,9 @@ let discover ?http ?cancel ~provider ?credential () =
            "deepseek" | "groq" | "mistral" | "together" |
            "cerebras" | "venice" | "deepinfra" | "fireworks" |
            "baseten" | "huggingface" | "nanogpt" | "abliteration" |
-           "gmi-cloud" | "moonshot"), Some (Api_key key)
+           "gmi-cloud" | "moonshot" | "novita" | "siliconflow" |
+           "siliconflow-cn" | "coreweave"),
+          Some (Api_key key)
         | "github-copilot", Some (Copilot_oauth key) ->
             if valid_secret key then Ok (Some key) else Error Invalid_credential
         | _, None -> Error Missing_credential
@@ -585,6 +628,10 @@ let discover ?http ?cancel ~provider ?credential () =
             | "openai", Some key -> ["Authorization", "Bearer " ^ key]
             | "openrouter", Some key -> ["Authorization", "Bearer " ^ key]
             | "google", Some key -> ["x-goog-api-key", key]
+            | ("novita" | "siliconflow" | "siliconflow-cn" | "coreweave"),
+              Some key ->
+                ["Authorization", "Bearer " ^ key;
+                 "Accept", "application/json"]
             | ("deepseek" | "groq" | "mistral" | "together" |
                "cerebras" | "venice" | "deepinfra" | "fireworks" |
                "baseten" | "huggingface" | "nanogpt" | "abliteration" |
