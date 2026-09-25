@@ -12,6 +12,19 @@ let credential (descriptor : Pave.Provider_catalog.descriptor) =
         Pave.Model_discovery.Copilot_oauth stored.access)
         (Pave.Oauth_store.get ~path:(Pave.Oauth_store.default_path ())
           ~provider:descriptor.id)
+  | "openai-codex" ->
+      (match descriptor.routes with
+      | [] -> None
+      | route :: _ ->
+          let _, _, resolve = Cli_auth.resolve_authentication
+            ~descriptor ~route ~endpoint:route.endpoint in
+          Option.map (fun resolve ->
+            let (credential : Pave.Provider.credentials) = resolve () in
+            let account = match credential.account_id with
+              | Some id -> id
+              | None -> failwith "Codex OAuth account ID unavailable" in
+            Pave.Model_discovery.Codex_oauth
+              (credential.access, account)) resolve)
   | _ -> None
 
 let choose screen ~(descriptor : Pave.Provider_catalog.descriptor) ?(intro = [])

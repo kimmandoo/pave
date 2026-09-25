@@ -2,7 +2,10 @@
    In particular a GitHub device grant is never sent to a caller-selected host.
    Discovery does not cache: callers decide when to refresh (for example, on
    entering the model selector), never on each change to the search query. *)
-type credential = Api_key of string | Copilot_oauth of string
+type credential =
+  | Api_key of string
+  | Copilot_oauth of string
+  | Codex_oauth of string * string
 
 type error =
   | Unsupported_provider of string
@@ -30,6 +33,9 @@ let openai_url = "https://api.openai.com/v1/models"
 let google_url = "https://generativelanguage.googleapis.com/v1beta/models"
 let ollama_url = "http://127.0.0.1:11434/api/tags"
 let copilot_url = "https://api.githubcopilot.com/models"
+let codex_urls = List.map (fun path ->
+  "https://chatgpt.com/backend-api" ^ path ^ "?client_version=" ^
+    Codex_wire.client_version) ["/codex/models"; "/models"]
 let max_response_bytes = 1_048_576
 
 let default_http ?cancel ~url ~headers () =
@@ -124,7 +130,84 @@ let add_unique seen result ids =
   List.iter (fun id -> if not (Hashtbl.mem seen id) then (
     Hashtbl.add seen id (); result := id :: !result)) ids
 
+let discover_codex ?http ?cancel credential =
+  let auth = match credential with
+    | None -> Error Missing_credential
+    | Some (Codex_oauth (access, account)) ->
+        if valid_secret access && valid_secret account then Ok (access, account)
+        else Error Invalid_credential
+    | Some _ -> Error Invalid_credential in
+  match auth with
+  | Error _ as failure -> failure
+  | Ok (access, account) ->
+      let headers = [
+        "Authorization", "Bearer " ^ access;
+        "chatgpt-account-id", account;
+        "OpenAI-Beta", "responses=experimental";
+        "originator", "pave";
+        "version", Codex_wire.client_version;
+        "Accept", "application/json" ] in
+      let http = match http with
+        | Some http -> http
+        | None -> fun ~url ~headers -> default_http ?cancel ~url ~headers () in
+      let rec request = function
+        | [] -> Error (Http_error 404)
+        | url :: rest ->
+            Provider.check_cancel cancel;
+            let response = http ~url ~headers in
+            Provider.check_cancel cancel;
+            match response with
+            | Ok (404, _) when rest <> [] -> request rest
+            | Error _ as error -> error
+            | Ok (status, _) when status < 200 || status >= 300 ->
+                Error (Http_error status)
+            | Ok (_, body) ->
+                if String.length body > max_response_bytes then
+                  invalid "listing exceeds 1 MiB"
+                else let json = try Some (Yojson.Basic.from_string body)
+                  with Yojson.Json_error _ -> None in
+                match json with
+                | None -> invalid "malformed or truncated JSON"
+                | Some json ->
+                    let rows = match extract_field "models" json with
+                      | Some (`List rows) -> Ok rows
+                      | None -> listing "data" json
+                      | _ -> invalid "invalid models array" in
+                    (match rows with
+                    | Error _ as error -> error
+                    | Ok rows ->
+                        let seen = Hashtbl.create (List.length rows) in
+                        let result = ref [] in
+                        let rec collect = function
+                          | [] -> Ok (List.rev !result)
+                          | row :: tail ->
+                              let slug = match extract_field "slug" row with
+                                | Some (`String _ as slug) -> Some slug
+                                | None -> extract_field "id" row
+                                | _ -> None in
+                              (match slug with
+                              | Some (`String name) ->
+                                  (match checked_id name with
+                                  | Error _ as error -> error
+                                  | Ok name ->
+                                      let hidden = match extract_field
+                                        "visibility" row with
+                                        | Some (`String value) ->
+                                            List.mem (String.lowercase_ascii value)
+                                              ["hide"; "hidden"]
+                                        | _ -> false in
+                                      if not hidden && not (Hashtbl.mem seen name)
+                                      then (Hashtbl.add seen name ();
+                                        result := name :: !result);
+                                      collect tail)
+                              | _ -> invalid "missing slug or id model ID") in
+                        collect rows) in
+      try request codex_urls with
+      | Provider.Provider_error _ | Unix.Unix_error _ | Sys_error _ ->
+          Error (Transport_error "request failed or timed out")
 let discover ?http ?cancel ~provider ?credential () =
+  if provider = "openai-codex" then discover_codex ?http ?cancel credential
+  else
   let target = match provider with
     | "openai" -> Some (openai_url, "data", "id", include_all)
     | "google" -> Some (google_url, "models", "name", include_gemini)
