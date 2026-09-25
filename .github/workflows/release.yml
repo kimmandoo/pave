@@ -53,6 +53,21 @@ jobs:
           cp _build/default/bin/main.exe bundle/pave
           cp LICENSE THIRD_PARTY_NOTICES bundle/
           tar -czf "$ASSET" -C bundle pave LICENSE THIRD_PARTY_NOTICES
+      - name: Smoke packaged native executable
+        env:
+          ASSET: pave-${{ matrix.os }}-${{ matrix.arch }}.tar.gz
+        run: |
+          set -eu
+          unpacked="$(mktemp -d)"
+          trap 'rm -rf "$unpacked"' EXIT
+          tar -xzf "$ASSET" -C "$unpacked"
+          test -x "$unpacked/pave"
+          "$unpacked/pave" --help >/dev/null
+          providers="$("$unpacked/pave" --providers)"
+          case "$providers" in
+            *ollama*) ;;
+            *) echo "packaged binary did not list the Ollama provider" >&2; exit 1 ;;
+          esac
       - uses: actions/upload-artifact@v4
         with:
           name: pave-${{ matrix.os }}-${{ matrix.arch }}
