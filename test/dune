@@ -243,3 +243,28 @@
  (name test_nvidia_api)
  (modules test_nvidia_api)
  (libraries pave unix yojson))
+
+(test
+ (name test_novita_api)
+ (modules test_novita_api)
+ (libraries pave unix yojson))
+
+(test
+ (name test_siliconflow_api)
+ (modules test_siliconflow_api)
+ (libraries pave unix yojson))
+
+(test
+ (name test_siliconflow_cn)
+ (modules test_siliconflow_cn)
+ (libraries pave unix yojson))
+
+(test
+ (name test_stepfun_api)
+ (modules test_stepfun_api)
+ (libraries pave unix yojson))
+
+(test
+ (name test_coreweave_api)
+ (modules test_coreweave_api)
+ (libraries pave unix yojson))

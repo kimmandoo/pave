@@ -112,8 +112,10 @@ let () =
        | Ok models ->
            List.iter (fun id ->
              Printf.printf "%s\t%s\n" id
-               (if Pave.Provider_catalog.route descriptor "" = None
-                then "discovered; no supported inference route"
+               (if descriptor.id = "stepfun" then
+                  "listed; Chat/tool capability unverified"
+                else if Pave.Provider_catalog.route descriptor "" = None then
+                  "discovered; no supported inference route"
                 else "selectable")) models;
            if models = [] then
              Printf.printf "No models reported by %s.\n" descriptor.id);

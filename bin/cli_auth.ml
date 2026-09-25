@@ -89,6 +89,8 @@ let api_key (descriptor : Pave.Provider_catalog.descriptor) =
       | _ -> None)
   | None when descriptor.id = "ollama-cloud" ->
       Pave.Ollama_cloud.env_api_key ()
+  | None when descriptor.id = "coreweave" ->
+      Pave.Coreweave_api.env_api_key ()
   | None -> None
 let resolve_authentication ~(descriptor : Pave.Provider_catalog.descriptor)
     ~(route : Pave.Provider_catalog.route) ~endpoint =
