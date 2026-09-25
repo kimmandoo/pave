@@ -1,15 +1,19 @@
 let oauth_policy service = match service with
   | "anthropic" -> Pave.Oauth_flow.anthropic ~sdk_version:"0.112.1" ()
   | "openai-codex" -> Pave.Codex_oauth.policy ()
+  | "gitlab-duo" -> Pave.Gitlab_duo_oauth.policy ()
   | _ -> failwith ("unsupported OAuth login: " ^ service)
 
 let oauth_exchange service policy authorization response =
   if service = "openai-codex" then
     Pave.Codex_oauth.exchange authorization ~response
+  else if service = "gitlab-duo" then
+    Pave.Gitlab_duo_oauth.exchange authorization ~response
   else Pave.Oauth_flow.exchange policy authorization ~response
 
 let oauth_refresh service policy credential =
   if service = "openai-codex" then Pave.Codex_oauth.refresh credential
+  else if service = "gitlab-duo" then Pave.Gitlab_duo_oauth.refresh credential
   else Pave.Oauth_flow.refresh policy credential
 
 let handle_action ~login ~login_manual ~logout =
@@ -49,6 +53,25 @@ let handle_action ~login ~login_manual ~logout =
                  ~on_authorization:(fun (auth : Pave.Oauth_device.authorization) ->
                    Printf.printf "Open this verification URL:\n%s\nEnter code: %s\nWaiting for authorization...\n%!"
                      auth.verification_uri auth.user_code) ())
+             else if service = "devin" then (
+               let on_authorization (auth : Pave.Oauth_flow.authorization) =
+                 Printf.printf "Open this authorization URL:\n%s\n%!" auth.url in
+               if login_manual <> "" then
+                 Pave.Devin_oauth.login_manual ~on_authorization
+                   ~on_code:(fun () ->
+                     print_string "Paste the full callback URL: "; flush stdout;
+                     read_line ()) ()
+               else Pave.Devin_oauth.login
+                 ~on_authorization:(fun auth ->
+                   on_authorization auth;
+                   print_endline "Waiting for browser callback...") ())
+             else if service = "kilo" then (
+               if login_manual <> "" then
+                 failwith "Kilo uses a device code; run --login instead of --login-manual";
+               Pave.Kilo_oauth.login
+                 ~on_authorization:(fun (auth : Pave.Kilo_oauth.authorization) ->
+                   Printf.printf "Open this verification URL:\n%s\nEnter code: %s\nWaiting for authorization...\n%!"
+                     auth.verification_url auth.code) ())
              else (
                let policy = oauth_policy service in
                if login_manual <> "" then (
@@ -154,7 +177,8 @@ let resolve_authentication ~(descriptor : Pave.Provider_catalog.descriptor)
             failwith ("run pave --login " ^ provider_id ^
               (match descriptor.api_key_env with
                | Some name -> " or set " ^ name | None -> ""));
-          let policy = if service = "openrouter" || service = "github-copilot"
+          let policy = if List.mem service
+            ["openrouter"; "github-copilot"; "devin"; "kilo"]
             then None else Some (oauth_policy service) in
           let resolve_credential () = Pave.Oauth_store.with_lock ~path (fun () ->
             let credential = match Pave.Oauth_store.get ~path ~provider:provider_id with
@@ -177,6 +201,15 @@ let resolve_authentication ~(descriptor : Pave.Provider_catalog.descriptor)
                (credential.access = "" || credential.refresh <> None ||
                 credential.expires_at <> None) then
               failwith "GitHub Copilot stored credential is invalid";
+            if service = "devin" &&
+               (not (Pave.Devin_api.valid_text credential.access) ||
+                credential.access = "devin-session-token$" ||
+                credential.refresh <> None || credential.expires_at <> None) then
+              failwith "Devin session credential is invalid; run pave --login devin";
+            if service = "kilo" &&
+               (not (Pave.Kilo_api.valid_key credential.access) ||
+                credential.refresh <> None || credential.expires_at <> None) then
+              failwith "Kilo gateway credential is invalid; run pave --login kilo";
             let account_id, residency =
               if service = "openai-codex" then
                 let id, residency = Pave.Codex_oauth.identity credential in

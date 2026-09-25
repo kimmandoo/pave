@@ -131,7 +131,7 @@ let builtins = [
     routes = [ { name = "chat"; wire = Provider.Kilo_chat;
       endpoint = Kilo_api.chat_url } ];
     default_route = "chat";
-    api_key_env = Some "KILO_API_KEY"; oauth = None };
+    api_key_env = Some "KILO_API_KEY"; oauth = Some "kilo" };
   { id = "alibaba-coding-plan"; display_name = "Alibaba Coding Plan (select region)";
     routes = [
       { name = "china"; wire = Provider.Alibaba_coding_chat;
@@ -229,7 +229,7 @@ let builtins = [
     routes = [ { name = "connect"; wire = Provider.Devin_connect;
       endpoint = Devin_api.chat_url } ];
     default_route = "connect";
-    api_key_env = Some "DEVIN_API_KEY"; oauth = None };
+    api_key_env = Some "DEVIN_API_KEY"; oauth = Some "devin" };
   { id = "gitlab-duo"; display_name = "GitLab Duo Direct Access (manual upstream model/route)";
     routes = [
       { name = "messages"; wire = Provider.Gitlab_duo_messages;
@@ -239,7 +239,7 @@ let builtins = [
       { name = "chat"; wire = Provider.Gitlab_duo_chat;
         endpoint = Gitlab_duo_api.completions_url } ];
     default_route = "select-route";
-    api_key_env = Some "GITLAB_TOKEN"; oauth = None };
+    api_key_env = Some "GITLAB_TOKEN"; oauth = Some "gitlab-duo" };
   { id = "moonshot"; display_name = "Moonshot AI (global)";
     routes = [ { name = "chat"; wire = Provider.Openai_completions;
       endpoint = "https://api.moonshot.ai/v1/chat/completions" } ];

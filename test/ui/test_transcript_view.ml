@@ -2,8 +2,8 @@ open Transcript_view
 
 let fail message = failwith message
 let expect label condition = if not condition then fail label
-let rendered t width = layout t ~columns:width ~measure:(fun cluster ->
-  Notty.I.width (Notty.I.string Notty.A.empty cluster))
+let measure cluster = Notty.I.width (Notty.I.string Notty.A.empty cluster)
+let rendered t width = layout t ~columns:width ~measure
 let lines t width = Array.to_list (Array.map (fun visual -> visual.text) (rendered t width))
 let has text lines = List.exists (String.equal text) lines
 let heading_count t kind =
@@ -13,6 +13,14 @@ let heading_count t kind =
     if row.kind = kind && row.style = Heading then incr count
   done;
   !count
+
+let row_visual view source =
+  match Array.find_opt (fun (entry : entry) -> entry.source = source)
+      view.entries with
+  | None -> None
+  | Some entry ->
+      Some (Array.init entry.length (fun i ->
+        (visual_at view (entry.start + i)).text))
 
 let () =
   let transcript = create () in
@@ -115,6 +123,92 @@ let () =
   expect "tiny viewport layout cache remains logical-row bounded"
     (Array.length compact.entries = 2 && compact.total >= 4096 &&
       (visual_at compact 2000).text = "A");
+  let different_measure = snapshot large ~columns:1 ~measure:(fun _ -> 2) in
+  expect "same-width snapshots honor a changed grapheme measurer"
+    ((visual_at different_measure 2000).text = "?");
+  let history = create () in
+  for i = 1 to 3200 do notice history (string_of_int i) done;
+  let initial_history = snapshot history ~columns:8 ~measure in
+  expect "long history begins with its original rows"
+    (row_visual initial_history 1 = Some [|"1"|]);
+  event history "[http_request]";
+  let running = snapshot history ~columns:8 ~measure in
+  expect "cached running tool heading is visible"
+    (Array.exists (fun (entry : entry) ->
+      entry.row.text = "http_request · running") running.entries);
+  event history "[http_request] first output\nsecond output\nsecret output";
+  let completed = snapshot history ~columns:8 ~measure in
+  expect "tool heading updates after a cached running snapshot"
+    (Array.exists (fun (entry : entry) ->
+      entry.row.text = "http_request · completed") completed.entries &&
+    not (Array.exists (fun (entry : entry) ->
+      entry.row.text = "http_request · running") completed.entries));
+  expect "old history and collapsed preview survive tool settlement"
+    (row_visual completed 1 = Some [|"1"|] &&
+    not (Array.exists (fun (entry : entry) ->
+      entry.row.text = "secret output") completed.entries));
+  delta history "e\204\129 👩‍💻";
+  let live_source = history.count in
+  let first_delta = snapshot history ~columns:8 ~measure in
+  expect "first live row wraps at a grapheme boundary"
+    (row_visual first_delta live_source = Some [|"e\204\129 👩‍💻"|]);
+  delta history " and longer response";
+  let narrow_history = snapshot history ~columns:8 ~measure in
+  let wider_history = snapshot history ~columns:18 ~measure in
+  let narrow_again = snapshot history ~columns:8 ~measure in
+  let complete_text = "e\204\129 👩‍💻 and longer response" in
+  let joined view = match row_visual view live_source with
+    | None -> ""
+    | Some segments -> String.concat "" (Array.to_list segments) in
+  expect "long-history streaming delta replaces stale live measurements"
+    (joined narrow_history = complete_text &&
+    joined wider_history = complete_text &&
+    joined narrow_again = complete_text &&
+    Array.length (Option.get (row_visual narrow_history live_source)) >
+      Array.length (Option.get (row_visual wider_history live_source)) &&
+    Array.for_all (fun text -> measure text <= 8)
+      (Option.get (row_visual narrow_again live_source)));
+  expect "tool expansion reflows hidden details at current width"
+    (Option.is_some (toggle history ~first:0 ~last:(history.count - 1)));
+  let expanded_narrow = snapshot history ~columns:8 ~measure in
+  let expanded_wide = snapshot history ~columns:18 ~measure in
+  expect "expanded result replaces preview and preserves its text"
+    (Array.exists (fun (entry : entry) ->
+      entry.row.text = "secret output") expanded_narrow.entries &&
+    Array.exists (fun (entry : entry) ->
+      entry.row.text = "secret output") expanded_wide.entries &&
+    row_visual expanded_wide live_source <> None);
+  expect "collapsing after resize hides details again"
+    (Option.is_some (toggle history ~first:0 ~last:(history.count - 1)));
+  let collapsed_again = snapshot history ~columns:8 ~measure in
+  expect "collapsed result has no stale expanded details"
+    (not (Array.exists (fun (entry : entry) ->
+      entry.row.text = "secret output") collapsed_again.entries) &&
+    joined collapsed_again = complete_text);
+  finish history;
+  let finished = snapshot history ~columns:8 ~measure in
+  expect "settled stream retains its final content after a cached live row"
+    (joined finished = complete_text &&
+    (Option.get (Array.find_opt (fun (entry : entry) ->
+      entry.source = live_source) finished.entries)).row.provisional = false);
+  delta history "retract this";
+  ignore (snapshot history ~columns:8 ~measure);
+  rollback history;
+  let cancelled = snapshot history ~columns:8 ~measure in
+  expect "cancellation evicts only provisional tail"
+    (joined cancelled = complete_text &&
+    not (Array.exists (fun (entry : entry) ->
+      entry.row.text = "retract this") cancelled.entries));
+  while history.count < 9_990 do notice history "fill" done;
+  let before_trim = snapshot history ~columns:8 ~measure in
+  expect "snapshot is near the bounded storage limit"
+    (history.count < max_rows &&
+    row_visual before_trim 1000 = Some [|"334"|]);
+  for _ = 1 to 10 do notice history "fill" done;
+  let after_trim = snapshot history ~columns:8 ~measure in
+  expect "eviction shifts cached source offsets without retaining old rows"
+    (history.count <= max_rows &&
+    row_visual after_trim 0 = row_visual before_trim 1000);
   let many = create () in
   for i = 1 to 11_000 do notice many (string_of_int i) done;
   expect "bounded logical transcript storage" (many.count <= max_rows);

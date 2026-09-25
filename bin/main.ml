@@ -381,17 +381,20 @@ let () =
       let selector = match selected with
         | Some selector -> selector
         | None ->
-            let providers = Pave.Interaction.selectable_providers () in
-            let descriptor = Option.value ~default:!active_descriptor preferred in
-            let route_name = if descriptor.id = !active_descriptor.id
-              then !active_route.name else descriptor.default_route in
             (match !ui with
              | Some screen ->
-                 (match Model_picker.choose screen ~descriptor ~route_name
-                   ~title:("Model · " ^ descriptor.id ^ " (current conversation)")
-                   ~choices:[] () with
-                  | Some value -> value | None -> "")
+                 let picked = match preferred with
+                   | None -> Model_picker.choose_all screen
+                       ~active:!active_descriptor ~current_route:!active_route.name ()
+                   | Some (descriptor : Pave.Provider_catalog.descriptor) ->
+                       let route_name = if descriptor.id = !active_descriptor.id
+                         then !active_route.name else descriptor.default_route in
+                       Model_picker.choose screen ~descriptor ~route_name
+                         ~title:("Model · " ^ descriptor.id ^ " (current conversation)")
+                         ~choices:[] () in
+                 Option.value ~default:"" picked
              | None ->
+                 let providers = Pave.Interaction.selectable_providers () in
                  on_event ("Current model: " ^ !active_descriptor.id ^ "/" ^
                    (if !active_model = "" then "(none)" else !active_model));
                  List.iter (fun (entry : Pave.Provider_catalog.descriptor) ->
@@ -419,54 +422,36 @@ let () =
               on_event ("Signed in to " ^ descriptor.id ^
                 "; active model unchanged. Use /model when ready.")) preferred
         | None -> () in
-    let choose_login selected =
-      let id = match selected, !ui with
-        | Some id, _ -> id
-        | None, Some screen ->
-            let options = List.filter_map (fun (entry : Pave.Provider_catalog.descriptor) ->
-              match entry.oauth with
-              | None -> None
-              | Some _ -> Some (entry.id ^ "  " ^ entry.display_name, entry.id))
-              (Pave.Interaction.selectable_providers ()) in
-            (match Tui.choose screen
-              ~intro:["LOGIN = connect an account, not switch models.";
-                "Use /setup to save a provider + model default."]
-              ~title:"LOGIN · Connect an account"
-              ~choices:(List.map fst options) with
-             | Some choice -> List.assoc choice options
-             | None -> "")
-        | None, None ->
-            print_endline "Account sign-in providers (login does not change your model):";
-            List.iter (fun (entry : Pave.Provider_catalog.descriptor) ->
-              if entry.oauth <> None then
-                Printf.printf "  %s  %s\n" entry.id entry.display_name)
-              (Pave.Interaction.selectable_providers ());
-            print_string "Provider ID (blank cancels): "; flush stdout;
-            (try String.trim (read_line ()) with End_of_file -> "") in
-      if id <> "" then (
-        let descriptor = match Pave.Provider_catalog.find id with
-          | Some value when value.oauth <> None -> value
-          | _ -> failwith ("account sign-in unavailable for " ^ id) in
-        (match !ui with
-         | Some screen -> Tui.suspend screen (fun () ->
-             ignore (Cli_auth.handle_action ~login:descriptor.id
-               ~login_manual:"" ~logout:""))
-         | None -> ignore (Cli_auth.handle_action ~login:descriptor.id
-             ~login_manual:"" ~logout:""));
-        match !ui with
-        | Some screen ->
-            (match Tui.choose screen
-              ~intro:["Account connected; your active model has not changed.";
-                "Choose a model now for this conversation only.";
-                "Use /setup later to save a default for future sessions."]
-              ~title:("LOGIN · Connected to " ^ descriptor.id)
-              ~choices:["Choose model now"; "Keep current model"] with
-             | Some "Choose model now" ->
-                 choose_model ~preferred:descriptor None
-             | _ -> on_event ("Signed in to " ^ id ^ "; active model unchanged."))
-        | None ->
-            on_event ("Signed in to " ^ id ^ "; active model unchanged. " ^
-              "Use /model " ^ id ^ "/MODEL_ID to switch, /setup to save a default.")) in
+    let choose_login screen =
+      let options = List.filter_map
+        (fun (entry : Pave.Provider_catalog.descriptor) ->
+          match entry.oauth with
+          | None -> None
+          | Some _ -> Some (entry.id ^ "  " ^ entry.display_name, entry.id))
+        (Pave.Interaction.selectable_providers ()) in
+      match Tui.choose screen
+        ~intro:["Connect a browser or device-code account.";
+          "Connecting never changes your current model or user default."]
+        ~title:"SETUP · Connect an account"
+        ~choices:(List.map fst options) with
+      | None -> ()
+      | Some choice ->
+          let id = List.assoc choice options in
+          let descriptor = match Pave.Provider_catalog.find id with
+            | Some value when value.oauth <> None -> value
+            | _ -> failwith ("account sign-in unavailable for " ^ id) in
+          Tui.suspend screen (fun () ->
+            ignore (Cli_auth.handle_action ~login:descriptor.id
+              ~login_manual:"" ~logout:""));
+          (match Tui.choose screen
+            ~intro:["Account connected; your active model has not changed.";
+              "Choose a model now for this conversation only.";
+              "Use /setup again to save a default for future sessions."]
+            ~title:("SETUP · Connected to " ^ descriptor.id)
+            ~choices:["Choose model now"; "Keep current model"] with
+           | Some "Choose model now" ->
+               choose_model ~preferred:descriptor None
+           | _ -> on_event ("Signed in to " ^ id ^ "; active model unchanged.")) in
     let run_setup screen ~first_run =
       match Setup_view.run screen with
       | Setup_view.Skipped ->
@@ -595,12 +580,20 @@ let () =
              | Pave.Interaction.Prompt _ -> false
              | _ -> true) ->
              feedback "Wait for the current turn or /cancel it before changing session or model."
-         | Pave.Interaction.Login selected -> choose_login selected
          | Pave.Interaction.Model selected -> choose_model selected
          | Pave.Interaction.Setup ->
              (match !ui with
-              | Some screen -> run_setup screen ~first_run:false
-              | None -> on_event "Setup needs an interactive terminal; use --provider and --model.")
+              | Some screen ->
+                  (match Tui.choose screen
+                    ~intro:["Connect an account, or set a default for new sessions.";
+                      "Neither action changes your current draft."]
+                    ~title:"SETUP · Account & defaults"
+                    ~choices:["Connect account only"; "Choose user default"] with
+                   | Some "Connect account only" -> choose_login screen
+                   | Some "Choose user default" ->
+                       run_setup screen ~first_run:false
+                   | _ -> ())
+              | None -> on_event "Setup needs an interactive terminal; use --login PROVIDER or --provider/--model.")
          | Pave.Interaction.Settings ->
           (match !ui with
            | Some screen -> Settings_view.open_view screen ~root

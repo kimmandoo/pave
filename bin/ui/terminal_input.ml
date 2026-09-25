@@ -1,21 +1,30 @@
 type mode = Normal | Escape | Utf8 of int
 
-type t = {
-  term : Notty_unix.Term.t;
-  fd : Unix.file_descr;
+type decoder = {
   filter : Notty.Unescape.t;
   events : Notty.Unescape.event Queue.t;
   scratch : bytes;
-  input : bytes;
   mutable size : int;
   mutable mode : mode;
 }
 
+type t = {
+  term : Notty_unix.Term.t;
+  fd : Unix.file_descr;
+  read_fds : Unix.file_descr list;
+  mutable wake_fds : (Unix.file_descr * Unix.file_descr list) option;
+  decoder : decoder;
+  input : bytes;
+}
+
+let create_decoder () =
+  { filter = Notty.Unescape.create (); events = Queue.create ();
+    scratch = Bytes.create 64; size = 0; mode = Normal }
+
 let create term =
   let fd, _ = Notty_unix.Term.fds term in
-  { term; fd; filter = Notty.Unescape.create (); events = Queue.create ();
-    scratch = Bytes.create 64; input = Bytes.create 1024;
-    size = 0; mode = Normal }
+  { term; fd; read_fds = [ fd ]; wake_fds = None;
+    decoder = create_decoder (); input = Bytes.create 1024 }
 
 let flush t =
   if t.size > 0 then (
@@ -25,6 +34,9 @@ let flush t =
       | #Notty.Unescape.event as event -> Queue.add event t.events; drain ()
       | `Await | `End -> () in
     drain ())
+
+let flush_ascii t =
+  if t.mode = Normal then flush t
 
 let append t c =
   Bytes.set t.scratch t.size c;
@@ -40,15 +52,17 @@ let rec accept t c =
   let byte = Char.code c in
   match t.mode with
   | Normal ->
-      if byte = 27 then (append t c; t.mode <- Escape)
-      else if byte < 128 then (append t c; flush t)
+      if byte = 27 then (flush t; append t c; t.mode <- Escape)
+      else if byte < 128 then (
+        append t c;
+        if t.size = Bytes.length t.scratch then flush t)
       else if byte >= 0xc2 && byte <= 0xdf then
-        (append t c; t.mode <- Utf8 2)
+        (flush t; append t c; t.mode <- Utf8 2)
       else if byte >= 0xe0 && byte <= 0xef then
-        (append t c; t.mode <- Utf8 3)
+        (flush t; append t c; t.mode <- Utf8 3)
       else if byte >= 0xf0 && byte <= 0xf4 then
-        (append t c; t.mode <- Utf8 4)
-      else replacement t
+        (flush t; append t c; t.mode <- Utf8 4)
+      else (flush t; replacement t)
   | Utf8 expected ->
       if byte land 0xc0 <> 0x80 then (replacement t; accept t c)
       else (
@@ -76,27 +90,43 @@ let rec accept t c =
         (t.mode <- Normal; t.size <- 0)
       else append t c
 
+let expire_escape t =
+  let standalone = t.size = 1 in
+  t.mode <- Normal;
+  if standalone then flush t else t.size <- 0
+
 let pending t =
-  if not (Queue.is_empty t.events) || Notty_unix.Term.pending t.term then true
+  flush_ascii t.decoder;
+  if not (Queue.is_empty t.decoder.events) || Notty_unix.Term.pending t.term then true
   else (
     try
-      let readable, _, _ = Unix.select [ t.fd ] [] [] 0. in
+      let readable, _, _ = Unix.select t.read_fds [] [] 0. in
       readable <> []
     with Unix.Unix_error (Unix.EINTR, _, _) -> true)
 
 let event ?wake_fd ?timeout t =
+  let d = t.decoder in
   let rec next () : [ Notty.Unescape.event | `Resize of int * int | `End | `Wake | `Tick ] =
+    flush_ascii d;
     if Notty_unix.Term.pending t.term then
       (match Notty_unix.Term.event t.term with
        | `Resize _ as resized -> resized
        | `End -> `End
        | #Notty.Unescape.event as key -> key)
-    else if not (Queue.is_empty t.events) then
-      (Queue.take t.events :> [ Notty.Unescape.event | `Resize of int * int | `End | `Wake | `Tick ])
+    else if not (Queue.is_empty d.events) then
+      (Queue.take d.events :> [ Notty.Unescape.event | `Resize of int * int | `End | `Wake | `Tick ])
     else (
-      let wait = if t.mode = Escape then 0.04 else
+      let wait = if d.mode = Escape then 0.04 else
         match timeout with Some seconds -> max 0. seconds | None -> -1. in
-      let watched = match wake_fd with None -> [ t.fd ] | Some fd -> [ fd; t.fd ] in
+      let watched = match wake_fd with
+        | None -> t.read_fds
+        | Some fd ->
+            (match t.wake_fds with
+             | Some (cached, fds) when cached = fd -> fds
+             | _ ->
+                 let fds = [ fd; t.fd ] in
+                 t.wake_fds <- Some (fd, fds);
+                 fds) in
       let readable = try
         let ready, _, _ = Unix.select watched [] [] wait in
         ready
@@ -109,12 +139,8 @@ let event ?wake_fd ?timeout t =
         if count = 0 then `End
         else (
           if count > 0 then
-            for i = 0 to count - 1 do accept t (Bytes.get t.input i) done;
+            for i = 0 to count - 1 do accept d (Bytes.get t.input i) done;
           next ()))
-      else if t.mode = Escape then (
-        let standalone = t.size = 1 in
-        t.mode <- Normal;
-        if standalone then flush t else t.size <- 0;
-        next ())
+      else if d.mode = Escape then (expire_escape d; next ())
       else (match timeout with Some _ -> `Tick | None -> next ())) in
   next ()

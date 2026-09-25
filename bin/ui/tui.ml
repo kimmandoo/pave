@@ -3,7 +3,7 @@ open Notty
 (* Transcript limits live in Transcript_view; no duplicate storage here. *)
 let prompt = "  ❯ "
 
-type candidate = { value : string; custom : bool; verified : bool }
+type candidate = { value : string; custom : bool; verified : bool; listed : bool }
 
 type chooser = {
   title : string;
@@ -18,6 +18,7 @@ type chooser = {
   mutable selected : int;
   mutable offset : int;
   mutable touched : bool;
+  mutable filtered : (string * candidate array) option;
 }
 
 type t = {
@@ -38,6 +39,7 @@ type t = {
   mutable body_cache : (int * int * int * I.t) option;
   mutable layout_cache : (int * int * Transcript_view.snapshot) option;
   mutable previous : I.t array option;
+  mutable cursor_position : (int * int) option;
   mutable status : string;
   mutable activity : string option;
   mutable activity_started : float option;
@@ -55,6 +57,9 @@ let user_attr = if no_color then A.empty else A.(fg lightblue ++ st bold)
 let muted = if no_color then A.empty else A.(fg lightblack)
 let warning = if no_color then A.empty else A.(fg lightyellow)
 let error = if no_color then A.empty else A.(fg lightred)
+let selected_attr = if no_color then A.(st bold)
+  else A.(fg black ++ bg lightcyan ++ st bold)
+let measure_text chunk = I.width (I.string text_attr chunk)
 
 let idle_status =
   "Alt+O tool details · PgUp/Dn scroll · Enter send · Ctrl+R search"
@@ -95,7 +100,7 @@ let change_transcript t action =
   let before, cols = if t.scroll = 0 then 0, 0 else (
     let cols, _ = Notty_unix.Term.size t.term in
     let content_cols = if cols <= 6 then max 1 cols else cols - 5 in
-    let measure chunk = I.width (I.string text_attr chunk) in
+    let measure = measure_text in
     let layout = match t.layout_cache with
       | Some (width, revision, layout)
         when width = cols && revision = t.transcript.revision -> layout
@@ -105,7 +110,7 @@ let change_transcript t action =
   transcript_changed t;
   if t.scroll > 0 then (
     let after = (Transcript_view.snapshot t.transcript ~columns:cols
-      ~measure:(fun chunk -> I.width (I.string text_attr chunk))).total in
+      ~measure:measure_text).total in
     t.scroll <- max 0 (t.scroll + after - before))
 
 let style_attr (row : Transcript_view.row) =
@@ -141,38 +146,45 @@ let styled_line width attr text =
 
 let shorten_width width text =
   if width < 2 then "" else
-  let measure cluster = I.width (I.string text_attr cluster) in
+  let measure = measure_text in
   if measure text <= width then text
   else (Transcript_view.wrap ~columns:(width - 1) ~measure text).(0) ^ "…"
 
 let matches chooser =
-  let query = String.lowercase_ascii chooser.filter in
-  let found = ref [] in
-  Array.iter (fun item ->
-    let value = item.value in
-    let n = String.length value and m = String.length query in
-    let rec at pos j =
-      j = m || (Char.lowercase_ascii value.[pos + j] = query.[j]
-        && at pos (j + 1)) in
-    let rec find pos =
-      pos + m <= n && (at pos 0 || find (pos + 1)) in
-    if find 0 then found := item :: !found) chooser.choices;
-  let found = List.rev !found in
-  let manual =
-    chooser.allow_custom &&
-    chooser.filter <> "" &&
-    chooser.filter.[String.length chooser.filter - 1] <> '/' &&
-    String.contains chooser.filter '/' &&
-    not (List.exists (fun item -> item.value = chooser.filter) found) in
-  Array.of_list (if manual then
-    { value = chooser.filter; custom = true; verified = false } :: found
-    else found)
+  match chooser.filtered with
+  | Some (filter, found) when filter = chooser.filter -> found
+  | _ ->
+      let query = String.lowercase_ascii chooser.filter in
+      let found = ref [] in
+      Array.iter (fun item ->
+        let value = item.value in
+        let n = String.length value and m = String.length query in
+        let rec at pos j =
+          j = m || (Char.lowercase_ascii value.[pos + j] = query.[j]
+            && at pos (j + 1)) in
+        let rec find pos =
+          pos + m <= n && (at pos 0 || find (pos + 1)) in
+        if find 0 then found := item :: !found) chooser.choices;
+      let found = List.rev !found in
+      let manual =
+        chooser.allow_custom &&
+        chooser.filter <> "" &&
+        chooser.filter.[String.length chooser.filter - 1] <> '/' &&
+        String.contains chooser.filter '/' &&
+        not (List.exists (fun item -> item.value = chooser.filter) found) in
+      let found = Array.of_list (if manual then
+        { value = chooser.filter; custom = true; verified = false; listed = false } :: found
+        else found) in
+      chooser.filtered <- Some (chooser.filter, found);
+      found
 
 let candidate_label chooser item =
   let source =
     if item.custom then "Use: "
     else if not chooser.dynamic || List.mem item.value chooser.plain then ""
-    else if item.verified then "[verified] " else "[suggested] " in
+    else if item.verified then "[verified] "
+    else if item.listed then "[listed · API unverified] "
+    else "[suggested] " in
   source ^ sanitize item.value
 
 let view_height t =
@@ -201,7 +213,7 @@ let hint_room t =
   let prompt_width = I.width (I.string accent prompt) in
   let field_width = max 1 (cols - if cols <= prompt_width then 0
     else prompt_width) in
-  let measure cluster = I.width (I.string text_attr cluster) in
+  let measure = measure_text in
   let lines = Pave.Composer.layout ~columns:field_width ~measure t.editor in
   let height = min 4 (max 1 (min (rows - 4) (Array.length lines))) in
   rows - 4 - height >= 2
@@ -240,7 +252,7 @@ let paint t =
   let prompt = if cols <= prompt_width then "" else prompt in
   let prefix_width = if prompt = "" then 0 else prompt_width in
   let field_width = max 1 (cols - prefix_width) in
-  let measure cluster = I.width (I.string text_attr cluster) in
+  let measure = measure_text in
   let editor_lines = Pave.Composer.layout ~columns:field_width ~measure t.editor in
   let editor_row, editor_col =
     Pave.Composer.position ~measure t.editor editor_lines in
@@ -264,18 +276,21 @@ let paint t =
         let elapsed = match t.activity_started with
           | Some since -> max 0 (int_of_float (Unix.gettimeofday () -. since))
           | None -> 0 in
-        " · " ^ single_line state ^
+        "  ·  " ^ single_line state ^
         (if elapsed = 0 then "" else if elapsed < 60 then
           Printf.sprintf " · %ds" elapsed
         else Printf.sprintf " · %dm%02ds" (elapsed / 60) (elapsed mod 60)) in
   let queued = if t.queue = 0 then "" else
-    Printf.sprintf " · %d queued" t.queue in
+    Printf.sprintf "  ·  %d queued" t.queue in
   let usage = match t.activity, t.usage_badge with
     | None, Some badge when cols >= 28 && cols >= 9 + String.length badge ->
         badge
     | _ -> "" in
-  let header = styled_line cols accent
-    ("  ◆  PAVE" ^ activity ^ (if cols >= 48 then queued else "") ^ usage) in
+  let header = I.hsnap ~align:`Left cols I.(
+    string accent "  ◆  PAVE" <|>
+    string (if t.activity = None then muted else warning)
+      (activity ^ (if cols >= 48 then queued else "")) <|>
+    string muted usage) in
   let model = single_line t.model in
   let model =
     if cols < 60 then match String.rindex_opt model '/' with
@@ -284,12 +299,13 @@ let paint t =
           shorten_width 6 (String.sub model 0 split) ^ "/" ^
           String.sub model (split + 1) (String.length model - split - 1)
     else model in
-  let journal = if t.session then "on" else "off" in
   let location = styled_line cols text_attr
     (if cols < 22 then " " ^ shorten_width (max 2 (cols - 1)) model
     else if cols < 60 then
-      " " ^ shorten_width (cols - 15) model ^ " · journal " ^ journal
-    else "  " ^ model ^ "   ·   journal " ^ journal ^
+      "  MODEL " ^ shorten_width (cols - 22) model ^ "  ·  " ^
+      (if t.session then "SAVED" else "UNSAVED")
+    else "  MODEL  " ^ model ^ "   ·   " ^
+      (if t.session then "SESSION SAVED" else "SESSION UNSAVED") ^
       "   ·   " ^ single_line t.root) in
   let divider = I.uchar muted (Uchar.of_int 0x2500) cols 1 in
   let layout = match t.layout_cache with
@@ -323,19 +339,20 @@ let paint t =
           chooser.offset <- chooser.selected - page + 1;
         chooser.offset <- min chooser.offset (max 0 (count - page));
         I.vcat (List.init body_height (fun i ->
-          if i = 0 then styled_line cols accent ("  " ^ chooser.title)
+          if i = 0 then styled_line cols accent
+            (Printf.sprintf "  ▌  %s  ·  %d matches" chooser.title count)
           else if i <= intro_height then
             if i = intro_height then I.void cols 1
             else styled_line cols muted ("  " ^ chooser.intro.(i - 1))
           else if status_height = 1 && i = intro_height + 1 then
-            styled_line cols muted
-              ("  " ^ Option.get chooser.status)
+            styled_line cols text_attr
+              ("  ◦  " ^ Option.get chooser.status)
           else
             let index = chooser.offset + i - 1 - intro_height - status_height in
             if index >= count then I.void cols 1
             else let choice = found.(index) in
               styled_line cols
-                (if index = chooser.selected then accent else text_attr)
+                (if index = chooser.selected then selected_attr else text_attr)
                 ((if index = chooser.selected then "  ❯ " else "    ")
                  ^ candidate_label chooser choice)))
     | None ->
@@ -463,22 +480,28 @@ let paint t =
           hint_row cols (t.hint_offset + index - 1 = t.hint_selected) choice);
     [| footer |]; prompt_rows ] in
   let output = Buffer.create 512 in
-  Buffer.add_string output "\027[?25l";
+  let dirty = ref false in
   for row = 0 to rows - 1 do
     if (match t.previous with
       | Some previous when Array.length previous = rows ->
           not (I.equal previous.(row) screen.(row))
       | _ -> true) then (
+      if not !dirty then Buffer.add_string output "\027[?25l";
+      dirty := true;
       Buffer.add_string output (Printf.sprintf "\027[%d;1H\027[0m\027[2K" (row + 1));
       Render.to_buffer output Cap.ansi (0, 0) (cols, 1) screen.(row))
   done;
   t.previous <- Some screen;
   let y = if rows < 6 then rows - 1
     else rows - editor_height + cursor_row in
-  Buffer.add_string output (Printf.sprintf "\027[%d;%dH\027[?25h"
-    (max 0 y + 1) (max 0 cursor_col + 1));
-  Buffer.output_buffer stdout output;
-  flush stdout;
+  let position = max 0 y + 1, max 0 cursor_col + 1 in
+  if !dirty || t.cursor_position <> Some position then (
+    Buffer.add_string output (Printf.sprintf "\027[%d;%dH%s"
+      (fst position) (snd position) (if !dirty then "\027[?25h" else ""));
+    t.cursor_position <- Some position);
+  if Buffer.length output > 0 then (
+    Buffer.output_buffer stdout output;
+    flush stdout);
   t.last_paint <- Unix.gettimeofday ()
 
 let paint_resized t =
@@ -489,7 +512,7 @@ let paint_resized t =
       let old_entry = Transcript_view.visual_at old_layout first in
       let cols, rows = Notty_unix.Term.size t.term in
       let cols = max 1 cols and rows = max 1 rows in
-      let measure chunk = I.width (I.string text_attr chunk) in
+      let measure = measure_text in
       let content_cols = if cols <= 6 then cols else cols - 5 in
       let next = Transcript_view.snapshot t.transcript
         ~columns:content_cols ~measure in
@@ -528,7 +551,8 @@ let create ~root ~model ~session =
     hint_draft = ""; hint_selected = 0; hint_offset = 0;
     hint_suppressed = None;
     revision = 0; body_cache = None; layout_cache = None;
-    previous = None; status = idle_status; activity = None;
+    previous = None; cursor_position = None;
+    status = idle_status; activity = None;
     activity_started = None; usage_badge = None; queue = 0;
     last_paint = 0.; paste = false; paste_buffer = Buffer.create 256 } in
   (try paint t with exn -> Notty_unix.Term.release term; raise exn);
@@ -543,6 +567,7 @@ let suspend t callback =
     t.term <- term;
     t.input <- Terminal_input.create term;
     t.previous <- None;
+    t.cursor_position <- None;
     t.body_cache <- None;
     t.paste <- false;
     Buffer.clear t.paste_buffer;
@@ -673,7 +698,7 @@ let rec next_input ?wake_fd t =
   | event -> event
 
 let read ?wake_fd ?on_wake ?on_interrupt ?on_completion t =
-  let measure cluster = I.width (I.string text_attr cluster) in
+  let measure = measure_text in
   let field_width () =
     let cols, _ = Notty_unix.Term.size t.term in
     let prefix_width = I.width (I.string accent prompt) in
@@ -789,7 +814,7 @@ let read ?wake_fd ?on_wake ?on_interrupt ?on_completion t =
     | `Key (`Page `Down, _) -> scroll_by t (-view_height t); loop ()
     | `Key (`ASCII 'o', [ `Meta ]) ->
         let cols, rows = Notty_unix.Term.size t.term in
-        let measure chunk = I.width (I.string text_attr chunk) in
+        let measure = measure_text in
         let layout = match t.layout_cache with
           | Some (width, revision, layout)
             when width = cols && revision = t.transcript.revision -> layout
@@ -884,30 +909,36 @@ let read ?wake_fd ?on_wake ?on_interrupt ?on_completion t =
     t.paste <- false;
     Buffer.clear paste_buffer) loop
 
-(* Update verified choices only on the UI thread (typically from on_wake);
-   preserve an explicit selection while fresh provider IDs arrive. *)
-let update_chooser chooser ~verified ~status =
+(* Update live choices only on the UI thread; preserve an explicit selection
+   while fresh provider IDs arrive. Listing alone does not verify an API route. *)
+let update_chooser chooser ~verified ~listed ~status =
   let previous = matches chooser in
   let selected = if chooser.selected < Array.length previous then
       Some previous.(chooser.selected).value else None in
   let confirmed = Hashtbl.create (List.length verified) in
   List.iter (fun value -> Hashtbl.replace confirmed value ()) verified;
-  let seen = Hashtbl.create (Array.length chooser.suggestions + List.length verified) in
+  let discovered = Hashtbl.create (List.length listed) in
+  List.iter (fun value -> Hashtbl.replace discovered value ()) listed;
+  let seen = Hashtbl.create
+    (Array.length chooser.suggestions + List.length verified + List.length listed) in
   let choices = ref [] in
   let add value =
     if not (Hashtbl.mem seen value) then (
       Hashtbl.add seen value ();
       choices := { value; custom = false;
-        verified = Hashtbl.mem confirmed value } :: !choices) in
+        verified = Hashtbl.mem confirmed value;
+        listed = Hashtbl.mem discovered value } :: !choices) in
   List.iter add verified;
+  List.iter add listed;
   Array.iter (fun value ->
     if not (List.mem value chooser.plain) then add value) chooser.suggestions;
   Array.iter (fun value ->
     if List.mem value chooser.plain then add value) chooser.suggestions;
   chooser.choices <- Array.of_list (List.rev !choices);
+  chooser.filtered <- None;
   chooser.status <- Option.map sanitize status;
   let found = matches chooser in
-  chooser.selected <- (if verified <> [] && chooser.filter = "" &&
+  chooser.selected <- (if (verified <> [] || listed <> []) && chooser.filter = "" &&
     not chooser.touched then 0
     else match selected with
     | Some value ->
@@ -918,10 +949,10 @@ let update_chooser chooser ~verified ~status =
     | None -> 0);
   chooser.offset <- min chooser.offset chooser.selected
 
-let update_choices t ~verified ?status () =
+let update_choices t ~verified ?(listed = []) ?status () =
   match t.chooser with
   | Some chooser when chooser.dynamic ->
-      update_chooser chooser ~verified ~status;
+      update_chooser chooser ~verified ~listed ~status;
       paint t
   | _ -> invalid_arg "Tui.update_choices: no dynamic chooser is open"
 
@@ -936,10 +967,11 @@ let choose ?(allow_custom = false) ?(intro = []) ?(plain = [])
   let chooser = { title = sanitize title;
     intro = Array.of_list (List.map sanitize intro); plain; suggestions;
     choices = Array.map (fun value ->
-      { value; custom = false; verified = false }) suggestions;
+      { value; custom = false; verified = false; listed = false }) suggestions;
     allow_custom; dynamic = Option.value dynamic
       ~default:(Option.is_some wake_fd); status = initial_status;
-    filter = ""; selected = 0; offset = 0; touched = false } in
+    filter = ""; selected = 0; offset = 0; touched = false;
+    filtered = None } in
   let old_scroll = t.scroll in
   let selected () =
     let found = matches chooser in
