@@ -64,4 +64,5 @@ let choose screen ~(descriptor : Pave.Provider_catalog.descriptor) ?(intro = [])
             ~status:"Model listing unavailable; offline suggestions remain" ()
       | Some `Cancelled | None -> () in
     Tui.choose screen ~allow_custom:true ~intro ~plain
-      ~wake_fd:read_fd ~on_wake ~title ~choices)
+      ~initial_status:"Loading available models…" ~wake_fd:read_fd
+      ~on_wake ~title ~choices)

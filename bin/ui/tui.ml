@@ -17,6 +17,7 @@ type chooser = {
   mutable filter : string;
   mutable selected : int;
   mutable offset : int;
+  mutable touched : bool;
 }
 
 type t = {
@@ -44,6 +45,7 @@ type t = {
   mutable queue : int;
   mutable last_paint : float;
   mutable paste : bool;
+  paste_buffer : Buffer.t;
 }
 
 let no_color = match Sys.getenv_opt "NO_COLOR" with Some s -> s <> "" | None -> false
@@ -509,7 +511,7 @@ let create ~root ~model ~session =
     revision = 0; body_cache = None; layout_cache = None;
     previous = None; status = idle_status; activity = None;
     activity_started = None; usage_badge = None; queue = 0;
-    last_paint = 0.; paste = false } in
+    last_paint = 0.; paste = false; paste_buffer = Buffer.create 256 } in
   (try paint t with exn -> Notty_unix.Term.release term; raise exn);
   t
 
@@ -524,6 +526,7 @@ let suspend t callback =
     t.previous <- None;
     t.body_cache <- None;
     t.paste <- false;
+    Buffer.clear t.paste_buffer;
     paint t)
 
 let reset_status t =
@@ -657,11 +660,29 @@ let read ?wake_fd ?on_wake ?on_interrupt ?on_completion t =
     let prefix_width = I.width (I.string accent prompt) in
     max 1 (if cols <= prefix_width then cols else cols - prefix_width) in
   let changed () = repaint_after_key t in
-  let paste_insert value =
+  let paste_buffer = t.paste_buffer in
+  let paste_limit () = match Pave.Composer.search_query t.editor with
+    | None -> 16_384 - String.length (Pave.Composer.text t.editor)
+    | Some query -> 512 - String.length query in
+  let paste_append value =
+    if Buffer.length paste_buffer + String.length value <= paste_limit () then
+      Buffer.add_string paste_buffer value in
+  let paste_append_char char =
+    if Buffer.length paste_buffer < paste_limit () then
+      Buffer.add_char paste_buffer char in
+  let paste_finish () =
+    t.paste <- false;
+    let value = Buffer.contents paste_buffer in
+    Buffer.clear paste_buffer;
     (match Pave.Composer.search_query t.editor with
-    | None -> Pave.Composer.insert t.editor value
+    | None ->
+        Pave.Composer.begin_paste t.editor;
+        Pave.Composer.insert t.editor value;
+        Pave.Composer.end_paste t.editor
     | Some _ -> Pave.Composer.search_insert t.editor value);
-    changed () in
+    t.hint_draft <- Pave.Composer.text t.editor;
+    dismiss_hint t;
+    paint t in
   let rec loop () =
     match next_input ?wake_fd t with
     | `End -> None
@@ -672,22 +693,20 @@ let read ?wake_fd ?on_wake ?on_interrupt ?on_completion t =
     | `Resize _ -> paint_resized t; loop ()
     | `Paste `Start ->
         t.paste <- true;
-        if Pave.Composer.search_query t.editor = None then
-          Pave.Composer.begin_paste t.editor;
+        Buffer.clear paste_buffer;
         paint t; loop ()
-    | `Paste `End ->
-        t.paste <- false;
-        Pave.Composer.end_paste t.editor;
-        t.hint_draft <- Pave.Composer.text t.editor;
-        dismiss_hint t;
-        paint t; loop ()
+    | `Paste `End when t.paste ->
+        paste_finish (); loop ()
+    | `Paste `End -> loop ()
     | `Key (`Enter, _) when t.paste ->
-        if Pave.Composer.search_query t.editor = None then paste_insert "\n";
+        if Pave.Composer.search_query t.editor = None then paste_append "\n";
         loop ()
+    | `Key (`Tab, _) when t.paste ->
+        paste_append_char ' '; loop ()
     | `Key (`ASCII c, []) when t.paste && Char.code c >= 32 ->
-        paste_insert (String.make 1 c); loop ()
+        paste_append_char c; loop ()
     | `Key (`Uchar uchar, []) when t.paste ->
-        paste_insert (utf8 uchar); loop ()
+        paste_append (utf8 uchar); loop ()
     | `Key _ when t.paste -> loop ()
     | `Key (`ASCII 'C', [ `Ctrl ]) ->
         if Pave.Composer.text t.editor = "" then (
@@ -843,9 +862,8 @@ let read ?wake_fd ?on_wake ?on_interrupt ?on_completion t =
         Pave.Composer.insert t.editor (utf8 uchar); changed (); loop ()
     | _ -> loop () in
   Fun.protect ~finally:(fun () ->
-    if t.paste then (
-      t.paste <- false;
-      Pave.Composer.end_paste t.editor)) loop
+    t.paste <- false;
+    Buffer.clear paste_buffer) loop
 
 (* The chooser is updated only on the UI thread (typically from on_wake). The
    initial offline suggestions remain available when verified IDs arrive. *)
@@ -862,18 +880,16 @@ let update_chooser chooser ~verified ~status =
       Hashtbl.add seen value ();
       choices := { value; custom = false;
         verified = Hashtbl.mem confirmed value } :: !choices) in
+  List.iter add verified;
   Array.iter (fun value ->
     if not (List.mem value chooser.plain) then add value) chooser.suggestions;
-  List.iter add verified;
   Array.iter (fun value ->
     if List.mem value chooser.plain then add value) chooser.suggestions;
   chooser.choices <- Array.of_list (List.rev !choices);
   chooser.status <- Option.map sanitize status;
   let found = matches chooser in
   chooser.selected <- (if verified <> [] && chooser.filter = "" &&
-    chooser.selected = 0 &&
-    (match selected with Some value -> List.mem value chooser.plain
-      | None -> false) then 0
+    not chooser.touched then 0
     else match selected with
     | Some value ->
         let rec locate i =
@@ -891,7 +907,7 @@ let update_choices t ~verified ?status () =
   | _ -> invalid_arg "Tui.update_choices: no dynamic chooser is open"
 
 let choose ?(allow_custom = false) ?(intro = []) ?(plain = [])
-    ?wake_fd ?on_wake ?dynamic t ~title ~choices =
+    ?initial_status ?wake_fd ?on_wake ?dynamic t ~title ~choices =
   let cols, rows = Notty_unix.Term.size t.term in
   if cols < 9 || rows < 2 then (
     alert t "Resize terminal (at least 9 columns × 2 rows) to select";
@@ -903,8 +919,8 @@ let choose ?(allow_custom = false) ?(intro = []) ?(plain = [])
     choices = Array.map (fun value ->
       { value; custom = false; verified = false }) suggestions;
     allow_custom; dynamic = Option.value dynamic
-      ~default:(Option.is_some wake_fd); status = None;
-    filter = ""; selected = 0; offset = 0 } in
+      ~default:(Option.is_some wake_fd); status = initial_status;
+    filter = ""; selected = 0; offset = 0; touched = false } in
   let old_scroll = t.scroll in
   let selected () =
     let found = matches chooser in
@@ -937,23 +953,29 @@ let choose ?(allow_custom = false) ?(intro = []) ?(plain = [])
       | `Key (`Enter, _) when not t.paste ->
           (match selected () with Some _ as choice -> choice | None -> loop ())
       | `Key (`Arrow `Up, _) ->
+          chooser.touched <- true;
           chooser.selected <- max 0 (chooser.selected - 1);
           paint t; loop ()
       | `Key (`Arrow `Down, _) ->
+          chooser.touched <- true;
           chooser.selected <- max 0 (min (Array.length (matches chooser) - 1)
             (chooser.selected + 1));
           paint t; loop ()
       | `Key (`Page direction, _) ->
+          chooser.touched <- true;
           let step = view_height t in
           chooser.selected <- max 0 (min (Array.length (matches chooser) - 1)
             (chooser.selected + if direction = `Down then step else -step));
           paint t; loop ()
       | `Key (`Home, _) ->
+          chooser.touched <- true;
           chooser.selected <- 0; paint t; loop ()
       | `Key (`End, _) ->
+          chooser.touched <- true;
           chooser.selected <- max 0 (Array.length (matches chooser) - 1);
           paint t; loop ()
       | `Key (`Backspace, _) when chooser.filter <> "" ->
+          chooser.touched <- true;
           let boundaries = Pave.Composer.segment chooser.filter in
           chooser.filter <- String.sub chooser.filter 0
             boundaries.(Array.length boundaries - 2);
@@ -961,6 +983,7 @@ let choose ?(allow_custom = false) ?(intro = []) ?(plain = [])
           paint t; loop ()
       | `Key (`ASCII c, []) when Char.code c >= 32 ->
           if String.length chooser.filter < 256 then (
+            chooser.touched <- true;
             chooser.filter <- chooser.filter ^ String.make 1 c;
             chooser.selected <- 0; chooser.offset <- 0;
             paint t);
@@ -968,6 +991,7 @@ let choose ?(allow_custom = false) ?(intro = []) ?(plain = [])
       | `Key (`Uchar uchar, []) ->
           let value = utf8 uchar in
           if String.length chooser.filter + String.length value <= 256 then (
+            chooser.touched <- true;
             chooser.filter <- chooser.filter ^ value;
             chooser.selected <- 0; chooser.offset <- 0;
             paint t);
