@@ -1,5 +1,12 @@
 # Troubleshooting
 
+### [2026-09-25] Modified Enter keys did not queue follow-ups
+
+- **Context / Symptom:** A 70×18 PTY sent Kitty's `ESC[13;5u` for Ctrl+Enter during a streaming turn, but no follow-up was queued.
+- **Root Cause:** The installed Notty decoder did not recognize Kitty modified-Enter CSI-u sequences. `Terminal_input` also kept ESC followed by C0 Return/Line Feed pending until its escape timeout discarded both bytes.
+- **Solution:** Decoded ESC-prefixed Return/Line Feed as Meta+Enter events, mapped Option/Alt+Enter to queued follow-ups, and added `/queue MESSAGE` as an explicit terminal-independent submission boundary. Help now labels Option/Return on macOS and Alt/Enter elsewhere. A local fake-provider PTY verified queue, dequeue, steering, draft retention and retry.
+- **Prevention / Reference:** Exercise key bytes through the real TUI PTY and installed decoder; do not assume Kitty CSI-u support. On macOS, configure Option to send Escape/Meta or use `/queue MESSAGE`.
+
 ### [2026-09-25] OCaml Unix lacks a no-follow open flag
 
 - **Context / Symptom:** `dune runtest` rejected `Unix.O_NOFOLLOW` as an unbound constructor while building typed user/project settings on the OCaml 5.5.1 switch.

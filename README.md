@@ -167,8 +167,8 @@ The searchable setup picker queries the chosen provider asynchronously. Use Up/D
 
 ### Terminal experience
 
-- **Conversation:** Pixel-art Pave appears only in an empty transcript; the first message replaces it. Roles, Markdown, tool progress and folded results use distinct blocks. `Alt+O` toggles the latest visible tool result.
-- **Navigation:** Type `/` for filtered slash-command hints (`/re` narrows them). Up/Down selects, Tab or Enter inserts **without executing**, Escape keeps the draft, and a second Enter submits. `/help` shows the catalog.
+- **Conversation:** Pixel-art Pave appears only in an empty transcript; the first message replaces it. Roles, Markdown, tool progress and folded results use distinct blocks. `Option+O` on macOS or `Alt+O` elsewhere toggles the latest visible tool result.
+- **Navigation:** Type `/` for filtered slash-command hints (`/re` narrows them). Up/Down selects, Tab or Return (macOS) / Enter (other supported terminals) inserts **without executing**, Escape keeps the draft, and a second Return/Enter submits. `/help` shows the catalog.
 - **Status:** The model row identifies saved versus unsaved sessions; activity switches from `Working` to the running tool and back. Elapsed time advances through slow responses and shell approval without idle polling. Idle usage shows measured branch/conversation input and output tokens when available; `/usage` details models and untracked cost.
 - **Failures:** Provider, auth and tool errors appear as readable error blocks. Failed or cancelled streaming text is removed; unknown exceptions retain diagnostic text. Approving a visible shell command still requires a separate `y`.
 - **Display:** Pickers highlight the active row and keep provider-list errors visible. Narrow terminals show compact `PAVE`; `NO_COLOR=1` removes colors. Redirected I/O uses the plain CLI.
@@ -194,16 +194,19 @@ Explicit CLI flags override session choices, then project and user defaults. A s
 
 | In the TUI | Action |
 | --- | --- |
-| `Enter` · `Shift+Enter` | Send a prompt · insert a newline; pasted Enter never submits |
+| `Return` (macOS) · `Enter` (other supported terminals) | Send a prompt; during a turn, interrupt it and steer with that prompt. Pasted Enter never submits. |
+| `Option+Return` (macOS) · `Alt+Enter` (other supported terminals) · `/queue MESSAGE` | Queue a follow-up without interrupting the active turn. The slash command also works when the terminal cannot encode modified Enter. |
+| `Option+↑` (macOS) · `Alt+↑` (other supported terminals) | Restore the most recent queued prompt into the editor; otherwise navigate prompt history. |
 | `←` `→` · `↑` `↓` | Move by Unicode grapheme or wrapped visual row; history at first/last row |
-| `Ctrl+P`/`Ctrl+N` · `Ctrl+R` | Explicit older/newer history · incremental reverse search (Enter recalls, Escape cancels) |
-| `Ctrl/Alt+←/→` · `Ctrl+W` | Move or delete by word; editor draft stays intact during model output |
-| `Ctrl+Z`/`Ctrl+Y` · `Ctrl+K`/`Ctrl+U` · `Alt+Y` | Undo/redo a draft edit · kill after/before the cursor · yank killed text; bracketed paste is one undo step |
-| `PgUp`/`PgDn` · `Ctrl+Home`/`Ctrl+End` · `Alt+O` | Scroll the transcript, jump to its beginning/end, or expand/collapse the latest visible tool result |
-| `Ctrl+C` · `Ctrl+D` | Clear a nonempty draft; with an empty draft cancel the active turn · exit when empty |
-| `/` then `Tab` | Search available slash commands; Enter inserts a choice, Escape returns to the unchanged draft |
+| `Ctrl+P`/`Ctrl+N` · `Ctrl+R` | Explicit older/newer history · incremental reverse search (Return recalls on macOS; Enter elsewhere, Escape cancels) |
+| `Ctrl/Option+←/→` (macOS) · `Ctrl/Alt+←/→` (other terminals) · `Ctrl+W` | Move or delete by word; editor draft stays intact during model output |
+| `Ctrl+Z`/`Ctrl+Y` · `Ctrl+K`/`Ctrl+U` · `Option+Y` (macOS) / `Alt+Y` (other terminals) | Undo/redo a draft edit · kill after/before the cursor · yank killed text; bracketed paste is one undo step |
+| `PgUp`/`PgDn` · `Ctrl+Home`/`Ctrl+End` · `Option+O` (macOS) / `Alt+O` (other terminals) | Scroll the transcript, jump to its beginning/end, or expand/collapse the latest visible tool result |
+| `Ctrl+C` · `Ctrl+D` | Interrupt an active turn without losing the draft; when idle, clear a nonempty draft; `Ctrl+D` exits when empty. |
+| `/` then `Tab` | Search available slash commands; Return (macOS) / Enter (other terminals) inserts a choice, Escape returns to the unchanged draft |
 | `/setup` · `/model [PROVIDER[@API]/MODEL_ID]` | Connect an account without changing defaults, or configure the user default · choose the active conversation model/API across connected providers |
 | `/cancel` · `/settings` | Stop the active request/command; edit typed project defaults for the next launch |
+| `/queue MESSAGE` | Queue a follow-up while a turn is active; when idle, send it immediately. |
 | `/tools [NAME]` | List the tools actually offered to the model, or inspect one tool's description; shell availability follows `--allow-shell` and still requires per-command approval |
 | `/context` | Inspect the actual model/route, saved branch and retained conversation count; show only provider-reported input/output tokens from OpenAI Responses, Codex subscription Responses, Anthropic Messages, Google Gemini, Ollama and Chat Completions routes that supply complete usage (the official OpenAI Chat stream explicitly requests it), on the selected ancestry or cumulative ephemeral conversation; other requests, context limit and cost remain untracked |
 | `/usage` | Inspect only recorded provider-reported tokens; private journals group the selected branch's input/output totals by model, while ephemeral conversations show the combined measured total without claiming per-model provenance |
@@ -213,6 +216,9 @@ Explicit CLI flags override session choices, then project and user defaults. A s
 | `/help` · `/entries` | Show descriptive commands · list journal message IDs |
 | `/tree` · `/branch ID` · `/fork /path/new.jsonl` | Search recent journal ancestry and select a branch · choose an exact entry ID · copy the selected conversation |
 | `/compact` · `/quit` | Summarize older turns manually · exit |
+
+On macOS, `/help` labels Meta as `Option` and Enter as `Return`; other supported terminals show `Alt` and `Enter`. Configure Option to send Escape/Meta in the terminal to use modified shortcuts. `/queue MESSAGE` remains available when it is not configured.
+
 
 ### Sessions and long-running turns
 

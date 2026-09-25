@@ -227,4 +227,25 @@ let () =
   Pave.Composer.search_cancel editor;
   Pave.Composer.undo editor;
   assert (Pave.Composer.text editor = "");
+  let editor = Pave.Composer.create () in
+  Pave.Composer.insert editor "draft 👩‍💻";
+  Pave.Composer.home editor;
+  Pave.Composer.right editor;
+  Pave.Composer.right editor;
+  let draft_cursor = Pave.Composer.cursor editor in
+  let prefix = "queued\n\n" in
+  assert (Pave.Composer.prepend editor prefix);
+  assert (Pave.Composer.text editor = prefix ^ "draft 👩‍💻");
+  assert (Pave.Composer.cursor editor = String.length prefix + draft_cursor);
+  Pave.Composer.undo editor;
+  assert (Pave.Composer.text editor = "draft 👩‍💻");
+  assert (Pave.Composer.cursor editor = draft_cursor);
+  Pave.Composer.redo editor;
+  assert (Pave.Composer.text editor = prefix ^ "draft 👩‍💻");
+  let restored = Pave.Composer.text editor
+  and restored_cursor = Pave.Composer.cursor editor in
+  assert (not (Pave.Composer.prepend editor (String.make 16_384 'x')));
+  assert (Pave.Composer.text editor = restored);
+  assert (Pave.Composer.cursor editor = restored_cursor);
+
   print_endline "terminal composer: ok"

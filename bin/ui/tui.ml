@@ -21,6 +21,8 @@ type chooser = {
   mutable filtered : (string * candidate array) option;
 }
 
+type submission = { text : string; follow_up : bool }
+
 type t = {
   mutable term : Notty_unix.Term.t;
   mutable input : Terminal_input.t;
@@ -62,19 +64,25 @@ let selected_attr = if no_color then A.(st bold)
   else A.(fg black ++ bg lightcyan ++ st bold)
 let measure_text chunk = I.width (I.string text_attr chunk)
 
+let macos = Sys.os_type = "Unix" && Sys.file_exists "/System/Library"
+let meta_key = if macos then "Option" else "Alt"
+let enter_key = if macos then "Return" else "Enter"
+
 let idle_status =
-  "Alt+O tool details · PgUp/Dn scroll · Enter send · Ctrl+R search"
+  enter_key ^ " steer · " ^ meta_key ^ "+" ^ enter_key ^ " follow-up · /queue"
 
 let hotkeys = [
-  "Keys · Enter send · Shift+Enter newline";
-  "/ · live commands; ↑/↓ select · Tab/Enter insert · Esc close";
+  "Steer: " ^ enter_key ^ " · follow-up: " ^ meta_key ^ "+" ^ enter_key ^
+    " or /queue MESSAGE";
+  "/ · live commands; ↑/↓ select · Tab/" ^ enter_key ^ " insert · Esc close";
   "Ctrl+R reverse search · Esc cancel search";
-  "↑/↓ move in draft · Ctrl+P/N or Alt+↑/↓ prompt history";
-  "Ctrl+A/E line ends · Alt+B/F move by word · Ctrl+W erase word";
-  "Ctrl+Z/Y undo/redo · Ctrl+K/U kill line · Alt+Y yank";
-  "Alt+O tool details · PgUp/Dn scroll · Ctrl+Home/End transcript";
-  "Ctrl+C clear draft or interrupt if empty · Ctrl+D exit if empty";
-  "Bracketed paste inserts atomically; pasted Enter does not send";
+  meta_key ^ "+↑ restores a queued prompt when available; otherwise prompt history";
+  "Ctrl+P/N or " ^ meta_key ^ "+↓ prompt history · ↑/↓ move in the draft";
+  "Ctrl+A/E line ends · " ^ meta_key ^ "+B/F move by word · Ctrl+W erase word";
+  "Ctrl+Z/Y undo/redo · Ctrl+K/U kill line · " ^ meta_key ^ "+Y yank";
+  meta_key ^ "+O tool details · PgUp/Dn scroll · Ctrl+Home/End transcript";
+  "Ctrl+C interrupts without losing the draft; idle clears the draft";
+  "Bracketed paste inserts atomically; pasted " ^ enter_key ^ " does not send";
 ]
 
 (* Two ASCII columns per 8px SVG pixel keep the mark square in a terminal. *)
@@ -391,22 +399,22 @@ let paint t =
         if body_height < 2 then (
           let label = if Array.length found = 0 then "(no match)"
             else candidate_label chooser found.(chooser.selected) in
-          Printf.sprintf "  %d/%d %s · Enter select · Esc cancel%s"
-            number (Array.length found) label status)
+          Printf.sprintf "  %d/%d %s · %s select · Esc cancel%s"
+            number (Array.length found) label enter_key status)
         else if cols < 55 then
-          Printf.sprintf "  %d/%d · Enter select · Esc cancel%s"
-            number (Array.length found) status
+          Printf.sprintf "  %d/%d · %s select · Esc cancel%s"
+            number (Array.length found) enter_key status
         else if cols < 75 then
-          Printf.sprintf "  %d/%d · ↑↓ move · Enter select · Esc cancel%s"
-            number (Array.length found) status
+          Printf.sprintf "  %d/%d · ↑↓ move · %s select · Esc cancel%s"
+            number (Array.length found) enter_key status
         else
-          Printf.sprintf "  %d/%d · ↑↓/PgUp/PgDn move · Enter select · Esc cancel%s"
-            number (Array.length found) status
+          Printf.sprintf "  %d/%d · ↑↓/PgUp/PgDn move · %s select · Esc cancel%s"
+            number (Array.length found) enter_key status
     | None when hint_height > 0 ->
         let selected = List.nth hints t.hint_selected in
         let label = selected.name ^ " · " ^ selected.summary in
         if cols < 45 then "  " ^ label
-        else "  " ^ label ^ "   ·   ↑↓ move · Tab/Enter insert · Esc close"
+        else "  " ^ label ^ "   ·   ↑↓ move · Tab/" ^ enter_key ^ " insert · Esc close"
     | None ->
         let status = match Pave.Composer.search_query t.editor with
           | None -> t.status
@@ -415,11 +423,11 @@ let paint t =
               (match Pave.Composer.search_match t.editor with
               | None -> "(no match)"
               | Some value -> sanitize (String.split_on_char '\n' value |> List.hd)) ^
-              " · Ctrl+R older · Enter recall · Esc cancel" in
+              " · Ctrl+R older · " ^ enter_key ^ " recall · Esc cancel" in
         if cols < 45 then
           (if status = idle_status then
             (if t.queue > 0 then Printf.sprintf "q%d · " t.queue else "") ^
-            "Alt+O details · PgUp/Dn scroll"
+            meta_key ^ "+O details · PgUp/Dn scroll"
            else status)
         else
           (if total = 0 then "  "
@@ -475,7 +483,7 @@ let paint t =
         let index = row - (body_height - hint_height) in
         if index = 0 then
           styled_line cols accent
-            "  / Commands · ↑↓ move · Tab/Enter insert · Esc close"
+            ("  / Commands · ↑↓ move · Tab/" ^ enter_key ^ " insert · Esc close")
         else
           let choice = List.nth hints (t.hint_offset + index - 1) in
           hint_row cols (t.hint_offset + index - 1 = t.hint_selected) choice);
@@ -607,6 +615,16 @@ let set_usage t = function
 let set_queue t count =
   t.queue <- max 0 count;
   paint t
+let prepend_prompt t text =
+  let draft = Pave.Composer.text t.editor in
+  let prefix = text ^ (if draft = "" then "" else "\n\n") in
+  if Pave.Composer.prepend t.editor prefix then (
+    t.hint_draft <- Pave.Composer.text t.editor;
+    dismiss_hint t;
+    paint t;
+    true)
+  else false
+
 
 let show_history t (messages : Pave.Protocol.message list) =
   Hashtbl.clear t.tool_groups;
@@ -734,7 +752,7 @@ let rec next_input ?wake_fd t =
   | `Tick -> paint t; next_input ?wake_fd t
   | event -> event
 
-let read ?wake_fd ?on_wake ?on_interrupt ?on_completion t =
+let read ?wake_fd ?on_wake ?on_interrupt ?on_dequeue ?on_completion t =
   let measure = measure_text in
   let field_width () =
     let cols, _ = Notty_unix.Term.size t.term in
@@ -764,6 +782,12 @@ let read ?wake_fd ?on_wake ?on_interrupt ?on_completion t =
     t.hint_draft <- Pave.Composer.text t.editor;
     dismiss_hint t;
     paint t in
+  let submit follow_up =
+    match Pave.Composer.submit t.editor with
+    | None -> None
+    | Some text ->
+        paint t;
+        Some { text; follow_up } in
   let rec loop () =
     match next_input ?wake_fd t with
     | `End -> None
@@ -790,10 +814,13 @@ let read ?wake_fd ?on_wake ?on_interrupt ?on_completion t =
         paste_append (utf8 uchar); loop ()
     | `Key _ when t.paste -> loop ()
     | `Key (`ASCII 'C', [ `Ctrl ]) ->
-        if Pave.Composer.text t.editor = "" then (
-          Pave.Composer.search_cancel t.editor;
-          Option.iter (fun callback -> callback ()) on_interrupt)
-        else Pave.Composer.clear t.editor;
+        let handled = match on_interrupt with
+          | Some callback -> callback ()
+          | None -> false in
+        if not handled then (
+          if Pave.Composer.text t.editor = "" then
+            Pave.Composer.search_cancel t.editor
+          else Pave.Composer.clear t.editor);
         changed (); loop ()
     | `Key key when Pave.Composer.search_query t.editor <> None ->
         (match key with
@@ -837,16 +864,22 @@ let read ?wake_fd ?on_wake ?on_interrupt ?on_completion t =
                    changed ()
                | _ -> ()));
         loop ()
+    | `Key (`ASCII 'M', mods) when List.mem `Meta mods &&
+        List.mem `Ctrl mods ->
+        (match submit true with None -> loop () | Some _ as result -> result)
+    | `Key (`Enter, mods) when List.mem `Meta mods ->
+        (match submit true with None -> loop () | Some _ as result -> result)
     | `Key (`Enter, mods) when not (List.mem `Shift mods) &&
-        hints_visible t ->
+        not (List.mem `Ctrl mods) && hints_visible t ->
         Option.iter (insert_hint t) (selected_hint t);
         changed (); loop ()
     | `Key (`Enter, mods) ->
         if t.paste || List.mem `Shift mods then
           (Pave.Composer.insert t.editor "\n"; changed (); loop ())
-        else (match Pave.Composer.submit t.editor with
+        else
+          (match submit (List.mem `Ctrl mods) with
           | None -> loop ()
-          | Some value -> paint t; Some value)
+          | Some _ as result -> result)
     | `Key (`Page `Up, _) -> scroll_by t (view_height t); loop ()
     | `Key (`Page `Down, _) -> scroll_by t (-view_height t); loop ()
     | `Key (`ASCII 'o', [ `Meta ]) ->
@@ -890,6 +923,9 @@ let read ?wake_fd ?on_wake ?on_interrupt ?on_completion t =
         t.scroll <- max_int; t.revision <- t.revision + 1; paint t; loop ()
     | `Key (`End, [ `Ctrl ]) ->
         t.scroll <- 0; t.revision <- t.revision + 1; paint t; loop ()
+    | `Key (`Arrow `Up, [ `Meta ]) when t.queue > 0 ->
+        Option.iter (fun dequeue -> dequeue ()) on_dequeue;
+        changed (); loop ()
     | `Key (`Arrow `Up, [ `Meta ]) | `Key (`ASCII 'P', [ `Ctrl ]) ->
         Pave.Composer.older t.editor; changed (); loop ()
     | `Key (`Arrow `Down, [ `Meta ]) | `Key (`ASCII 'N', [ `Ctrl ]) ->

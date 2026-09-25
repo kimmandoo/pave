@@ -81,6 +81,8 @@ let rec accept t c =
         (t.mode <- Normal; flush t; accept t c)
       else if t.size = 1 && byte >= 0xc2 then
         (t.mode <- Normal; flush t; accept t c)
+      else if t.size = 1 && byte < 0x20 then
+        (append t c; t.mode <- Normal; flush t)
       else if t.size = 1 && (c = '[' || c = 'O') then append t c
       else if t.size = 1 && byte >= 0x20 && byte < 0x7f then
         (append t c; t.mode <- Normal; flush t)
