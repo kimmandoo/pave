@@ -865,27 +865,35 @@ let () =
           ~run:(fun ~cancel text ->
             ignore (Pave.Agent.run ~cancel ~max_turns
               (get_agent ()) text))
-          ~on_message:(Tui.event screen)
-          ~on_delta:(Tui.delta screen)
-          ~on_phase:(function
-            | Pave.Agent.Model -> Tui.set_activity screen (Some "Working")
-            | Pave.Agent.Tool name ->
-                Tui.set_activity screen (Some ("Tool: " ^ name)))
-          ~on_approve:(Tui.confirm screen)
-          ~on_start:(fun text ->
-            Tui.set_activity screen (Some "Working");
-            Tui.sent screen text)
-          ~on_finish:(fun outcome ->
-            refresh_usage screen;
-            Tui.set_activity screen None;
-            match outcome with
-            | Pave.Turn_runner.Completed -> Tui.finish_live screen
-            | Pave.Turn_runner.Cancelled ->
+          ~on_event:(function
+            | Pave.Turn_runner.Turn_started { prompt; _ } ->
+                Tui.set_activity screen (Some "Working");
+                Tui.sent screen prompt
+            | Pave.Turn_runner.Transcript_message { text; _ } ->
+                Tui.event screen text
+            | Pave.Turn_runner.Text_delta { text; _ } ->
+                Tui.delta screen text
+            | Pave.Turn_runner.Activity_phase { phase; _ } ->
+                (match phase with
+                 | Pave.Agent.Model ->
+                     Tui.set_activity screen (Some "Working")
+                 | Pave.Agent.Tool name ->
+                     Tui.set_activity screen (Some ("Tool: " ^ name)))
+            | Pave.Turn_runner.Turn_completed _ ->
+                refresh_usage screen;
+                Tui.set_activity screen None;
+                Tui.finish_live screen
+            | Pave.Turn_runner.Turn_cancelled _ ->
+                refresh_usage screen;
+                Tui.set_activity screen None;
                 Tui.clear_live screen;
                 Tui.event screen "Turn cancelled."
-            | Pave.Turn_runner.Failed exn ->
+            | Pave.Turn_runner.Turn_failed { error; _ } ->
+                refresh_usage screen;
+                Tui.set_activity screen None;
                 Tui.clear_live screen;
-                Tui.event screen ("Error: " ^ error_message exn))
+                Tui.event screen ("Error: " ^ error_message error))
+          ~on_approve:(Tui.confirm screen)
           ~on_queued:(fun count ->
             Tui.set_queue screen count;
             if count > 0 then
