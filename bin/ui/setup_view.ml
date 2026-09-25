@@ -37,15 +37,19 @@ let run screen =
       (try Pave.Oauth_store.get ~path:(Pave.Oauth_store.default_path ())
         ~provider:descriptor.id <> None
        with Pave.Oauth_store.Storage_error _ -> false) in
+    let key_is_set = match key with
+      | Some env -> (match Sys.getenv_opt env with
+          | Some value -> value <> ""
+          | None -> false)
+      | None -> false in
     let key_label = Option.map (fun env ->
-      env ^ (match Sys.getenv_opt env with
-        | Some value when value <> "" -> " (set)"
-        | _ -> " (not set)")) key in
+      env ^ (if key_is_set then " (set)" else " (not set)")) key in
     let saved_label = "Use saved OAuth sign-in" in
     let login_label = "Sign in via OAuth" in
     let choices =
-      (match key_label with Some label -> [label] | None -> []) @
+      (if key_is_set then Option.to_list key_label else []) @
       (if saved_oauth then [saved_label] else []) @
+      (if not key_is_set then Option.to_list key_label else []) @
       (if oauth then [login_label] else []) @
       ["Back · providers"; "Skip setup"] in
     if key = None && not oauth then model descriptor None
