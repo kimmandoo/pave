@@ -104,7 +104,7 @@ let () =
        | Ok models ->
            List.iter (fun id ->
              Printf.printf "%s\t%s\n" id
-               (if Pave.Provider_catalog.route descriptor ~model:id "" = None
+               (if Pave.Provider_catalog.route descriptor "" = None
                 then "discovered; no supported inference route"
                 else "selectable")) models;
            if models = [] then
@@ -131,27 +131,16 @@ let () =
     let model = match saved_model with
       | Some (_, saved) -> saved
       | None when !model <> "" -> !model
-      | None -> match configured.default_provider with
+      | None -> (match configured.default_provider with
           | Some configured_provider when configured_provider = descriptor.id ->
-              Option.value ~default:(Option.value ~default:"" descriptor.default_model)
-                configured.default_model
-          | _ -> Option.value ~default:"" descriptor.default_model in
-    let route = match Pave.Provider_catalog.route descriptor ~model !api_name with
+              Option.value ~default:"" configured.default_model
+          | _ -> "") in
+    let route = match Pave.Provider_catalog.route descriptor !api_name with
       | Some value -> value
-      | None -> failwith ("unsupported saved model or API for " ^
-          descriptor.id ^ "/" ^ model ^ "; specify --model to override") in
+      | None -> failwith ("unsupported API for " ^
+          descriptor.id ^ "; specify --api to override") in
     let configured_default_usable =
-      match configured.default_provider with
-      | Some _ -> model <> "" &&
-          Pave.Provider_catalog.route descriptor ~model "" <> None
-      | None ->
-          (* An API key plus the built-in OpenAI default is already usable. *)
-          (match descriptor.api_key_env with
-           | Some name when descriptor.id = "openai" && model <> "" ->
-               (match Sys.getenv_opt name with
-                | Some key -> key <> ""
-                | None -> false)
-           | _ -> false) in
+      model <> "" && Pave.Provider_catalog.route descriptor "" <> None in
     let active_descriptor = ref descriptor and active_model = ref model
       and active_route = ref route and endpoint_override = ref !endpoint in
     let ui = ref None in
@@ -398,22 +387,15 @@ let () =
             let providers = Pave.Interaction.selectable_providers () in
             (match !ui with
              | Some screen ->
-                 let choices = List.concat_map
-                   (fun (entry : Pave.Provider_catalog.descriptor) ->
-                     List.map (fun model -> entry.id ^ "/" ^ model)
-                       (Pave.Provider_catalog.known_models entry)) providers in
                  (match Model_picker.choose screen ~descriptor:!active_descriptor
-                   ~title:"Model · live account IDs + offline suggestions"
-                   ~choices () with
+                   ~title:"Model · live IDs (type an ID if unavailable)"
+                   ~choices:[] () with
                   | Some value -> value | None -> "")
              | None ->
                  on_event ("Current model: " ^ !active_descriptor.id ^ "/" ^
                    (if !active_model = "" then "(none)" else !active_model));
                  List.iter (fun (entry : Pave.Provider_catalog.descriptor) ->
-                   on_event (entry.id ^ "  " ^ entry.display_name ^
-                     (match entry.default_model with
-                      | Some model -> "  (default: " ^ model ^ ")"
-                      | None -> ""))) providers;
+                   on_event (entry.id ^ "  " ^ entry.display_name)) providers;
                  print_string "Provider/model ID (blank cancels): "; flush stdout;
                  (try String.trim (read_line ()) with End_of_file -> "")) in
       if selector <> "" then (
@@ -570,7 +552,7 @@ let () =
                on_event ("Default provider: " ^
                  Option.value ~default:"openai" values.default_provider);
                on_event ("Default model: " ^
-                 Option.value ~default:"(provider default)" values.default_model);
+                 Option.value ~default:"(not selected)" values.default_model);
                on_event ("Disable shell tools: " ^
                  string_of_bool values.disable_shell);
                on_event ("Maximum turns: " ^

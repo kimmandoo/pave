@@ -12,8 +12,10 @@ let header key headers =
 
 let () =
   assert (Wire.endpoint = "https://api.githubcopilot.com/chat/completions");
-  List.iter (fun model -> assert (not (Wire.supported_model model)))
-    ["gpt-5"; "claude-sonnet-4"; "GPT-4.1"; "gpt-4o-mini"; ""];
+  rejected (fun () -> Wire.validate ~endpoint:Wire.endpoint
+    ~model:"" ~token:"ghu_fixture-private-token");
+  rejected (fun () -> Wire.validate ~endpoint:Wire.endpoint
+    ~model:"bad\nmodel" ~token:"ghu_fixture-private-token");
   let token = "ghu_fixture-private-token" in
   let messages = [Protocol.user "question"] in
   let headers = Wire.headers ~endpoint:Wire.endpoint ~model:"gpt-4.1" ~token ~messages in
@@ -32,8 +34,9 @@ let () =
   rejected (fun () -> Wire.headers
     ~endpoint:"https://api.githubcopilot.com/chat/completions/../v1/responses"
     ~model:"gpt-4.1" ~token ~messages);
-  rejected (fun () -> Wire.headers ~endpoint:Wire.endpoint
-    ~model:"gpt-5" ~token ~messages);
+  let newer = Wire.headers ~endpoint:Wire.endpoint
+    ~model:"new-chat-model" ~token ~messages in
+  assert (header "Authorization" newer = "Bearer " ^ token);
   rejected (fun () -> Wire.headers ~endpoint:Wire.endpoint
     ~model:"gpt-4o" ~token:"ghu_forged\r\nHost:evil.example" ~messages);
   rejected (fun () -> Wire.headers ~endpoint:Wire.endpoint

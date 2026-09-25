@@ -7,7 +7,8 @@ let chunk parts finish =
   event (Yojson.Basic.to_string (`Assoc [ "candidates", `List [ `Assoc candidate ] ]))
 let text value = `Assoc [ "text", `String value ]
 let tool id name arguments = `Assoc [ "functionCall", `Assoc [
-  "id", `String id; "name", `String name; "args", arguments ] ]
+  "id", `String id; "name", `String name; "args", arguments ];
+  "thoughtSignature", `String "c2ln" ]
 let invalid ?(model="gemini-2.5-flash") wire =
   let stream = Pave.Gemini_stream.create ~model ~on_text:(fun _ -> ()) in
   match Pave.Gemini_stream.feed stream wire; Pave.Gemini_stream.finish stream with
@@ -57,7 +58,7 @@ let () =
   let result_without_id = Pave.Gemini_stream.create ~model:"gemini-2.5-flash" ~on_text:(fun _ -> ()) in
   Pave.Gemini_stream.feed result_without_id
     (chunk [ `Assoc [ "functionCall", `Assoc [ "name", `String "read_file";
-      "args", args ] ] ] true);
+      "args", args ]; "thoughtSignature", `String "c2ln" ] ] true);
   (match (Pave.Gemini_stream.finish result_without_id).tool_calls with
    | [ invocation ] -> assert (invocation.id <> "" && invocation.arguments = args)
    | _ -> failwith "missing streamed tool call");
@@ -94,7 +95,8 @@ let () =
              "name", `String "read_file";
              "response", `Assoc [ "output", `String "contents" ] ] ] ] ] ])
    | _ -> failwith "signed stream lost call");
-  invalid ~model:"gemini-3-pro" (chunk [ tool "fc-3" "read_file" args ] true);
+  invalid (chunk [ `Assoc [ "functionCall", `Assoc [
+    "id", `String "fc-3"; "name", `String "read_file"; "args", args ] ] ] true);
   invalid ~model:"gemini-3-pro" (chunk [ signed_part ] false ^
     chunk [ signed_part ] true);
   invalid ~model:"gemini-3-pro"

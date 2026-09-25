@@ -142,7 +142,7 @@ let resolve_model ~current_provider ~input =
   let descriptor = match Provider_catalog.find provider_id with
     | Some descriptor -> descriptor
     | None -> invalid_argument ("unknown provider: " ^ provider_id) in
-  let route = match Provider_catalog.route descriptor ~model "" with
+  let route = match Provider_catalog.route descriptor "" with
     | Some route -> route
     | None -> invalid_argument ("no route for provider: " ^ provider_id) in
   descriptor, model, route

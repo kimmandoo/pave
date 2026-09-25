@@ -174,12 +174,6 @@ let () =
       [ system; user ] [] with
      | exception Pave.Provider.Provider_error _ -> assert (not !credential_read)
      | _ -> failwith "Copilot bearer accepted by a foreign HTTPS endpoint");
-    (match Pave.Provider.complete ~authentication:Pave.Provider.OAuth
-      ~resolve_credential:(fun () -> credential_read := true;
-        { Pave.Provider.access = "sensitive"; account_id = None; residency = None })
-      { copilot with model = "gpt-5" } [ system; user ] [] with
-     | exception Pave.Provider.Provider_error _ -> assert (not !credential_read)
-     | _ -> failwith "unsupported Copilot model read a credential");
     (match Pave.Provider.complete copilot [ system; user ] [] with
      | exception Pave.Provider.Provider_error _ -> ()
      | _ -> failwith "Copilot accepted an API key instead of a device grant");

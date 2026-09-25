@@ -34,8 +34,16 @@ let () =
   let tool = `Assoc [ "type", `String "function"; "function", `Assoc [
     "name", `String "read_file"; "description", `String "Read UTF-8 file";
     "parameters", schema ] ] in
+  let signed_parts = [ text "Reading…";
+    `Assoc [ "functionCall", `Assoc [ "id", `String first.id;
+      "name", `String first.name; "args", first.arguments ];
+      "thoughtSignature", `String "c2ln" ];
+    `Assoc [ "functionCall", `Assoc [ "id", `String second.id;
+      "name", `String second.name; "args", second.arguments ] ] ] in
+  let signed_turn = Pave.Gemini_wire.parse_completion ~model:"gemini-2.5-flash"
+    (response signed_parts "STOP") in
   let transcript = [ system "Respond concisely"; user "Read two files";
-    assistant (Some "Reading…") [ first; second ]; tool_result second.id "café content";
+    signed_turn; tool_result second.id "café content";
     tool_result first.id "日本語 content"; assistant (Some "All done") [] ] in
   let request = Pave.Gemini_wire.request ~model:"gemini-2.5-flash" transcript [ tool ] in
   assert (field "model" request = `Null);
@@ -45,8 +53,7 @@ let () =
       "parametersJsonSchema", normalized_schema ] ] ] ]);
   assert (field "contents" request = `List [
     item "user" [ text "Read two files" ];
-    item "model" [ text "Reading…"; fn "read_file" first.arguments;
-      fn "read_file" second.arguments ];
+    item "model" signed_parts;
     item "user" [
       `Assoc [ "functionResponse", `Assoc [ "name", `String "read_file";
         "response", `Assoc [ "output", `String "日本語 content" ] ] ];
@@ -68,8 +75,11 @@ let () =
   let reply = Pave.Gemini_wire.parse_completion ~model:"gemini-2.5-flash"
     (response [ text "こんにちは "; text "世界 🌍";
       `Assoc [ "functionCall", `Assoc [ "id", `String first.id;
-        "name", `String first.name; "args", first.arguments ] ] ] "STOP") in
-  assert (reply = assistant (Some "こんにちは 世界 🌍") [ first ]);
+        "name", `String first.name; "args", first.arguments ];
+        "thoughtSignature", `String "c2ln" ] ] "STOP") in
+  assert (reply.content = Some "こんにちは 世界 🌍");
+  assert (reply.tool_calls = [ first ]);
+  assert (reply.provider_state <> None);
   let counts = `Assoc [
     "usageMetadata", `Assoc [
       "promptTokenCount", `Int 12; "cachedContentTokenCount", `Int 7;
@@ -83,7 +93,9 @@ let () =
   assert (Pave.Gemini_wire.usage (`Assoc [
     "usageMetadata", `Assoc ["promptTokenCount", `Int 12] ]) = None);
   let generated = Pave.Gemini_wire.parse_completion ~model:"gemini-2.5-flash"
-    (response [ fn "read_file" second.arguments ] "STOP") in
+    (response [ `Assoc [ "functionCall", `Assoc [
+      "name", `String "read_file"; "args", second.arguments ];
+      "thoughtSignature", `String "c2ln" ] ] "STOP") in
   (match generated.tool_calls with
    | [ invocation ] ->
        assert (invocation.id <> "");
