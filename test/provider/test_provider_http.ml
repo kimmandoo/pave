@@ -37,6 +37,7 @@ let anthropic_stream =
   {|{"type":"message_stop"}|} ^ "\n\n"
 
 let read_request ic =
+  let request_line = input_line ic in
   let headers = ref [] and length = ref 0 in
   let rec consume () =
     let line = input_line ic in
@@ -48,14 +49,17 @@ let read_request ic =
       consume ()) in
   consume ();
   let body = Yojson.Basic.from_string (really_input_string ic !length) in
-  !headers, body
+  let path = match String.split_on_char ' ' request_line with
+    | _method :: path :: _ -> path
+    | _ -> failwith "malformed HTTP request" in
+  path, !headers, body
 
 let has_header prefix headers = List.exists (String.starts_with ~prefix) headers
 
 let serve client step signal_write closed_write =
   let ic = Unix.in_channel_of_descr client in
   let oc = Unix.out_channel_of_descr client in
-  let headers, request = read_request ic in
+  let path, headers, request = read_request ic in
   let status, content_type, body = match step with
     | 0 ->
         assert (has_header "authorization: bearer mock-openai" headers);
@@ -88,6 +92,47 @@ let serve client step signal_write closed_write =
         (if step = 7 then
            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}]}\n\n"
          else {|{"choices":[{"message":{"role":"assistant","content":"partial|})
+    | 8 | 9 | 10 | 11 | 12 | 13 ->
+        let provider, key = match (step - 8) / 2 with
+          | 0 -> "together", "mock-together"
+          | 1 -> "cerebras", "mock-cerebras"
+          | _ -> "venice", "mock-venice" in
+        assert (path = "/chat/completions");
+        assert (has_header ("authorization: bearer " ^ key) headers);
+        assert (member "model" request = `String "discovered-next-model");
+        let tool_id = "call-" ^ provider in
+        let user = Pave.Protocol.message_to_json (Pave.Protocol.user "look up detail") in
+        if step mod 2 = 0 then (
+          assert (member "messages" request = `List [user]);
+          assert (member "tools" request =
+            `List [`Assoc ["type", `String "function";
+              "function", `Assoc ["name", `String "lookup";
+                "parameters", `Assoc ["type", `String "object"]]]]);
+          let call = Pave.Protocol.call_to_json { Pave.Protocol.id = tool_id;
+            name = "lookup"; arguments = `Assoc ["query", `String "detail"] } in
+          200, "application/json",
+          Yojson.Basic.to_string (`Assoc ["choices", `List [`Assoc [
+            "finish_reason", `String "tool_calls";
+            "message", `Assoc ["role", `String "assistant";
+              "content", `Null; "tool_calls", `List [call]]]]]))
+        else (
+          (match member "messages" request with
+          | `List [first; assistant; result] ->
+              assert (first = user);
+              assert (member "role" assistant = `String "assistant");
+              assert (member "tool_calls" assistant =
+                `List [Pave.Protocol.call_to_json { Pave.Protocol.id = tool_id;
+                  name = "lookup";
+                  arguments = `Assoc ["query", `String "detail"] }]);
+              assert (member "role" result = `String "tool");
+              assert (member "tool_call_id" result = `String tool_id);
+              assert (member "content" result = `String "found")
+          | _ -> failwith "second inference omitted the tool-result turn");
+          200, "application/json",
+          Yojson.Basic.to_string (`Assoc ["choices", `List [`Assoc [
+            "finish_reason", `String "stop";
+            "message", `Assoc ["role", `String "assistant";
+              "content", `String (provider ^ "-reply")]]]]))
     | _ -> failwith "unexpected request" in
   if step = 5 then (
     Printf.fprintf oc "HTTP/1.1 %d Mock\r\nContent-Type: %s\r\nConnection: keep-alive\r\n\r\n%s"
@@ -121,7 +166,7 @@ let () =
   if child = 0 then (
     Unix.close signal_read;
     Unix.close closed_read;
-    (try for step = 0 to 7 do
+    (try for step = 0 to 13 do
        let client, _ = Unix.accept socket in serve client step signal_write closed_write
      done with exn -> prerr_endline (Printexc.to_string exn); exit 2);
     exit 0);
@@ -242,5 +287,30 @@ let () =
      | exception Pave.Provider.Cancelled -> ()
      | _ -> failwith "streamed request returned despite cancellation");
     assert (!streamed_text = [ "partial" ]);
-    expect_disconnect ());
+    expect_disconnect ();
+    List.iter (fun (id, url, env) ->
+      let descriptor = Option.get (Pave.Provider_catalog.find id) in
+      assert (descriptor.api_key_env = Some env);
+      let route = Option.get (Pave.Provider_catalog.route descriptor "") in
+      assert (route.endpoint = url);
+      let config : Pave.Provider.config = {
+        endpoint = Printf.sprintf "http://127.0.0.1:%d/chat/completions" port;
+        api_key = "mock-" ^ id;
+        model = "discovered-next-model";
+        api = route.wire } in
+      let tools = [`Assoc ["type", `String "function";
+        "function", `Assoc ["name", `String "lookup";
+          "parameters", `Assoc ["type", `String "object"]]]] in
+      let first = Pave.Provider.complete config
+        [Pave.Protocol.user "look up detail"] tools in
+      assert (first.tool_calls = [{ Pave.Protocol.id = "call-" ^ id;
+        name = "lookup"; arguments = `Assoc ["query", `String "detail"] }]);
+      let second = Pave.Provider.complete config
+        [Pave.Protocol.user "look up detail"; first;
+         Pave.Protocol.tool_result ("call-" ^ id) "found"] tools in
+      assert (second.content = Some (id ^ "-reply"));
+      assert (second.tool_calls = [])) [
+        "together", "https://api.together.ai/v1/chat/completions", "TOGETHER_API_KEY";
+        "cerebras", "https://api.cerebras.ai/v1/chat/completions", "CEREBRAS_API_KEY";
+        "venice", "https://api.venice.ai/api/v1/chat/completions", "VENICE_API_KEY" ]);
   print_endline "provider HTTP: ok"

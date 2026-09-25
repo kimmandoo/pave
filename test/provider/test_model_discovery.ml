@@ -87,6 +87,48 @@ let () =
       "deepseek", deepseek_url;
       "groq", groq_url;
       "mistral", mistral_url ];
+  let together_key = "private-together" in
+  let together_headers = ["Authorization", "Bearer " ^ together_key] in
+  let http, calls = fixed_http together_url together_headers (Ok (200,
+    {|[{"id":"chat-next/1","type":"chat"},{"id":"embed-next/2","type":"embedding"},{"id":"chat-next/3","type":"chat"},{"id":"chat-next/1","type":"chat"}]|})) in
+  expect_models ["chat-next/1"; "chat-next/3"]
+    (discover ~http ~provider:"together" ~credential:(Api_key together_key) ());
+  assert (!calls = 1);
+  let http, _ = fixed_http together_url together_headers
+    (Ok (200, {|[{"id":"unclassified"}]|})) in
+  expect_error is_invalid_response
+    (discover ~http ~provider:"together" ~credential:(Api_key together_key) ());
+  let http, _ = fixed_http together_url together_headers
+    (Ok (200, {|{"data":[{"id":"not-an-array","type":"chat"}]}|})) in
+  expect_error is_invalid_response
+    (discover ~http ~provider:"together" ~credential:(Api_key together_key) ());
+  let http, calls = fixed_http cerebras_url bearer (Ok (200,
+    {|{"object":"list","data":[{"id":"live-chat/1"},{"id":"live-chat/2"},{"id":"live-chat/1"}]}|})) in
+  expect_models ["live-chat/1"; "live-chat/2"]
+    (discover ~http ~provider:"cerebras" ~credential:(Api_key key) ());
+  assert (!calls = 1);
+  let http, calls = fixed_http venice_url bearer (Ok (200,
+    {|{"object":"list","type":"text","data":[{"id":"live-chat/1","type":"text","model_spec":{"capabilities":{"supportsFunctionCalling":true}}},{"id":"chat-no-tools","type":"text","model_spec":{"capabilities":{"supportsFunctionCalling":false}}},{"id":"image-model","type":"image"},{"id":"live-chat/2","type":"text","model_spec":{"capabilities":{"supportsFunctionCalling":true}}},{"id":"live-chat/1","type":"text","model_spec":{"capabilities":{"supportsFunctionCalling":true}}}]}|})) in
+  expect_models ["live-chat/1"; "live-chat/2"]
+    (discover ~http ~provider:"venice" ~credential:(Api_key key) ());
+  assert (!calls = 1);
+  let http, _ = fixed_http venice_url bearer (Ok (200,
+    {|{"data":[{"id":"unsafe-chat","type":"text","model_spec":{"capabilities":{}}}]}|})) in
+  expect_error is_invalid_response (discover ~http ~provider:"venice"
+    ~credential:(Api_key key) ());
+  let unused ~url:_ ~headers:_ = failwith "unauthorized listing attempted" in
+  List.iter (fun provider ->
+    expect_error no_credential (discover ~http:unused ~provider ());
+    expect_error wrong_credential (discover ~http:unused ~provider
+      ~credential:(Copilot_oauth key) ())) ["cerebras"; "venice"];
+  expect_error no_credential (discover ~http:unused ~provider:"together" ());
+  expect_error wrong_credential (discover ~http:unused ~provider:"together"
+    ~credential:(Codex_oauth (together_key, "account")) ());
+  let http, calls = fixed_http venice_url bearer
+    (Ok (302, {|{"Location":"https://attacker.example/models"}|})) in
+  expect_error unavailable (discover ~http ~provider:"venice"
+    ~credential:(Api_key key) ());
+  assert (!calls = 1);
   let headers = ["x-api-key", key; "anthropic-version", "2023-06-01"] in
   let calls = ref 0 in
   let http ~url ~headers:actual =
