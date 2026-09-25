@@ -34,6 +34,10 @@ let google_url = "https://generativelanguage.googleapis.com/v1beta/models"
 let ollama_url = "http://127.0.0.1:11434/api/tags"
 let copilot_url = "https://api.githubcopilot.com/models"
 let openrouter_url = "https://openrouter.ai/api/v1/models/user"
+let anthropic_url = "https://api.anthropic.com/v1/models"
+let deepseek_url = "https://api.deepseek.com/models"
+let groq_url = "https://api.groq.com/openai/v1/models"
+let mistral_url = "https://api.mistral.ai/v1/models"
 let codex_urls = List.map (fun path ->
   "https://chatgpt.com/backend-api" ^ path ^ "?client_version=" ^
     Codex_wire.client_version) ["/codex/models"; "/models"]
@@ -218,6 +222,10 @@ let discover ?http ?cancel ~provider ?credential () =
     | "ollama" -> Some (ollama_url, "models", "name", include_all)
     | "github-copilot" -> Some (copilot_url, "data", "id", include_copilot)
     | "openrouter" -> Some (openrouter_url, "data", "id", include_all)
+    | "anthropic" -> Some (anthropic_url, "data", "id", include_all)
+    | "deepseek" -> Some (deepseek_url, "data", "id", include_all)
+    | "groq" -> Some (groq_url, "data", "id", include_all)
+    | "mistral" -> Some (mistral_url, "data", "id", include_all)
     | _ -> None in
   match target with
   | None -> Error (Unsupported_provider provider)
@@ -225,7 +233,8 @@ let discover ?http ?cancel ~provider ?credential () =
       let secret = match provider, credential with
         | "ollama", None -> Ok None
         | "ollama", Some _ -> Error Invalid_credential
-        | ("openai" | "google" | "openrouter"), Some (Api_key key)
+        | ("openai" | "google" | "openrouter" | "anthropic" |
+           "deepseek" | "groq" | "mistral"), Some (Api_key key)
         | "github-copilot", Some (Copilot_oauth key) ->
             if valid_secret key then Ok (Some key) else Error Invalid_credential
         | _, None -> Error Missing_credential
@@ -237,6 +246,10 @@ let discover ?http ?cancel ~provider ?credential () =
             | "openai", Some key -> ["Authorization", "Bearer " ^ key]
             | "openrouter", Some key -> ["Authorization", "Bearer " ^ key]
             | "google", Some key -> ["x-goog-api-key", key]
+            | ("deepseek" | "groq" | "mistral"), Some key ->
+                ["Authorization", "Bearer " ^ key]
+            | "anthropic", Some key ->
+                ["x-api-key", key; "anthropic-version", "2023-06-01"]
             | "github-copilot", Some key ->
                 ["Authorization", "Bearer " ^ key;
                  "User-Agent", "copilot/1.0.82";
@@ -252,9 +265,13 @@ let discover ?http ?cancel ~provider ?credential () =
           let rec pages page token =
             Provider.check_cancel cancel;
             if page >= 50 then invalid "too many model listing pages"
-            else let page_url = match token with
-              | None -> url
-              | Some token -> url ^ "?pageToken=" ^ Oauth_flow.url_encode token in
+            else let page_url = match provider, token with
+              | "anthropic", None -> url ^ "?limit=100"
+              | "anthropic", Some token ->
+                  url ^ "?limit=100&after_id=" ^ Oauth_flow.url_encode token
+              | _, None -> url
+              | _, Some token ->
+                  url ^ "?pageToken=" ^ Oauth_flow.url_encode token in
             let response = http ~url:page_url ~headers in
             Provider.check_cancel cancel;
             match response with
@@ -277,7 +294,22 @@ let discover ?http ?cancel ~provider ?credential () =
                           | Error _ as failure -> failure
                           | Ok ids ->
                               add_unique seen result ids;
-                              if provider <> "google" then Ok (List.rev !result)
+                              if provider = "anthropic" then
+                                (match extract_field "has_more" json with
+                                | Some (`Bool false) -> Ok (List.rev !result)
+                                | Some (`Bool true) ->
+                                    (match extract_field "last_id" json with
+                                    | Some (`String next) ->
+                                        (match checked_id next with
+                                        | Ok next when ids <> [] &&
+                                            List.hd (List.rev ids) = next &&
+                                            not (Hashtbl.mem visited next) ->
+                                            Hashtbl.add visited next ();
+                                            pages (page + 1) (Some next)
+                                        | _ -> invalid "invalid or repeated last_id")
+                                    | _ -> invalid "missing last_id")
+                                | _ -> invalid "invalid or missing has_more")
+                              else if provider <> "google" then Ok (List.rev !result)
                               else match extract_field "nextPageToken" json with
                               | None -> Ok (List.rev !result)
                               | Some (`String next) when next <> "" &&

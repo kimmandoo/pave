@@ -72,6 +72,43 @@ let () =
     (discover ~http ~provider:"openrouter"
       ~credential:(Api_key router_key) ());
   assert (!calls = 1);
+  let key = "new-provider-private-key" in
+  let bearer = ["Authorization", "Bearer " ^ key] in
+  List.iter (fun (provider, url) ->
+    let http, calls = fixed_http url bearer (Ok (200,
+      {|{"data":[{"id":"future-chat-1"},{"id":"future-chat-2"}]}|})) in
+    expect_models ["future-chat-1"; "future-chat-2"]
+      (discover ~http ~provider ~credential:(Api_key key) ());
+    assert (!calls = 1);
+    expect_error no_credential (discover ~http ~provider ());
+    expect_error wrong_credential (discover ~http ~provider
+      ~credential:(Copilot_oauth key) ());
+    assert (!calls = 1)) [
+      "deepseek", deepseek_url;
+      "groq", groq_url;
+      "mistral", mistral_url ];
+  let headers = ["x-api-key", key; "anthropic-version", "2023-06-01"] in
+  let calls = ref 0 in
+  let http ~url ~headers:actual =
+    incr calls;
+    assert (actual = headers);
+    if !calls = 1 then (
+      assert (url = anthropic_url ^ "?limit=100");
+      Ok (200, {|{"data":[{"id":"future-Claude/1"},{"id":"next/?"}],"has_more":true,"last_id":"next/?"}|}))
+    else (
+      assert (url = anthropic_url ^ "?limit=100&after_id=next%2F%3F");
+      Ok (200, {|{"data":[{"id":"future-Claude/2"},{"id":"future-Claude/1"}],"has_more":false,"last_id":"future-Claude/1"}|})) in
+  expect_models ["future-Claude/1"; "next/?"; "future-Claude/2"]
+    (discover ~http ~provider:"anthropic" ~credential:(Api_key key) ());
+  assert (!calls = 2);
+  let http, _ = fixed_http (anthropic_url ^ "?limit=100") headers
+    (Ok (200, {|{"data":[{"id":"partial"}],"has_more":true,"last_id":"mismatch"}|})) in
+  expect_error is_invalid_response (discover ~http ~provider:"anthropic"
+    ~credential:(Api_key key) ());
+  let http, _ = fixed_http (anthropic_url ^ "?limit=100") headers
+    (Ok (200, {|{"data":[{"id":"partial"}]}|})) in
+  expect_error is_invalid_response (discover ~http ~provider:"anthropic"
+    ~credential:(Api_key key) ());
   let http, calls = fixed_http openrouter_url router_headers
     (Ok (403, "forbidden")) in
   expect_error unavailable (discover ~http ~provider:"openrouter"
