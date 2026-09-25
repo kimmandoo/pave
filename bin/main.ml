@@ -10,6 +10,7 @@ let error_message = function
 
 let () =
   let root = ref "." and model = ref "" in
+  let exit_kind = ref Pave.Session.Normal in
   let endpoint = ref "" and provider_name = ref "" and api_name = ref "" in
   let stream = ref false in
   let session = ref "" and prompt = ref "" and prompt_supplied = ref false
@@ -128,6 +129,13 @@ let () =
     let system = prompt_configuration.text in
     let journal = ref (if !session = "" then None else
       Some (Pave.Session.open_file ~cwd:root !session)) in
+    at_exit (fun () -> match !journal with
+      | None -> ()
+      | Some current ->
+          (try ignore (Pave.Session.record_exit current ~kind:!exit_kind)
+           with exn ->
+             prerr_endline ("Error recording session exit: " ^
+               Printexc.to_string exn)));
     let saved_model =
       if explicit_model_override then None
       else Option.bind !journal Pave.Session.model in
@@ -189,12 +197,30 @@ let () =
           Tui.tool_settled screen call_id name result is_error
       | Pave.Agent.Tool_aborted { call_id; name; result; _ } ->
           Tui.tool_aborted screen call_id name result in
-    let worker_tool_event event = match !ui with
+    let persist_tool_event event = match !journal, event with
+      | Some current, Pave.Agent.Tool_started { call_id; name } ->
+          ignore (Pave.Session.record_tool_started current ~call_id ~name)
+      | Some current, Pave.Agent.Tool_settled { call_id; name; is_error; _ } ->
+          ignore (Pave.Session.record_tool_settled current ~call_id ~name ~is_error)
+      | Some current, Pave.Agent.Tool_aborted {
+          call_id; name; side_effects_may_have_occurred; _ } ->
+          ignore (Pave.Session.record_tool_aborted current ~call_id ~name
+            ~side_effects_may_have_occurred)
+      | _, Pave.Agent.Tool_updated _ | None, _ -> () in
+    let worker_tool_event event =
+      persist_tool_event event;
+      match !ui with
       | Some screen when Thread.id (Thread.self ()) = ui_thread ->
           render_tool_event screen event
       | Some _ ->
           Option.iter (fun current -> Pave.Turn_runner.tool current event) !runner
-      | None -> () in
+      | None ->
+          (match event with
+           | Pave.Agent.Tool_started { name; _ } -> on_event ("[" ^ name ^ "]")
+           | Pave.Agent.Tool_updated _ -> ()
+           | Pave.Agent.Tool_settled { name; result; _ }
+           | Pave.Agent.Tool_aborted { name; result; _ } ->
+               on_event ("[" ^ name ^ "] " ^ result)) in
     let worker_event message = match !runner with
       | Some current -> Pave.Turn_runner.message current message
       | None -> on_event message in
@@ -260,7 +286,8 @@ let () =
         ~allow_shell:!allow_shell ~stream:(!stream || Option.is_some !ui)
         ~approve_command:worker_approval ~on_usage:record_usage
         ?on_phase:(if Option.is_some !ui then Some worker_phase else None)
-        ?on_tool_event:(if Option.is_some !ui then Some worker_tool_event else None)
+        ?on_tool_event:(if Option.is_some !ui || Option.is_some !journal
+          then Some worker_tool_event else None)
         ~history ~on_change ~on_event:worker_event ~on_delta:worker_delta () in
     let get_agent () = match !agent with
       | Some current -> current
@@ -824,6 +851,27 @@ let () =
                        entry.id (Pave.Session_tree.first_line
                          (provider ^ "/" ^ model))
                        tokens.input_tokens tokens.output_tokens)
+                 | Pave.Session.Tool_lifecycle { call_id; name; state } ->
+                     let status = match state with
+                       | Pave.Session.Tool_started -> "started"
+                       | Pave.Session.Tool_settled { is_error = false } -> "settled"
+                       | Pave.Session.Tool_settled { is_error = true } -> "failed"
+                       | Pave.Session.Tool_aborted {
+                           side_effects_may_have_occurred = false } -> "aborted"
+                       | Pave.Session.Tool_aborted {
+                           side_effects_may_have_occurred = true } ->
+                           "aborted; side effects possible" in
+                     Some (Printf.sprintf "%s tool %s (%s) · %s" entry.id
+                       (Pave.Session_tree.first_line name) call_id status)
+                 | Pave.Session.Session_exit { kind; pending_tool_calls } ->
+                     let kind = match kind with
+                       | Pave.Session.Normal -> "normal"
+                       | Pave.Session.Signal -> "signal"
+                       | Pave.Session.Fatal -> "fatal"
+                       | Pave.Session.Process_exit -> "process exit" in
+                     let count = List.length pending_tool_calls in
+                     Some (Printf.sprintf "%s exit %s · %d pending tool%s"
+                       entry.id kind count (if count = 1 then "" else "s"))
                  | Pave.Session.Branch -> None) (Pave.Session.entries current) in
                (match !ui with
                 | Some screen -> Tui.events screen lines
@@ -928,5 +976,6 @@ let () =
         instruction_diagnostics;
       interact ())
   with exn ->
+    exit_kind := Pave.Session.Fatal;
     prerr_endline ("Error: " ^ error_message exn);
     exit 1

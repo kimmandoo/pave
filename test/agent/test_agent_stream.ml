@@ -76,13 +76,23 @@ let () =
       endpoint = Printf.sprintf "http://127.0.0.1:%d/chat/completions" port;
       api_key = "mock"; model = "mock" } in
     let events = ref [] and deltas = ref [] and tool_events = ref [] in
+    let outcome_order = ref [] in
     let agent = Pave.Agent.create ~provider ~root ~system:"inspect the mobile repo"
       ~stream:true ~on_event:(fun text -> events := text :: !events)
       ~on_delta:(fun text -> deltas := text :: !deltas)
-      ~on_tool_event:(fun event -> tool_events := event :: !tool_events) () in
+      ~on_change:(fun message ->
+        if message.Pave.Protocol.role = "tool" then
+          outcome_order := "result" :: !outcome_order)
+      ~on_tool_event:(fun event ->
+        tool_events := event :: !tool_events;
+        match event with
+        | Pave.Agent.Tool_started _ -> outcome_order := "started" :: !outcome_order
+        | Pave.Agent.Tool_settled _ -> outcome_order := "settled" :: !outcome_order
+        | Pave.Agent.Tool_updated _ | Pave.Agent.Tool_aborted _ -> ()) () in
     assert (Pave.Agent.run agent "Read App.swift" = "Swift source verified.");
     assert (List.rev !deltas = [ "Swift source verified."; "\n" ]);
     assert (not (List.mem "Swift source verified." !events));
+    assert (List.rev !outcome_order = ["started"; "settled"; "result"]);
     assert (List.length (Pave.Agent.messages agent) = 4);
     (match List.rev !tool_events with
      | [ Pave.Agent.Tool_started { call_id = "call-mobile"; name = "read_file" };
@@ -92,24 +102,37 @@ let () =
          assert (String.starts_with ~prefix:"struct App {}\n" result)
      | _ -> failwith "tool call did not emit ordered typed lifecycle events");
     let cancelled = ref false in
-    let changes = ref [] and cancel_events = ref [] in
+    let changes = ref [] and cancel_events = ref [] and cancel_order = ref [] in
     let cancelled_agent = Pave.Agent.create ~provider ~root ~system:"inspect the mobile repo"
       ~stream:true ~on_event:(fun _ -> ())
       ~on_tool_event:(fun event ->
         cancel_events := event :: !cancel_events;
-        match event with
-        | Pave.Agent.Tool_started { call_id = "write-mobile"; _ } ->
-            cancelled := true
-        | _ -> ())
-      ~on_change:(fun message -> changes := message :: !changes) () in
+        (match event with
+         | Pave.Agent.Tool_started { call_id = "write-mobile"; _ } ->
+             cancelled := true;
+             cancel_order := "started" :: !cancel_order
+         | Pave.Agent.Tool_aborted { call_id = "write-mobile"; _ } ->
+             cancel_order := "aborted" :: !cancel_order
+         | _ -> ()))
+      ~on_change:(fun message ->
+        changes := message :: !changes;
+        if message.Pave.Protocol.role = "tool" then
+          cancel_order := "result" :: !cancel_order) () in
     (match Pave.Agent.run ~cancel:(fun () -> !cancelled) cancelled_agent "Write file" with
      | exception Pave.Provider.Cancelled -> ()
      | _ -> failwith "agent executed a cancelled tool call");
     assert (not (Sys.file_exists (Filename.concat root "MUST_NOT_EXIST")));
     (match Pave.Agent.messages cancelled_agent with
-     | [ message ] -> assert (message.Pave.Protocol.role = "user")
-     | _ -> failwith "cancelled agent journal contains an incomplete assistant turn");
-    assert (List.rev !changes = Pave.Agent.messages cancelled_agent);
+     | [ user; assistant; result ] ->
+         assert (user.Pave.Protocol.role = "user");
+         assert (List.map (fun (call : Pave.Protocol.tool_call) -> call.id)
+           assistant.tool_calls = ["write-mobile"]);
+         assert (result.Pave.Protocol.role = "tool");
+         assert (result.tool_call_id = Some "write-mobile");
+         assert (match result.content with
+           | Some text -> String.starts_with ~prefix:"Error:" text
+           | None -> false)
+     | _ -> failwith "canceled tool turn was not persisted with a paired result");
     (match List.rev !cancel_events with
      | [ Pave.Agent.Tool_started { call_id = "write-mobile"; name = "write_file" };
          Pave.Agent.Tool_aborted {
@@ -117,6 +140,7 @@ let () =
          } ] ->
          assert (String.starts_with ~prefix:"Error:" result)
      | _ -> failwith "canceled unstarted tool did not settle as aborted");
+    assert (List.rev !cancel_order = ["started"; "aborted"; "result"]);
     let cancelled_after_tool = ref false and partial_events = ref [] in
     let partial_agent = Pave.Agent.create ~provider ~root ~system:"inspect the mobile repo"
       ~stream:true ~on_event:(fun _ -> ())
