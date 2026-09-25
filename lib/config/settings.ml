@@ -108,15 +108,15 @@ let load ~root =
     };
     diagnostics = List.rev !diagnostics }
 
-(* Project edits are explicit. A lock serializes Pave writers, and replacing a
-   temporary regular file never follows a pre-existing settings symlink. *)
-let update_project ~root change =
-  let directory = Filename.concat root ".pave" in
+(* Project edits are explicit. Both scopes use the same locked, atomic
+   replacement; a pre-existing settings symlink is never followed. *)
+let update_file ?(require_owner = false) ~directory change =
   (try Unix.mkdir directory 0o700 with
    | Unix.Unix_error (Unix.EEXIST, _, _) -> ());
   let stat = Unix.lstat directory in
-  if stat.Unix.st_kind <> Unix.S_DIR then
-    invalid_arg "project .pave must be a real directory";
+  if stat.Unix.st_kind <> Unix.S_DIR ||
+     (require_owner && stat.Unix.st_uid <> Unix.geteuid ()) then
+    invalid_arg "settings directory must be an owned real directory";
   let lock_path = Filename.concat directory "settings.lock" in
   let previous = try Some (Unix.lstat lock_path) with
     | Unix.Unix_error (Unix.ENOENT, _, _) -> None in
@@ -166,3 +166,33 @@ let update_project ~root change =
         Fun.protect ~finally:(fun () -> Unix.close directory_fd) (fun () ->
           Unix.fsync directory_fd);
         updated)))
+
+let update_project ~root change =
+  let directory = Filename.concat root ".pave" in
+  update_file ~directory change
+
+let user_directory () =
+  let home, diagnostics = config_home () in
+  if diagnostics <> [] || Filename.is_relative home then
+    invalid_arg "XDG_CONFIG_HOME must be absolute to save user settings";
+  let rec ensure_directory path =
+    if path <> Filename.dirname path then (
+      (try
+         let stat = Unix.lstat path in
+         if stat.Unix.st_kind <> Unix.S_DIR then
+           invalid_arg "user config path must be a real directory"
+       with Unix.Unix_error (Unix.ENOENT, _, _) ->
+         ensure_directory (Filename.dirname path);
+         Unix.mkdir path 0o700)) in
+  ensure_directory home;
+  let directory = Filename.concat home "pave" in
+  (try Unix.mkdir directory 0o700 with
+   | Unix.Unix_error (Unix.EEXIST, _, _) -> ());
+  let stat = Unix.lstat directory in
+  if stat.Unix.st_kind <> Unix.S_DIR ||
+     stat.Unix.st_uid <> Unix.geteuid () then
+    invalid_arg "user settings directory must be an owned real directory";
+  directory
+
+let update_user change =
+  update_file ~require_owner:true ~directory:(user_directory ()) change

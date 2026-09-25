@@ -5,6 +5,7 @@ type command =
   | Cancel
   | Help
   | Settings
+  | Setup
   | New
   | Resume of string option
   | Compact
@@ -21,7 +22,7 @@ type command =
   | Unknown of string
 
 type action =
-  | A_login | A_model | A_settings | A_new | A_resume | A_cancel
+  | A_login | A_model | A_settings | A_setup | A_new | A_resume | A_cancel
   | A_entries | A_tree | A_tools | A_context | A_usage | A_hotkeys | A_branch | A_fork
   | A_compact | A_retry | A_help | A_quit
 
@@ -31,6 +32,7 @@ let commands = [
   { name = "/login"; usage = "[PROVIDER]"; summary = "Sign in to a provider"; action = A_login };
   { name = "/model"; usage = "[PROVIDER/MODEL]"; summary = "Choose an inference model"; action = A_model };
   { name = "/settings"; usage = ""; summary = "View or edit project defaults"; action = A_settings };
+  { name = "/setup"; usage = ""; summary = "Choose a user default provider and model"; action = A_setup };
   { name = "/new"; usage = ""; summary = "Start a private saved session"; action = A_new };
   { name = "/resume"; usage = "[PATH]"; summary = "Search or reopen saved sessions"; action = A_resume };
   { name = "/cancel"; usage = ""; summary = "Cancel the active turn"; action = A_cancel };
@@ -109,6 +111,7 @@ let parse line =
     | Some A_cancel -> no_args (); Cancel
     | Some A_help -> no_args (); Help
     | Some A_settings -> no_args (); Settings
+    | Some A_setup -> no_args (); Setup
     | Some A_new -> no_args (); New
     | Some A_resume -> Resume (Option.map (require_path name) argument)
     | Some A_compact -> no_args (); Compact
