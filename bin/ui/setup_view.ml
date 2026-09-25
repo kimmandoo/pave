@@ -95,20 +95,15 @@ let run screen =
       | Some default when not (List.mem default models) -> default :: models
       | _ -> models in
     let choices = List.map (fun id -> descriptor.id ^ "/" ^ id) models in
-    let instructions = "Type " ^ descriptor.id ^ "/MODEL_ID" in
     match Model_picker.choose screen ~descriptor
-      ~plain:[instructions; "Back · authentication"; "Skip setup"]
+      ~plain:["Back · authentication"; "Skip setup"]
       ~intro:["03 / 03  ·  MODEL";
-        "Filter the list or type PROVIDER/MODEL_ID.";
-        "Only routable model IDs can become your default."]
-      ~title:"SETUP · Choose model (type ID)"
-      ~choices:(choices @ [instructions; "Back · authentication"; "Skip setup"]) () with
+        "Use arrows and Enter to choose an available model.";
+        "Type an ID only if the model you need is not listed."]
+      ~title:"SETUP · Select model"
+      ~choices:(choices @ ["Back · authentication"; "Skip setup"]) () with
     | None | Some "Skip setup" -> skip
     | Some "Back · authentication" -> authentication descriptor
-    | Some choice when choice = instructions ->
-        Tui.alert screen ("Type " ^ descriptor.id ^
-          "/MODEL_ID in the chooser, then Enter");
-        model descriptor missing_key
     | Some choice ->
         (try
            let selected, id, route = Pave.Interaction.resolve_model
