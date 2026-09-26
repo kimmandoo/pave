@@ -2,6 +2,7 @@ type values = {
   default_provider : string option;
   default_model : string option;
   default_api : string option;
+  default_account_id : string option;
   disable_shell : bool;
   max_turns : int option;
   approval_mode : Approval.mode option;
@@ -13,6 +14,7 @@ type loaded = { values : values; diagnostics : string list }
 
 let empty = {
   default_provider = None; default_model = None; default_api = None;
+  default_account_id = None;
   disable_shell = false; max_turns = None; approval_mode = None;
   tool_approval = []; command_patterns = [];
 }
@@ -107,7 +109,7 @@ let parse text =
     | _ -> invalid_arg "expected a JSON object" in
   check_unique_fields "setting" fields;
   let allowed = ["default_provider"; "default_model"; "default_api";
-    "disable_shell"; "max_turns"; "tools"] in
+    "default_account_id"; "disable_shell"; "max_turns"; "tools"] in
   List.iter (fun (name, _) -> if not (List.mem name allowed) then
     invalid_arg ("unknown setting " ^ name)) fields;
   let disable_shell = match member "disable_shell" fields with
@@ -117,16 +119,20 @@ let parse text =
   let default_provider = string_field "default_provider" fields in
   let default_model = string_field "default_model" fields in
   let default_api = string_field "default_api" fields in
-  (match default_model, default_api, default_provider with
-   | _, Some _, None ->
+  let default_account_id = string_field "default_account_id" fields in
+  (match default_model, default_api, default_account_id, default_provider with
+   | _, _, Some _, None ->
+       invalid_arg "default_account_id requires default_provider"
+   | _, Some _, _, None ->
        invalid_arg "default_api requires default_provider"
-   | Some _, _, None -> invalid_arg "default_model requires default_provider"
+   | Some _, _, _, None ->
+       invalid_arg "default_model requires default_provider"
    | _ -> ());
   let approval_mode, tool_approval, command_patterns =
     match List.assoc_opt "tools" fields with
     | None -> None, [], []
     | Some value -> parse_approval_settings value in
-  { default_provider; default_model; default_api; disable_shell;
+  { default_provider; default_model; default_api; default_account_id; disable_shell;
     max_turns = positive_field "max_turns" fields;
     approval_mode; tool_approval; command_patterns }
 
@@ -199,6 +205,9 @@ let load ~root =
       default_api = (match project.default_provider with
         | Some _ -> project.default_api
         | None -> first_some project.default_api user.default_api);
+      default_account_id = (match project.default_provider with
+        | Some _ -> project.default_account_id
+        | None -> first_some project.default_account_id user.default_account_id);
       disable_shell = user.disable_shell || project.disable_shell;
       max_turns = first_some project.max_turns user.max_turns;
       approval_mode = first_some project.approval_mode user.approval_mode;
@@ -259,6 +268,7 @@ let update_file ?(require_owner = false) ~directory change =
         option "default_provider" updated.default_provider
         @ option "default_model" updated.default_model
         @ option "default_api" updated.default_api
+        @ option "default_account_id" updated.default_account_id
         @ ["disable_shell", `Bool updated.disable_shell]
         @ (match updated.max_turns with None -> []
           | Some count -> ["max_turns", `Int count])

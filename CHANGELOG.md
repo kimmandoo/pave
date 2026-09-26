@@ -1,6 +1,7 @@
 # Changelog
 
 ## 2026-09-26
+- feat(discovery): added canonical provider/account/route/upstream model identities, exact selectors, separate ID/capability provenance, bounded cancellable fresh snapshots, explicit provider statuses and strict duplicate-ID rejection. Migrated CLI, journal and model-picker consumers; inventoried all 83 sibling provider identities and recorded the prohibited Antigravity third-party login. The full suite, install build, opam lint, canonical local CLI discovery/inference and loopback-only TUI cancellation/Tab status-page smoke passed; remote listing requests were denied.
 
 - feat(context): added capability-gated native compaction for the direct Anthropic Messages API-key route, exact signed-block replay bound to model/route/system/tools, provider-reported context/display metadata, and image-byte accounting without claiming image-token costs. Kept custom/off-route summaries visible and made picker metadata readable at narrow widths. The forced full suite, install build, opam lint, fake-provider route/header/replay fixtures, actual compaction PTY flow and 30×10/52×14/100×24 model-picker PTYs passed. Prepared v0.1.42 locally; four-target release CI and publication remain pending.
 

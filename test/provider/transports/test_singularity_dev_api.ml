@@ -121,8 +121,9 @@ let () =
       assert (url = Singularity.models_url);
       assert (headers = ["Authorization", "Bearer " ^ key;
         "Accept", "application/json"]);
-      Ok (200, {|{"object":"list","data":[{"id":"image-only","object":"model","capabilities":[{"endpoint":"/v1/images/generations"}]},{"id":"future-vendor/chat-model","object":"model","capabilities":[{"endpoint":"/v1/chat/completions"},{"endpoint":"/v1/responses"}]},{"id":"future-vendor/chat-model","object":"model","capabilities":[{"endpoint":"/v1/chat/completions"}]}]}|}) in
-    expect_models [model] (Singularity.discover ~http ~api_key:key ());
+      Ok (200, {|{"object":"list","data":[{"id":"image-only","object":"model","capabilities":[{"endpoint":"/v1/images/generations"}]},{"id":"future-vendor/chat-model","object":"model","capabilities":[{"endpoint":"/v1/chat/completions"},{"endpoint":"/v1/responses"}]},{"id":"future-vendor/other-chat-model","object":"model","capabilities":[{"endpoint":"/v1/chat/completions"}]}]}|}) in
+    expect_models [model; "future-vendor/other-chat-model"]
+      (Singularity.discover ~http ~api_key:key ());
     assert (!calls = 1);
     expect_error ((=) Singularity.Invalid_credential)
       (Singularity.discover ~http ~api_key:"" ());
@@ -136,6 +137,7 @@ let () =
       {|{"object":"list","data":[{"id":null,"object":"model","capabilities":[]}]}|};
       {|{"object":"list","data":[{"id":"missing-capabilities","object":"model"}]}|};
       {|{"object":"list","data":[{"id":"bad-endpoint","object":"model","capabilities":[{"endpoint":null}]}]}|};
+      {|{"object":"list","data":[{"id":"same/model","object":"model","capabilities":[{"endpoint":"/v1/images/generations"}]},{"id":"same/model","object":"model","capabilities":[{"endpoint":"/v1/chat/completions"}]}]}|};
       {|{"data":[]}|}; {|{"models":[]}|}; "not json"];
     expect_error invalid (Singularity.discover
       ~http:(fun ~url:_ ~headers:_ -> Ok (200,

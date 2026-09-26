@@ -79,7 +79,7 @@ The switch belongs to the checkout; prefix commands with `opam exec --` without 
 Start `pave` for interactive setup; no credentials are needed just to open the terminal. The default provider reads `OPENAI_API_KEY` only when making a request.
 
 1. Use `/setup` to connect an account or choose a saved default; use `/model` to switch the current conversation.
-2. Run `pave --providers` for routes or `pave --provider ID --models` for pinned, account-scoped model listings. No model IDs or wire routes are guessed from names.
+2. Run `pave --providers` for routes or `pave --provider ID --models` for a fresh, pinned, account-scoped listing. Copy a canonical `provider@route[#account]/EXACT_UPSTREAM_ID` selector from the output directly into `--model`; IDs and display labels are distinct, and model rosters are not cached.
 3. Treat `[listed · API unverified]` as an account-listed ID, **not** proof of Chat, tool support or compatible wire routes. Anthropic OAuth cannot list models without `ANTHROPIC_API_KEY`; type an Anthropic model ID instead if needed.
 
 Keep API keys out of checked-in config and session files.
@@ -88,8 +88,8 @@ Keep API keys out of checked-in config and session files.
 # Interactive: resize-aware TUI, prompt history and a persistent session.
 pave --root /path/to/mobile/repo --session /private/path/pave.jsonl
 
-# One-shot streaming reply; choose an ID from `pave --provider openai --models`.
-pave --provider openai --model "$MODEL_ID" --prompt 'Inspect the Android build failure' --stream
+# One-shot streaming reply; paste an exact selector from `pave --provider openai --models`.
+pave --model "$MODEL_SELECTOR" --prompt 'Inspect the Android build failure' --stream
 
 # Anthropic: API key, or explicit browser-based OAuth login for a subscription.
 pave --login anthropic
@@ -141,7 +141,7 @@ These routes passed isolated fake-HTTPS/native workspace tool-result scenarios; 
 
 API-key providers read environment variables, never keys typed into the TUI. Browser URLs and device codes appear on the regular terminal while the full-screen UI is suspended; the transcript and draft return afterward.
 
-In `/model`, use arrows and Enter to choose a discovered ID, or type `PROVIDER/MODEL_ID`. Unclassified IDs may not support Chat or tools. For incompatible API routes, enter `PROVIDER@API/MODEL_ID` (for example, `/model commandcode@messages/MODEL_ID`) or choose the route in setup/settings. A bare ID keeps the current provider and API. Saved sessions restore their route; switching models keeps conversation text but retains signed provider state **only** when provider, model and API all match. Escape cancels discovery without submitting the draft.
+In `/model`, use arrows and Enter to choose a discovered ID, or type a canonical `PROVIDER@API[#ACCOUNT]/EXACT_MODEL_ID` selector. Tab browses each provider's loading/ready/unsupported/failure status while successful results stay selectable; unclassified IDs may not support Chat or tools. A bare ID keeps the current provider and API. Saved sessions restore their route; switching models keeps conversation text but retains signed provider state **only** when provider, account, model and API all match. Escape cancels discovery and preserves the draft.
 
 **Sign-in details**
 

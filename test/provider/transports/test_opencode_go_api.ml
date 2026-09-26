@@ -107,16 +107,18 @@ let () =
       incr calls;
       assert (url = Go.models_url);
       assert (headers = ["Accept", "application/json"; "User-Agent", "pave"]);
-      Ok (200, {|{"object":"list","data":[{"id":"glm-5.3","object":"model","created":1790329858,"owned_by":"opencode"},{"id":"minimax-m3","object":"model","created":1790329858,"owned_by":"opencode"},{"id":"glm-5.3","object":"model"}]}|}) in
+      Ok (200, {|{"object":"list","data":[{"id":"glm-5.3","object":"model","created":1790329858,"owned_by":"opencode"},{"id":"minimax-m3","object":"model","created":1790329858,"owned_by":"opencode"},{"id":"third-valid-model","object":"model"}]}|}) in
     (* Even the documented non-Chat ID is returned: the listing cannot certify
        a route or tool capability for any of its rows. *)
     assert (Go.discover ~http ~api_key:key () =
-      Ok [chat_model; non_chat_model]);
+      Ok [chat_model; non_chat_model; "third-valid-model"]);
     assert (Go.discover ~http ~api_key:"" () =
-      Ok [chat_model; non_chat_model]);
+      Ok [chat_model; non_chat_model; "third-valid-model"]);
     assert (Go.discover ~http ~api_key:"bad\r\nHeader: injected" () =
-      Ok [chat_model; non_chat_model]);
+      Ok [chat_model; non_chat_model; "third-valid-model"]);
     assert (!calls = 3);
+    expect_error invalid (Go.parse_models
+      {|{"object":"list","data":[{"id":"duplicate","object":"model"},{"id":"duplicate","object":"model"}]}|});
     List.iter (fun body -> expect_error invalid
       (Go.discover ~http:(fun ~url:_ ~headers:_ -> Ok (200, body))
          ~api_key:key ())) [
@@ -164,11 +166,16 @@ let () =
       Unix.rmdir directory) (fun () ->
       Unix.putenv "PATH" (directory ^ ":" ^ old_path);
       Unix.putenv "PAVE_OPENCODE_GO_FIXTURE_STATE" state;
-      let discovered = match Result.map Pave.Model_discovery.model_ids
-        (Pave.Model_discovery.discover
-          ~provider:"opencode-go" ~credential:(Pave.Model_discovery.Api_key key) ()) with
-        | Ok ids when ids = [chat_model; non_chat_model] -> chat_model
+      let listing = match Pave.Model_discovery.discover
+        ~provider:"opencode-go" ~credential:(Pave.Model_discovery.Api_key key) () with
+        | Ok listing -> listing
+        | Error _ -> fail "Go discovery failed" in
+      let discovered = match Pave.Model_discovery.model_ids listing with
+        | [chat; _] when chat = chat_model -> chat
         | _ -> fail "Go discovery lost unclassified IDs" in
+      assert (listing.source.id_source = Pave.Model_catalog.Provider_listing);
+      assert (List.for_all (fun model ->
+        model.Pave.Model_catalog.identity.account_id = None) listing.models);
       let config : Pave.Provider.config = {
         endpoint = Go.chat_url; api_key = key; model = discovered;
         api = Pave.Provider.Opencode_go_chat } in

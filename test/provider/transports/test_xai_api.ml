@@ -103,9 +103,13 @@ let () =
       assert (url = Xai.models_url);
       assert (headers = ["Authorization", "Bearer " ^ key;
                          "Accept", "application/json"]);
-      Ok (200, {|{"models":[{"id":"new-model-2099","aliases":["alias"]},{"id":"other-model"},{"id":"new-model-2099"}]}|}) in
-    expect_models ["new-model-2099"; "other-model"]
+      Ok (200, {|{"models":[{"id":"new-model-2099","aliases":["alias"]},{"id":"other-model"},{"id":"third-model"}]}|}) in
+    expect_models ["new-model-2099"; "other-model"; "third-model"]
       (Xai.discover ~http ~api_key:key ());
+    expect_invalid (Xai.discover
+      ~http:(fun ~url:_ ~headers:_ -> Ok (200,
+        {|{"models":[{"id":"same-model"},{"id":"same-model"}]}|}))
+      ~api_key:key ());
     assert (!calls = 1);
     assert (Xai.discover ~http ~api_key:"" () = Error Xai.Invalid_credential);
     assert (Xai.discover ~http ~api_key:"bad\r\nAuthorization: Bearer stolen" () =

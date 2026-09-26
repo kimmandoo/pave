@@ -39,7 +39,7 @@ type action =
 type shortcut = { name : string; usage : string; summary : string; action : action }
 
 let commands = [
-  { name = "/model"; usage = "[PROVIDER[@API]/MODEL]"; summary = "Switch model for this conversation"; action = A_model };
+  { name = "/model"; usage = "[PROVIDER[@API][#ACCOUNT]/MODEL]"; summary = "Switch model for this conversation"; action = A_model };
   { name = "/settings"; usage = ""; summary = "View or edit project defaults"; action = A_settings };
   { name = "/setup"; usage = ""; summary = "Connect and save your user default model"; action = A_setup };
   { name = "/new"; usage = ""; summary = "Start a private saved session"; action = A_new };
@@ -185,37 +185,43 @@ let parse line =
 
 let selectable_providers () = Provider_catalog.all ()
 
-let resolve_model ?current_route ~current_provider ~input () =
+let resolve_model ?current_route ?current_account_id ~current_provider ~input () =
   let input = String.trim input in
   if input = "" || String.exists is_whitespace_or_control input then
     invalid_argument "model selector must be a nonempty single argument";
-  let provider_selector, model = match String.index_opt input '/' with
+  let provider_id, selected_route, selected_account, model =
+    match String.index_opt input '/' with
+    | None -> current_provider, None, None, input
     | Some slash ->
-      String.sub input 0 slash,
-      String.sub input (slash + 1) (String.length input - slash - 1)
-    | None -> current_provider, input in
+        let prefix = String.sub input 0 slash in
+        let model = String.sub input (slash + 1)
+          (String.length input - slash - 1) in
+        if String.contains prefix '@' || String.contains prefix '#' ||
+           Provider_catalog.find prefix <> None then
+          let provider, route, account =
+            Model_identity.parse_selector_prefix prefix in
+          provider, route, account, model
+        else current_provider, None, None, input in
   if model = "" then invalid_argument "model ID must not be empty";
-  let provider_id, selected_route = match String.index_opt provider_selector '@' with
-    | None -> provider_selector, ""
-    | Some at ->
-        String.sub provider_selector 0 at,
-        String.sub provider_selector (at + 1)
-          (String.length provider_selector - at - 1) in
-  if provider_id = "" || (selected_route = "" &&
-      String.contains provider_selector '@') then
-    invalid_argument "use PROVIDER@API/MODEL to select a wire route";
   let descriptor = match Provider_catalog.find provider_id with
     | Some descriptor -> descriptor
     | None -> invalid_argument ("unknown provider: " ^ provider_id) in
-  let route_name = if selected_route <> "" then selected_route
-    else if provider_id = current_provider then
-      Option.value ~default:"" current_route
-    else "" in
+  let route_name = match selected_route with
+    | Some name -> name
+    | None when provider_id = current_provider ->
+        Option.value ~default:"" current_route
+    | None -> "" in
   let route = match Provider_catalog.route descriptor route_name with
     | Some route -> route
     | None -> invalid_argument
         ("no route for " ^ provider_id ^ "; use " ^ provider_id ^ "@API/MODEL") in
-  descriptor, model, route
+  let account_id = match selected_account with
+    | Some _ -> selected_account
+    | None when provider_id = current_provider -> current_account_id
+    | None -> None in
+  let identity = Model_identity.make ~provider:provider_id ?account_id
+    ~route:route.name ~upstream_id:model () in
+  descriptor, identity, route
 
 let history_for_model ~provider:active_provider ~route:active_route
     ~wire ~model messages =

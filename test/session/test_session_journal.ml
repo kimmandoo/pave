@@ -1,5 +1,8 @@
 let message text = Pave.Protocol.user text
 
+let model_identity ?account_id provider route upstream_id =
+  Pave.Model_identity.make ~provider ?account_id ~route ~upstream_id ()
+
 let () =
   let dir = Filename.temp_file "pave-journal-" "" in
   Sys.remove dir; Unix.mkdir dir 0o700;
@@ -7,6 +10,7 @@ let () =
   let fork_path = Filename.concat dir "fork.jsonl" in
   let metadata_path = Filename.concat dir "metadata.jsonl" in
   let metadata_fork = Filename.concat dir "metadata-fork.jsonl" in
+  let legacy_path = Filename.concat dir "legacy.jsonl" in
   let lifecycle_path = Filename.concat dir "lifecycle.jsonl" in
   let lifecycle_fork = Filename.concat dir "lifecycle-fork.jsonl" in
   let terminal_path = Filename.concat dir "terminal.jsonl" in
@@ -21,6 +25,7 @@ let () =
     (try Sys.remove reset_path with Sys_error _ -> ());
     (try Sys.remove attachment_path with Sys_error _ -> ());
     (try Sys.remove fork_path with Sys_error _ -> ());
+    (try Sys.remove legacy_path with Sys_error _ -> ());
     (try Sys.remove metadata_fork with Sys_error _ -> ());
     (try Sys.remove metadata_path with Sys_error _ -> ());
     (try Sys.remove lifecycle_fork with Sys_error _ -> ());
@@ -214,28 +219,33 @@ let () =
       | Pave.Session.Tool_lifecycle _ | Pave.Session.Session_exit _ ->
           Some entry.id
       | _ -> None) (Pave.Session.branch_entries isolated) = []);
+    let openai_model = model_identity "openai" "responses" "gpt-6-sol"
+    and ollama_model = model_identity "ollama" "chat" "local"
+    and commandcode_messages = model_identity "commandcode" "messages"
+      "future-model"
+    and commandcode_responses = model_identity "commandcode" "responses"
+      "future-model" in
     let metadata = Pave.Session.open_file metadata_path in
-    Pave.Session.set_model metadata ~provider:"openai" ~model:"gpt-6-sol";
-    Pave.Session.set_model metadata ~provider:"openai" ~model:"gpt-6-sol";
+    Pave.Session.set_model metadata openai_model;
+    Pave.Session.set_model metadata openai_model;
     assert (List.length (Pave.Session.entries metadata) = 1);
     let first = Pave.Session.append metadata (message "first") in
-    Pave.Session.set_model metadata ~provider:"ollama" ~model:"local";
+    Pave.Session.set_model metadata ollama_model;
     let second = Pave.Session.append metadata (message "second") in
     let counted : Pave.Protocol.usage =
       { input_tokens = 18; output_tokens = 7 } in
     Pave.Session.append_usage metadata ~provider:"ollama" ~model:"local" counted;
     let measured_tip = Option.get (Pave.Session.leaf_id metadata) in
     assert (Pave.Session.usage metadata = Some counted);
-    assert (Pave.Session.model metadata = Some ("ollama", "local"));
+    assert (Pave.Session.model metadata = Some ollama_model);
     Pave.Session.branch metadata first;
-    assert (Pave.Session.model metadata = Some ("openai", "gpt-6-sol"));
+    assert (Pave.Session.model metadata = Some openai_model);
     assert (Pave.Session.usage metadata = None);
     assert (Pave.Session.history metadata = [message "first"]);
     let branch_marker = (List.hd (List.rev (Pave.Session.entries metadata))).id in
     let branched = Pave.Session.open_file metadata_path in
-    assert (Pave.Session.model branched = Some ("openai", "gpt-6-sol"));
-    assert (Pave.Session.model_at branched (Some second) =
-      Some ("ollama", "local"));
+    assert (Pave.Session.model branched = Some openai_model);
+    assert (Pave.Session.model_at branched (Some second) = Some ollama_model);
     Pave.Session.branch branched branch_marker;
     Pave.Session.branch branched measured_tip;
     assert (Pave.Session.usage branched = Some counted);
@@ -254,10 +264,10 @@ let () =
     assert (Pave.Session.usage copy = None);
     assert (Pave.Session.usage_by_model copy = []);
     Pave.Session.branch branched branch_marker;
-    assert (Pave.Session.model branched = Some ("openai", "gpt-6-sol"));
+    assert (Pave.Session.model branched = Some openai_model);
     assert (Pave.Session.history (Pave.Session.open_file metadata_path) =
       [message "first"]);
-    assert (Pave.Session.model copy = Some ("openai", "gpt-6-sol"));
+    assert (Pave.Session.model copy = Some openai_model);
     assert (Pave.Session.history copy = [message "first"]);
     let assistant text : Pave.Protocol.message = { role = "assistant"; content = Some text; tool_calls = [];
     tool_call_id = None; tool_result_content = None; provider_state = None; attachments = [] } in
@@ -296,26 +306,24 @@ let () =
     assert (Pave.Session.retry_candidate copy = None);
     Pave.Session.branch copy prior;
     ignore (Pave.Session.append copy (message "switch model"));
-    Pave.Session.set_model copy ~provider:"ollama" ~model:"local";
+    Pave.Session.set_model copy ollama_model;
     assert (Pave.Session.retry_candidate copy = None);
-    Pave.Session.set_model ~api:"messages" copy
-      ~provider:"commandcode" ~model:"future-model";
+    Pave.Session.set_model copy commandcode_messages;
     let route_tip = Option.get (Pave.Session.leaf_id copy) in
-    Pave.Session.set_model ~api:"messages" copy
-      ~provider:"commandcode" ~model:"future-model";
+    Pave.Session.set_model copy commandcode_messages;
     assert (Pave.Session.leaf_id copy = Some route_tip);
-    assert (Pave.Session.api (Pave.Session.open_file metadata_fork) =
-      Some "messages");
-    Pave.Session.set_model ~api:"responses" copy
-      ~provider:"commandcode" ~model:"future-model";
-    assert (Pave.Session.api copy = Some "responses");
-    assert (Pave.Session.api_at copy (Some route_tip) = Some "messages");
+    assert (Pave.Session.model (Pave.Session.open_file metadata_fork) =
+      Some commandcode_messages);
+    Pave.Session.set_model copy commandcode_responses;
+    assert (Pave.Session.model copy = Some commandcode_responses);
+    assert (Pave.Session.model_at copy (Some route_tip) =
+      Some commandcode_messages);
     Pave.Session.branch copy route_tip;
-    assert (Pave.Session.api (Pave.Session.open_file metadata_fork) =
-      Some "messages");
+    assert (Pave.Session.model (Pave.Session.open_file metadata_fork) =
+      Some commandcode_messages);
     let settings = Pave.Session.open_file settings_path in
     let settings_target = Pave.Session.append settings (message "settings base") in
-    Pave.Session.set_model settings ~provider:"openai" ~model:"gpt-5";
+    Pave.Session.set_model settings (model_identity "openai" "responses" "gpt-5");
     Pave.Session.set_thinking settings (Some "high");
     Pave.Session.set_disabled_tools settings ["write_file"];
     Pave.Session.set_mode settings (Some Pave.Approval.Ask_writes);
@@ -323,7 +331,8 @@ let () =
     Pave.Session.set_label settings ~target_id:settings_target (Some "review");
     Pave.Session.set_pinned settings true;
     let settings_tip = Option.get (Pave.Session.leaf_id settings) in
-    assert (Pave.Session.model settings = Some ("openai", "gpt-5"));
+    assert (Pave.Session.model settings = Some
+      (model_identity "openai" "responses" "gpt-5"));
     assert (Pave.Session.thinking settings = Some "high");
     assert (Pave.Session.disabled_tools settings = ["write_file"]);
     assert (Pave.Session.mode settings = Some Pave.Approval.Ask_writes);
@@ -355,7 +364,8 @@ let () =
     assert (Pave.Session.model settings = None);
     assert (Pave.Session.pinned settings);
     Pave.Session.branch settings settings_tip;
-    assert (Pave.Session.model settings = Some ("openai", "gpt-5"));
+    assert (Pave.Session.model settings = Some
+      (model_identity "openai" "responses" "gpt-5"));
     assert (Pave.Session.thinking settings = Some "high");
     assert (Pave.Session.disabled_tools settings = ["write_file"]);
     assert (Pave.Session.mode settings = Some Pave.Approval.Ask_writes);
@@ -374,7 +384,7 @@ let () =
      | _ -> failwith "clear crossed an unresolved tool call");
     ignore (Pave.Session.append reset
       (Pave.Protocol.tool_result reset_call.id "completed"));
-    Pave.Session.set_model reset ~provider:"openai" ~model:"gpt-5";
+    Pave.Session.set_model reset (model_identity "openai" "responses" "gpt-5");
     ignore (Pave.Session.clear reset);
     assert (Pave.Session.history reset = [
       message "old context";
@@ -383,7 +393,8 @@ let () =
         attachments = [] };
       Pave.Protocol.tool_result reset_call.id "completed"]);
     assert (Pave.Session.context reset = []);
-    assert (Pave.Session.model reset = Some ("openai", "gpt-5"));
+    assert (Pave.Session.model reset = Some
+      (model_identity "openai" "responses" "gpt-5"));
     ignore (Pave.Session.append reset (message "new request"));
     ignore (Pave.Session.append reset (assistant "new answer"));
     let latest_user = Pave.Session.append reset (message "latest request") in
@@ -438,11 +449,27 @@ let () =
     let multimodal_reopened = Pave.Session.open_file multimodal_path in
     assert (Pave.Session.history multimodal_reopened =
       [image_assistant; image_result]);
-    (match Pave.Session.set_model ~api:"invalid route" copy
-       ~provider:"commandcode" ~model:"future-model" with
+    ignore (Pave.Session.open_file legacy_path);
+    let legacy_output = open_out_gen [Open_append; Open_binary] 0o600
+      legacy_path in
+    output_string legacy_output
+      "{\"type\":\"model\",\"id\":\"legacy-model\",\"parentId\":null,\"timestamp\":\"2025-01-01T00:00:00Z\",\"provider\":\"openai\",\"model\":\"gpt/legacy\",\"api\":null}\n";
+    close_out legacy_output;
+    let legacy = Pave.Session.open_file legacy_path in
+    assert (Pave.Session.model legacy = Some
+      (model_identity "openai" "responses" "gpt/legacy"));
+    let account_model = model_identity ~account_id:"org/alice#1"
+      "github-copilot" "chat" "models/assistant/id" in
+    Pave.Session.set_model legacy account_model;
+    assert (Pave.Session.model (Pave.Session.open_file legacy_path) =
+      Some account_model);
+    (match Pave.Session.set_model copy
+       (model_identity "commandcode" "unknown-route" "future-model") with
      | exception Pave.Protocol.Invalid_response _ -> ()
-     | _ -> failwith "invalid API marker was accepted");
-    (match Pave.Session.set_model copy ~provider:"openai" ~model:"invalid name" with
+     | _ -> failwith "unsupported model route was accepted");
+    (match Pave.Session.set_model copy
+       { (model_identity "openai" "responses" "valid-model") with
+         upstream_id = "invalid name" } with
      | exception Pave.Protocol.Invalid_response _ -> ()
      | _ -> failwith "invalid model marker was accepted"));
   print_endline "session journal branches: ok"

@@ -50,16 +50,19 @@ let () =
   invalid "trailing command arguments" (fun () -> parse "/new accidental");
   invalid "multiple tool arguments" (fun () -> parse "/tools read_file write_file");
   invalid "tree takes no argument" (fun () -> parse "/tree missing");
-  let descriptor, model, route = resolve_model ~current_provider:"openai" ~input:"gpt-5" () in
-  if descriptor.id <> "openai" || model <> "gpt-5" || route.name <> "responses" then
+  let descriptor, identity, route = resolve_model
+    ~current_provider:"openai" ~input:"gpt-5" () in
+  if descriptor.id <> "openai" || identity.upstream_id <> "gpt-5" ||
+     route.name <> "responses" then
     fail "model-specific Responses route was not selected";
   let openai = Option.get (Pave.Provider_catalog.find "openai") in
   (match Pave.Provider_catalog.route openai "" with
    | Some route when route.wire = Pave.Provider.Openai_responses -> ()
    | _ -> fail "default OpenAI wire API should support discovered models");
-  let descriptor, model, route = resolve_model ~current_provider:"openai"
+  let descriptor, identity, route = resolve_model ~current_provider:"openai"
     ~input:"openrouter/openai/gpt-4o" () in
-  if descriptor.id <> "openrouter" || model <> "openai/gpt-4o" || route.name <> "chat" then
+  if descriptor.id <> "openrouter" ||
+     identity.upstream_id <> "openai/gpt-4o" || route.name <> "chat" then
     fail "provider-prefix selector lost namespaced model ID";
   let descriptor, _, route = resolve_model ~current_provider:"ollama"
     ~input:"anthropic/claude-sonnet-4-5" () in
@@ -75,24 +78,66 @@ let () =
   if descriptor.id <> "github-copilot" ||
     route.wire <> Pave.Provider.Copilot_chat then
     fail "newly discovered Copilot model could not use pinned Chat route";
-  let descriptor, model, route = resolve_model ~current_provider:"openai"
+  let descriptor, identity, route = resolve_model ~current_provider:"openai"
     ~input:"commandcode@messages/future-studio-model" () in
-  if descriptor.id <> "commandcode" || model <> "future-studio-model" ||
+  if descriptor.id <> "commandcode" ||
+     identity.upstream_id <> "future-studio-model" ||
      route.name <> "messages" then
     fail "explicit native provider route could not be selected interactively";
-  let _, model, route = resolve_model ~current_provider:"commandcode"
+  let _, identity, route = resolve_model ~current_provider:"commandcode"
     ~current_route:"messages" ~input:"future-studio-next" () in
-  if model <> "future-studio-next" || route.name <> "messages" then
+  if identity.upstream_id <> "future-studio-next" ||
+     route.name <> "messages" then
     fail "choosing another model reset the active Messages API route";
+  let _, slash_identity, _ = resolve_model ~current_provider:"openai"
+    ~input:"org/model/with/slashes" () in
+  if slash_identity.provider <> "openai" ||
+     slash_identity.upstream_id <> "org/model/with/slashes" then
+    fail "slash-bearing exact model ID was parsed as a provider";
+  let scoped = Pave.Model_identity.make ~provider:"github-copilot"
+    ~account_id:"org/alice#primary" ~route:"chat"
+    ~upstream_id:"models/chat/one" () in
+  let _, parsed_scoped, _ = resolve_model ~current_provider:"openai"
+    ~input:(Pave.Model_identity.selector scoped) () in
+  if not (Pave.Model_identity.equal scoped parsed_scoped) then
+    fail "canonical provider/account/route/model selector did not roundtrip";
+  if Pave.Model_identity.selector scoped <>
+      "github-copilot@chat#org%2Falice%23primary/models/chat/one" then
+    fail "canonical account selector did not escape separator characters";
+  let same_model_other_account = Pave.Model_identity.make
+    ~provider:"github-copilot" ~account_id:"org/bob#primary" ~route:"chat"
+    ~upstream_id:"models/chat/one" () in
+  if Pave.Model_identity.equal scoped same_model_other_account ||
+     Pave.Model_identity.selector scoped =
+       Pave.Model_identity.selector same_model_other_account then
+    fail "identical upstream IDs from different accounts were conflated";
+  let _, parsed_other_account, _ = resolve_model ~current_provider:"openai"
+    ~input:(Pave.Model_identity.selector same_model_other_account) () in
+  if not (Pave.Model_identity.equal parsed_other_account
+      same_model_other_account) then
+    fail "second account identity did not roundtrip";
+  let _, inherited_account, _ = resolve_model
+    ~current_provider:"github-copilot" ~current_route:"chat"
+    ~current_account_id:"active-user" ~input:"models/chat/two" () in
+  if inherited_account.account_id <> Some "active-user" ||
+     inherited_account.upstream_id <> "models/chat/two" then
+    fail "account scope was not retained for an exact slash-bearing ID";
   invalid "missing explicit route" (fun () ->
     resolve_model ~current_provider:"openai" ~input:"commandcode/future-model" ());
   invalid "unknown native route" (fun () ->
-    resolve_model ~current_provider:"openai" ~input:"commandcode@unknown/future-model" ());
+    resolve_model ~current_provider:"openai"
+      ~input:"commandcode@unknown/future-model" ());
   invalid "empty route" (fun () ->
     resolve_model ~current_provider:"openai" ~input:"commandcode@/future-model" ());
-  invalid "unknown provider" (fun () -> resolve_model ~current_provider:"openai" ~input:"missing/foo" ());
-  invalid "empty model" (fun () -> resolve_model ~current_provider:"openai" ~input:"openrouter/" ());
-  invalid "control in model ID" (fun () -> resolve_model ~current_provider:"openai" ~input:"gpt-5\nother" ());
+  invalid "unknown provider" (fun () ->
+    resolve_model ~current_provider:"openai" ~input:"missing@route/foo" ());
+  invalid "malformed account escape" (fun () ->
+    resolve_model ~current_provider:"openai"
+      ~input:"github-copilot@chat#%XZ/model/id" ());
+  invalid "empty model" (fun () -> resolve_model
+    ~current_provider:"openai" ~input:"openrouter/" ());
+  invalid "control in model ID" (fun () -> resolve_model
+    ~current_provider:"openai" ~input:"gpt-5\nother" ());
   let native = `Assoc [
     "provider", `String "openai-codex";
     "model", `String "codex-model-a";

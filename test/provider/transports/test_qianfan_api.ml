@@ -107,11 +107,13 @@ let () =
       assert (url = Qianfan.models_url);
       assert (headers = ["Authorization", "Bearer " ^ key;
         "Accept", "application/json"]);
-      Ok (200, {|{"object":"list","data":[{"id":"fixture/available-chat","object":"model","type":"chat"},{"id":"fixture/embedding","object":"model","type":"embeddings"},{"id":"fixture/unknown","object":"model"},{"id":"fixture/available-chat","object":"model","type":"chat"}]}|}) in
-    expect_models [model] (Qianfan.discover ~http ~api_key:key ());
+      Ok (200, {|{"object":"list","data":[{"id":"fixture/available-chat","object":"model","type":"chat"},{"id":"fixture/embedding","object":"model","type":"embeddings"},{"id":"fixture/unknown","object":"model"},{"id":"fixture/second-chat","object":"model","type":"chat"}]}|}) in
+    expect_models [model; "fixture/second-chat"] (Qianfan.discover ~http ~api_key:key ());
     assert (!calls = 1);
     expect_models [] (Qianfan.parse_models
       {|{"data":[{"id":"unclassified","object":"model"},{"id":"image","object":"model","type":"text2image"}]}|});
+    expect_error invalid (Qianfan.parse_models
+      {|{"data":[{"id":"duplicate","object":"model","type":"embeddings"},{"id":"duplicate","object":"model","type":"chat"}]}|});
     expect_error ((=) Qianfan.Invalid_credential)
       (Qianfan.discover ~http ~api_key:"" ());
     expect_error ((=) Qianfan.Invalid_credential)

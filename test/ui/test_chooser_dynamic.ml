@@ -3,13 +3,15 @@ let chooser : Tui.chooser = {
   intro = [||];
   plain = [];
   suggestions = [| "openai/gpt-4.1"; "google/gemini-2.5-pro" |];
-  choices = [| { Tui.value = "openai/gpt-4.1"; custom = false;
-      verified = false; listed = false; detail = None };
-    { Tui.value = "google/gemini-2.5-pro"; custom = false;
-      verified = false; listed = false; detail = None } |];
+  choices = [| { Tui.value = "openai/gpt-4.1"; label = "GPT-4.1 · exact";
+      custom = false; verified = false; listed = false; detail = None };
+    { Tui.value = "google/gemini-2.5-pro"; label = "Gemini Pro";
+      custom = false; verified = false; listed = false; detail = None } |];
   allow_custom = true;
   dynamic = true;
   status = None;
+  status_pages = [||];
+  status_page = 0;
   filter = "gpt";
   selected = 0;
   offset = 0;
@@ -25,13 +27,15 @@ let () =
     ~verified:[ "openai/o3"; "openai/gpt-4.1"; "openai/o3" ]
     ~listed:[]
     ~details:["openai/gpt-4.1", "context 120000 tokens · APIs chat/responses"]
+    ~labels:["openai/gpt-4.1", "GPT-4.1 · exact"]
     ~status:(Some "Verified IDs loaded");
   assert (values () = [ "openai/gpt-4.1" ]);
   assert (chooser.selected = 0 && chooser.filter = "gpt");
-  assert (Tui.candidate_label chooser (Tui.matches chooser).(0)
-    = "[verified] openai/gpt-4.1");
-  assert (Tui.candidate_label ~columns:30 chooser
-    (Tui.matches chooser).(0) = "✓ openai/gpt-4.1");
+  assert ((Tui.matches chooser).(0).value = "openai/gpt-4.1" &&
+    (Tui.matches chooser).(0).label = "GPT-4.1 · exact");
+  chooser.filter <- "GPT-4.1 · exact";
+  assert (values () = ["openai/gpt-4.1"]);
+  chooser.filter <- "gpt";
   let detail = "context 120000 tokens · APIs chat/responses" in
   let rows = Tui.wrap_chooser_text ~columns:18 ~max_rows:4 detail in
   assert (String.concat " " (Array.to_list rows) = detail);
@@ -44,11 +48,12 @@ let () =
   chooser.selected <- 1;
   chooser.touched <- true;
   Tui.update_chooser chooser ~verified:[ "openai/o3"; "openai/gpt-4.1";
-    "openai/gpt-5" ] ~listed:[] ~details:[] ~status:None;
+    "openai/gpt-5" ] ~listed:[] ~details:[]
+    ~labels:["openai/gpt-4.1", "GPT 4.1 (readable)"] ~status:None;
   assert (values () = [ "openai/o3"; "openai/gpt-4.1"; "openai/gpt-5" ]);
   assert (chooser.selected = 1);
-  assert (Tui.candidate_label chooser (Tui.matches chooser).(0)
-    = "[verified] openai/o3");
+  assert ((Tui.matches chooser).(chooser.selected).value = "openai/gpt-4.1");
+  assert ((Tui.matches chooser).(chooser.selected).label = "GPT 4.1 (readable)");
   chooser.filter <- "openai/gpt-4";
   chooser.selected <- 0;
   let prefix = Tui.matches chooser in
@@ -60,60 +65,59 @@ let () =
   chooser.filter <- "local/custom";
   chooser.selected <- 0;
   Tui.update_chooser chooser ~verified:[ "openai/gpt-4.1" ]
-    ~listed:[] ~details:[] ~status:None;
+    ~listed:[] ~details:[] ~labels:[] ~status:None;
   assert (values () = [ "local/custom" ]);
   assert ((Tui.matches chooser).(0).custom);
-  assert (Tui.candidate_label chooser (Tui.matches chooser).(0) = "Use: local/custom");
   assert (chooser.filter = "local/custom");
   chooser.filter <- "gemini";
-  Tui.update_chooser chooser ~verified:[] ~listed:[] ~details:[]
+  Tui.update_chooser chooser ~verified:[] ~listed:[] ~details:[] ~labels:[]
     ~status:(Some "Offline");
   assert (values () = [ "google/gemini-2.5-pro" ]);
-  assert (Tui.candidate_label chooser (Tui.matches chooser).(0)
-    = "[suggested] google/gemini-2.5-pro");
+  assert (not (Tui.matches chooser).(0).verified &&
+    not (Tui.matches chooser).(0).listed);
   assert (chooser.status = Some "Offline");
   let onboarding = { chooser with
     plain = ["Back · authentication"; "Skip setup"];
     suggestions = [| "ollama/offline"; "Back · authentication"; "Skip setup" |];
     choices = Array.map (fun value ->
-      { Tui.value; custom = false; verified = false; listed = false;
-        detail = None })
+      { Tui.value; label = value; custom = false; verified = false;
+        listed = false; detail = None })
       [| "ollama/offline"; "Back · authentication"; "Skip setup" |];
     filter = ""; selected = 0; offset = 0; touched = false;
     filtered = None } in
   Tui.update_chooser onboarding
     ~verified:["ollama/llama3.2:latest"; "ollama/qwen2.5-coder:7b"]
-    ~listed:[] ~details:[] ~status:(Some "2 live models");
+    ~listed:[] ~details:[] ~labels:[] ~status:(Some "2 live models");
   let shown = Tui.matches onboarding in
-  assert (shown.(0).value = "ollama/llama3.2:latest");
-  assert (Tui.candidate_label onboarding shown.(0) =
-    "[verified] ollama/llama3.2:latest");
+  assert (shown.(0).value = "ollama/llama3.2:latest" && shown.(0).verified);
   assert (shown.(2).value = "ollama/offline");
   assert (onboarding.selected = 0);
-  assert (Tui.candidate_label onboarding shown.(3) = "Back · authentication");
+  assert (shown.(3).value = "Back · authentication");
   onboarding.selected <- 3;
   onboarding.touched <- true;
   Tui.update_chooser onboarding ~verified:["ollama/another"]
-    ~listed:[] ~details:[] ~status:None;
+    ~listed:[] ~details:[] ~labels:[] ~status:None;
   assert ((Tui.matches onboarding).(onboarding.selected).value =
     "Back · authentication");
   let navigated = { onboarding with
-    choices = [| { Tui.value = "ollama/offline"; custom = false;
-      verified = false; listed = false; detail = None } |];
+    choices = [| { Tui.value = "ollama/offline"; label = "Offline";
+      custom = false; verified = false; listed = false; detail = None } |];
     selected = 0; touched = true; filtered = None } in
   Tui.update_chooser navigated ~verified:["ollama/another"]
-    ~listed:[] ~details:[] ~status:None;
+    ~listed:[] ~details:[] ~labels:[] ~status:None;
   assert ((Tui.matches navigated).(navigated.selected).value = "ollama/offline");
   let mixed = { chooser with filter = ""; touched = false; selected = 0 } in
   Tui.update_chooser mixed ~verified:["openai/new-chat"]
     ~listed:["stepfun/new-audio"; "stepfun/new-chat"]
-    ~details:[] ~status:(Some "3 models");
+    ~details:[]
+    ~labels:["openai/new-chat", "New chat";
+      "stepfun/new-audio", "Audio model"]
+    ~status:(Some "3 models");
   let found = Tui.matches mixed in
   assert (Array.to_list (Array.map (fun (item : Tui.candidate) -> item.value) found) =
     ["openai/new-chat"; "stepfun/new-audio"; "stepfun/new-chat";
      "openai/gpt-4.1"; "google/gemini-2.5-pro"]);
-  assert (Tui.candidate_label mixed found.(1) =
-    "[listed · API unverified] stepfun/new-audio");
+  assert (found.(1).listed && found.(1).label = "Audio model");
   let approval_rows = Tui.approval_body_rows ~columns:8
     ~measure:(fun text ->
       Notty.I.width (Notty.I.string Notty.A.empty text))

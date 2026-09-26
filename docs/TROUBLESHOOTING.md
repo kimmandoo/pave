@@ -7,6 +7,27 @@
 - **Solution:** Restored typed model-row projections, supplied `retrieved_at`, and called `Anthropic_wire.parse_compaction_response` directly from the native compaction helper. `opam exec -- dune build @install` passed.
 - **Prevention / Reference:** Keep discovery projections explicit for each provider row type, include all source-provenance fields, and do not reuse function-local parsing helpers across module-level functions.
 
+### [2026-09-26] R1 model identity migration left stale build assumptions
+
+- **Context / Symptom:** `opam exec -- dune build @install` rejected model-picker status strings where the TUI required `string option`; later failures reported `string option` where `Option.value` required `string`, an unbound route `name`, and old tuple patterns with extra fields.
+- **Root Cause:** CLI and picker consumers still treated account selection and context/capability targets as the previous tuple/string representation after they became optional account IDs and canonical `Model_identity.t` values. Shared record labels also left coordinator snapshots inferred as requests.
+- **Solution:** Matched `Some`/`None` account precedence explicitly, annotated route/snapshot/identity values, and rendered exact canonical identities in context and capability status. The install build passed.
+- **Prevention / Reference:** Migrate every consumer when replacing tuple identity with a typed record; annotate ambiguous record values and distinguish `string option` from `string` fallbacks.
+
+### [2026-09-26] Public model listings rejected configured inference keys
+
+- **Context / Symptom:** Production model discovery for OpenCode Zen, OpenCode Go, and Charm Hyper failed even though their pinned model endpoints were public and the configured API key was used only for inference.
+- **Root Cause:** `Anonymous` discovery policy accepted only a missing credential; passing a configured `Api_key` caused rejection before the public listing transport, which intentionally omitted authorization headers.
+- **Solution:** Accepted a valid configured API key for anonymous discovery without forwarding it or binding it as an account. The listing remains provider-wide; transport fixtures assert no authorization header and production discovery asserts provider-listing provenance.
+- **Prevention / Reference:** Keep listing access policy distinct from inference credential configuration; public listing adapters must ignore configured secrets rather than send them.
+
+### [2026-09-26] Strict duplicate rejection exposed stale success fixtures
+
+- **Context / Symptom:** The first forced suite run failed in Google pagination, local Chat Completions, and public provider listing tests after duplicate model IDs became invalid.
+- **Root Cause:** Several fixtures still used repeated IDs as successful rows to pin the previous deduplication/overwrite behavior, including a duplicate across Google pages.
+- **Solution:** Replaced duplicate rows in valid success fixtures with distinct IDs and kept duplicates only in explicit invalid-response assertions. Focused provider regressions and the forced full suite passed.
+- **Prevention / Reference:** Treat duplicate IDs as a rejected listing response; test pagination with unique success rows and a separate explicit duplicate failure.
+
 ### [2026-09-26] Manual compaction could leave the retained prompt over budget
 
 - **Context / Symptom:** Inspection found that an explicitly bounded manual summary could fit its own summary request while the resulting system prompt, tools, summary and newest turn still exceeded the configured prompt allowance. The automatic path checked this projected context; `/compact` did not.

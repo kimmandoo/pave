@@ -14,7 +14,8 @@ type error = Invalid_credential | Transport_error | Http_error of int
   | Invalid_response of string
 type model = { id : string; name : string; router : bool;
   context_window_tokens : int option; tokenizer_type : string option;
-  max_tokens : int; supports_tools : bool; supports_parallel_tool_calls : bool }
+  max_tokens : int option; supports_tools : bool option;
+  supports_parallel_tool_calls : bool option }
 type http = url:string -> headers:(string * string) list -> body:string ->
   on_chunk:(string -> unit) -> (int, error) result
 
@@ -219,14 +220,16 @@ let model_of_config fs =
           tokenizer
     then Some tokenizer else None in
   let max_tokens = integer 13 info in
+  let tools, parallel_tools = if features = [] then None, None
+    else Some (flag 12 features), Some (flag 21 features) in
   Some { id; name = (let label = String.trim (text 1 fs) in
     if label = "" then id else label);
     router;
     context_window_tokens = (if context_window > 0 then Some context_window else None);
     tokenizer_type;
-    max_tokens = (if max_tokens > 0 then max_tokens else 64000);
-    supports_tools = features = [] || flag 12 features;
-    supports_parallel_tool_calls = flag 21 features }
+    max_tokens = (if max_tokens > 0 then Some max_tokens else None);
+    supports_tools = tools;
+    supports_parallel_tool_calls = parallel_tools }
 let discover ?http ?cancel ~api_key () = protect (fun () ->
   if not (valid_text api_key) then Error Invalid_credential else
   let discover_with meta = match rpc ?http ?cancel ~url:models_url
@@ -236,10 +239,12 @@ let discover ?http ?cancel ~api_key () = protect (fun () ->
       let records = submessages 1 (fields (decode_unary payload)) in
       if List.length records > max_models then bad "Devin catalog exceeds size limit";
       let seen = Hashtbl.create (List.length records) in
-      Ok (List.filter_map (fun record -> match model_of_config record with
-        | Some model when not (Hashtbl.mem seen model.id) ->
-            Hashtbl.add seen model.id (); Some model
-        | _ -> None) records) in
+      List.iter (fun record ->
+        let id = text 22 record in
+        if valid_id id then (
+          if Hashtbl.mem seen id then bad "duplicate Devin catalog model ID";
+          Hashtbl.add seen id ())) records;
+      Ok (List.filter_map model_of_config records) in
   let native = discover_with (metadata ~discovery:true api_key) in
   (* Enterprise seats can expose more models to the legacy identity than the
      CLI identity. Prefer the larger credential-scoped roster, not seed IDs. *)

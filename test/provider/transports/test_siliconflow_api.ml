@@ -107,8 +107,8 @@ let () =
       assert (url = Siliconflow.models_url);
       assert (headers = ["Authorization", "Bearer " ^ key;
                          "Accept", "application/json"]);
-      Ok (200, {|{"object":"list","data":[{"id":"new/chat-2099","object":"model"},{"id":"other/chat"},{"id":"new/chat-2099"}]}|}) in
-    expect_models ["new/chat-2099"; "other/chat"]
+      Ok (200, {|{"object":"list","data":[{"id":"new/chat-2099","object":"model"},{"id":"other/chat"},{"id":"third/chat"}]}|}) in
+    expect_models ["new/chat-2099"; "other/chat"; "third/chat"]
       (Siliconflow.discover ~http ~api_key:key ());
     assert (!calls = 1);
     assert (Siliconflow.discover ~http ~api_key:"" () = Error Siliconflow.Invalid_credential);
@@ -121,6 +121,7 @@ let () =
       {|{"data":[{"id":"bad\nname"}]}|};
       {|{"data":[{"id":null,"name":"fallback"}]}|};
       {|{"data":[{"id":"ok"},{}]}|};
+      {|{"data":[{"id":"same/model"},{"id":"same/model"}]}|};
       {|{"models":[{"id":"wrong-endpoint"}]}|}; "not json" ];
     expect_invalid (Siliconflow.discover
       ~http:(fun ~url:_ ~headers:_ -> Ok (200,

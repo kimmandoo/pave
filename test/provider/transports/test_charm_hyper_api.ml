@@ -117,10 +117,14 @@ let () =
       incr calls;
       assert (url = Hyper.models_url);
       assert (headers = ["Accept", "application/json"]);
-      Ok (200, {|{"object":"list","data":[{"id":"future-hyper-model","object":"model"},{"id":"another/model","object":"model"},{"id":"future-hyper-model","object":"model"}]}|}) in
-    expect_models [model; "another/model"] (Hyper.discover ~http ~api_key:key ());
-    expect_models [model; "another/model"] (Hyper.discover ~http ~api_key:"" ());
+      Ok (200, {|{"object":"list","data":[{"id":"future-hyper-model","object":"model"},{"id":"another/model","object":"model"},{"id":"third-valid-hyper-model","object":"model"}]}|}) in
+    expect_models [model; "another/model"; "third-valid-hyper-model"]
+      (Hyper.discover ~http ~api_key:key ());
+    expect_models [model; "another/model"; "third-valid-hyper-model"]
+      (Hyper.discover ~http ~api_key:"" ());
     assert (!calls = 2);
+    expect_error invalid (Hyper.parse_models
+      {|{"object":"list","data":[{"id":"duplicate","object":"model"},{"id":"duplicate","object":"model"}]}|});
     List.iter (fun body -> expect_error invalid
       (Hyper.discover ~http:(fun ~url:_ ~headers:_ -> Ok (200, body))
          ~api_key:key ())) [
@@ -176,11 +180,15 @@ let () =
       Unix.rmdir directory) (fun () ->
       Unix.putenv "PATH" (directory ^ ":" ^ old_path);
       Unix.putenv "PAVE_CHARM_HYPER_FIXTURE_STATE" state;
-      let discovered = match Result.map Pave.Model_discovery.model_ids
-        (Pave.Model_discovery.discover
-          ~provider:"charm-hyper" ~credential:(Pave.Model_discovery.Api_key key) ()) with
-      | Ok [id] -> id
-      | _ -> fail "production model discovery failed" in
+      let listing = match Pave.Model_discovery.discover
+        ~provider:"charm-hyper" ~credential:(Pave.Model_discovery.Api_key key) () with
+        | Ok listing -> listing
+        | Error _ -> fail "production model discovery failed" in
+      let discovered = match Pave.Model_discovery.model_ids listing with
+      | [id] -> id
+      | _ -> fail "production discovery returned an unexpected roster" in
+      assert (listing.source.id_source = Pave.Model_catalog.Provider_listing);
+      assert ((List.hd listing.models).identity.account_id = None);
       assert (discovered = model);
       let config : Pave.Provider.config = {
         endpoint = Hyper.chat_url; api_key = key; model = discovered;

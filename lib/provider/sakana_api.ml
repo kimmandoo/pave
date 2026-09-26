@@ -60,18 +60,20 @@ let parse_models body =
       | Some (`List rows) ->
           let seen = Hashtbl.create (List.length rows) in
           let models = ref [] in
+          let duplicate = ref false in
           let valid = List.for_all (function
             | `Assoc fields -> (match List.assoc_opt "id" fields with
                 | Some (`String id) when id <> "" && String.length id <= 256 &&
                     String.for_all (fun c -> Char.code c > 32 &&
                       Char.code c < 127) id ->
-                    if not (Hashtbl.mem seen id) then (
+                    if Hashtbl.mem seen id then duplicate := true
+                    else (
                       Hashtbl.add seen id ();
                       models := id :: !models);
                     true
                 | _ -> false)
             | _ -> false) rows in
-          if valid then Ok (List.rev !models)
+          if valid && not !duplicate then Ok (List.rev !models)
           else Error (Invalid_response "invalid model ID")
       | _ -> Error (Invalid_response "missing data array"))
   | _ -> Error (Invalid_response "malformed model listing")

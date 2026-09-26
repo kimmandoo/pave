@@ -1,6 +1,6 @@
 type result =
   | Skipped
-  | Selected of Pave.Provider_catalog.descriptor * string *
+  | Selected of Pave.Provider_catalog.descriptor * Pave.Model_identity.t *
       Pave.Provider_catalog.route * string option
 
 let provider_choices () =
@@ -131,17 +131,19 @@ let run screen =
         if local_without_key then provider () else authentication descriptor
     | Some choice ->
         (try
-           let selected, id, route = Pave.Interaction.resolve_model
-             ~current_route:route_name ~current_provider:descriptor.id
-             ~input:choice () in
+           let selected, identity, route = Pave.Interaction.resolve_model
+             ~current_route:route_name
+             ?current_account_id:(Model_picker.credential descriptor
+               ~route_name |> Model_picker.credential_account_id)
+             ~current_provider:descriptor.id ~input:choice () in
            if selected.id <> descriptor.id then
              invalid_arg "choose a model from the selected provider";
-           finish selected id route missing_key
+           finish selected identity route missing_key
          with (Invalid_argument _ | Failure _) as exn ->
            Tui.alert screen ("Model unavailable: " ^ Printexc.to_string exn);
            model descriptor missing_key)
-  and finish descriptor id (route : Pave.Provider_catalog.route) missing_key =
-    let label = descriptor.id ^ "@" ^ route.name ^ "/" ^ id in
+  and finish descriptor identity (route : Pave.Provider_catalog.route) missing_key =
+    let label = Pave.Model_identity.selector identity in
     let title = match missing_key with
       | Some env -> "SETUP · Set " ^ env ^ " before prompts"
       | None -> "SETUP · Confirm your model" in
@@ -152,7 +154,7 @@ let run screen =
       ~title
       ~choices:["Save " ^ label; "Back · models"; "Skip setup"] with
     | Some selected when selected = "Save " ^ label ->
-        Selected (descriptor, id, route, missing_key)
+        Selected (descriptor, identity, route, missing_key)
     | Some "Back · models" -> model descriptor missing_key
     | _ -> skip in
   welcome ()

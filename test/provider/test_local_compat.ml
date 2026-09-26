@@ -51,7 +51,7 @@ let serve socket =
         assert (has_header ("authorization: bearer " ^ key) headers);
         if step = 0 then
           respond oc 200
-            {|{"data":[{"id":"discovered/local-model"},{"id":"discovered/local-model"},{"id":"next/chat"}]}|} ""
+            {|{"data":[{"id":"discovered/local-model"},{"id":"discovered/alternate-model"},{"id":"next/chat"}]}|} ""
         else respond oc 302 "" "Location: http://127.0.0.1:1/stolen\r\n")
       else (
         assert (method_ = "POST" && path = "/v1/chat/completions");
@@ -137,10 +137,18 @@ let () =
   let local_http ~url ~headers =
     assert (url = "http://127.0.0.1:8000/v1/models");
     assert (headers = []);
-    Ok (200, {|{"data":[{"id":"first/chat"},{"id":"first/chat"},{"id":"second/chat"}]}|}) in
+    Ok (200, {|{"data":[{"id":"first/chat"},{"id":"second/chat"}]}|}) in
   assert (Local.discover ~http:local_http ~provider:"vllm"
     ~endpoint:"http://localhost:8000/v1/chat/completions" () =
     Ok ["first/chat"; "second/chat"]);
+  let duplicate_http ~url ~headers =
+    assert (url = "http://127.0.0.1:8000/v1/models");
+    assert (headers = []);
+    Ok (200, {|{"data":[{"id":"same"},{"id":"same"}]}|}) in
+  (match Local.discover ~http:duplicate_http ~provider:"vllm"
+    ~endpoint:"http://localhost:8000/v1/chat/completions" () with
+   | Error (Local.Invalid_response "duplicate model ID") -> ()
+   | _ -> failwith "local model listing accepted duplicate IDs");
   let sent = ref false in
   let config : Provider.config = {
     api = Provider.Local_chat;
@@ -182,7 +190,8 @@ let () =
         let key = "local-" ^ provider in
         let config = { config with api_key = key; endpoint } in
         let models = Local.discover ~provider ~endpoint ~key () in
-        assert (models = Ok ["discovered/local-model"; "next/chat"]);
+        assert (models = Ok [
+          "discovered/local-model"; "discovered/alternate-model"; "next/chat"]);
         let tools = [`Assoc ["type", `String "function";
           "function", `Assoc ["name", `String "lookup";
             "parameters", `Assoc ["type", `String "object"]]]] in

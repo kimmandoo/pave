@@ -16,7 +16,8 @@ let () =
   let session = ref "" and prompt = ref "" and prompt_supplied = ref false
     and allow_shell = ref false in
   let approval_mode_override = ref None in
-  let explicit_selection = ref false and session_supplied = ref false in
+  let explicit_selection = ref false and explicit_provider = ref false
+    and session_supplied = ref false in
   let max_turns = ref None and list_providers = ref false
     and list_models = ref false and context_window_tokens = ref None
     and context_window_auto = ref false and context_window_set = ref false in
@@ -27,13 +28,14 @@ let () =
     "--root", Arg.Set_string root, "Workspace directory (default: current directory)";
     "--model", Arg.String (fun value ->
       model := value; explicit_selection := true),
-      "Model ID (required for prompts unless saved in settings or session)";
+      "Model ID or canonical provider@route[#account]/MODEL selector";
     "--provider", Arg.String (fun value ->
-      provider_name := value; explicit_selection := true),
+      provider_name := value; explicit_provider := true;
+      explicit_selection := true),
       "Provider ID (see --providers)";
     "--providers", Arg.Set list_providers, "List registered inference providers and exit";
     "--models", Arg.Set list_models,
-      "List models reported by the selected provider (authenticated; not an offline catalog)";
+      "Print fresh account/route-scoped selectors from the pinned listing endpoint";
     "--api", Arg.String (fun value ->
       api_name := value; explicit_selection := true),
       "Provider wire API (see --providers)";
@@ -124,53 +126,125 @@ let () =
       configured.max_turns) !max_turns in
     if max_turns <= 0 then failwith "--max-turns must be positive";
     let explicit_model_override = !explicit_selection in
-    let provider_name = if !provider_name <> "" then !provider_name
+    let configured_provider_name = if !provider_name <> "" then !provider_name
       else Option.value ~default:"openai" configured.default_provider in
+    let configured_account_id =
+      if configured.default_provider = Some configured_provider_name then
+        configured.default_account_id else None in
+    let canonical_model_provider =
+      match String.index_opt !model '/' with
+      | None -> None
+      | Some slash ->
+          let prefix = String.sub !model 0 slash in
+          (match String.index_opt prefix '@' with
+           | None -> None
+           | Some separator ->
+               Some (String.sub prefix 0 separator)) in
+    let explicit_model_selection = match canonical_model_provider with
+      | None -> None
+      | Some _ ->
+          let descriptor, identity, route =
+            Pave.Interaction.resolve_model
+              ?current_account_id:configured_account_id
+              ~current_provider:configured_provider_name ~input:!model () in
+          if !explicit_provider && descriptor.id <> configured_provider_name then
+            failwith "--provider conflicts with the canonical --model selector";
+          if !api_name <> "" && route.name <> !api_name then
+            failwith "--api conflicts with the canonical --model selector";
+          Some (descriptor, identity, route) in
+    let provider_name = match explicit_model_selection with
+      | Some (descriptor, _, _) -> descriptor.id
+      | None -> configured_provider_name in
     let descriptor = match Pave.Provider_catalog.find provider_name with
       | Some value -> value
       | None -> failwith ("unsupported provider: " ^ provider_name) in
     let discovery_credential = Model_picker.credential in
     if !list_models then (
-      let credential = discovery_credential descriptor in
+      let listing_route =
+        if !api_name <> "" then !api_name
+        else match explicit_model_selection with
+          | Some (_, _, selected_route) -> selected_route.name
+          | None when descriptor.default_route <> "select-route" ->
+              descriptor.default_route
+          | None -> failwith ("--models requires --api for " ^ descriptor.id) in
+      let route = match Pave.Provider_catalog.route descriptor listing_route with
+        | Some route -> route
+        | None -> failwith ("unsupported API for " ^ descriptor.id ^
+            "; use --api with one of --providers' routes") in
+      let account_id = match explicit_model_selection with
+        | Some (_, identity, _) -> identity.account_id
+        | None when configured.default_provider = Some descriptor.id ->
+            configured.default_account_id
+        | None -> None in
+      let credential = discovery_credential ~route_name:route.name descriptor in
       (match Pave.Model_discovery.discover ~provider:descriptor.id
-        ?credential () with
+          ~route_name:route.name ?account_id ?credential () with
        | Error error -> failwith (Pave.Model_discovery.message error)
        | Ok listing ->
+           let source_name = match listing.source.id_source with
+             | Pave.Model_catalog.Pinned_account_listing ->
+                 "pinned account listing"
+             | Pave.Model_catalog.Provider_listing -> "provider listing"
+             | Pave.Model_catalog.Capability_response -> "capability response"
+             | Pave.Model_catalog.Explicit_user_input -> "explicit user input" in
+           let retrieved = match listing.source.retrieved_at with
+             | None -> "freshness timestamp unavailable"
+             | Some time ->
+                 let observed = Unix.gmtime time in
+                 Printf.sprintf "retrieved %04d-%02d-%02dT%02d:%02d:%02dZ"
+                   (observed.tm_year + 1900) (observed.tm_mon + 1)
+                   observed.tm_mday observed.tm_hour observed.tm_min
+                   observed.tm_sec in
+           Printf.printf "Fresh %s from %s · %s\n" source_name
+             (Option.value ~default:"pinned provider endpoint"
+               listing.source.endpoint) retrieved;
            List.iter (fun (model : Pave.Model_discovery.model) ->
-             let endpoints = match model.supported_endpoints with
+             let capabilities = model.capabilities in
+             let endpoints = match capabilities.supported_endpoints with
                | None -> []
                | Some _ ->
-                   List.filter_map (fun (route : Pave.Provider_catalog.route) ->
+                   List.filter_map (fun (candidate : Pave.Provider_catalog.route) ->
                      if Pave.Model_discovery.model_supports_endpoint
-                         ~provider:descriptor.id model ~endpoint:route.endpoint
-                     then Some route.name else None) descriptor.routes in
+                         ~provider:descriptor.id model ~endpoint:candidate.endpoint
+                     then Some candidate.name else None) descriptor.routes in
              let status =
                if Pave.Provider_catalog.unclassified_models descriptor.id then
-                 "listed; Chat/tool capability unverified"
-               else if endpoints <> [] then "listed; per-model endpoints reported"
-               else if Pave.Provider_catalog.route descriptor "" = None then
-                 "discovered; no supported inference route"
-               else "selectable" in
-             let details = match model.name with
+                 "listed; inference compatibility unverified"
+               else if endpoints <> [] then "listed; per-model APIs reported"
+               else if capabilities.supported_endpoints <> None then
+                 "not advertised on a registered API"
+               else "selectable on the pinned route" in
+             let details = match model.display_name with
                | None -> []
                | Some name -> ["display name " ^ name] in
-             let details = match model.context_window_tokens with
+             let details = match capabilities.context_window_tokens with
                | None -> details
                | Some tokens ->
                    Printf.sprintf "context %d tokens (provider-reported)" tokens
                    :: details in
+             let details = match capabilities.max_output_tokens with
+               | None -> details
+               | Some tokens ->
+                   Printf.sprintf "maximum output %d tokens (provider-reported)"
+                     tokens :: details in
+             let details = match capabilities.tools with
+               | None -> details
+               | Some true -> "tool support reported" :: details
+               | Some false -> "tool support not supported (provider-reported)"
+                   :: details in
+             let details = match capabilities.native_compaction_supported with
+               | Some true -> "native compaction supported (provider-reported)" :: details
+               | Some false -> "native compaction not supported (provider-reported)" :: details
+               | None -> details in
              let details = if endpoints = [] then details
-               else ("endpoints " ^ String.concat "," endpoints) :: details in
-             let details = match model.provider_tokenizer with
+               else ("APIs " ^ String.concat "," endpoints) :: details in
+             let details = match capabilities.provider_tokenizer with
                | None -> details
                | Some value ->
                    Printf.sprintf "tokenizer type %s (provider-reported; metadata only)"
                      value :: details in
-             let details = match model.native_compaction_supported with
-               | Some true -> "native compaction supported (provider-reported)" :: details
-               | Some false -> "native compaction not supported (provider-reported)" :: details
-               | None -> details in
-             Printf.printf "%s\t%s%s\n" model.id status
+             Printf.printf "%s\t%s%s\n"
+               (Pave.Model_identity.selector model.identity) status
                (if details = [] then "" else
                   " · " ^ String.concat " · " (List.rev details)))
              listing.models;
@@ -201,29 +275,64 @@ let () =
       else Option.bind !journal Pave.Session.model in
     let descriptor = match saved_model with
       | None -> descriptor
-      | Some (provider, _) ->
-          (match Pave.Provider_catalog.find provider with
+      | Some identity ->
+          (match Pave.Provider_catalog.find identity.provider with
            | Some value -> value
            | None -> failwith ("saved session uses unavailable provider " ^
-               provider ^ "; specify --provider and --model to override")) in
-    let model = match saved_model with
-      | Some (_, saved) -> saved
-      | None when !model <> "" -> !model
-      | None -> (match configured.default_provider with
+               identity.provider ^ "; specify --provider and --model to override")) in
+    let model = match explicit_model_selection, saved_model with
+      | Some (_, identity, _), _ -> identity.upstream_id
+      | None, Some identity -> identity.upstream_id
+      | None, None when !model <> "" -> !model
+      | None, None -> (match configured.default_provider with
           | Some configured_provider when configured_provider = descriptor.id ->
               Option.value ~default:"" configured.default_model
           | _ -> "") in
     let selected_api = if !api_name <> "" then !api_name
-      else match saved_model, Option.bind !journal Pave.Session.api with
-        | Some _, Some api -> api
-        | _ -> (match configured.default_provider with
-          | Some provider when provider = descriptor.id ->
-              Option.value ~default:"" configured.default_api
-          | _ -> "") in
+      else match explicit_model_selection, saved_model with
+        | Some (_, _, route), _ -> route.name
+        | None, Some identity -> identity.route
+        | None, None -> (match configured.default_provider with
+            | Some provider when provider = descriptor.id ->
+                Option.value ~default:"" configured.default_api
+            | _ -> "") in
     let route = match Pave.Provider_catalog.route descriptor selected_api with
       | Some value -> value
       | None -> failwith ("unsupported API for " ^
           descriptor.id ^ "; specify --api to override") in
+    let make_model_identity (descriptor : Pave.Provider_catalog.descriptor)
+        (route : Pave.Provider_catalog.route) ?account_id upstream_id =
+      Pave.Model_identity.make ~provider:descriptor.id ?account_id
+        ~route:route.name ~upstream_id () in
+    let configured_account_id =
+      if configured.default_provider = Some descriptor.id then
+        configured.default_account_id else None in
+    let inferred_account_id =
+      Model_picker.credential ~route_name:route.name descriptor
+      |> Model_picker.credential_account_id in
+    let selected_account_id =
+      match explicit_model_selection, saved_model with
+      | Some (_, identity, _), _ when identity.account_id <> None ->
+          identity.account_id
+      | None, Some identity when identity.account_id <> None ->
+          identity.account_id
+      | _ -> (match configured_account_id with
+          | Some _ as account_id -> account_id
+          | None -> inferred_account_id) in
+    let initial_identity = match explicit_model_selection with
+      | Some (_, identity, _) ->
+          Some { identity with account_id =
+            (match identity.account_id with
+             | Some _ as account_id -> account_id
+             | None -> selected_account_id) }
+      | None when model = "" -> None
+      | None ->
+          (match saved_model with
+           | Some identity when identity.provider = descriptor.id &&
+               identity.route = route.name && identity.upstream_id = model &&
+               identity.account_id = selected_account_id -> Some identity
+           | _ -> Some (make_model_identity descriptor route
+               ?account_id:selected_account_id model)) in
     let configured_default_usable = model <> "" in
     let configured_default_selection =
       let default_provider =
@@ -231,58 +340,71 @@ let () =
       match Pave.Provider_catalog.find default_provider with
       | None -> None
       | Some default_descriptor ->
-          let default_model = match configured.default_provider with
-            | Some provider when provider = default_provider ->
-                Option.value ~default:"" configured.default_model
-            | _ -> "" in
-          let default_api = match configured.default_provider with
-            | Some provider when provider = default_provider ->
-                Option.value ~default:"" configured.default_api
-            | _ -> "" in
+          let configured_for_provider =
+            configured.default_provider = Some default_provider in
+          let default_model = if configured_for_provider then
+            configured.default_model else None in
+          let default_api = if configured_for_provider then
+            Option.value ~default:"" configured.default_api else "" in
           let default_route =
             match Pave.Provider_catalog.route default_descriptor default_api with
             | Some route -> Some route
             | None -> Pave.Provider_catalog.route default_descriptor "" in
-          Option.map (fun route -> default_descriptor, default_model, route)
-            default_route in
-    let model_label (descriptor : Pave.Provider_catalog.descriptor)
-        (route : Pave.Provider_catalog.route) model =
-      descriptor.id ^
-      (if descriptor.default_route = "select-route" then "@" ^ route.name else "") ^
-      "/" ^ model in
+          Option.map (fun
+              (default_route : Pave.Provider_catalog.route) ->
+            let identity = Option.map (fun upstream_id ->
+              let account_id = match
+                  (if configured_for_provider then
+                    configured.default_account_id else None) with
+                | Some _ as account_id -> account_id
+                | None ->
+                    Model_picker.credential ~route_name:default_route.name
+                      default_descriptor
+                    |> Model_picker.credential_account_id in
+              make_model_identity default_descriptor default_route
+                ?account_id upstream_id) default_model in
+            default_descriptor, identity, default_route) default_route in
+    let selection_label (descriptor : Pave.Provider_catalog.descriptor)
+        identity (route : Pave.Provider_catalog.route) =
+      match identity with
+      | Some identity -> Pave.Model_identity.selector identity
+      | None -> descriptor.id ^ "@" ^ route.name ^ "/(not selected)" in
     let active_descriptor = ref descriptor and active_model = ref model
+      and active_identity = ref initial_identity
       and active_route = ref route and endpoint_override = ref !endpoint in
     let context_window_source = ref None in
     let context_window_tokenizer = ref None in
     let anthropic_compaction_capability :
-      (string * string * string * string * bool option) option ref = ref None in
+      (Pave.Model_identity.t * string * bool option) option ref = ref None in
     if !context_window_auto then (
       let initial_endpoint =
         if !endpoint_override = "" then route.endpoint else !endpoint_override in
       if initial_endpoint <> route.endpoint then
         failwith "--context-window auto cannot use a custom inference endpoint";
-      if model = "" then
-        failwith "--context-window auto requires an exact initial model selection";
+      let identity = match initial_identity with
+        | Some identity -> identity
+        | None -> failwith "--context-window auto requires an exact initial model selection" in
       if not (List.mem descriptor.id
           ["anthropic"; "commandcode"; "devin"; "google"; "openai-codex"]) then
         failwith "--context-window auto requires provider-reported metadata from Anthropic, Command Code, Devin, Google, or OpenAI Codex";
-      let credential = discovery_credential descriptor in
+      let credential = discovery_credential ~route_name:route.name descriptor in
       let listing = match Pave.Model_discovery.discover
-          ~provider:descriptor.id ?credential () with
+          ~provider:descriptor.id ~route_name:route.name
+          ?account_id:identity.account_id ?credential () with
         | Ok listing -> listing
         | Error error -> failwith
             ("--context-window auto: " ^ Pave.Model_discovery.message error) in
       let selected_model = match List.find_opt
           (fun (candidate : Pave.Model_discovery.model) ->
-            candidate.id = model) listing.models with
+            Pave.Model_identity.equal candidate.identity identity) listing.models with
         | Some selected -> selected
         | None -> failwith
             "--context-window auto: selected model is absent from the live provider listing" in
       if descriptor.id = "anthropic" then
         anthropic_compaction_capability := Some
-          (descriptor.id, route.name, model, initial_endpoint,
-            selected_model.native_compaction_supported);
-      (match selected_model.supported_endpoints with
+          (identity, initial_endpoint,
+            selected_model.capabilities.native_compaction_supported);
+      (match selected_model.capabilities.supported_endpoints with
        | Some _ when Pave.Model_discovery.model_supports_endpoint
            ~provider:descriptor.id selected_model ~endpoint:route.endpoint -> ()
        | Some _ -> failwith
@@ -292,40 +414,44 @@ let () =
            List.length descriptor.routes = 1 -> ()
        | None -> failwith
            "--context-window auto: the live listing did not report model API routes");
-      let tokens = match selected_model.context_window_tokens with
+      let tokens = match selected_model.capabilities.context_window_tokens with
         | Some tokens -> tokens
         | None -> failwith
             "--context-window auto: the provider did not report this model's context window" in
       if tokens < 8192 || tokens > 20_000_000 then
         failwith "--context-window auto: provider-reported context window is outside the supported 8192..20000000 range";
       context_window_tokens := Some tokens;
-      context_window_tokenizer := selected_model.provider_tokenizer;
-      let observed = Unix.gmtime listing.source.retrieved_at in
-      let timestamp = Printf.sprintf "%04d-%02d-%02dT%02d:%02d:%02dZ"
-        (observed.tm_year + 1900) (observed.tm_mon + 1) observed.tm_mday
-        observed.tm_hour observed.tm_min observed.tm_sec in
+      context_window_tokenizer :=
+        selected_model.capabilities.provider_tokenizer;
+      let timestamp = match listing.source.retrieved_at with
+        | None -> "freshness timestamp unavailable"
+        | Some time ->
+            let observed = Unix.gmtime time in
+            Printf.sprintf "%04d-%02d-%02dT%02d:%02d:%02dZ"
+              (observed.tm_year + 1900) (observed.tm_mon + 1)
+              observed.tm_mday observed.tm_hour observed.tm_min observed.tm_sec in
       context_window_source := Some
         (Printf.sprintf "provider-reported by %s at %s (observed %s)"
-          listing.source.provider
+          descriptor.id
           (Option.value ~default:"pinned model listing" listing.source.endpoint)
           timestamp)
     ) else if Option.is_some !context_window_tokens then
       context_window_source := Some "manually supplied for the exact initial provider/model/API";
     let context_window_target =
-      match !context_window_tokens with
-      | None -> None
-      | Some _ when model = "" ->
+      match !context_window_tokens, initial_identity with
+      | None, _ -> None
+      | Some _, None ->
           failwith "--context-window requires an exact initial model selection"
-      | Some _ -> Some (descriptor.id, model, route.name,
-          if !endpoint_override = "" then route.endpoint else !endpoint_override) in
+      | Some _, Some identity ->
+          Some (identity,
+            if !endpoint_override = "" then route.endpoint else !endpoint_override) in
     let active_context_window () =
       let endpoint = if !endpoint_override = "" then !active_route.endpoint
         else !endpoint_override in
-      match !context_window_tokens, context_window_target with
-      | Some tokens, Some (provider, selected_model, api, target_endpoint)
-        when !active_descriptor.id = provider &&
-             !active_model = selected_model &&
-             !active_route.name = api && endpoint = target_endpoint -> Some tokens
+      match !context_window_tokens, !active_identity, context_window_target with
+      | Some tokens, Some active_identity, Some (target_identity, target_endpoint)
+        when Pave.Model_identity.equal active_identity target_identity &&
+             endpoint = target_endpoint -> Some tokens
       | _ -> None in
     let ui = ref None in
     let runner : Pave.Turn_runner.t option ref = ref None in
@@ -450,9 +576,19 @@ let () =
         failwith ("Select a model with /model " ^ !active_descriptor.id
           ^ "/MODEL_ID before sending a prompt");
       let descriptor = !active_descriptor and route = !active_route in
+      let identity = match !active_identity with
+        | Some identity -> identity
+        | None -> failwith "active model identity is unavailable" in
+      if identity.provider <> descriptor.id || identity.route <> route.name ||
+         identity.upstream_id <> !active_model then
+        failwith "active model identity is inconsistent with its provider route";
       let authentication, api_key, resolve_credential =
         Cli_auth.resolve_authentication ~descriptor ~route
           ~endpoint:!endpoint_override in
+      let credential_account_id = Option.bind resolve_credential
+        (fun resolve -> (resolve ()).Pave.Provider.account_id) in
+      if identity.account_id <> credential_account_id then
+        failwith "selected model account does not match the active credentials; reselect the model for this account";
       let endpoint =
         if route.wire = Pave.Provider.Cloudflare_ai_gateway_chat then
           Option.get (Pave.Cloudflare_ai_gateway_api.env_chat_url ())
@@ -492,33 +628,37 @@ let () =
          not (native_anthropic_route provider) then false
       else
         let endpoint = provider.Pave.Provider.endpoint in
-        let matches (provider_id, route, model, cached_endpoint, _) =
-          provider_id = !active_descriptor.id &&
-          route = !active_route.name && model = !active_model &&
-          cached_endpoint = endpoint in
-        match !anthropic_compaction_capability with
-        | Some cached when matches cached ->
-            (match cached with
-             | _, _, _, _, Some true -> true
-             | _ -> false)
-        | _ ->
-            let credential = discovery_credential !active_descriptor in
-            (match Pave.Model_discovery.discover ?cancel
-                ~provider:"anthropic" ?credential () with
-             | Ok listing
-               when listing.source.provider = "anthropic" &&
-                    listing.source.endpoint =
-                      Some Pave.Model_discovery.anthropic_url ->
-                 let supported = Option.bind
-                   (List.find_opt
-                     (fun (model : Pave.Model_discovery.model) ->
-                       model.id = !active_model) listing.models)
-                   (fun model -> model.native_compaction_supported) in
-                 anthropic_compaction_capability := Some
-                   (!active_descriptor.id, !active_route.name, !active_model,
-                    endpoint, supported);
-                 supported = Some true
-             | _ -> false) in
+        match !active_identity with
+        | None -> false
+        | Some identity ->
+          let matches (cached_identity, cached_endpoint, _) =
+            Pave.Model_identity.equal cached_identity identity &&
+            cached_endpoint = endpoint in
+          (match !anthropic_compaction_capability with
+           | Some cached when matches cached ->
+               (match cached with
+                | _, _, Some true -> true
+                | _ -> false)
+           | _ ->
+               let credential = discovery_credential
+                 ~route_name:!active_route.name !active_descriptor in
+               (match Pave.Model_discovery.discover ?cancel
+                   ~provider:"anthropic" ~route_name:!active_route.name
+                   ?account_id:identity.account_id ?credential () with
+                | Ok listing
+                  when listing.source.endpoint =
+                    Some Pave.Model_discovery.anthropic_url ->
+                    let supported = Option.bind
+                      (List.find_opt
+                        (fun (model : Pave.Model_discovery.model) ->
+                          Pave.Model_identity.equal model.identity identity)
+                        listing.models)
+                      (fun model ->
+                        model.capabilities.native_compaction_supported) in
+                    anthropic_compaction_capability := Some
+                      (identity, endpoint, supported);
+                    supported = Some true
+                | _ -> false)) in
     let system_prompt_message text : Pave.Protocol.message = {
       role = "system"; content = Some text; tool_calls = [];
       tool_call_id = None; tool_result_content = None;
@@ -657,10 +797,8 @@ let () =
                     Some projected)) in
     let make_agent () =
       let provider, authentication, resolve_credential = resolve_provider () in
-      (match !journal with
-       | Some session when !active_model <> "" ->
-           Pave.Session.set_model ~api:!active_route.name session
-             ~provider:!active_descriptor.id ~model:!active_model
+      (match !journal, !active_identity with
+       | Some session, Some identity -> Pave.Session.set_model session identity
        | _ -> ());
       let history = match !journal with
         | Some session -> Pave.Session.context session
@@ -724,15 +862,18 @@ let () =
             on_event ("Error: current conversation" ^ attachment_note ^
               " is unsaved; start with --session to preserve it");
             false in
-    let session_selection ?saved_api saved =
+    let session_selection saved =
       if explicit_model_override then None
-      else Option.map (fun (provider, model) ->
-        let current_route = match saved_api with
-          | Some name -> Some name
-          | None when provider = !active_descriptor.id -> Some !active_route.name
-          | None -> None in
-        Pave.Interaction.resolve_model ?current_route ~current_provider:provider
-          ~input:(provider ^ "/" ^ model) ()) saved in
+      else Option.map (fun (identity : Pave.Model_identity.t) ->
+        let descriptor = match Pave.Provider_catalog.find identity.provider with
+          | Some descriptor -> descriptor
+          | None -> failwith ("saved session uses unavailable provider " ^
+              identity.provider) in
+        let route = match Pave.Provider_catalog.route descriptor identity.route with
+          | Some route -> route
+          | None -> failwith ("saved session uses unsupported route " ^
+              identity.provider ^ "@" ^ identity.route) in
+        descriptor, Some identity, route) saved in
     let restore_branch_settings current leaf =
       let saved_mode = Pave.Session.mode_at current leaf in
       thinking_level := Pave.Session.thinking_at current leaf;
@@ -740,39 +881,43 @@ let () =
       effective_approval_mode := if explicit_approval_mode then
         Option.value ~default:configured_approval_mode !approval_mode_override
       else Option.value ~default:configured_approval_mode saved_mode in
-    let use_selection (descriptor, model, route) =
+    let use_selection (descriptor, identity, route) =
       active_descriptor := descriptor;
-      active_model := model;
+      active_identity := identity;
+      active_model := Option.fold ~none:""
+        ~some:(fun identity -> identity.Pave.Model_identity.upstream_id) identity;
       active_route := route;
       endpoint_override := "";
       agent := None;
       match !ui with
-      | Some screen -> Tui.set_model screen (model_label descriptor route model)
+      | Some screen -> Tui.set_model screen
+          (selection_label descriptor identity route)
       | None -> () in
-    let apply_model_selection ((descriptor : Pave.Provider_catalog.descriptor),
-        model, (route : Pave.Provider_catalog.route)) =
+    let apply_model_selection
+        ((descriptor : Pave.Provider_catalog.descriptor),
+         (identity : Pave.Model_identity.t),
+         (route : Pave.Provider_catalog.route)) =
+      if identity.provider <> descriptor.id || identity.route <> route.name then
+        failwith "selected model identity does not match its provider route";
       (match !journal with
-       | Some current ->
-           Pave.Session.set_model ~api:route.name current ~provider:descriptor.id ~model
+       | Some current -> Pave.Session.set_model current identity
        | None -> ());
       (match !journal, !agent with
        | None, Some previous -> retained_history := Pave.Agent.messages previous
        | _ -> ());
-      use_selection (descriptor, model, route) in
+      use_selection (descriptor, Some identity, route) in
     let switch_session ?(inherit_active_model = false) next =
       let saved_model = Pave.Session.model next in
       let selected =
         if explicit_model_override then None
         else match saved_model with
-          | Some _ -> session_selection
-              ?saved_api:(Pave.Session.api next) saved_model
+          | Some identity -> session_selection (Some identity)
           | None when inherit_active_model -> None
           | None -> configured_default_selection in
-      let descriptor, model, route = match selected with
+      let _, identity, _ = match selected with
         | Some choice -> choice
-        | None -> !active_descriptor, !active_model, !active_route in
-      if model <> "" then
-        Pave.Session.set_model ~api:route.name next ~provider:descriptor.id ~model;
+        | None -> !active_descriptor, !active_identity, !active_route in
+      Option.iter (Pave.Session.set_model next) identity;
       journal := Some next;
       restore_branch_settings next (Pave.Session.leaf_id next);
       (match selected with Some choice -> use_selection choice | None -> agent := None);
@@ -966,8 +1111,8 @@ let () =
                  Option.value ~default:"" picked
              | None ->
                  let providers = Pave.Interaction.selectable_providers () in
-                 on_event ("Current model: " ^ !active_descriptor.id ^ "/" ^
-                   (if !active_model = "" then "(none)" else !active_model));
+                 on_event ("Current model: " ^
+                   selection_label !active_descriptor !active_identity !active_route);
                  List.iter (fun (entry : Pave.Provider_catalog.descriptor) ->
                    on_event (entry.id ^ "  " ^ entry.display_name)) providers;
                  print_string "Provider/model ID (blank cancels): "; flush stdout;
@@ -977,14 +1122,31 @@ let () =
           | Some descriptor when descriptor.id <> !active_descriptor.id ->
               descriptor.id, descriptor.default_route
           | _ -> !active_descriptor.id, !active_route.name in
-        let descriptor, model, route =
-          try Pave.Interaction.resolve_model
+        let selected_route =
+          match Pave.Provider_catalog.find current_provider with
+          | Some descriptor ->
+              Pave.Provider_catalog.route descriptor current_route
+          | None -> None in
+        let inferred_account = Option.bind selected_route (fun route ->
+          Option.bind (Pave.Provider_catalog.find current_provider)
+            (fun descriptor ->
+              Model_picker.credential ~route_name:route.name descriptor
+              |> Model_picker.credential_account_id)) in
+        let active_account_id = Option.bind !active_identity
+          (fun (identity : Pave.Model_identity.t) ->
+            if identity.provider = current_provider then identity.account_id
+            else None) in
+        let current_account_id = match active_account_id with
+          | Some _ as account_id -> account_id
+          | None -> inferred_account in
+        let descriptor, identity, route =
+          try Pave.Interaction.resolve_model ?current_account_id
             ~current_provider ~current_route ~input:selector ()
           with exn ->
             (match !ui with Some screen -> Tui.reset_status screen | None -> ());
             raise exn in
-        apply_model_selection (descriptor, model, route);
-        on_event ("Active model: " ^ model_label descriptor route model ^
+        apply_model_selection (descriptor, identity, route);
+        on_event ("Active model: " ^ Pave.Model_identity.selector identity ^
           ". /setup saves a default for future sessions.")
       ) else match !ui with
         | Some screen ->
@@ -1041,13 +1203,15 @@ let () =
                on_event ("Setup skip was not saved: " ^ error_message exn ^
                  ". Run /setup to return.")))
           else on_event "Setup cancelled; your saved default is unchanged."
-      | Setup_view.Selected (descriptor, model, route, missing_key) ->
-          apply_model_selection (descriptor, model, route);
+      | Setup_view.Selected (descriptor, identity, route, missing_key) ->
+          apply_model_selection (descriptor, identity, route);
           let saved =
             try
               ignore (Pave.Settings.update_user (fun current -> {
                 current with default_provider = Some descriptor.id;
-                  default_model = Some model; default_api = Some route.name }));
+                  default_model = Some identity.upstream_id;
+                  default_api = Some route.name;
+                  default_account_id = identity.account_id }));
               true
             with exn ->
               on_event ("User default was not saved: " ^ error_message exn ^
@@ -1059,11 +1223,12 @@ let () =
                  | Some _ -> Pave.Setup_state.Skipped
                  | None -> Pave.Setup_state.Complete);
                on_event (match missing_key with
-                 | Some env -> "Default saved: " ^ descriptor.id ^ "/" ^ model ^
+                 | Some env -> "Default saved: " ^
+                     Pave.Model_identity.selector identity ^
                      ". Key setup skipped; set " ^ env ^
                      " in your shell before sending prompts. Run /setup to finish."
-                 | None -> "Setup complete. Default: " ^ descriptor.id ^ "/" ^
-                     model ^ ".")
+                 | None -> "Setup complete. Default: " ^
+                     Pave.Model_identity.selector identity ^ ".")
              with exn ->
                on_event ("Default saved, but setup status was not saved: " ^
                  error_message exn ^ ". Run /setup to retry."))) in
@@ -1182,8 +1347,7 @@ let () =
     let interact () =
       let checkout_branch current target =
         let saved_model = Pave.Session.model_at current (Some target) in
-        let selected = session_selection
-          ?saved_api:(Pave.Session.api_at current (Some target)) saved_model in
+        let selected = session_selection saved_model in
         Pave.Session.branch current target;
         restore_branch_settings current (Some target);
         (match selected with
@@ -1527,8 +1691,8 @@ let () =
                 ["Context window · unknown; automatic compaction disabled (set --context-window TOKENS or auto for a supported provider)"]
             | Some configured, None ->
                 let target = match context_window_target with
-                  | Some (provider, selected_model, api, _) ->
-                      provider ^ "/" ^ selected_model ^ "@" ^ api
+                  | Some (identity, endpoint) ->
+                      Pave.Model_identity.selector identity ^ " · " ^ endpoint
                   | None -> "(no exact initial target)" in
                 [Printf.sprintf "Configured context window · %d tokens for %s (%s)"
                    configured target (Option.value
@@ -1583,21 +1747,18 @@ let () =
               ["Anthropic native compaction · disabled for non-official endpoints"]
             else
               match !anthropic_compaction_capability with
-              | Some (provider, route, model, endpoint, Some true)
-                when provider = !active_descriptor.id &&
-                     route = !active_route.name && model = !active_model &&
+              | Some (identity, endpoint, capability)
+                when Option.fold ~none:false
+                       ~some:(Pave.Model_identity.equal identity)
+                       !active_identity &&
                      endpoint = "https://api.anthropic.com/v1/messages" ->
-                  ["Anthropic native compaction · advertised for this model; API-key auth required"]
-              | Some (provider, route, model, endpoint, Some false)
-                when provider = !active_descriptor.id &&
-                     route = !active_route.name && model = !active_model &&
-                     endpoint = "https://api.anthropic.com/v1/messages" ->
-                  ["Anthropic native compaction · provider listing reports unsupported"]
-              | Some (provider, route, model, endpoint, None)
-                when provider = !active_descriptor.id &&
-                     route = !active_route.name && model = !active_model &&
-                     endpoint = "https://api.anthropic.com/v1/messages" ->
-                  ["Anthropic native compaction · provider listing did not report support"]
+                  (match capability with
+                   | Some true ->
+                       ["Anthropic native compaction · advertised for this model; API-key auth required"]
+                   | Some false ->
+                       ["Anthropic native compaction · provider listing reports unsupported"]
+                   | None ->
+                       ["Anthropic native compaction · provider listing did not report support"])
               | _ ->
                   ["Anthropic native compaction · capability checked against the model listing before use"] in
           let budget_lines = budget_lines @ anthropic_capability_lines in
@@ -1680,11 +1841,9 @@ let () =
                        (Pave.Session_tree.first_line content) attachments)
                  | Pave.Session.Compaction _ ->
                      Some (entry.id ^ " compaction <summary>")
-                 | Pave.Session.Model { provider; model; api } ->
+                 | Pave.Session.Model identity ->
                      Some (entry.id ^ " model " ^
-                       Pave.Session_tree.first_line (provider ^
-                         (match api with None -> "" | Some api -> "@" ^ api) ^
-                         "/" ^ model))
+                       Pave.Model_identity.selector identity)
                  | Pave.Session.Thinking level ->
                      Some (entry.id ^ " thinking " ^
                        Option.value ~default:"default" level)
@@ -1768,8 +1927,7 @@ let () =
     else if Unix.isatty Unix.stdin && Unix.isatty Unix.stdout
       && Sys.getenv_opt "TERM" <> Some "dumb" then (
       let screen = Tui.create ~root
-        ~model:(model_label descriptor route
-          (if model = "" then "(select with /model)" else model))
+        ~model:(selection_label !active_descriptor !active_identity !active_route)
         ~session:(!session <> "") in
       Fun.protect ~finally:(fun () ->
         (match !runner with

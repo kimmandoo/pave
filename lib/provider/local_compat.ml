@@ -124,20 +124,23 @@ let discover ?http ?cancel ~provider ~endpoint ?key () =
                       (match List.assoc_opt "data" fields with
                       | Some (`List rows) ->
                           let seen = Hashtbl.create (List.length rows) in
-                          let models = ref [] in
+                          let models = ref [] and duplicate = ref false in
                           let valid = List.for_all (function
                             | `Assoc fields -> (match List.assoc_opt "id" fields with
                                 | Some (`String id) when id <> "" && String.length id <= 256 &&
                                     String.for_all (fun c -> Char.code c > 32 &&
                                       Char.code c < 127) id ->
-                                    if not (Hashtbl.mem seen id) then (
+                                    if Hashtbl.mem seen id then duplicate := true
+                                    else (
                                       Hashtbl.add seen id ();
                                       models := id :: !models);
                                     true
                                 | _ -> false)
                             | _ -> false) rows in
-                          if valid then Ok (List.rev !models)
-                          else Error (Invalid_response "invalid model ID")
+                          if not valid then Error (Invalid_response "invalid model ID")
+                          else if !duplicate then
+                            Error (Invalid_response "duplicate model ID")
+                          else Ok (List.rev !models)
                       | _ -> Error (Invalid_response "missing data array"))
                   | _ -> Error (Invalid_response "malformed model listing"))
           with

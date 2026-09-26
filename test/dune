@@ -181,6 +181,11 @@
  (libraries pave unix yojson))
 
 (test
+ (name test_model_discovery_coordinator)
+ (modules test_model_discovery_coordinator)
+ (libraries pave unix threads))
+
+(test
  (name test_system_prompt)
  (modules test_system_prompt)
  (libraries pave unix))

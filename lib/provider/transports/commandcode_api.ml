@@ -65,6 +65,7 @@ let parse_models body =
       | Some (`String "list"), Some (`List rows) when List.length rows <= max_models ->
           let seen = Hashtbl.create (List.length rows) in
           let models = ref [] in
+          let duplicate = ref false in
           let valid = List.for_all (function
             | `Assoc row ->
                 (match List.assoc_opt "id" row, List.assoc_opt "name" row,
@@ -73,6 +74,8 @@ let parse_models body =
                 | Some (`String id), Some (`String name), length,
                   Some (`List endpoints) when valid_id id && name <> "" &&
                     String.length name <= 512 ->
+                    if Hashtbl.mem seen id then duplicate := true
+                    else Hashtbl.add seen id ();
                     let context_length = match length with
                       | None | Some `Null -> Some None
                       | Some (`Int value) when value > 0 -> Some (Some value)
@@ -88,15 +91,14 @@ let parse_models body =
                     (match context_length, supported_endpoints with
                     | Some context_length, Some endpoints ->
                         let endpoints = List.rev endpoints in
-                        if endpoints <> [] && not (Hashtbl.mem seen id) then (
-                          Hashtbl.add seen id ();
+                        if endpoints <> [] then
                           models := { id; name; context_length;
-                            supported_endpoints = endpoints } :: !models);
+                            supported_endpoints = endpoints } :: !models;
                         true
                     | _ -> false)
                 | _ -> false)
             | _ -> false) rows in
-          if valid then Ok (List.rev !models)
+          if valid && not !duplicate then Ok (List.rev !models)
           else Error (Invalid_response "invalid Command Code model row")
       | Some (`String "list"), Some (`List _) ->
           Error (Invalid_response "too many Command Code models")

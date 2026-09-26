@@ -148,9 +148,12 @@ let () =
     assert (Mantle.parse_models (`Assoc ["data", `List [
       `Assoc ["id", `String model; "status", `String "available"];
       `Assoc ["id", `String "unavailable-model"; "status", `String "unavailable"];
-      `Assoc ["id", `String model];
+      `Assoc ["id", `String "distinct-available-model"];
       `Assoc ["id", `String "another-account-model"]]]) =
-      [model; "another-account-model"]);
+      [model; "distinct-available-model"; "another-account-model"]);
+    invalid_listing (fun () -> Mantle.parse_models (`Assoc ["data", `List [
+      `Assoc ["id", `String "duplicate-unavailable"; "status", `String "unavailable"];
+      `Assoc ["id", `String "duplicate-unavailable"]]]));
     invalid_listing (fun () -> Mantle.parse_models (`Assoc ["data", `List [
       `Assoc ["id", `String "x\nHeader:unsafe"]]]));
     invalid_listing (fun () -> Mantle.parse_models (`Assoc ["data", `String "bad"]));

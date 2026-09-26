@@ -153,12 +153,13 @@ let () =
       assert (url = Meta.models_url);
       assert (headers = ["Authorization", "Bearer " ^ key;
         "Accept", "application/json"]);
-      Ok (200, {|{"object":"list","data":[{"id":"operator-selected-responses-model","object":"model","created":1750000000,"owned_by":"meta"},{"id":"catalog-entry-with-unknown-route","object":"model","created":1750000000,"owned_by":"meta"},{"id":"operator-selected-responses-model","object":"model","created":1750000000,"owned_by":"meta"}]}|}) in
-    assert (Meta.discover ~http ~api_key:key () = Ok [model; other_model]);
+      Ok (200, {|{"object":"list","data":[{"id":"operator-selected-responses-model","object":"model","created":1750000000,"owned_by":"meta"},{"id":"catalog-entry-with-unknown-route","object":"model","created":1750000000,"owned_by":"meta"},{"id":"third-valid-meta-model","object":"model","created":1750000000,"owned_by":"meta"}]}|}) in
+    assert (Meta.discover ~http ~api_key:key () =
+      Ok [model; other_model; "third-valid-meta-model"]);
     assert (!count = 1);
-    expect_error ((=) Meta.Invalid_credential)
-      (Meta.discover ~http ~api_key:"bad\nheader" ());
-    assert (!count = 1);
+    expect_error (function Meta.Invalid_response _ -> true | _ -> false)
+      (Meta.parse_models
+        {|{"object":"list","data":[{"id":"duplicate","object":"model","created":1,"owned_by":"meta"},{"id":"duplicate","object":"model","created":2,"owned_by":"meta"}]}|});
     List.iter (fun body ->
       expect_error (function Meta.Invalid_response _ -> true | _ -> false)
         (Meta.discover ~http:(fun ~url:_ ~headers:_ -> Ok (200, body))

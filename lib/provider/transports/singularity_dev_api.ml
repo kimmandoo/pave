@@ -44,25 +44,28 @@ let parse_models body =
           let models = ref [] in
           let valid = List.for_all (function
             | `Assoc fields ->
-                (match List.assoc_opt "id" fields,
-                       List.assoc_opt "object" fields,
-                       List.assoc_opt "capabilities" fields with
-                | Some (`String id), Some (`String "model"), Some (`List capabilities)
-                  when valid_id id ->
-                    let chat = ref false in
-                    let valid_capabilities = List.for_all (function
-                      | `Assoc fields -> (match List.assoc_opt "endpoint" fields with
-                          | Some (`String "/v1/chat/completions") ->
-                              chat := true; true
-                          | Some (`String _) -> true
-                          | _ -> false)
-                      | _ -> false) capabilities in
-                    if valid_capabilities then (
-                      if !chat && not (Hashtbl.mem seen id) then (
-                        Hashtbl.add seen id ();
-                        models := id :: !models);
-                      true)
-                    else false
+                (match List.assoc_opt "id" fields with
+                | Some (`String id) when valid_id id ->
+                    if Hashtbl.mem seen id then false
+                    else (
+                      Hashtbl.add seen id ();
+                      match List.assoc_opt "object" fields,
+                            List.assoc_opt "capabilities" fields with
+                      | Some (`String "model"), Some (`List capabilities) ->
+                          let chat = ref false in
+                          let valid_capabilities = List.for_all (function
+                            | `Assoc fields ->
+                                (match List.assoc_opt "endpoint" fields with
+                                | Some (`String "/v1/chat/completions") ->
+                                    chat := true; true
+                                | Some (`String _) -> true
+                                | _ -> false)
+                            | _ -> false) capabilities in
+                          if valid_capabilities then (
+                            if !chat then models := id :: !models;
+                            true)
+                          else false
+                      | _ -> false)
                 | _ -> false)
             | _ -> false) rows in
           if valid then Ok (List.rev !models)

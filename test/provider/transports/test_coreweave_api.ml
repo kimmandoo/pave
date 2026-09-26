@@ -128,8 +128,8 @@ let () =
       assert (url = Coreweave.models_url);
       assert (headers = ["Authorization", "Bearer " ^ key;
         "Accept", "application/json"]);
-      Ok (200, {|{"object":"list","data":[{"id":"newvendor/future-chat-model","object":"model"},{"id":"another/model","object":"model"},{"id":"newvendor/future-chat-model","object":"model"}]}|}) in
-    expect_models [model; "another/model"] (Coreweave.discover ~http ~api_key:key ());
+      Ok (200, {|{"object":"list","data":[{"id":"newvendor/future-chat-model","object":"model"},{"id":"another/model","object":"model"},{"id":"third/model","object":"model"}]}|}) in
+    expect_models [model; "another/model"; "third/model"] (Coreweave.discover ~http ~api_key:key ());
     assert (!calls = 1);
     expect_error ((=) Coreweave.Invalid_credential)
       (Coreweave.discover ~http ~api_key:"" ());
@@ -139,10 +139,11 @@ let () =
     List.iter (fun body -> expect_error invalid
       (Coreweave.discover ~http:(fun ~url:_ ~headers:_ -> Ok (200, body))
          ~api_key:key ())) [
+      {|{"data":[{"id":"newvendor/future-chat-model"},{"id":"newvendor/future-chat-model"}]}|};
       {|{"data":[{"id":"bad\nmodel"}]}|};
       {|{"data":[{"id":null}]}|};
       {|{"data":[{}]}|};
-      {|{"models":[]}|}; "not json"];
+      {|{"models":[]}|}; "not json" ];
     expect_error invalid (Coreweave.discover
       ~http:(fun ~url:_ ~headers:_ -> Ok (200,
         String.make (Coreweave.max_response_bytes + 1) 'x')) ~api_key:key ());

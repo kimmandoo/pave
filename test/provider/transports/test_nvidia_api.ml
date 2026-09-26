@@ -113,8 +113,9 @@ let () =
       assert (url = Nvidia.models_url);
       assert (headers = ["Authorization", "Bearer " ^ key;
         "Accept", "application/json"]);
-      Ok (200, {|{"object":"list","data":[{"id":"newvendor/future-tool-model"},{"id":"another/model"},{"id":"newvendor/future-tool-model"}]}|}) in
-    expect_models [model; "another/model"] (Nvidia.discover ~http ~api_key:key ());
+      Ok (200, {|{"object":"list","data":[{"id":"newvendor/future-tool-model"},{"id":"another/model"},{"id":"third/model"}]}|}) in
+    expect_models [model; "another/model"; "third/model"]
+      (Nvidia.discover ~http ~api_key:key ());
     assert (!calls = 1);
     expect_error ((=) Nvidia.Invalid_credential)
       (Nvidia.discover ~http ~api_key:"" ());
@@ -127,6 +128,7 @@ let () =
       {|{"data":[{"id":"bad\nmodel"}]}|};
       {|{"data":[{"id":null}]}|};
       {|{"data":[{}]}|};
+      {|{"data":[{"id":"same/model"},{"id":"same/model"}]}|};
       {|{"models":[]}|}; "not json"];
     expect_error invalid (Nvidia.discover
       ~http:(fun ~url:_ ~headers:_ -> Ok (200,

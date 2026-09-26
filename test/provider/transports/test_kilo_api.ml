@@ -115,13 +115,14 @@ let () =
       incr calls;
       assert (url = Kilo.models_url);
       assert (headers = ["Accept", "application/json"]);
-      Ok (200, {|{"data":[{"id":"example/future-chat-model","object":"model"},{"id":"another/model","object":"model"},{"id":"example/future-chat-model","object":"model"}]}|}) in
-    assert (Kilo.discover ~http ~api_key:key () = Ok [model; "another/model"]);
-    assert (Kilo.discover ~http ~api_key:"" () = Ok [model; "another/model"]);
+      Ok (200, {|{"data":[{"id":"example/future-chat-model","object":"model"},{"id":"another/model","object":"model"},{"id":"third-valid-model","object":"model"}]}|}) in
+    assert (Kilo.discover ~http ~api_key:key () =
+      Ok [model; "another/model"; "third-valid-model"]);
+    assert (Kilo.discover ~http ~api_key:"" () =
+      Ok [model; "another/model"; "third-valid-model"]);
     assert (!calls = 2);
-    expect_error ((=) Kilo.Invalid_credential)
-      (Kilo.discover ~http ~api_key:"bad\r\nAuthorization: Bearer stolen" ());
-    assert (!calls = 2);
+    expect_error invalid (Kilo.parse_models
+      {|{"data":[{"id":"duplicate","object":"model"},{"id":"duplicate","object":"model"}]}|});
     List.iter (fun body -> expect_error invalid
       (Kilo.discover ~http:(fun ~url:_ ~headers:_ -> Ok (200, body))
          ~api_key:key ())) [

@@ -46,12 +46,16 @@ let parse_models body =
           let ids = ref [] in
           let valid = List.for_all (function
             | `Assoc fields ->
-                (match List.assoc_opt "id" fields, List.assoc_opt "object" fields with
-                | Some (`String id), (None | Some (`String "model")) when valid_id id ->
-                    if not (Hashtbl.mem seen id) then (
+                (match List.assoc_opt "id" fields with
+                | Some (`String id) when valid_id id ->
+                    if Hashtbl.mem seen id then false
+                    else (
                       Hashtbl.add seen id ();
-                      ids := id :: !ids);
-                    true
+                      match List.assoc_opt "object" fields with
+                      | None | Some (`String "model") ->
+                          ids := id :: !ids;
+                          true
+                      | _ -> false)
                 | _ -> false)
             | _ -> false) rows in
           if valid then Ok (List.rev !ids)
