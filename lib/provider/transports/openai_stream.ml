@@ -177,4 +177,4 @@ let finish t =
    | Some "stop", _ :: _ -> invalid "finish_reason stop with tool calls"
    | _ -> ());
   { Protocol.role = "assistant"; content = (if t.content_seen then Some (Buffer.contents t.content) else None);
-  tool_calls = calls; tool_call_id = None; tool_result_content = None; provider_state = None }
+  tool_calls = calls; tool_call_id = None; tool_result_content = None; provider_state = None; attachments = [] }

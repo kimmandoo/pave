@@ -31,6 +31,20 @@ let summary (entry : Session.entry) =
   | Session.Model { provider; model; api } ->
       "model · " ^ first_line (provider ^
         (match api with None -> "" | Some api -> "@" ^ api) ^ "/" ^ model)
+  | Session.Thinking level ->
+      "thinking · " ^ Option.value ~default:"default" level
+  | Session.Tool_selection disabled ->
+      "tools · disabled " ^ String.concat ", " (List.map first_line disabled)
+  | Session.Mode_change mode ->
+      "approval · " ^ (match mode with
+        | None -> "inherit" | Some mode -> Approval.string_of_mode mode)
+  | Session.Title title -> "title · " ^ first_line title
+  | Session.Label { target_id; label } ->
+      "label · " ^ (match label with None -> "cleared" | Some value -> first_line value) ^
+      " · " ^ target_id
+  | Session.Pin pinned ->
+      "pin · " ^ (if pinned then "pinned" else "unpinned")
+  | Session.Reset_boundary -> "cleared model context"
   | Session.Usage { provider; model; tokens } ->
       Printf.sprintf "usage · %s · %d in / %d out"
         (first_line (provider ^ "/" ^ model))
@@ -60,9 +74,13 @@ let summary (entry : Session.entry) =
         | None | Some "" when message.tool_calls <> [] -> "tool calls"
         | None -> ""
         | Some text -> first_line text in
-      message.role ^ (if content = "" then "" else " · " ^ content)
-
-let choices ~leaf entries =
+      let attachments = match message.attachments with
+        | [] -> ""
+        | items -> " · " ^ String.concat ", "
+            (List.map (fun (item : Protocol.attachment) ->
+              first_line item.name) items) in
+      message.role ^ (if content = "" then "" else " · " ^ content) ^ attachments
+let choices ?(labels = []) ~leaf entries =
   let total = List.length entries in
   let depth_by_id = Hashtbl.create (min 2048 total) in
   let first = max 0 (total - max_choices) in
@@ -75,9 +93,12 @@ let choices ~leaf entries =
     if !index >= first then (
       let indent = String.make (2 * min depth 4) ' ' in
       let marker = if leaf = Some entry.id then "◆" else " " in
-      let label = Printf.sprintf "%s %s%s%s · %s" marker indent
+      let label = match List.assoc_opt entry.id labels with
+        | None -> ""
+        | Some text -> " · " ^ first_line text in
+      let label = Printf.sprintf "%s %s%s%s · %s%s" marker indent
         (if depth = 0 then "• " else if depth > 4 then "… " else "↳ ")
-        (summary entry) entry.id in
+        (summary entry) entry.id label in
       selected := { label; id = entry.id } :: !selected);
     incr index) entries;
   List.rev !selected, first > 0

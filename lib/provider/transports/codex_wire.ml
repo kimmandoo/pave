@@ -144,7 +144,7 @@ let parse_completion ~model json =
   if !texts = [] && !calls = [] then invalid "completion without assistant output";
   { role = "assistant"; content = (match List.rev !texts with [] -> None | texts -> Some (String.concat "" texts));
   tool_calls = List.rev !calls; tool_call_id = None; tool_result_content = None; provider_state = Some (`Assoc ["provider", `String "openai-codex";
-    "model", `String model; "output", `List outputs]) }
+    "model", `String model; "output", `List outputs]); attachments = [] }
 
 let replay_items ~model (msg : message) state =
   if member "provider" state <> `String "openai-codex" ||
@@ -189,15 +189,24 @@ let request ~model messages tools =
         if !pending <> [] || msg.tool_calls <> [] || msg.tool_call_id <> None ||
            msg.provider_state <> None then
           invalid "user message during tool results";
-        (match msg.content with
-        | Some text -> emit (text_item "user" text)
-        | None -> invalid "user message without content")
+        let content =
+          (match msg.content with
+          | Some text -> [`Assoc ["type", `String "input_text"; "text", `String text]]
+          | None -> []) @ List.map (fun (attachment : attachment) ->
+            if not (List.mem attachment.mime_type ["image/png"; "image/jpeg"; "image/webp"])
+            then invalid ("unsupported user image MIME type " ^ attachment.mime_type);
+            `Assoc ["type", `String "input_image";
+              "image_url", `String ("data:" ^ attachment.mime_type ^ ";base64," ^ attachment.data)])
+            msg.attachments in
+        if content = [] then invalid "user message without content";
+        emit (`Assoc ["role", `String "user"; "content", `List content])
     | "assistant" ->
         if !pending <> [] || msg.tool_call_id <> None then invalid "assistant during tool results";
         let native = match msg.provider_state with
           | None -> None
           | Some state -> Some (replay_items ~model msg state) in
-        let calls = List.map (fun (call : tool_call) ->
+        let calls : (tool_call * string) list =
+          List.map (fun (call : tool_call) ->
           let id = match native with
             | None -> wire_call_id call.id
             | Some _ -> check_call_id call.id; call.id in
@@ -215,11 +224,11 @@ let request ~model messages tools =
             | Some text -> emit (`Assoc ["role", `String "assistant"; "content", `String text])
             | None when calls = [] -> invalid "empty assistant message"
             | None -> ());
-            List.iter (fun (call, id) ->
+            List.iter (fun ((call : tool_call), id) ->
               emit (`Assoc ["type", `String "function_call"; "call_id", `String id;
                 "name", `String call.name;
                 "arguments", `String (Yojson.Basic.to_string call.arguments)])) calls);
-        pending := List.map (fun (call, id) -> call.id, id) calls
+        pending := List.map (fun ((call : tool_call), id) -> call.id, id) calls
     | "tool" ->
         (match msg.content, msg.tool_call_id, msg.tool_calls with
         | Some _, Some id, [] ->

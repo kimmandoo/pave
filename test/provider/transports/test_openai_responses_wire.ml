@@ -5,10 +5,10 @@ let invalid f = match f () with
   | exception Protocol.Invalid_response _ -> ()
   | _ -> failwith "expected invalid Responses response"
 let assistant content calls : Protocol.message =
-  { role = "assistant"; content; tool_calls = calls; tool_call_id = None; tool_result_content = None; provider_state = None }
+  { role = "assistant"; content; tool_calls = calls; tool_call_id = None; tool_result_content = None; provider_state = None; attachments = [] }
 let system content : Protocol.message =
   { role = "system"; content = Some content; tool_calls = [];
-    tool_call_id = None; tool_result_content = None; provider_state = None }
+    tool_call_id = None; tool_result_content = None; provider_state = None; attachments = [] }
 let call id name arguments : Protocol.tool_call = { id; name; arguments }
 let item kind fields = `Assoc (("type", `String kind) :: fields)
 let completed outputs = `Assoc [ "status", `String "completed"; "output", `List outputs ]
@@ -69,6 +69,13 @@ let () =
       item "input_text" ["text", `String "(see attached image)"] ]);
   assert (field "stream" (Openai_responses_wire.request ~stream:true
     ~model:"gpt-test" [] []) = `Bool true);
+  let attached = { (Protocol.user "describe") with attachments = [
+    { name = "ignored.png"; mime_type = "image/png"; data = "aGVsbG8=" } ] } in
+  assert (field "input" (Openai_responses_wire.request ~model:"gpt-test"
+    [attached] []) = `List [`Assoc ["role", `String "user"; "content", `List [
+      `Assoc ["type", `String "input_text"; "text", `String "describe"];
+      `Assoc ["type", `String "input_image";
+        "image_url", `String "data:image/png;base64,aGVsbG8="] ]]]);
   let response = completed [ message [ text "Hello "; text "world" ] ] in
   assert (Openai_responses_wire.parse_completion response = assistant (Some "Hello world") []);
   let reported = `Assoc [

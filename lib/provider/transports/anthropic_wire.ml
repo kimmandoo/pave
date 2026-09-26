@@ -107,9 +107,21 @@ let request ~model ~max_tokens messages tools =
          | "user" ->
              if !pending <> [] || msg.tool_calls <> [] || msg.tool_call_id <> None then
                invalid "user message during tool results";
-             (match msg.content with
-              | Some text -> append (wire_message "user" (`String text))
-              | None -> invalid "user message without content");
+             let content = match msg.attachments with
+               | [] ->
+                   (match msg.content with
+                   | Some text -> `String text
+                   | None -> invalid "user message without content")
+               | attachments ->
+                   let blocks = (match msg.content with
+                     | Some text when text <> "" -> [text_block text]
+                     | _ -> []) @ List.map (fun (attachment : attachment) ->
+                       if not (List.mem attachment.mime_type
+                         ["image/png"; "image/jpeg"; "image/webp"]) then
+                         invalid ("unsupported user image MIME type " ^ attachment.mime_type);
+                       image_block attachment.mime_type attachment.data) attachments in
+                   `List blocks in
+             append (wire_message "user" content);
              replay rest
          | "assistant" ->
              if !pending <> [] || msg.tool_call_id <> None then
@@ -187,4 +199,4 @@ let parse_response json =
   let content = match List.rev !texts with
     | [] -> None
     | texts -> Some (String.concat "" texts) in
-  { role = "assistant"; content; tool_calls; tool_call_id = None; tool_result_content = None; provider_state = None }
+  { role = "assistant"; content; tool_calls; tool_call_id = None; tool_result_content = None; provider_state = None; attachments = [] }

@@ -37,13 +37,24 @@ let request ~model messages tools =
   let pending = ref [] in
   let convert (msg : message) =
     match msg.role with
-    | "system" | "user" ->
+    | "system" ->
+        if msg.attachments <> [] then invalid "Ollama images are supported only on user messages";
         if !pending <> [] || msg.tool_calls <> [] || msg.tool_call_id <> None then
           invalid "message before tool results";
         let content = match msg.content with Some text -> text | None -> invalid "missing message content" in
-        `Assoc [ "role", `String msg.role; "content", `String content ]
+        `Assoc ["role", `String "system"; "content", `String content]
+    | "user" ->
+        if !pending <> [] || msg.tool_calls <> [] || msg.tool_call_id <> None then
+          invalid "message before tool results";
+        let content = match msg.content with Some text -> text | None -> "" in
+        let images = List.map (fun (attachment : attachment) ->
+          if not (List.mem attachment.mime_type ["image/png"; "image/jpeg"; "image/webp"])
+          then invalid ("unsupported user image MIME type " ^ attachment.mime_type);
+          attachment.data) msg.attachments in
+        if content = "" && images = [] then invalid "missing message content";
+        `Assoc (["role", `String "user"; "content", `String content] @
+          if images = [] then [] else ["images", `List (List.map (fun data -> `String data) images)])
     | "assistant" ->
-        if !pending <> [] || msg.tool_call_id <> None then invalid "assistant before tool results";
         let ids = Hashtbl.create (List.length msg.tool_calls) in
         let calls = List.map (fun (call : tool_call) ->
           if call.id = "" || call.name = "" || Hashtbl.mem ids call.id then
@@ -109,7 +120,7 @@ let parse_message json =
   let tool_calls = parse_calls (field "tool_calls" json) in
   if tool_calls = [] && (content = None || content = Some "") then
     invalid "empty assistant response";
-  { role = "assistant"; content; tool_calls; tool_call_id = None; tool_result_content = None; provider_state = None }
+  { role = "assistant"; content; tool_calls; tool_call_id = None; tool_result_content = None; provider_state = None; attachments = [] }
 
 let check_done_reason json has_calls =
   match field "done_reason" json with

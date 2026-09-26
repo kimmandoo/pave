@@ -96,9 +96,23 @@ let request messages tools =
         | "user" ->
             if !pending <> [] || message.tool_calls <> [] || message.tool_call_id <> None then
               invalid "user message during tool results";
-            (match message.content with
-             | Some content -> append (wire_message "user" [text content])
-             | None -> invalid "user message without content");
+            let blocks =
+              (match message.content with
+              | Some content -> [text content]
+              | None -> []) @ List.map (fun (attachment : attachment) ->
+                if not (List.mem attachment.mime_type
+                  ["image/png"; "image/jpeg"; "image/webp"]) then
+                  invalid ("unsupported user image MIME type " ^ attachment.mime_type);
+                let format = match attachment.mime_type with
+                  | "image/jpeg" -> "jpeg"
+                  | "image/png" -> "png"
+                  | "image/webp" -> "webp"
+                  | _ -> assert false in
+                `Assoc ["image", `Assoc ["format", `String format;
+                  "source", `Assoc ["bytes", `String attachment.data]]])
+                message.attachments in
+            if blocks = [] then invalid "user message without content";
+            append (wire_message "user" blocks);
             replay rest
         | "assistant" ->
             if !pending <> [] || message.tool_call_id <> None then
@@ -174,7 +188,8 @@ let parse_response json =
     | [] -> None
     | chunks -> Some (String.concat "" chunks) in
   { role = "assistant"; content; tool_calls = calls;
-    tool_call_id = None; tool_result_content = None; provider_state = None }
+    tool_call_id = None; tool_result_content = None; provider_state = None;
+    attachments = [] }
 
 let usage json =
   let reported = member "usage" json in

@@ -16,6 +16,13 @@ type kind =
   | Message of Protocol.message
   | Compaction of { summary : string; first_kept_id : string }
   | Model of { provider : string; model : string; api : string option }
+  | Thinking of string option
+  | Tool_selection of string list
+  | Mode_change of Approval.mode option
+  | Title of string
+  | Label of { target_id : string; label : string option }
+  | Pin of bool
+  | Reset_boundary
   | Usage of { provider : string; model : string; tokens : Protocol.usage }
   | Branch
   | Tool_lifecycle of tool_lifecycle
@@ -60,33 +67,56 @@ let timestamp () =
 
 let option_json = function None -> `Null | Some text -> `String text
 
-let new_header cwd =
+let new_header ?parent_session cwd =
   `Assoc [ "type", `String "session"; "version", `Int 1;
            "id", `String (fresh_id ()); "timestamp", `String (timestamp ());
-           "cwd", `String cwd ]
+           "cwd", `String cwd; "parentSession", option_json parent_session ]
 
 let entry_json entry =
   let type_name = match entry.kind with
     | Message _ -> "message" | Compaction _ -> "compaction"
-    | Model _ -> "model" | Usage _ -> "usage" | Branch -> "branch"
+    | Model _ -> "model" | Thinking _ -> "thinking_level_change"
+    | Tool_selection _ -> "tool_selection" | Mode_change _ -> "mode_change"
+    | Title _ -> "title_change" | Label _ -> "label"
+    | Pin _ -> "pin_change" | Reset_boundary -> "reset_boundary"
+    | Usage _ -> "usage" | Branch -> "branch"
     | Tool_lifecycle _ -> "tool" | Session_exit _ -> "exit" in
   let fields = [ "type", `String type_name;
     "id", `String entry.id; "parentId", option_json entry.parent_id;
     "timestamp", `String entry.timestamp ] in
   match entry.kind with
-  | Message message -> `Assoc (fields @ [
-      "message", Protocol.message_to_json ~stored:true message ])
+  | Message message ->
+      Protocol.validate_attachments message.attachments;
+      let message_json = Protocol.message_to_json ~stored:true
+        { message with attachments = [] } in
+      `Assoc (fields @ ["message", message_json] @
+        (if message.attachments = [] then [] else
+          ["attachments", `List (List.map Protocol.attachment_to_json
+            message.attachments)]))
   | Compaction { summary; first_kept_id } ->
       `Assoc (fields @ [ "summary", `String summary;
                          "firstKeptEntryId", `String first_kept_id ])
   | Model { provider; model; api } ->
       `Assoc (fields @ ["provider", `String provider; "model", `String model] @
         (match api with None -> [] | Some api -> ["api", `String api]))
+  | Thinking level ->
+      `Assoc (fields @ ["thinkingLevel", option_json level])
+  | Tool_selection disabled ->
+      `Assoc (fields @ ["disabledTools", `List (List.map (fun name ->
+        `String name) disabled)])
+  | Mode_change mode ->
+      `Assoc (fields @ ["mode", option_json
+        (Option.map Approval.string_of_mode mode)])
+  | Title title -> `Assoc (fields @ ["title", `String title])
+  | Label { target_id; label } ->
+      `Assoc (fields @ ["targetId", `String target_id;
+        "label", option_json label])
+  | Pin pinned -> `Assoc (fields @ ["pinned", `Bool pinned])
+  | Reset_boundary | Branch -> `Assoc fields
   | Usage { provider; model; tokens } ->
       `Assoc (fields @ ["provider", `String provider; "model", `String model;
         "inputTokens", `Int tokens.input_tokens;
         "outputTokens", `Int tokens.output_tokens])
-  | Branch -> `Assoc fields
   | Tool_lifecycle { call_id; name; state } ->
       let state_fields = match state with
         | Tool_started -> ["state", `String "started"]
@@ -148,6 +178,39 @@ let append_line t json =
 let valid_model_field text =
   text <> "" && not (String.exists (fun char ->
     Char.code char <= 32 || Char.code char = 127) text)
+let valid_text_field limit text =
+  text <> "" && String.length text <= limit &&
+  not (String.exists (fun char ->
+    let code = Char.code char in code < 32 || code = 127) text)
+
+let parse_optional_text get name limit =
+  match get name with
+  | `Null -> None
+  | `String value when valid_text_field limit value -> Some value
+  | _ -> invalid ("invalid " ^ name)
+
+let parse_attachment_list json =
+  match json with
+  | `Null -> []
+  | `List items ->
+      let attachments = List.map Protocol.attachment_from_json items in
+      (try Protocol.validate_attachments attachments
+       with Protocol.Invalid_response _ -> invalid "invalid attachments");
+      attachments
+  | _ -> invalid "invalid attachments"
+
+let parse_disabled_tools json =
+  match json with
+  | `List items ->
+      let names = List.map (function
+        | `String name when valid_model_field name -> name
+        | _ -> invalid "invalid disabled tool name") items in
+      if List.length names > 128 ||
+         List.length names <> List.length (List.sort_uniq String.compare names) then
+        invalid "invalid disabled tools";
+      names
+  | _ -> invalid "invalid disabled tools"
+
 
 let parse_entry json =
   let get key = Protocol.member key json in
@@ -179,7 +242,12 @@ let parse_entry json =
          | _ -> invalid "invalid pending tool state")
     | _ -> invalid "invalid pending tool call" in
   let kind = match get "type" with
-    | `String "message" -> Message (Protocol.message_from_json (get "message"))
+    | `String "message" ->
+        let message = Protocol.message_from_json (get "message") in
+        let attachments = parse_attachment_list (get "attachments") in
+        if attachments <> [] && message.role <> "user" then
+          invalid "attachments on a non-user message";
+        Message { message with attachments }
     | `String "compaction" ->
         (match get "summary", get "firstKeptEntryId" with
          | `String summary, `String first_kept_id
@@ -197,6 +265,32 @@ let parse_entry json =
              Model { provider; model;
                api = (match api with `String name -> Some name | _ -> None) }
          | _ -> invalid "invalid model selection")
+    | `String "thinking_level_change" ->
+        Thinking (parse_optional_text get "thinkingLevel" 32)
+    | `String "tool_selection" ->
+        Tool_selection (parse_disabled_tools (get "disabledTools"))
+    | `String "mode_change" ->
+        (match get "mode" with
+         | `Null -> Mode_change None
+         | `String value ->
+             (match Approval.mode_of_string value with
+              | Some mode -> Mode_change (Some mode)
+              | None -> invalid "invalid approval mode")
+         | _ -> invalid "invalid approval mode")
+    | `String "title_change" ->
+        (match get "title" with
+         | `String title when valid_text_field 256 title -> Title title
+         | _ -> invalid "invalid session title")
+    | `String "label" ->
+        (match get "targetId", parse_optional_text get "label" 128 with
+         | `String target_id, label when valid_model_field target_id ->
+             Label { target_id; label }
+         | _ -> invalid "invalid entry label")
+    | `String "pin_change" ->
+        (match get "pinned" with
+         | `Bool pinned -> Pin pinned
+         | _ -> invalid "invalid pin metadata")
+    | `String "reset_boundary" -> Reset_boundary
     | `String "usage" ->
         (match get "provider", get "model",
           get "inputTokens", get "outputTokens" with
@@ -239,7 +333,7 @@ let parse_entry json =
     | _ -> invalid "unsupported journal entry type" in
   { id; parent_id; timestamp; kind }
 
-let branch_entries t =
+let branch_entries_at t leaf =
   let rec walk id items =
     match id with
     | None -> items
@@ -247,41 +341,94 @@ let branch_entries t =
         let entry = try Hashtbl.find t.by_id id
           with Not_found -> invalid ("missing parent entry: " ^ id) in
         walk entry.parent_id (entry :: items) in
-  walk t.leaf []
+  walk leaf []
 
+let branch_entries t = branch_entries_at t t.leaf
 let entries t = List.rev t.records_rev
 let leaf_id t = t.leaf
+let parent_session t = match Protocol.member "parentSession" t.header with
+  | `String id -> Some id | _ -> None
+
+let latest_value entries select initial =
+  List.fold_left (fun current entry ->
+    match select entry.kind with None -> current | Some value -> value)
+    initial entries
+
 let model_at t leaf =
-  let rec find = function
-    | None -> None
-    | Some id ->
-        let entry = try Hashtbl.find t.by_id id
-          with Not_found -> invalid ("missing parent entry: " ^ id) in
-        match entry.kind with
-        | Model { provider; model; _ } -> Some (provider, model)
-        | Message _ | Compaction _ | Usage _ | Branch
-        | Tool_lifecycle _ | Session_exit _ -> find entry.parent_id in
-  find leaf
+  latest_value (branch_entries_at t leaf) (function
+    | Model { provider; model; _ } -> Some (Some (provider, model))
+    | _ -> None) None
+
 let model t = model_at t t.leaf
+
 let api_at t leaf =
-  let rec find = function
-    | None -> None
-    | Some id ->
-        let entry = try Hashtbl.find t.by_id id
-          with Not_found -> invalid ("missing parent entry: " ^ id) in
-        match entry.kind with
-        | Model { api; _ } -> api
-        | Message _ | Compaction _ | Usage _ | Branch
-        | Tool_lifecycle _ | Session_exit _ -> find entry.parent_id in
-  find leaf
+  latest_value (branch_entries_at t leaf) (function
+    | Model { api; _ } -> Some api
+    | _ -> None) None
+
 let api t = api_at t t.leaf
+
+let thinking_at t leaf =
+  latest_value (branch_entries_at t leaf) (function
+    | Thinking level -> Some level | _ -> None) None
+
+let thinking t = thinking_at t t.leaf
+
+let disabled_tools_at t leaf =
+  latest_value (branch_entries_at t leaf) (function
+    | Tool_selection disabled -> Some disabled | _ -> None) []
+
+let disabled_tools t = disabled_tools_at t t.leaf
+let tool_enabled t name = not (List.mem name (disabled_tools t))
+
+let mode_at t leaf =
+  latest_value (branch_entries_at t leaf) (function
+    | Mode_change mode -> Some mode | _ -> None) None
+
+let mode t = mode_at t t.leaf
+
+let title_at t _leaf =
+  let title = latest_value (entries t) (function
+    | Title title -> Some (Some title) | _ -> None) None in
+  match title with
+  | Some _ -> title
+  | None -> (match Protocol.member "title" t.header with
+      | `String value when value <> "" -> Some value | _ -> None)
+
+let title t = title_at t t.leaf
+
+let labels_at t leaf =
+  List.fold_left (fun labels entry -> match entry.kind with
+    | Label { target_id; label } ->
+        (match label with
+         | None -> List.remove_assoc target_id labels
+         | Some text -> (target_id, text) :: List.remove_assoc target_id labels)
+    | _ -> labels) [] (branch_entries_at t leaf)
+
+let label_at t target_id =
+  List.assoc_opt target_id (labels_at t t.leaf)
+
+let labels t = labels_at t t.leaf
+
+let label_target t =
+  let entries = List.rev (branch_entries t) in
+  let rec find = function
+    | [] -> t.leaf
+    | entry :: rest ->
+        (match entry.kind with
+         | Message _ | Compaction _ -> Some entry.id
+         | Model _ | Thinking _ | Tool_selection _ | Mode_change _
+         | Title _ | Label _ | Pin _ | Reset_boundary | Usage _ | Branch
+         | Tool_lifecycle _ | Session_exit _ -> find rest) in
+  find entries
 let usage t =
   List.fold_left (fun total entry -> match entry.kind with
     | Usage { tokens; _ } ->
         (match total with
          | None -> Some tokens
          | Some previous -> Some (Protocol.add_usage previous tokens))
-    | Message _ | Compaction _ | Model _ | Branch
+    | Message _ | Compaction _ | Model _ | Thinking _ | Tool_selection _
+    | Mode_change _ | Title _ | Label _ | Pin _ | Reset_boundary | Branch
     | Tool_lifecycle _ | Session_exit _ -> total)
     None (branch_entries t)
 module Usage_models = Map.Make (struct
@@ -296,14 +443,17 @@ let usage_by_model t =
         Usage_models.update key (function
           | None -> Some tokens
           | Some previous -> Some (Protocol.add_usage previous tokens)) models
-    | Message _ | Compaction _ | Model _ | Branch
+    | Message _ | Compaction _ | Model _ | Thinking _ | Tool_selection _
+    | Mode_change _ | Title _ | Label _ | Pin _ | Reset_boundary | Branch
     | Tool_lifecycle _ | Session_exit _ -> models)
     Usage_models.empty (branch_entries t) in
   Usage_models.bindings models
+
 let messages entries =
   List.filter_map (fun entry -> match entry.kind with
     | Message message -> Some message
-    | Compaction _ | Model _ | Usage _ | Branch
+    | Compaction _ | Model _ | Thinking _ | Tool_selection _
+    | Mode_change _ | Title _ | Label _ | Pin _ | Reset_boundary | Usage _ | Branch
     | Tool_lifecycle _ | Session_exit _ -> None) entries
 let history t = messages (branch_entries t)
 let retryable_history history =
@@ -312,7 +462,7 @@ let retryable_history history =
     | (message : Protocol.message) :: earlier ->
         (match message.role, message.content, message.tool_calls with
          | "user", Some text, [] when safe && String.trim text <> "" ->
-             Some (List.rev earlier, text)
+             Some (List.rev earlier, message)
          | "user", _, _ -> None
          | "assistant", _, [] -> find safe earlier
          | _ -> find false earlier) in
@@ -321,25 +471,38 @@ let retryable_history history =
 let retry_candidate t =
   let rec find = function
     | [] -> None
-    | { kind = Message { role = "user"; content = Some text; _ };
+    | { kind = Message ({ role = "user"; content = Some text; _ } as message);
         parent_id = Some parent; _ } :: _ when String.trim text <> "" ->
-        Some (parent, text)
+        Some (parent, message)
     | { kind = Message { role = "assistant"; tool_calls = []; _ }; _ } :: rest
     | { kind = Usage _; _ } :: rest
     | { kind = Tool_lifecycle _; _ } :: rest
-    | { kind = Session_exit _; _ } :: rest -> find rest
+    | { kind = Session_exit _; _ } :: rest
+    | { kind = Title _; _ } :: rest
+    | { kind = Label _; _ } :: rest
+    | { kind = Pin _; _ } :: rest -> find rest
+    | { kind = Reset_boundary; _ } :: _ -> None
     | _ -> None in
   find (List.rev (branch_entries t))
 
 let context t =
   let path = branch_entries t in
   let latest = List.fold_left (fun found entry -> match entry.kind with
-    | Compaction { summary; first_kept_id } -> Some (entry.id, summary, first_kept_id)
-    | Message _ | Model _ | Usage _ | Branch
-    | Tool_lifecycle _ | Session_exit _ -> found) None path in
+    | Compaction { summary; first_kept_id } ->
+        `Compaction (entry.id, summary, first_kept_id)
+    | Reset_boundary -> `Reset entry.id
+    | Message _ | Model _ | Thinking _ | Tool_selection _ | Mode_change _
+    | Title _ | Label _ | Pin _ | Usage _ | Branch | Tool_lifecycle _ | Session_exit _ -> found)
+    `None path in
   match latest with
-  | None -> messages path
-  | Some (marker_id, summary, first_kept_id) ->
+  | `None -> messages path
+  | `Reset marker_id ->
+      let rec after = function
+        | [] -> invalid "reset boundary missing from branch"
+        | entry :: rest when entry.id = marker_id -> messages rest
+        | _ :: rest -> after rest in
+      after path
+  | `Compaction (marker_id, summary, first_kept_id) ->
       let rec split before = function
         | [] -> invalid "compaction marker missing from branch"
         | entry :: after when entry.id = marker_id -> List.rev before, after
@@ -351,19 +514,24 @@ let context t =
         | _ :: rest -> kept rest in
       Protocol.user summary :: messages (kept before @ after)
 
+
 let compaction_plan t =
   let path = branch_entries t in
+  let active_path = List.fold_left (fun entries entry ->
+    match entry.kind with
+    | Reset_boundary -> []
+    | _ -> entry :: entries) [] path |> List.rev in
   let rec last_user candidate = function
     | [] -> candidate
     | { id; kind = Message { role = "user"; _ }; _ } :: rest ->
         last_user (Some id) rest
     | _ :: rest -> last_user candidate rest in
-  match last_user None path with
+  match last_user None active_path with
   | None -> invalid "nothing to compact"
   | Some first_kept_id ->
       let rec before_last_user = function
         | [] -> invalid "compaction boundary missing from context"
-        | message :: prefix when message.Protocol.role = "user" -> List.rev prefix
+        | message :: rest when message.Protocol.role = "user" -> List.rev rest
         | _ :: rest -> before_last_user rest in
       let prefix = before_last_user (List.rev (context t)) in
       if List.length prefix < 2 then invalid "nothing to compact";
@@ -393,7 +561,10 @@ let unresolved_tool_calls entries =
         update call_id Settled
     | Tool_lifecycle { call_id; state = Tool_aborted { side_effects_may_have_occurred }; _ } ->
         update call_id (Aborted { side_effects_may_have_occurred })
-    | Compaction _ | Model _ | Usage _ | Branch | Session_exit _ -> ()) entries;
+    | Reset_boundary ->
+        if !pending <> [] then invalid "reset boundary with outstanding tool calls"
+    | Compaction _ | Model _ | Thinking _ | Tool_selection _
+    | Mode_change _ | Title _ | Label _ | Pin _ | Usage _ | Branch | Session_exit _ -> ()) entries;
   List.rev !pending
 
 let missing_results entries = unresolved_tool_calls entries
@@ -445,11 +616,15 @@ let compact t ~summary ~first_kept_id =
   if missing_results (branch_entries t) <> [] then invalid "unresolved tool results";
   (append_entry t (Compaction { summary; first_kept_id })).id
 
-let append t message =
-  (match message.Protocol.role, message.content, message.tool_calls, message.tool_call_id with
+let append t (message : Protocol.message) =
+  (match message.role, message.content, message.tool_calls, message.tool_call_id with
    | "user", Some _, [], None | "assistant", _, _, None
    | "tool", Some _, [], Some _ -> ()
    | _ -> invalid "unsupported message");
+  (try Protocol.validate_attachments message.attachments
+   with Protocol.Invalid_response _ -> invalid "invalid user attachments");
+  if message.attachments <> [] && message.role <> "user" then
+    invalid "attachments on a non-user message";
   (append_entry t (Message message)).id
 
 let record_tool_event t ~call_id ~name state =
@@ -490,6 +665,51 @@ let set_model ?api t ~provider ~model:selected =
     t.records_rev <- entry :: t.records_rev;
     Hashtbl.add t.by_id entry.id entry;
     t.leaf <- Some entry.id)
+let clear t =
+  if unresolved_tool_calls (branch_entries t) <> [] then
+    invalid "cannot clear while tool calls are unresolved";
+  (append_entry t Reset_boundary).id
+
+let set_thinking t level =
+  (match level with
+   | None -> ()
+   | Some value when valid_text_field 32 value -> ()
+   | Some _ -> invalid "invalid thinking level");
+  if thinking t <> level then ignore (append_entry t (Thinking level))
+
+let set_disabled_tools t disabled =
+  let disabled = List.sort_uniq String.compare disabled in
+  if List.length disabled > 128 ||
+     not (List.for_all valid_model_field disabled) then
+    invalid "invalid disabled tools";
+  if disabled_tools t <> disabled then
+    ignore (append_entry t (Tool_selection disabled))
+
+let set_mode t selected =
+  if mode t <> selected then ignore (append_entry t (Mode_change selected))
+
+let set_title t selected =
+  let selected = String.trim selected in
+  if not (valid_text_field 256 selected) then invalid "invalid session title";
+  if selected <> Option.value ~default:"" (title t) then
+    ignore (append_entry t (Title selected))
+let set_label t ~target_id label =
+  if not (List.exists (fun entry -> entry.id = target_id)
+      (branch_entries t)) then invalid "label target is not on the selected branch";
+  (match label with
+   | None -> ()
+   | Some value when valid_text_field 128 value -> ()
+   | Some _ -> invalid "invalid entry label");
+  if label_at t target_id <> label then
+    ignore (append_entry t (Label { target_id; label }))
+
+let pinned t =
+  latest_value (entries t) (function
+    | Pin selected -> Some selected
+    | _ -> None) false
+
+let set_pinned t selected =
+  if pinned t <> selected then ignore (append_entry t (Pin selected))
 
 let append_usage t ~provider ~model (tokens : Protocol.usage) =
   if not (valid_model_field provider && valid_model_field model) ||
@@ -529,6 +749,10 @@ let load_journal path =
       Protocol.member "cwd" header with
      | `String id, `String _, `String _ when id <> "" -> ()
      | _ -> invalid "incomplete session header");
+    (match Protocol.member "parentSession" header with
+     | `Null -> ()
+     | `String parent when valid_text_field 128 parent -> ()
+     | _ -> invalid "invalid parent session ID");
     let records = ref [] in
     let by_id = Hashtbl.create 32 in
     let seen_ids = Hashtbl.create 32 in
@@ -541,8 +765,21 @@ let load_journal path =
        | Some parent when not (Hashtbl.mem by_id parent) ->
            invalid ("entry has missing parent: " ^ parent)
        | _ -> ());
+      let is_ancestor target start =
+        let rec walk = function
+          | None -> false
+          | Some id when id = target -> true
+          | Some id -> walk (Hashtbl.find by_id id).parent_id in
+        walk start in
       (match entry.kind with
-       | Message _ | Model _ | Usage _ | Tool_lifecycle _ | Session_exit _ ->
+       | Label { target_id; _ } ->
+           if not (is_ancestor target_id entry.parent_id) then
+             invalid "label target is not an ancestor"
+       | _ -> ());
+      (match entry.kind with
+       | Message _ | Model _ | Thinking _ | Tool_selection _ | Mode_change _
+       | Title _ | Label _ | Pin _ | Reset_boundary | Usage _ | Tool_lifecycle _
+       | Session_exit _ ->
            Hashtbl.add by_id entry.id entry; leaf := Some entry.id
        | Compaction { first_kept_id; _ } ->
            let rec ancestor = function
@@ -550,9 +787,12 @@ let load_journal path =
              | Some id when id = first_kept_id ->
                  (match (Hashtbl.find by_id id).kind with
                   | Message { role = "user"; _ } -> true | _ -> false)
-             | Some id -> ancestor (Hashtbl.find by_id id).parent_id in
+             | Some id ->
+                 (match (Hashtbl.find by_id id).kind with
+                  | Reset_boundary -> false
+                  | _ -> ancestor (Hashtbl.find by_id id).parent_id) in
            if not (ancestor entry.parent_id) then
-             invalid "compaction boundary is not an ancestor user entry";
+             invalid "compaction boundary is not an ancestor user entry after reset";
            Hashtbl.add by_id entry.id entry; leaf := Some entry.id
        | Branch ->
            Hashtbl.add by_id entry.id entry;
@@ -624,11 +864,49 @@ let rec open_file ?(cwd = Unix.getcwd ()) path =
       let session = load_journal path in
       recover_pending_tools session;
       session))
+let create_managed ~cwd ~directory =
+  let rec create () =
+    let header = new_header cwd in
+    let id = match Protocol.member "id" header with
+      | `String id -> id | _ -> invalid "session ID missing during create" in
+    let path = Filename.concat directory (id ^ ".jsonl") in
+    try
+      write_new_file path (line header);
+      open_file ~cwd path
+    with Unix.Unix_error (Unix.EEXIST, _, _) -> create () in
+  create ()
+
+
+let fork_header session =
+  let cwd = match Protocol.member "cwd" session.header with
+    | `String cwd -> cwd | _ -> Unix.getcwd () in
+  let parent_session = match Protocol.member "id" session.header with
+    | `String id -> id | _ -> invalid "session ID missing during fork" in
+  new_header ~parent_session cwd
+
+let fork_content session header =
+  line header ^ String.concat ""
+    (List.map (fun entry -> line (entry_json entry)) (branch_entries session))
+
+let finish_fork session path header =
+  write_new_file path (fork_content session header);
+  let forked = open_file path in
+  (match title session with
+   | Some selected when title forked <> Some selected ->
+       set_title forked selected
+   | _ -> ());
+  if pinned forked then set_pinned forked false;
+  forked
 
 let fork session path =
-  let header = new_header (match Protocol.member "cwd" session.header with
-    | `String cwd -> cwd | _ -> Unix.getcwd ()) in
-  let body = line header ^ String.concat "" (List.map (fun entry -> line (entry_json entry))
-    (branch_entries session)) in
-  write_new_file path body;
-  open_file path
+  finish_fork session path (fork_header session)
+
+let fork_managed session directory =
+  let rec create () =
+    let header = fork_header session in
+    let id = match Protocol.member "id" header with
+      | `String id -> id | _ -> invalid "session ID missing during fork" in
+    let path = Filename.concat directory (id ^ ".jsonl") in
+    try finish_fork session path header with
+    | Unix.Unix_error (Unix.EEXIST, _, _) -> create () in
+  create ()

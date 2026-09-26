@@ -216,7 +216,8 @@ let () =
     `Assoc ["reasoningContent", `Assoc ["reasoningText", `Assoc [
       "text", `String "unpreserved"; "signature", `String "signed"]]]]));
   let history : Pave.Protocol.message = { role = "assistant"; content = None; tool_calls = [call];
-  tool_call_id = None; tool_result_content = None; provider_state = None } in
+  tool_call_id = None; tool_result_content = None; provider_state = None;
+  attachments = [] } in
   expect_invalid (fun () -> Wire.request
     [Pave.Protocol.user "Find alpha"; history;
       Pave.Protocol.tool_result call.id "value-alpha"] []);
@@ -224,7 +225,7 @@ let () =
   let typed_result blocks = Pave.Protocol.tool_result_blocks call.id blocks in
   let assistant_message : Pave.Protocol.message = {
     role = "assistant"; content = None; tool_calls = [call]; tool_call_id = None;
-    tool_result_content = None; provider_state = None } in
+    tool_result_content = None; provider_state = None; attachments = [] } in
   let png = "iVBORw0KGgo=" in
   let mixed = Wire.request
     [Pave.Protocol.user "Find alpha"; assistant_message;
@@ -258,5 +259,12 @@ let () =
   expect_invalid (fun () -> Wire.request
     [assistant_message; typed_result [Pave.Protocol.Image {
       mime_type = "image/bmp"; data = "AA==" }]] [tool]);
+  let attached = { (Pave.Protocol.user "describe") with attachments = [
+    { name = "secret.jpg"; mime_type = "image/jpeg"; data = "/9j/2Q==" } ] } in
+  assert (field "messages" (Wire.request [attached] []) = `List [
+    `Assoc ["role", `String "user"; "content", `List [
+      `Assoc ["text", `String "describe"];
+      `Assoc ["image", `Assoc ["format", `String "jpeg";
+        "source", `Assoc ["bytes", `String "/9j/2Q=="]]]]]]);
   fixture ();
   print_endline "bedrock converse wire: ok"

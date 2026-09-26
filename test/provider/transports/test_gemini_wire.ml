@@ -4,10 +4,10 @@ let expect_invalid f = match f () with
   | _ -> failwith "expected invalid Gemini response"
 let call id name arguments : Pave.Protocol.tool_call = { id; name; arguments }
 let assistant content tool_calls : Pave.Protocol.message =
-  { role = "assistant"; content; tool_calls; tool_call_id = None; tool_result_content = None; provider_state = None }
+  { role = "assistant"; content; tool_calls; tool_call_id = None; tool_result_content = None; provider_state = None; attachments = [] }
 let system text : Pave.Protocol.message =
   { role = "system"; content = Some text; tool_calls = [];
-    tool_call_id = None; tool_result_content = None; provider_state = None }
+    tool_call_id = None; tool_result_content = None; provider_state = None; attachments = [] }
 let item role parts = `Assoc [ "role", `String role; "parts", `List parts ]
 let text value = `Assoc [ "text", `String value ]
 let fn name args = `Assoc [ "functionCall", `Assoc [ "name", `String name; "args", args ] ]
@@ -229,4 +229,10 @@ let () =
       "candidates", `List [] ]));
   expect_invalid (fun () -> Pave.Gemini_wire.parse_completion ~model:"gemini-2.5-flash"
     (response [ `Assoc [ "inlineData", `Assoc [] ] ] "STOP"));
+  let attached = { (user "describe") with attachments = [
+    { name = "display.webp"; mime_type = "image/webp"; data = "aGVsbG8=" } ] } in
+  assert (field "contents" (Pave.Gemini_wire.request ~model:"gemini-2.5-flash"
+    [attached] []) = `List [item "user" [text "describe";
+      `Assoc ["inlineData", `Assoc ["mimeType", `String "image/webp";
+        "data", `String "aGVsbG8="]]]]);
   print_endline "Gemini request/response wire: ok"

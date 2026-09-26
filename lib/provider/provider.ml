@@ -474,6 +474,32 @@ let post_stream ?(local = false) ?cancel ~endpoint ~headers ~secret body_json ~o
 let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage ?cancel
     config messages tools =
   check_cancel cancel;
+  let has_attachments = ref false in
+  List.iter (fun (message : Protocol.message) ->
+    if message.attachments <> [] then (
+      has_attachments := true;
+      if message.role <> "user" then
+        raise (Provider_error "image attachments are supported only on user messages");
+      try Protocol.validate_attachments message.attachments
+      with Protocol.Invalid_response reason -> raise (Provider_error reason)
+    )) messages;
+  if !has_attachments &&
+     not (match config.api with
+       | Openai_completions | Local_chat | Anthropic_messages | Openai_responses
+       | Azure_responses | Bedrock_mantle_responses | Ollama_chat | Gemini_direct
+       | Vertex_generate | Bedrock_converse | Xai_chat | Nvidia_chat | Novita_chat
+       | Siliconflow_chat | Siliconflow_cn_chat | Stepfun_chat | Coreweave_chat
+       | Synthetic_chat | Zai_chat | Zenmux_chat | Wafer_chat | Qianfan_chat
+       | Xiaomi_chat | Kilo_chat | Alibaba_coding_chat | Singularity_dev_chat
+       | Opencode_go_chat | Charm_hyper_chat | Singularity_tech_chat | Firepass_chat
+       | Yolo_auto_chat | Xiaomi_token_ams_chat | Xiaomi_token_cn_chat
+       | Xiaomi_token_sgp_chat | Minimax_code_chat | Minimax_code_cn_chat
+       | Vercel_ai_gateway_chat | Cloudflare_ai_gateway_chat | Commandcode_chat
+       | Commandcode_messages | Commandcode_responses | Gitlab_duo_messages
+       | Gitlab_duo_responses | Gitlab_duo_chat | Codex_responses | Copilot_chat
+       | Opencode_zen_responses | Meta_responses -> true
+       | Devin_connect -> false) then
+    raise (Provider_error "this provider route does not support user image attachments");
   let config = if config.api = Local_chat then
     { config with endpoint = local_endpoint config.endpoint } else config in
   if authentication = OAuth &&

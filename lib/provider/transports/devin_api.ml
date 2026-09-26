@@ -491,7 +491,8 @@ let parse_stream ?(assigned_model="") ?(selected_model="") ?(cascade_id="") body
     "signature", `String !signature;
     "actual_model", `String !actual_model]) in
   ({ role = "assistant"; content = (if content = "" then None else Some content);
-    tool_result_content = None; tool_calls; tool_call_id = None; provider_state } : Protocol.message), !usage
+    tool_result_content = None; tool_calls; tool_call_id = None; provider_state;
+    attachments = [] } : Protocol.message), !usage
 
 let complete ?http ?cancel ?(max_tokens=64000)
     ?(supports_parallel_tool_calls=false) ~api_key ~model ~cascade_id ~router

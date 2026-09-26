@@ -34,6 +34,17 @@ let () =
     Unix.putenv "XDG_STATE_HOME" state;
     let module Store = Pave.Session_store in
     assert (Store.recent ~root = []);
+    let unmanaged = Pave.Session.open_file
+      ~cwd:(Unix.realpath root) (child root "external.jsonl") in
+    ignore (Pave.Session.append unmanaged (Pave.Protocol.user "outside store"));
+    invalid (fun () -> Store.toggle_pin ~root unmanaged);
+    Store.set_title ~root unmanaged "External journal";
+    assert (Pave.Session.title unmanaged = Some "External journal");
+    let unmanaged_id = match Pave.Protocol.member "id"
+      unmanaged.Pave.Session.header with
+      | `String id -> id | _ -> assert false in
+    assert (not (Sys.file_exists (child (Store.directory ~root)
+      (unmanaged_id ^ ".title"))));
     let first = Store.create ~root in
     let second = Store.create ~root in
     assert (first.Pave.Session.path <> second.Pave.Session.path);
@@ -54,15 +65,53 @@ let () =
     let reopened = Store.open_existing ~root first.path in
     assert (Pave.Session.history reopened = [Pave.Protocol.user prompt]);
     assert (Pave.Session.model reopened = Some ("ollama", "fixture"));
+    Store.set_title ~root first "Release review";
+    assert ((Store.search ~root "release" |> List.map
+      (fun (item : Store.recent) -> item.path)) = [first.path]);
+    assert ((Store.search ~root "RELEASE" |> List.map
+      (fun (item : Store.recent) -> item.path)) = [first.path]);
+    let first_id = match Pave.Protocol.member "id" first.Pave.Session.header with
+      | `String id -> id | _ -> assert false in
+    assert ((Store.search ~root (String.sub first_id 0 8) |> List.map
+      (fun (item : Store.recent) -> item.path)) = [first.path]);
+    assert (Store.toggle_pin ~root second);
+    assert (Pave.Session.pinned second);
+    assert (List.exists (fun (entry : Pave.Session.entry) ->
+      match entry.kind with Pave.Session.Pin true -> true | _ -> false)
+      (Pave.Session.entries second));
+    assert (Pave.Session.history second =
+      [Pave.Protocol.user "Inspect Android lifecycle"]);
+    let pinned_recent = Store.recent ~root in
+    assert ((List.hd pinned_recent).path = second.path);
+    let pins_file = Filename.concat (Store.directory ~root) "pins.json" in
+    assert ((Unix.stat pins_file).Unix.st_perm land 0o077 = 0);
+    assert ((List.hd pinned_recent).pinned);
+    assert (not (Store.toggle_pin ~root second));
+    assert (not (Pave.Session.pinned second));
+    assert (List.exists (fun (entry : Pave.Session.entry) ->
+      match entry.kind with Pave.Session.Pin false -> true | _ -> false)
+      (Pave.Session.entries second));
+    assert (not (Pave.Session.pinned (Store.open_existing ~root second.path)));
+    assert (not (List.hd (Store.recent ~root)).pinned);
+    let forked = Store.fork ~root first in
+    let parent_id = match Pave.Protocol.member "id" first.Pave.Session.header with
+      | `String id -> id | _ -> assert false in
+    assert (Pave.Session.parent_session forked = Some parent_id);
+    assert (Pave.Session.history forked = Pave.Session.history first);
+    assert (Pave.Session.title forked = Some "Release review");
+    let forked_id = match Pave.Protocol.member "id" forked.Pave.Session.header with
+      | `String id -> id | _ -> assert false in
+    assert (List.exists (fun (item : Store.recent) ->
+      item.id = forked_id && item.title = "Release review") (Store.recent ~root));
     let link = child base "alias" in
     Unix.symlink root link;
     assert (Store.directory ~root:link = Store.directory ~root);
     let symlink = child (Filename.dirname first.path)
       (Pave.Session.fresh_id () ^ ".jsonl") in
     Unix.symlink first.path symlink;
-    assert (List.length (Store.recent ~root) = 2);
+    assert (List.length (Store.recent ~root) = 3);
     invalid (fun () -> Store.open_existing ~root symlink);
     Unix.chmod second.path 0o644;
-    assert (List.length (Store.recent ~root) = 1);
+    assert (List.length (Store.recent ~root) = 2);
     invalid (fun () -> Store.open_existing ~root second.path));
   print_endline "private session store: ok"

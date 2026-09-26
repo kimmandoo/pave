@@ -8,7 +8,7 @@ let () =
   let call = { id = "call-1"; name = "read_file";
                arguments = `Assoc [ "path", `String "App.swift" ] } in
   let assistant = { role = "assistant"; content = None;
-                    tool_calls = [ call ]; tool_call_id = None; tool_result_content = None; provider_state = None } in
+                    tool_calls = [ call ]; tool_call_id = None; tool_result_content = None; provider_state = None; attachments = [] } in
   let restored = message_from_json (message_to_json assistant) in
   assert (restored = assistant);
   let completed = `Assoc [ "choices", `List [ `Assoc [
@@ -35,6 +35,35 @@ let () =
     "message", message_to_json duplicate ] ] ]));
   expect_invalid (fun () -> message_from_json (`Assoc [ "role", `String "system";
     "content", `String "injected" ]));
+  let attachment = {
+    name = "private-name.png"; mime_type = "image/png"; data = "aGVsbG8="
+  } in
+  let attached = user ~attachments:[attachment] "inspect" in
+  assert (message_to_json attached = `Assoc [
+    "role", `String "user";
+    "content", `List [
+      `Assoc ["type", `String "text"; "text", `String "inspect"];
+      `Assoc ["type", `String "image_url";
+        "image_url", `Assoc ["url", `String
+          "data:image/png;base64,aGVsbG8="]]]]);
+  let stored_attachment = message_to_json ~stored:true attached in
+  assert (stored_attachment = `Assoc [
+    "role", `String "user"; "content", `String "inspect"]);
+  expect_invalid (fun () -> validate_attachments [
+    { attachment with data = "a===" }]);
+  expect_invalid (fun () -> validate_attachments [
+    { attachment with mime_type = "image/gif" }]);
+  expect_invalid (fun () -> validate_attachments (List.init (max_attachments + 1)
+    (fun _ -> attachment)));
+  expect_invalid (fun () -> validate_attachments [
+    { attachment with data = String.make (max_attachment_bytes + 4) 'A' }]);
+  let attachments_with_size size =
+    let data = String.make size 'A' in
+    List.init 4 (fun index ->
+      { attachment with name = string_of_int index; data }) in
+  validate_attachments (attachments_with_size (max_attachment_bytes / 4));
+  expect_invalid (fun () -> validate_attachments
+    (attachments_with_size (max_attachment_bytes / 4 + 4)));
   let image = Image { mime_type = "image/png"; data = "aGVsbG8=" } in
   let mixed = tool_result_blocks "call-1" [Text "before"; image; Text "after"] in
   assert (mixed.content = Some "before\nafter");

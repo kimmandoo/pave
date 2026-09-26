@@ -138,7 +138,7 @@ let handle_frame t line =
           invalid "empty assistant response";
         t.usage <- Ollama_wire.usage json;
         t.result <- Some { Protocol.role = "assistant"; content;
-          tool_calls; tool_call_id = None; tool_result_content = None; provider_state = None };
+          tool_calls; tool_call_id = None; tool_result_content = None; provider_state = None; attachments = [] };
         t.done_seen <- true
     | _ -> invalid "invalid done marker")
 

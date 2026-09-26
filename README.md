@@ -168,7 +168,7 @@ The searchable setup picker queries the chosen provider asynchronously. Use Up/D
 ### Terminal experience
 
 - **Conversation:** Pixel-art Pave appears only in an empty transcript; the first message replaces it. Roles, Markdown, tool progress and folded results use distinct blocks. `Option+O` on macOS or `Alt+O` elsewhere toggles the latest visible tool result.
-- **Navigation:** Type `/` for filtered slash-command hints (`/re` narrows them). Up/Down selects, Tab or Return (macOS) / Enter (other supported terminals) inserts **without executing**, Escape keeps the draft, and a second Return/Enter submits. `/help` shows the catalog.
+- **Navigation:** Type `/` for filtered slash-command hints (`/re` narrows them). Up/Down selects; Tab inserts. Return/Enter runs an exact command, or inserts a partial match that still needs a second Return/Enter to submit; Escape keeps the draft. `/help` shows the catalog.
 - **Status:** The model row identifies saved versus unsaved sessions; activity switches from `Working` to the running tool and back. Elapsed time advances through slow responses and shell approval without idle polling. Idle usage shows measured branch/conversation input and output tokens when available; `/usage` details models and untracked cost.
 - **Failures:** Provider, auth and tool errors appear as readable error blocks. Failed or cancelled streaming text is removed; unknown exceptions retain diagnostic text. Approving a visible shell command still requires a separate `y`.
 - **Display:** Pickers highlight the active row and keep provider-list errors visible. Narrow terminals show compact `PAVE`; `NO_COLOR=1` removes colors. Redirected I/O uses the plain CLI.
@@ -220,7 +220,7 @@ Command patterns apply to shell arguments and use `*` for wildcard matching: den
 | `Ctrl+Z`/`Ctrl+Y` · `Ctrl+K`/`Ctrl+U` · `Option+Y` (macOS) / `Alt+Y` (other terminals) | Undo/redo a draft edit · kill after/before the cursor · yank killed text; bracketed paste is one undo step |
 | `PgUp`/`PgDn` · `Ctrl+Home`/`Ctrl+End` · `Option+O` (macOS) / `Alt+O` (other terminals) | Scroll the transcript, jump to its beginning/end, or expand/collapse the latest visible tool result |
 | `Ctrl+C` · `Ctrl+D` | Close a picker or cancel account sign-in; in the composer, interrupt a turn without losing the draft or clear a nonempty idle draft; `Ctrl+D` exits when empty. |
-| `/` then `Tab` | Search available slash commands; Return (macOS) / Enter (other terminals) inserts a choice, Escape returns to the unchanged draft |
+| `/` then `Tab` | Search available slash commands; Return/Enter inserts a partial match or runs an exact command; Escape returns to the draft |
 | `/setup` · `/model [PROVIDER[@API]/MODEL_ID]` | Connect an account without changing defaults, or configure the user default · choose the active conversation model/API across connected providers |
 | `/cancel` · `/settings` | Stop the active request/command; edit typed project defaults for the next launch |
 | `/queue MESSAGE` | Queue a follow-up while a turn is active; when idle, send it immediately. |
@@ -229,9 +229,13 @@ Command patterns apply to shell arguments and use `*` for wildcard matching: den
 | `/usage` | Inspect only recorded provider-reported tokens; private journals group the selected branch's input/output totals by model, while ephemeral conversations show the combined measured total without claiming per-model provenance |
 | `/retry` | Reissue the last user turn only if it made no tool calls; saved sessions retain the prior answer on an abandoned branch, while ephemeral answers are replaced; both requests may incur usage |
 | `/hotkeys` | Display actual interactive keyboard shortcuts (including search, word editing, paste and tool expansion); headless CLI does not claim terminal keys work |
-| `/new` · `/resume [PATH]` | Create a private, persistent workspace journal; search recent journals or reopen an explicit workspace journal |
-| `/help` · `/entries` | Show descriptive commands · list journal message IDs |
-| `/tree` · `/branch ID` · `/fork /path/new.jsonl` | Search recent journal ancestry and select a branch · choose an exact entry ID · copy the selected conversation |
+| `/new` · `/resume [ID|TITLE|PATH]` | Create a private workspace journal; list, search by title/ID, or reopen a same-workspace private journal |
+| `/clear` · `/fresh` | Reset model context while preserving journal history/settings · rebuild the local agent from current context without changing the journal |
+| `/rename TITLE` · `/label [TEXT]` · `/pin` | Save journal title/entry labels · toggle a journal pin in the private recent-session index |
+| `/approval [MODE]` · `/thinking [LEVEL|default]` · `/tool enable|disable NAME` | Persist branch-local approval, thinking metadata and tool availability; thinking metadata does not override provider-specific controls |
+| `/attach PATH|clear` | Stage workspace-relative PNG/JPEG/WebP images for the next prompt (up to 8, 7 MiB per file, 10 MiB combined encoded data) |
+| `/help` · `/entries` | Show descriptive commands · list journal entry IDs and metadata |
+| `/tree` · `/branch ID` · `/fork [PATH]` | Search/select parent-linked entries · check out an exact entry ID · fork into a private journal or an explicit new file |
 | `/compact` · `/quit` | Summarize older turns manually · exit |
 
 On macOS, `/help` labels Meta as `Option` and Enter as `Return`; other supported terminals show `Alt` and `Enter`. Configure Option to send Escape/Meta in the terminal to use modified shortcuts. `/queue MESSAGE` remains available when it is not configured.
@@ -240,11 +244,13 @@ On macOS, `/help` labels Meta as `Option` and Enter as `Return`; other supported
 ### Sessions and long-running turns
 
 - **During a turn:** Network and approved commands leave the editor responsive. Later prompts queue until their turn starts; `/cancel` stops the active turn without dropping queued prompts or the draft. Failed/cancelled partial text is removed.
-- **Scrollback:** Memory retains the newest 10,000 logical rows; a saved journal retains its complete durable history. `/resume` restores that history without replacing the editor draft. New startup conversations are ephemeral; `/new` asks before discarding an unsaved one.
-- **Private journals:** `/new` creates an **unencrypted** append-only JSONL file under `${XDG_STATE_HOME:-~/.local/state}/pave/sessions/<SHA-256 of canonical workspace path>/<random>.jsonl` (0700 directories, 0600 files). `/resume` shows at most 100 recent journals for the current workspace, rejecting symlinks, foreign owners and permissive files, including explicit paths. `--session PATH` reopens a chosen journal.
-- **Branch metadata:** Provider/model/API changes belong to branches, not provider messages. `/resume`, `--session` and `/branch` restore them; explicit `--provider`, `--model`, `--api` or `--endpoint` wins. Credentials and custom endpoints are not stored as model metadata, and a removed route must be overridden on reopen.
+- **Scrollback:** Memory retains the newest 10,000 logical rows; a saved journal retains its complete durable history. `/resume` restores that history without replacing the editor draft. New startup conversations are ephemeral; `/new` confirms before discarding an unsaved conversation or staged image attachments.
+- **Private journals:** `/new` creates an **unencrypted** append-only JSONL file under `${XDG_STATE_HOME:-~/.local/state}/pave/sessions/<SHA-256 of canonical workspace path>/<random>.jsonl` (0700 directories, 0600 files). `/resume` searches at most 100 recent journals for the current workspace and accepts only private owned regular files, including explicit paths. `/pin` appends a journal metadata event and updates the private recent-list index. `--session PATH` reopens a chosen journal.
+- **Context and metadata:** Model/API, approval mode, tool availability, thinking-level metadata and entry labels are typed journal entries, never provider messages. Model/API, approval, tool, thinking and label state follows the selected branch; titles and pins are session-wide. `/thinking` records metadata only and leaves provider/model defaults unchanged. `/clear` appends a reset boundary, preserves earlier journal history and settings, and refuses while tool calls remain unresolved. `/fresh` rebuilds the local agent on the next prompt without writing to the journal.
+- **Images and privacy:** Attachments are base64 data stored with the user journal entry, separate from its provider-message record; journals are unencrypted and may contain sensitive image data. Pave displays image names/placeholders, never base64. Image-capable routes receive native image fields; unsupported routes reject attached prompts before authentication/network I/O.
+- **Branch metadata:** Provider/model/API changes belong to branches, not provider messages. `/resume`, `--session` and `/branch` restore selected branch settings; explicit `--provider`, `--model`, `--api` or `--endpoint` wins. Credentials and custom endpoints are not stored as model metadata, and a removed route must be overridden on reopen.
 - **Recovery and privacy:** Reopening marks interrupted tool calls failed instead of rerunning them. Keep journals out of version control: Gemini 3 replay can persist model-issued thought text and signatures. `/compact` retains the entire journal, but summarization can fail when the provider context limit is exceeded.
-- **Tree picker:** `/tree` shows parent-linked entries and model changes, searches preview text and IDs, highlights the active tip and limits the list to 1,024 recent entries. `/branch ID` selects older entries; Escape leaves the branch and draft intact.
+- **Tree picker:** `/tree` searches at most 1,024 parent-linked entries by their sanitized previews and IDs, highlights the active tip and keeps older ancestry reachable through `/branch ID`. `/branch` and `/fork` use the selected branch's durable messages and metadata; canceled selection leaves the branch and draft unchanged.
 
 ## Providers
 

@@ -170,4 +170,4 @@ let finish t =
    | Some reason -> invalid ("unexpected stop_reason: " ^ reason)
    | None -> assert false);
   { Protocol.role = "assistant"; content = (if Buffer.length text = 0 then None else Some (Buffer.contents text));
-  tool_calls = calls; tool_call_id = None; tool_result_content = None; provider_state = None }
+  tool_calls = calls; tool_call_id = None; tool_result_content = None; provider_state = None; attachments = [] }

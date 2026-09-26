@@ -63,11 +63,18 @@ let request ?(stream = false) ~model messages tools =
     | "user" ->
         if !pending <> [] || msg.tool_calls <> [] || msg.tool_call_id <> None then
           invalid "user message during tool results";
-        (match msg.content with
-         | Some text -> emit (`Assoc [ "role", `String "user";
-             "content", `List [ `Assoc [ "type", `String "input_text";
-               "text", `String text ] ] ])
-         | None -> invalid "user message without content")
+        let content =
+          (match msg.content with
+          | Some text -> [`Assoc ["type", `String "input_text"; "text", `String text]]
+          | None -> []) @
+          List.map (fun (attachment : attachment) ->
+            if not (List.mem attachment.mime_type ["image/png"; "image/jpeg"; "image/webp"])
+            then invalid ("unsupported user image MIME type " ^ attachment.mime_type);
+            `Assoc ["type", `String "input_image";
+              "image_url", `String ("data:" ^ attachment.mime_type ^ ";base64," ^ attachment.data)])
+            msg.attachments in
+        if content = [] then invalid "user message without content";
+        emit (`Assoc ["role", `String "user"; "content", `List content])
     | "assistant" ->
         if !pending <> [] || msg.tool_call_id <> None then
           invalid "assistant message during tool results";
@@ -143,4 +150,4 @@ let parse_completion json =
     | _ -> invalid "unsupported output item") outputs;
   { role = "assistant"; content = (match List.rev !texts with
       | [] -> None | texts -> Some (String.concat "" texts));
-    tool_calls = List.rev !calls; tool_call_id = None; tool_result_content = None; provider_state = None }
+    tool_calls = List.rev !calls; tool_call_id = None; tool_result_content = None; provider_state = None; attachments = [] }
