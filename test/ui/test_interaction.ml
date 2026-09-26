@@ -17,8 +17,20 @@ let () =
    | Resume (Some "/tmp/saved session.jsonl") -> ()
    | _ -> fail "resume path with spaces");
   (match parse "/fork /tmp/saved session.jsonl" with
-   | Fork "/tmp/saved session.jsonl" -> ()
+   | Fork (Some "/tmp/saved session.jsonl") -> ()
    | _ -> fail "fork path with spaces");
+  (match parse "/clear", parse "/fresh", parse "/rename Fix login flow",
+    parse "/label Need review", parse "/label", parse "/pin",
+    parse "/approval yolo", parse "/approval default",
+    parse "/thinking high", parse "/thinking default",
+    parse "/tool disable write_file", parse "/attach Images/screen.png",
+    parse "/attach clear", parse "/fork" with
+   | Clear, Fresh, Rename "Fix login flow", Label (Some "Need review"),
+     Label None, Pin, Approval (Some "yolo"), Approval (Some "default"),
+     Thinking (Some "high"), Thinking (Some "default"),
+     Tool_toggle { name = "write_file"; enabled = false },
+     Attach (Some "Images/screen.png"), Attach None, Fork None -> ()
+   | _ -> fail "journal lifecycle command parsing");
   (match parse "/new", parse "/entries", parse "/tree", parse "/tools",
     parse "/quit", parse "mobile task" with
    | New, Entries, Tree, Tools None, Quit, Prompt "mobile task" -> ()
@@ -35,7 +47,6 @@ let () =
   if suggestions "/model/foo" <> [] then fail "slash completion matched invalid prefix";
   invalid "multiple model arguments" (fun () -> parse "/model openai/gpt-5 extra");
   invalid "missing branch ID" (fun () -> parse "/branch");
-  invalid "missing fork path" (fun () -> parse "/fork");
   invalid "trailing command arguments" (fun () -> parse "/new accidental");
   invalid "multiple tool arguments" (fun () -> parse "/tools read_file write_file");
   invalid "tree takes no argument" (fun () -> parse "/tree missing");
@@ -87,7 +98,7 @@ let () =
     "model", `String "codex-model-a";
     "output", `List [] ] in
   let assistant : Pave.Protocol.message = { role = "assistant"; content = Some "visible answer"; tool_calls = [];
-  tool_call_id = None; tool_result_content = None; provider_state = Some native } in
+  tool_call_id = None; tool_result_content = None; provider_state = Some native; attachments = [] } in
   let history = [ Pave.Protocol.user "original prompt"; assistant ] in
   let same = history_for_model ~wire:Pave.Provider.Codex_responses
     ~model:"codex-model-a" history in

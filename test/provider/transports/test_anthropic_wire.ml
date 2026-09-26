@@ -7,10 +7,10 @@ let expect_invalid f =
 
 let call id name arguments : Pave.Protocol.tool_call = { id; name; arguments }
 let assistant content calls : Pave.Protocol.message =
-  { role = "assistant"; content; tool_calls = calls; tool_call_id = None; tool_result_content = None; provider_state = None }
+  { role = "assistant"; content; tool_calls = calls; tool_call_id = None; tool_result_content = None; provider_state = None; attachments = [] }
 let system text : Pave.Protocol.message =
   { role = "system"; content = Some text; tool_calls = [];
-    tool_call_id = None; tool_result_content = None; provider_state = None }
+    tool_call_id = None; tool_result_content = None; provider_state = None; attachments = [] }
 let block kind fields = `Assoc (("type", `String kind) :: fields)
 let message role blocks = `Assoc [ "role", `String role; "content", `List blocks ]
 let response stop blocks =
@@ -87,6 +87,13 @@ let () =
   expect_invalid (fun () -> Pave.Anthropic_wire.request ~model:"claude-test"
     ~max_tokens:4096 [ assistant None [ first ]; tool_result first.id "ok";
       tool_result first.id "again" ] []);
+  let attached = { (user "describe") with attachments = [
+    { name = "ignored"; mime_type = "image/png"; data = png } ] } in
+  assert (field "messages" (Pave.Anthropic_wire.request ~model:"claude-test"
+    ~max_tokens:1024 [attached] []) = `List [
+      message "user" [block "text" ["text", `String "describe"]; block "image" [
+        "source", `Assoc ["type", `String "base64";
+          "media_type", `String "image/png"; "data", `String png]]]]);
   let text s = block "text" [ "text", `String s ] in
   let use id name input = block "tool_use" [ "id", `String id;
     "name", `String name; "input", input ] in

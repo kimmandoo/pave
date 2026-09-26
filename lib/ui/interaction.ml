@@ -7,11 +7,20 @@ type command =
   | Setup
   | New
   | Resume of string option
+  | Clear
+  | Fresh
+  | Rename of string
+  | Label of string option
+  | Pin
+  | Approval of string option
+  | Thinking of string option
+  | Tool_toggle of { name : string; enabled : bool }
+  | Attach of string option
   | Compact
   | Retry
   | Tree
   | Branch of string
-  | Fork of string
+  | Fork of string option
   | Tools of string option
   | Context
   | Usage
@@ -22,9 +31,10 @@ type command =
   | Unknown of string
 
 type action =
-  | A_model | A_settings | A_setup | A_new | A_resume | A_cancel | A_queue
-  | A_entries | A_tree | A_tools | A_context | A_usage | A_hotkeys | A_branch | A_fork
-  | A_compact | A_retry | A_help | A_quit
+  | A_model | A_settings | A_setup | A_new | A_resume | A_clear | A_fresh
+  | A_rename | A_label | A_pin | A_approval | A_thinking | A_tool | A_attach
+  | A_cancel | A_queue | A_entries | A_tree | A_tools | A_context | A_usage
+  | A_hotkeys | A_branch | A_fork | A_compact | A_retry | A_help | A_quit
 
 type shortcut = { name : string; usage : string; summary : string; action : action }
 
@@ -33,7 +43,16 @@ let commands = [
   { name = "/settings"; usage = ""; summary = "View or edit project defaults"; action = A_settings };
   { name = "/setup"; usage = ""; summary = "Connect and save your user default model"; action = A_setup };
   { name = "/new"; usage = ""; summary = "Start a private saved session"; action = A_new };
-  { name = "/resume"; usage = "[PATH]"; summary = "Search or reopen saved sessions"; action = A_resume };
+  { name = "/resume"; usage = "[ID|TITLE|PATH]"; summary = "Search or reopen saved sessions"; action = A_resume };
+  { name = "/clear"; usage = ""; summary = "Reset active context without deleting journal history"; action = A_clear };
+  { name = "/fresh"; usage = ""; summary = "Rebuild the local provider agent from saved context"; action = A_fresh };
+  { name = "/rename"; usage = "TITLE"; summary = "Set a durable session title"; action = A_rename };
+  { name = "/label"; usage = "[TEXT]"; summary = "Set or clear a label on the selected entry"; action = A_label };
+  { name = "/pin"; usage = ""; summary = "Toggle this session in the pinned resume list"; action = A_pin };
+  { name = "/approval"; usage = "[always-ask|write|yolo]"; summary = "Show or set this branch's approval mode"; action = A_approval };
+  { name = "/thinking"; usage = "[LEVEL|default]"; summary = "Store branch-local thinking-level metadata; provider defaults remain unchanged"; action = A_thinking };
+  { name = "/tool"; usage = "enable|disable NAME"; summary = "Set branch-local tool availability"; action = A_tool };
+  { name = "/attach"; usage = "PATH|clear"; summary = "Attach an image to the next prompt"; action = A_attach };
   { name = "/queue"; usage = "MESSAGE"; summary = "Queue a follow-up without interrupting the active turn"; action = A_queue };
   { name = "/cancel"; usage = ""; summary = "Cancel the active turn"; action = A_cancel };
   { name = "/retry"; usage = ""; summary = "Retry the last turn only if no tools ran"; action = A_retry };
@@ -44,7 +63,7 @@ let commands = [
   { name = "/entries"; usage = ""; summary = "List journal entries"; action = A_entries };
   { name = "/tree"; usage = ""; summary = "Search journal ancestry and branch"; action = A_tree };
   { name = "/branch"; usage = "ID"; summary = "Continue from an earlier entry"; action = A_branch };
-  { name = "/fork"; usage = "PATH"; summary = "Copy the selected journal branch"; action = A_fork };
+  { name = "/fork"; usage = "[PATH]"; summary = "Fork the selected journal branch into a private session"; action = A_fork };
   { name = "/compact"; usage = ""; summary = "Summarize older turns"; action = A_compact };
   { name = "/help"; usage = ""; summary = "Show commands and keys"; action = A_help };
   { name = "/quit"; usage = ""; summary = "Exit Pave"; action = A_quit };
@@ -80,6 +99,11 @@ let require_path command argument =
     invalid_argument (command ^ " requires a readable path");
   argument
 
+let require_text command argument =
+  if String.trim argument = "" || String.exists (fun char ->
+    let code = Char.code char in code < 32 || code = 127) argument then
+    invalid_argument (command ^ " requires nonempty single-line text");
+  argument
 let parse line =
   let line = String.trim line in
   if not (String.starts_with ~prefix:"/" line) then Prompt line
@@ -113,6 +137,35 @@ let parse line =
     | Some A_setup -> no_args (); Setup
     | Some A_new -> no_args (); New
     | Some A_resume -> Resume (Option.map (require_path name) argument)
+    | Some A_clear -> no_args (); Clear
+    | Some A_fresh -> no_args (); Fresh
+    | Some A_rename ->
+        Rename (require_text name (Option.value ~default:"" argument))
+    | Some A_label -> Label (Option.map (require_text name) argument)
+    | Some A_pin -> no_args (); Pin
+    | Some A_approval -> Approval (single name argument)
+    | Some A_thinking -> Thinking (single name argument)
+
+    | Some A_tool ->
+        (match argument with
+         | None -> invalid_argument (name ^ " requires enable|disable NAME")
+         | Some text ->
+             (match String.index_opt text ' ' with
+              | None -> invalid_argument (name ^ " requires enable|disable NAME")
+              | Some offset ->
+                  let operation = String.sub text 0 offset in
+                  let tool_name = String.trim
+                    (String.sub text (offset + 1) (String.length text - offset - 1))
+                    |> require_single_argument name in
+                  let enabled = match operation with
+                    | "enable" -> true | "disable" -> false
+                    | _ -> invalid_argument (name ^ " requires enable|disable NAME") in
+                  Tool_toggle { name = tool_name; enabled }))
+    | Some A_attach ->
+        (match argument with
+         | None -> invalid_argument (name ^ " requires an image path or clear")
+         | Some "clear" -> Attach None
+         | Some path -> Attach (Some (require_path name path)))
     | Some A_queue ->
         (match argument with
         | Some text -> Queue_prompt text
@@ -121,7 +174,7 @@ let parse line =
     | Some A_retry -> no_args (); Retry
     | Some A_branch -> Branch (require_single_argument name
         (Option.value ~default:"" argument))
-    | Some A_fork -> Fork (require_path name (Option.value ~default:"" argument))
+    | Some A_fork -> Fork (Option.map (require_path name) argument)
     | Some A_tools -> Tools (single name argument)
     | Some A_context -> no_args (); Context
     | Some A_usage -> no_args (); Usage

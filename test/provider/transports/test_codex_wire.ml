@@ -6,9 +6,9 @@ let invalid f = match f () with
   | exception Protocol.Invalid_response _ -> ()
   | _ -> failwith "expected invalid Codex response"
 let system text : Protocol.message =
-  { role = "system"; content = Some text; tool_calls = []; tool_call_id = None; tool_result_content = None; provider_state = None }
+  { role = "system"; content = Some text; tool_calls = []; tool_call_id = None; tool_result_content = None; provider_state = None; attachments = [] }
 let developer text : Protocol.message =
-  { role = "developer"; content = Some text; tool_calls = []; tool_call_id = None; tool_result_content = None; provider_state = None }
+  { role = "developer"; content = Some text; tool_calls = []; tool_call_id = None; tool_result_content = None; provider_state = None; attachments = [] }
 let completed model output = `Assoc ["status", `String "completed";
   "model", `String model; "output", `List output]
 let reasoning = item "reasoning" ["id", `String "rs_1";
@@ -118,7 +118,7 @@ let () =
     arguments = `Assoc [] } in
   let long_body = Codex_wire.request ~model [
     { role = "assistant"; content = None; tool_calls = [long_call];
-      tool_call_id = None; tool_result_content = None; provider_state = None };
+      tool_call_id = None; tool_result_content = None; provider_state = None; attachments = [] };
     Protocol.tool_result long_id "out"] [] in
   (match field "input" long_body with
   | `List [call; output] ->
@@ -132,7 +132,15 @@ let () =
     { role = "assistant"; content = None; tool_calls = [
       { long_call with id = "same|first" };
       { long_call with id = "same|second" } ];
-      tool_call_id = None; tool_result_content = None; provider_state = None };
+      tool_call_id = None; tool_result_content = None; provider_state = None; attachments = [] };
     Protocol.tool_result "same|first" "out";
     Protocol.tool_result "same|second" "out"] []);
+  let attached = { (Protocol.user "describe") with attachments = [
+    { name = "private-name.png"; mime_type = "image/png"; data = "aGVsbG8=" } ] } in
+  let encoded_input = field "input" (Codex_wire.request ~model [attached] []) in
+  let expected_input = `List [
+    `Assoc ["role", `String "user"; "content", `List [
+      item "input_text" ["text", `String "describe"];
+      item "input_image" ["image_url", `String "data:image/png;base64,aGVsbG8="]]]] in
+  assert (encoded_input = expected_input);
   print_endline "Codex wire: ok"

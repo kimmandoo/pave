@@ -4,10 +4,10 @@ let expect_invalid f = match f () with
   | _ -> failwith "expected invalid Ollama response"
 
 let assistant content calls : Pave.Protocol.message =
-  { role = "assistant"; content; tool_calls = calls; tool_call_id = None; tool_result_content = None; provider_state = None }
+  { role = "assistant"; content; tool_calls = calls; tool_call_id = None; tool_result_content = None; provider_state = None; attachments = [] }
 let system content : Pave.Protocol.message =
   { role = "system"; content = Some content; tool_calls = [];
-    tool_call_id = None; tool_result_content = None; provider_state = None }
+    tool_call_id = None; tool_result_content = None; provider_state = None; attachments = [] }
 let native_call name arguments = `Assoc [ "type", `String "function";
   "function", `Assoc [ "name", `String name; "arguments", arguments ] ]
 let native_message role content extras =
@@ -70,6 +70,11 @@ let () =
       "parameters", `Assoc [ "type", `String "string" ] ] ] in
   expect_invalid (fun () -> Pave.Ollama_wire.request ~model:"qwen"
     [user "hello"] [ invalid_tool ]);
+  let attached = { (user "describe") with attachments = [
+    { name = "ignored"; mime_type = "image/webp"; data = "aGVsbG8=" } ] } in
+  assert (field "messages" (Pave.Ollama_wire.request ~model:"qwen"
+    [attached] []) = `List [
+      native_message "user" "describe" ["images", `List [`String "aGVsbG8="]]]);
   let message = native_message "assistant" "こんにちは" [] in
   assert (Pave.Ollama_wire.parse_completion (completion message) =
     assistant (Some "こんにちは") []);

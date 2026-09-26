@@ -195,6 +195,11 @@
  (libraries pave unix))
 
 (test
+ (name test_session_attachment)
+ (modules test_session_attachment)
+ (libraries pave unix))
+
+(test
  (name test_transcript_view)
  (modules test_transcript_view transcript_view)
  (libraries pave unix notty-community uutf uuseg))

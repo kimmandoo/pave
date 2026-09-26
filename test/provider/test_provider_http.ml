@@ -63,6 +63,12 @@ let serve client step signal_write closed_write =
   let status, content_type, body = match step with
     | 0 ->
         assert (has_header "authorization: bearer mock-openai" headers);
+        assert (member "messages" request = `List [`Assoc [
+          "role", `String "user"; "content", `List [
+            `Assoc ["type", `String "text"; "text", `String "inspect"];
+            `Assoc ["type", `String "image_url";
+              "image_url", `Assoc ["url", `String
+                "data:image/png;base64,aGVsbG8="]]]]]);
         assert (member "stream" request = `Bool true);
         200, "text/event-stream", stream_body
     | 1 ->
@@ -190,7 +196,7 @@ let () =
     let anthropic : Pave.Provider.config = { endpoint; api_key = "mock-anthropic";
       model = "mock-claude"; api = Pave.Provider.Anthropic_messages } in
     let system : Pave.Protocol.message = { role = "system"; content = Some "mobile system";
-      tool_calls = []; tool_call_id = None; tool_result_content = None; provider_state = None } in
+      tool_calls = []; tool_call_id = None; tool_result_content = None; provider_state = None; attachments = [] } in
     let user = Pave.Protocol.user "inspect" in
     let credential_read = ref false in
     List.iter (fun endpoint ->
@@ -242,9 +248,22 @@ let () =
     (match Pave.Provider.complete copilot [ system; user ] [] with
      | exception Pave.Provider.Provider_error _ -> ()
      | _ -> failwith "Copilot accepted an API key instead of a device grant");
+    let image_user = { (Pave.Protocol.user "inspect") with attachments = [
+      { name = "display.png"; mime_type = "image/png"; data = "aGVsbG8=" } ] } in
+    let devin = { anthropic with api = Pave.Provider.Devin_connect;
+      endpoint = Pave.Devin_api.chat_url } in
+    (match Pave.Provider.complete ~authentication:Pave.Provider.OAuth
+      ~resolve_credential:(fun () -> credential_read := true;
+        { Pave.Provider.access = "sensitive"; account_id = None; residency = None })
+      devin [image_user] [] with
+     | exception Pave.Provider.Provider_error message ->
+         assert (not !credential_read);
+         assert (String.starts_with ~prefix:
+           "this provider route does not support user image attachments" message)
+     | _ -> failwith "Devin accepted user image attachments");
     let deltas = ref [] in
     let streamed = Pave.Provider.complete ~on_text:(fun delta -> deltas := delta :: !deltas)
-      openai [ system; user ] [] in
+      openai [ image_user ] [] in
     assert (!deltas = [ "Hello " ]);
     assert (streamed.content = Some "Hello ");
     assert (streamed.tool_calls = [ { Pave.Protocol.id = "call-1"; name = "read_file";

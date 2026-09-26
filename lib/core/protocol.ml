@@ -5,6 +5,8 @@ type content_block =
   | Text of string
   | Image of { mime_type : string; data : string }
 
+type attachment = { name : string; mime_type : string; data : string }
+
 type message = {
   role : string;
   content : string option;
@@ -12,12 +14,54 @@ type message = {
   tool_calls : tool_call list;
   tool_call_id : string option;
   provider_state : Yojson.Basic.t option;
+  attachments : attachment list;
 }
 
 exception Invalid_response of string
+
 let valid_image_content mime_type data =
   String.starts_with ~prefix:"image/" mime_type &&
   String.length mime_type > String.length "image/" && data <> ""
+
+let max_attachment_bytes = 10 * 1024 * 1024
+let max_attachments = 8
+
+let valid_attachment_mime = function
+  | "image/png" | "image/jpeg" | "image/webp" -> true
+  | _ -> false
+
+let valid_base64 data =
+  let length = String.length data in
+  let value = function
+    | 'A'..'Z' | 'a'..'z' | '0'..'9' | '+' | '/' -> true
+    | _ -> false in
+  let padding = if length > 0 && data.[length - 1] = '=' then
+    if length > 1 && data.[length - 2] = '=' then 2 else 1
+    else 0 in
+  length > 0 && length mod 4 = 0 &&
+  let rec check index =
+    if index = length then true
+    else if index >= length - padding then data.[index] = '='
+    else value data.[index] && check (index + 1) in
+  check 0
+
+let validate_attachments attachments =
+  if List.length attachments > max_attachments then
+    raise (Invalid_response "too many image attachments");
+  let total = List.fold_left (fun total (attachment : attachment) ->
+    let { name; mime_type; data } = attachment in
+    if name = "" || String.length name > 255 ||
+       String.exists (fun c -> let code = Char.code c in
+         code < 32 || code = 127 || c = '/' || c = '\\') name then
+      raise (Invalid_response "invalid image attachment name");
+    if not (valid_attachment_mime mime_type) then
+      raise (Invalid_response "unsupported image attachment type");
+    if String.length data > max_attachment_bytes || not (valid_base64 data) then
+      raise (Invalid_response "invalid or oversized image attachment data");
+    if String.length data > max_attachment_bytes - total then
+      raise (Invalid_response "image attachments exceed size limit");
+    total + String.length data) 0 attachments in
+  ignore total
 
 let validate_content_blocks blocks =
   List.iter (function
@@ -31,18 +75,20 @@ let add_usage left right =
   { input_tokens = left.input_tokens + right.input_tokens;
     output_tokens = left.output_tokens + right.output_tokens }
 
-let user content =
+let user ?(attachments = []) content =
+  validate_attachments attachments;
   { role = "user"; content = Some content; tool_result_content = None;
-    tool_calls = []; tool_call_id = None; provider_state = None }
+    tool_calls = []; tool_call_id = None; provider_state = None; attachments }
 let tool_result id content =
   { role = "tool"; content = Some content; tool_result_content = None;
-    tool_calls = []; tool_call_id = Some id; provider_state = None }
+    tool_calls = []; tool_call_id = Some id; provider_state = None;
+    attachments = [] }
 let tool_result_blocks id blocks =
   validate_content_blocks blocks;
   { role = "tool"; content = Some (String.concat "\n" (List.filter_map
       (function Text text -> Some text | Image _ -> None) blocks));
     tool_result_content = Some blocks; tool_calls = [];
-    tool_call_id = Some id; provider_state = None }
+    tool_call_id = Some id; provider_state = None; attachments = [] }
 
 let content_blocks_of_tool_result (message : message) =
   match message.tool_result_content with
@@ -63,6 +109,18 @@ let member key = function
   | _ -> `Null
 
 let string = function `String s -> s | _ -> raise (Invalid_response "expected string")
+let attachment_to_json (attachment : attachment) =
+  `Assoc ["name", `String attachment.name;
+    "mimeType", `String attachment.mime_type;
+    "data", `String attachment.data]
+
+let attachment_from_json json =
+  let name = member "name" json |> string
+  and mime_type = member "mimeType" json |> string
+  and data = member "data" json |> string in
+  let attachment = { name; mime_type; data } in
+  validate_attachments [attachment];
+  attachment
 
 let call_to_json call =
   `Assoc [ "id", `String call.id; "type", `String "function";
@@ -85,7 +143,7 @@ let content_block_from_json json =
       Image { mime_type; data }
   | _ -> raise (Invalid_response "invalid stored tool-result content block")
 
-let message_to_json ?(stored = false) msg =
+let message_to_json ?(stored = false) (msg : message) =
   (match msg.tool_result_content with
    | None -> ()
    | Some blocks ->
@@ -94,8 +152,27 @@ let message_to_json ?(stored = false) msg =
           msg.tool_call_id = None || msg.provider_state <> None ||
           msg.content <> Some (text_of_content_blocks blocks) then
          raise (Invalid_response "invalid tool-result content"));
+  validate_attachments msg.attachments;
+  if msg.attachments <> [] &&
+     (msg.role <> "user" || msg.tool_result_content <> None ||
+      msg.tool_calls <> [] || msg.tool_call_id <> None ||
+      msg.provider_state <> None) then
+    raise (Invalid_response "image attachments require a plain user message");
   let fields = [ "role", `String msg.role ] in
-  let fields = match msg.content with None -> fields | Some s -> fields @ [ "content", `String s ] in
+  let fields = match msg.content, stored, msg.attachments with
+    | None, _, [] | None, true, _ -> fields
+    | Some text, true, _ -> fields @ ["content", `String text]
+    | Some text, false, [] -> fields @ ["content", `String text]
+    | content, false, attachments ->
+        let text = match content with Some text when text <> "" ->
+          [`Assoc ["type", `String "text"; "text", `String text]]
+        | _ -> [] in
+        let images = List.map (fun (attachment : attachment) ->
+          `Assoc ["type", `String "image_url";
+            "image_url", `Assoc ["url", `String
+              ("data:" ^ attachment.mime_type ^ ";base64," ^ attachment.data)]])
+          attachments in
+        fields @ ["content", `List (text @ images)] in
   let fields = match stored, msg.tool_result_content with
     | true, Some blocks ->
         fields @ ["tool_result_content", `List (List.map content_block_to_json blocks)]
@@ -193,7 +270,7 @@ let parse_message json =
     | _ -> raise (Invalid_response "invalid assistant content") in
   let tool_calls = parse_calls (member "tool_calls" json) in
   { role = "assistant"; content; tool_result_content = None;
-    tool_calls; tool_call_id = None; provider_state = None }
+    tool_calls; tool_call_id = None; provider_state = None; attachments = [] }
 
 let message_from_json json =
   let role = member "role" json |> string in
@@ -219,7 +296,8 @@ let message_from_json json =
            raise (Invalid_response "stored tool-result text differs from its content blocks")
        | _ -> ())
   | _ -> raise (Invalid_response "invalid stored message"));
-  { role; content; tool_result_content; tool_calls; tool_call_id; provider_state }
+  { role; content; tool_result_content; tool_calls; tool_call_id;
+    provider_state; attachments = [] }
 
 let parse_completion json =
   match member "choices" json with

@@ -194,9 +194,18 @@ let request ~model messages tools =
          | "user" ->
              if !pending <> [] || msg.tool_calls <> [] || msg.tool_call_id <> None then
                invalid "user message during tool results";
-             (match msg.content with
-              | Some text when text <> "" -> add (content "user" [ part text ])
-              | _ -> invalid "empty user message");
+             let parts =
+               (match msg.content with
+               | Some text when text <> "" -> [part text]
+               | _ -> []) @ List.map (fun (attachment : attachment) ->
+                 if not (List.mem attachment.mime_type
+                   ["image/png"; "image/jpeg"; "image/webp"]) then
+                   invalid ("unsupported user image MIME type " ^ attachment.mime_type);
+                 `Assoc ["inlineData", `Assoc [
+                   "mimeType", `String attachment.mime_type;
+                   "data", `String attachment.data]]) msg.attachments in
+             if parts = [] then invalid "empty user message";
+             add (content "user" parts);
              convert rest
          | "assistant" ->
              if !pending <> [] || msg.tool_call_id <> None then
@@ -293,7 +302,7 @@ let parse_candidate ~model candidate =
   let signed = has_signature parts in
   if tool_calls <> [] && not signed then
     invalid "Gemini tool turn lacks native thought signature";
-  { role = "assistant"; content; tool_calls; tool_call_id = None; tool_result_content = None; provider_state = (if signed then Some (native_state ~model parts) else None) }
+  { role = "assistant"; content; tool_calls; tool_call_id = None; tool_result_content = None; provider_state = (if signed then Some (native_state ~model parts) else None); attachments = [] }
 
 let parse_completion ~model json =
   (match field "error" json with

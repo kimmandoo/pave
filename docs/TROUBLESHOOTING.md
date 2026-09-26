@@ -1,5 +1,26 @@
 # Troubleshooting
 
+### [2026-09-25] Codex image serializer inferred the wrong record type
+
+- **Context / Symptom:** `opam exec -- dune runtest --force` failed to compile `lib/provider/transports/codex_wire.ml` with `This expression has type attachment; There is no field arguments within type attachment`.
+- **Root Cause:** The `List.iter` and pending-call mapper destructured tuples without fixing the first element's record type; annotating the containing list alone did not resolve OCaml's field inference.
+- **Solution:** Annotated tuple-bound call values as `tool_call` in both serializers. `opam exec -- dune build lib/pave.cma` then completed.
+- **Prevention / Reference:** Annotate tuple-bound record values directly at wire-serialization boundaries when inference remains ambiguous.
+
+### [2026-09-25] Managed session filenames diverged from journal IDs
+
+- **Context / Symptom:** The private-store regression found that setting a managed session title did not make it searchable, and pinning could reject a session created by the store.
+- **Root Cause:** `Session_store.create` and `fork` generated the filename ID separately from the session header ID, while title and pin ownership checks require them to match.
+- **Solution:** Added managed session constructors that derive private journal filenames from the generated header ID. `opam exec -- dune exec test/test_session_store.exe` passed title search, pin/unpin, fork lineage, and title inheritance checks.
+- **Prevention / Reference:** Derive a managed journal's filename and header identity from the same generated ID.
+
+### [2026-09-25] Exact slash commands selected autocomplete instead of running
+
+- **Context / Symptom:** In a 70×18 PTY, typing `/new` and pressing Return only accepted the visible command hint; the session did not start until another submit action.
+- **Root Cause:** `Tui.read` handled visible slash hints before submission even when the draft exactly matched a command.
+- **Solution:** Exact command matches now submit on Return while partial prefixes still autocomplete. The PTY exercised `/new`, `/pin`, `/tree`, `/fork`, `/resume`, `/clear`, `/fresh`, and `/quit` without trailing spaces.
+- **Prevention / Reference:** Preserve completion for partial commands and execute exact matches on Return; verify this through a real TUI PTY.
+
 ### [2026-09-25] System Dune did not use project switch dependencies
 
 - **Context / Symptom:** Running `dune build @install` directly failed with `Library "yojson" not found`, although the repository's opam switch contained Yojson.

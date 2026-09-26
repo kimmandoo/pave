@@ -1,6 +1,6 @@
 let message role text : Pave.Protocol.message =
   { role; content = Some text; tool_calls = []; tool_call_id = None;
-    tool_result_content = None; provider_state = None }
+    tool_result_content = None; provider_state = None; attachments = [] }
 
 let entry id parent_id message : Pave.Session.entry =
   { id; parent_id; timestamp = "2026-09-25T00:00:00Z";
@@ -22,6 +22,10 @@ let () =
   assert (List.exists (String.starts_with ~prefix:"    ↳") labels);
   assert (List.for_all (fun text -> not (String.contains text '\027')) labels);
   assert (not (String.contains (List.hd (List.rev labels)) '\n'));
+  let labeled, _ = Pave.Session_tree.choices ~labels:["d", "Release review"]
+    ~leaf:(Some "d") [first; answered; abandoned; alternate] in
+  assert (String.ends_with ~suffix:" · Release review"
+    (List.hd (List.rev labeled)).label);
   assert (Pave.Session_tree.first_line "safe\226\128\174unsafe" =
     "safe unsafe");
   let tool = {
@@ -45,6 +49,18 @@ let () =
   assert (Pave.Session_tree.summary tool = "tool · read_file · started");
   assert (Pave.Session_tree.summary exit =
     "session exit · fatal · 1 pending tool");
+  let pin : Pave.Session.entry = {
+    id = "pin-entry"; parent_id = Some "a";
+    timestamp = "2026-09-25T00:00:03Z"; kind = Pave.Session.Pin true
+  } in
+  assert (Pave.Session_tree.summary pin = "pin · pinned");
+  let attached_prompt = Pave.Protocol.user ~attachments:[{
+    Pave.Protocol.name = "private.png";
+    mime_type = "image/png"; data = "aGVsbG8="
+  }] "Look at this" in
+  assert (Pave.Session_tree.summary
+    (entry "attached-prompt" None attached_prompt) =
+    "user · Look at this · private.png");
   let image_result = Pave.Protocol.tool_result_blocks "image-call" [
     Pave.Protocol.Image { mime_type = "image/png"; data = "secret-base64" }
   ] in

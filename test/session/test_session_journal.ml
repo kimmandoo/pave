@@ -11,7 +11,15 @@ let () =
   let lifecycle_fork = Filename.concat dir "lifecycle-fork.jsonl" in
   let terminal_path = Filename.concat dir "terminal.jsonl" in
   let multimodal_path = Filename.concat dir "multimodal.jsonl" in
+  let settings_path = Filename.concat dir "settings.jsonl" in
+  let settings_fork = Filename.concat dir "settings-fork.jsonl" in
+  let reset_path = Filename.concat dir "reset.jsonl" in
+  let attachment_path = Filename.concat dir "attachment.jsonl" in
   Fun.protect ~finally:(fun () ->
+    (try Sys.remove settings_fork with Sys_error _ -> ());
+    (try Sys.remove settings_path with Sys_error _ -> ());
+    (try Sys.remove reset_path with Sys_error _ -> ());
+    (try Sys.remove attachment_path with Sys_error _ -> ());
     (try Sys.remove fork_path with Sys_error _ -> ());
     (try Sys.remove metadata_fork with Sys_error _ -> ());
     (try Sys.remove metadata_path with Sys_error _ -> ());
@@ -51,7 +59,7 @@ let () =
     let current = Pave.Session.open_file path in
     Pave.Session.branch current selected;
     let pending_id = Pave.Session.append current { role = "assistant"; content = None;
-      tool_calls = [ call ]; tool_call_id = None; tool_result_content = None; provider_state = None } in
+      tool_calls = [ call ]; tool_call_id = None; tool_result_content = None; provider_state = None; attachments = [] } in
     Pave.Session.record_tool_started current ~call_id:call.id ~name:call.name
     |> ignore;
     assert (Option.is_some
@@ -96,7 +104,7 @@ let () =
       id = "settled-call"; name = "write_file"; arguments = `Assoc [] } in
     ignore (Pave.Session.append terminal (message "terminal recovery"));
     ignore (Pave.Session.append terminal { role = "assistant"; content = None; tool_calls = [terminal_call];
-    tool_call_id = None; tool_result_content = None; provider_state = None });
+    tool_call_id = None; tool_result_content = None; provider_state = None; attachments = [] });
     Pave.Session.record_tool_started terminal
       ~call_id:terminal_call.id ~name:terminal_call.name |> ignore;
     Pave.Session.record_tool_settled terminal
@@ -123,7 +131,7 @@ let () =
     let aborted_call : Pave.Protocol.tool_call = {
       id = "aborted-recovery"; name = "run_command"; arguments = `Assoc [] } in
     ignore (Pave.Session.append terminal { role = "assistant"; content = None; tool_calls = [aborted_call];
-    tool_call_id = None; tool_result_content = None; provider_state = None });
+    tool_call_id = None; tool_result_content = None; provider_state = None; attachments = [] });
     Pave.Session.record_tool_started terminal
       ~call_id:aborted_call.id ~name:aborted_call.name |> ignore;
     Pave.Session.record_tool_aborted terminal
@@ -151,7 +159,7 @@ let () =
     let lifecycle = Pave.Session.open_file lifecycle_path in
     let lifecycle_user = Pave.Session.append lifecycle (message "lifecycle") in
     let call_message (call : Pave.Protocol.tool_call) : Pave.Protocol.message = { role = "assistant"; content = None; tool_calls = [call];
-    tool_call_id = None; tool_result_content = None; provider_state = None } in
+    tool_call_id = None; tool_result_content = None; provider_state = None; attachments = [] } in
     let finished_call : Pave.Protocol.tool_call = {
       id = "finished-call"; name = "read_file"; arguments = `Assoc [] } in
     ignore (Pave.Session.append lifecycle (call_message finished_call));
@@ -252,33 +260,38 @@ let () =
     assert (Pave.Session.model copy = Some ("openai", "gpt-6-sol"));
     assert (Pave.Session.history copy = [message "first"]);
     let assistant text : Pave.Protocol.message = { role = "assistant"; content = Some text; tool_calls = [];
-    tool_call_id = None; tool_result_content = None; provider_state = None } in
-    let before = [message "first"; assistant "old"; message "retry me"] in
+    tool_call_id = None; tool_result_content = None; provider_state = None; attachments = [] } in
+    let retry_attachment : Pave.Protocol.attachment = {
+      name = "retry.png"; mime_type = "image/png"; data = "iVBORw0KGgo=" } in
+    let retry_message = { (message "retry me") with
+      attachments = [retry_attachment] } in
+    let before = [message "first"; assistant "old"; retry_message] in
     assert (Pave.Session.retryable_history (before @ [assistant "answer"]) =
-      Some ([message "first"; assistant "old"], "retry me"));
+      Some ([message "first"; assistant "old"], retry_message));
     assert (Pave.Session.retryable_history
       (before @ [assistant "answer"; Pave.Protocol.tool_result "call-1" "done"]) =
       None);
     let prior = Pave.Session.append copy (assistant "old answer") in
-    ignore (Pave.Session.append copy (message "retry me"));
+    ignore (Pave.Session.append copy retry_message);
     ignore (Pave.Session.append copy (assistant "first answer"));
-    assert (Pave.Session.retry_candidate copy = Some (prior, "retry me"));
+    assert (Pave.Session.retry_candidate copy =
+      Some (prior, retry_message));
     Pave.Session.branch copy prior;
-    ignore (Pave.Session.append copy (message "retry me"));
+    ignore (Pave.Session.append copy retry_message);
     ignore (Pave.Session.append copy (assistant "new answer"));
     assert (Pave.Session.history copy =
       [message "first"; assistant "old answer";
-       message "retry me"; assistant "new answer"]);
+       retry_message; assistant "new answer"]);
     let completed_tip = Option.get (Pave.Session.leaf_id copy) in
     ignore (Pave.Session.append copy (message "interrupted request"));
     assert (Pave.Session.retry_candidate copy =
-      Some (completed_tip, "interrupted request"));
+      Some (completed_tip, message "interrupted request"));
     assert (Pave.Session.retryable_history [message "interrupted request"] =
-      Some ([], "interrupted request"));
+      Some ([], message "interrupted request"));
     Pave.Session.branch copy completed_tip;
     ignore (Pave.Session.append copy (message "tool turn"));
     ignore (Pave.Session.append copy { role = "assistant"; content = None; tool_calls = [ call ];
-    tool_call_id = None; tool_result_content = None; provider_state = None });
+    tool_call_id = None; tool_result_content = None; provider_state = None; attachments = [] });
     ignore (Pave.Session.append copy (Pave.Protocol.tool_result "call-1" "done"));
     assert (Pave.Session.retry_candidate copy = None);
     Pave.Session.branch copy prior;
@@ -300,12 +313,122 @@ let () =
     Pave.Session.branch copy route_tip;
     assert (Pave.Session.api (Pave.Session.open_file metadata_fork) =
       Some "messages");
+    let settings = Pave.Session.open_file settings_path in
+    let settings_target = Pave.Session.append settings (message "settings base") in
+    Pave.Session.set_model settings ~provider:"openai" ~model:"gpt-5";
+    Pave.Session.set_thinking settings (Some "high");
+    Pave.Session.set_disabled_tools settings ["write_file"];
+    Pave.Session.set_mode settings (Some Pave.Approval.Ask_writes);
+    Pave.Session.set_title settings "Release review";
+    Pave.Session.set_label settings ~target_id:settings_target (Some "review");
+    Pave.Session.set_pinned settings true;
+    let settings_tip = Option.get (Pave.Session.leaf_id settings) in
+    assert (Pave.Session.model settings = Some ("openai", "gpt-5"));
+    assert (Pave.Session.thinking settings = Some "high");
+    assert (Pave.Session.disabled_tools settings = ["write_file"]);
+    assert (Pave.Session.mode settings = Some Pave.Approval.Ask_writes);
+    assert (Pave.Session.title settings = Some "Release review");
+    assert (Pave.Session.labels settings = [settings_target, "review"]);
+    assert (Pave.Session.pinned settings);
+    assert (Pave.Session.history settings = [message "settings base"]);
+    assert (Pave.Session.label_target settings = Some settings_target);
+    let settings_reopened = Pave.Session.open_file settings_path in
+    assert (Pave.Session.thinking settings_reopened = Some "high");
+    assert (Pave.Session.disabled_tools settings_reopened = ["write_file"]);
+    assert (Pave.Session.mode settings_reopened = Some Pave.Approval.Ask_writes);
+    assert (Pave.Session.title settings_reopened = Some "Release review");
+    assert (Pave.Session.labels settings_reopened = [settings_target, "review"]);
+    assert (Pave.Session.pinned settings_reopened);
+    let parent_id = Pave.Protocol.member "id" settings.Pave.Session.header in
+    let settings_copy = Pave.Session.fork settings settings_fork in
+    assert (Pave.Session.parent_session settings_copy =
+      (match parent_id with `String id -> Some id | _ -> assert false));
+    assert (Pave.Session.title settings_copy = Some "Release review");
+    assert (Pave.Session.mode settings_copy = Some Pave.Approval.Ask_writes);
+    assert (not (Pave.Session.pinned settings_copy));
+    Pave.Session.branch settings settings_target;
+    assert (Pave.Session.thinking settings = None);
+    assert (Pave.Session.disabled_tools settings = []);
+    assert (Pave.Session.mode settings = None);
+    assert (Pave.Session.title settings = Some "Release review");
+    assert (Pave.Session.labels settings = []);
+    assert (Pave.Session.model settings = None);
+    assert (Pave.Session.pinned settings);
+    Pave.Session.branch settings settings_tip;
+    assert (Pave.Session.model settings = Some ("openai", "gpt-5"));
+    assert (Pave.Session.thinking settings = Some "high");
+    assert (Pave.Session.disabled_tools settings = ["write_file"]);
+    assert (Pave.Session.mode settings = Some Pave.Approval.Ask_writes);
+    assert (Pave.Session.title settings = Some "Release review");
+    assert (Pave.Session.labels settings = [settings_target, "review"]);
+    let reset = Pave.Session.open_file reset_path in
+    ignore (Pave.Session.append reset (message "old context"));
+    let reset_call : Pave.Protocol.tool_call = {
+      id = "reset-call"; name = "read_file"; arguments = `Assoc [] } in
+    ignore (Pave.Session.append reset {
+      role = "assistant"; content = None; tool_calls = [reset_call];
+      tool_call_id = None; tool_result_content = None;
+      provider_state = None; attachments = [] });
+    (match Pave.Session.clear reset with
+     | exception Pave.Protocol.Invalid_response _ -> ()
+     | _ -> failwith "clear crossed an unresolved tool call");
+    ignore (Pave.Session.append reset
+      (Pave.Protocol.tool_result reset_call.id "completed"));
+    Pave.Session.set_model reset ~provider:"openai" ~model:"gpt-5";
+    ignore (Pave.Session.clear reset);
+    assert (Pave.Session.history reset = [
+      message "old context";
+      { role = "assistant"; content = None; tool_calls = [reset_call];
+        tool_call_id = None; tool_result_content = None; provider_state = None;
+        attachments = [] };
+      Pave.Protocol.tool_result reset_call.id "completed"]);
+    assert (Pave.Session.context reset = []);
+    assert (Pave.Session.model reset = Some ("openai", "gpt-5"));
+    ignore (Pave.Session.append reset (message "new request"));
+    ignore (Pave.Session.append reset (assistant "new answer"));
+    let latest_user = Pave.Session.append reset (message "latest request") in
+    let first_kept, prefix = Pave.Session.compaction_plan reset in
+    assert (first_kept = latest_user);
+    assert (prefix = [message "new request"; assistant "new answer"]);
+    ignore (Pave.Session.compact reset ~summary:"Reset-era summary"
+      ~first_kept_id:first_kept);
+    assert (Pave.Session.history reset = [
+      message "old context";
+      { role = "assistant"; content = None; tool_calls = [reset_call];
+        tool_call_id = None; tool_result_content = None; provider_state = None;
+        attachments = [] };
+      Pave.Protocol.tool_result reset_call.id "completed";
+      message "new request"; assistant "new answer"; message "latest request"]);
+    assert (Pave.Session.context reset =
+      [message "Reset-era summary"; message "latest request"]);
+    let reset_reopened = Pave.Session.open_file reset_path in
+    assert (Pave.Session.context reset_reopened = Pave.Session.context reset);
+    assert (Pave.Session.history reset_reopened = Pave.Session.history reset);
+    let attachment = {
+      Pave.Protocol.name = "screenshot.png";
+      mime_type = "image/png"; data = "iVBORw0KGgo="
+    } in
+    let attached_user = Pave.Protocol.user ~attachments:[attachment] "Inspect" in
+    let attached_session = Pave.Session.open_file attachment_path in
+    ignore (Pave.Session.append attached_session attached_user);
+    let channel = open_in_bin attachment_path in
+    let stored_entry = Fun.protect ~finally:(fun () -> close_in_noerr channel)
+      (fun () ->
+        ignore (input_line channel);
+        Yojson.Basic.from_string (input_line channel)) in
+    let nested = Pave.Protocol.member "message" stored_entry in
+    assert (Pave.Protocol.member "content" nested = `String "Inspect");
+    assert (Pave.Protocol.member "attachments" nested = `Null);
+    assert (Pave.Protocol.member "attachments" stored_entry =
+      `List [Pave.Protocol.attachment_to_json attachment]);
+    assert (Pave.Session.history (Pave.Session.open_file attachment_path) =
+      [attached_user]);
     let multimodal = Pave.Session.open_file multimodal_path in
     let image_call : Pave.Protocol.tool_call = {
       id = "image-call"; name = "inspect_image"; arguments = `Assoc [] } in
     let image_assistant : Pave.Protocol.message = {
       role = "assistant"; content = None; tool_result_content = None;
-      tool_calls = [image_call]; tool_call_id = None; provider_state = None } in
+      tool_calls = [image_call]; tool_call_id = None; provider_state = None; attachments = [] } in
     let image_result = Pave.Protocol.tool_result_blocks image_call.id [
       Pave.Protocol.Text "Screenshot details";
       Pave.Protocol.Image { mime_type = "image/png"; data = "aGVsbG8=" }

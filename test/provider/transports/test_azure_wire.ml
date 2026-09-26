@@ -42,11 +42,11 @@ let () =
    | Unix.WEXITED 0 -> ()
    | _ -> failwith "Azure endpoint environment fixture failed");
   let user : Protocol.message = { role = "user"; content = Some "Find greeting";
-    tool_calls = []; tool_call_id = None; tool_result_content = None; provider_state = None } in
+    tool_calls = []; tool_call_id = None; tool_result_content = None; provider_state = None; attachments = [] } in
   let call : Protocol.tool_call = { id = "call_72"; name = "lookup";
     arguments = `Assoc ["query", `String "hello"] } in
   let expected : Protocol.message = { role = "assistant"; content = None;
-    tool_calls = [call]; tool_call_id = None; tool_result_content = None; provider_state = None } in
+    tool_calls = [call]; tool_call_id = None; tool_result_content = None; provider_state = None; attachments = [] } in
   let parameters = `Assoc ["type", `String "object"; "properties",
     `Assoc ["query", `Assoc ["type", `String "string"]]] in
   let tool = `Assoc ["type", `String "function"; "function", `Assoc [

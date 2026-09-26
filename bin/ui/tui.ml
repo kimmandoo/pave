@@ -47,6 +47,7 @@ type t = {
   mutable activity : string option;
   mutable activity_started : float option;
   mutable usage_badge : string option;
+  mutable pending_attachments : string list;
   mutable queue : int;
   mutable last_paint : float;
   mutable paste : bool;
@@ -295,11 +296,15 @@ let paint t =
     | None, Some badge when cols >= 28 && cols >= 9 + String.length badge ->
         badge
     | _ -> "" in
+  let attached = match t.pending_attachments with
+    | [] -> ""
+    | names -> Printf.sprintf " · %d image%s ready"
+        (List.length names) (if List.length names = 1 then "" else "s") in
   let header = I.hsnap ~align:`Left cols I.(
     string accent "  ◆  PAVE" <|>
     string (if t.activity = None then muted else warning)
       (activity ^ (if cols >= 48 then queued else "")) <|>
-    string muted usage) in
+    string muted (usage ^ attached)) in
   let model = single_line t.model in
   let model =
     if cols < 60 then match String.rindex_opt model '/' with
@@ -424,7 +429,7 @@ let paint t =
               | None -> "(no match)"
               | Some value -> sanitize (String.split_on_char '\n' value |> List.hd)) ^
               " · Ctrl+R older · " ^ enter_key ^ " recall · Esc cancel" in
-        if cols < 45 then
+        (if cols < 45 then
           (if status = idle_status then
             (if t.queue > 0 then Printf.sprintf "q%d · " t.queue else "") ^
             meta_key ^ "+O details · PgUp/Dn scroll"
@@ -432,7 +437,11 @@ let paint t =
         else
           (if total = 0 then "  "
            else if body_height = 0 then Printf.sprintf "  [0/%d] " total
-           else Printf.sprintf "  [%d-%d/%d] " (first + 1) last total) ^ status in
+           else Printf.sprintf "  [%d-%d/%d] " (first + 1) last total) ^ status) ^
+        (match t.pending_attachments with
+         | [] -> ""
+         | names -> Printf.sprintf " · %d image%s ready"
+             (List.length names) (if List.length names = 1 then "" else "s")) in
   let footer = styled_line cols text_attr footer_text in
   let first_line = max 0 (min (editor_row - editor_height + 1)
     (Array.length editor_lines - editor_height)) in
@@ -563,7 +572,8 @@ let create ~root ~model ~session =
     revision = 0; body_cache = None; layout_cache = None;
     previous = None; cursor_position = None;
     status = idle_status; activity = None;
-    activity_started = None; usage_badge = None; queue = 0;
+    activity_started = None; usage_badge = None;
+    pending_attachments = []; queue = 0;
     last_paint = 0.; paste = false; paste_buffer = Buffer.create 256 } in
   (try paint t with exn -> Notty_unix.Term.release term; raise exn);
   t
@@ -619,6 +629,10 @@ let set_usage t = function
       t.usage_badge <- Some (Printf.sprintf " · %d in/%d out"
         tokens.input_tokens tokens.output_tokens);
       paint t
+let set_attachments t names =
+  t.pending_attachments <- List.map single_line names;
+  paint t
+
 
 let set_queue t count =
   t.queue <- max 0 count;
@@ -641,7 +655,15 @@ let show_history t (messages : Pave.Protocol.message list) =
   List.iter (fun (message : Pave.Protocol.message) ->
     match message.role with
     | "user" ->
-        Option.iter (Transcript_view.sent t.transcript) message.content
+        let content = Option.value ~default:"" message.content in
+        let content = match message.attachments with
+          | [] -> content
+          | attachments ->
+              content ^ (if content = "" then "" else "\n") ^
+              "[Attached images: " ^ String.concat ", "
+                (List.map (fun (item : Pave.Protocol.attachment) ->
+                  single_line item.name) attachments) ^ "]" in
+        if content <> "" then Transcript_view.sent t.transcript content
     | "assistant" ->
         (match message.content with
         | Some content when content <> "" ->
@@ -681,11 +703,14 @@ let finish_live t =
   paint t
 
 let sent t text =
+  let text = match t.pending_attachments with
+    | [] -> text
+    | names -> text ^ "\n[Attached images: " ^ String.concat ", " names ^ "]" in
+  t.pending_attachments <- [];
   change_transcript t (fun () -> Transcript_view.sent t.transcript text);
   t.scroll <- 0;
   t.status <- idle_status;
   paint t
-
 let event t text =
   change_transcript t (fun () -> Transcript_view.event t.transcript text);
   paint t
@@ -882,9 +907,19 @@ let read ?wake_fd ?on_wake ?on_interrupt ?on_dequeue ?on_completion t =
     | `Key (`Enter, mods) when List.mem `Meta mods ->
         (match submit true with None -> loop () | Some _ as result -> result)
     | `Key (`Enter, mods) when not (List.mem `Shift mods) &&
-        not (List.mem `Ctrl mods) && hints_visible t ->
-        Option.iter (insert_hint t) (selected_hint t);
-        changed (); loop ()
+        not (List.mem `Ctrl mods) ->
+        let matches = hint_matches t in
+        if matches <> [] && hint_room t then
+          let draft = Pave.Composer.text t.editor in
+          if List.exists (fun (item : Pave.Interaction.shortcut) ->
+              item.name = draft) matches then
+            (match submit false with None -> loop () | Some _ as result -> result)
+          else (
+            if t.hint_selected < List.length matches then
+              insert_hint t (List.nth matches t.hint_selected);
+            changed (); loop ())
+        else
+          (match submit false with None -> loop () | Some _ as result -> result)
     | `Key (`Enter, mods) ->
         if t.paste || List.mem `Shift mods then
           (Pave.Composer.insert t.editor "\n"; changed (); loop ())

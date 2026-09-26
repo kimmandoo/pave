@@ -98,11 +98,11 @@ let queue_scope t path text =
   if size > max_scoped_context_bytes then false
   else (t.scoped_pending <- (path, text) :: pending; true)
 
-let run ?(max_turns = 20) ?cancel t text =
+let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
   if String.trim text = "" then invalid_arg "empty prompt";
   if max_turns <= 0 then invalid_arg "max_turns must be positive";
   Provider.check_cancel cancel;
-  append t (Protocol.user text);
+  append t (Protocol.user ~attachments text);
   let rec turn remaining =
     Provider.check_cancel cancel;
     if remaining = 0 then failwith "tool-call limit reached; inspect workspace before continuing";
@@ -114,7 +114,8 @@ let run ?(max_turns = 20) ?cancel t text =
       String.concat "\n\n" scoped in
     let system : Protocol.message =
       { role = "system"; content = Some system_text; tool_calls = [];
-        tool_call_id = None; tool_result_content = None; provider_state = None } in
+        tool_call_id = None; tool_result_content = None; provider_state = None;
+        attachments = [] } in
     let definitions =
       Tools.available_for ~allow_shell:t.allow_shell ~enabled:t.tool_available in
     (match t.on_phase with None -> () | Some notify -> notify Model);
