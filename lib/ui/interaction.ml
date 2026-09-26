@@ -217,12 +217,14 @@ let resolve_model ?current_route ~current_provider ~input () =
         ("no route for " ^ provider_id ^ "; use " ^ provider_id ^ "@API/MODEL") in
   descriptor, model, route
 
-let history_for_model ~wire ~model messages =
+let history_for_model ~provider:active_provider ~route:active_route
+    ~wire ~model messages =
   let retain (message : Protocol.message) =
     match message.provider_state with
     | None -> true
     | Some state ->
         let provider, route = match wire with
+          | Provider.Openai_responses -> "openai", Some "responses"
           | Provider.Codex_responses -> "openai-codex", None
           | Provider.Gemini_direct -> "google", None
           | Provider.Meta_responses -> "meta", None
@@ -234,7 +236,9 @@ let history_for_model ~wire ~model messages =
           | Provider.Gitlab_duo_messages -> "gitlab-duo", Some "anthropic"
           | Provider.Gitlab_duo_responses -> "gitlab-duo", Some "responses"
           | _ -> "", None in
-        provider <> "" &&
+        provider <> "" && active_provider = provider &&
+        (match route with
+         | None -> true | Some name -> active_route = name) &&
         Protocol.member "provider" state = `String provider &&
         Protocol.member "model" state = `String model &&
         (match route with

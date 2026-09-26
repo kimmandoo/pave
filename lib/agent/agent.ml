@@ -35,18 +35,21 @@ type t = {
   on_usage : (Protocol.usage -> unit) option;
   on_phase : (phase -> unit) option;
   on_tool_event : (tool_event -> unit) option;
+  before_request : (cancel:(unit -> bool) option ->
+    system:string -> messages:Protocol.message list ->
+    tools:Yojson.Basic.t list -> Protocol.message list option) option;
 }
 let create ~provider ~root ~system ?(authentication = Provider.Api_key)
     ?resolve_credential ?(allow_shell = false)
     ?(tool_available = fun _ -> true) ?(stream = false)
     ?(approval_mode = Approval.Ask_exec) ?(tool_approval = [])
     ?(command_patterns = []) ?(approve_command = fun _ -> false)
-    ?approve_tool ?(history = [])
+    ?approve_tool ?(history = []) ?before_request
     ?on_usage ?on_phase ?on_tool_event ?(on_change = fun _ -> ())
     ?(on_delta = fun _ -> ()) ~on_event () =
   { provider; authentication; resolve_credential; root; system; allow_shell;
     tool_available; stream; approval_mode; tool_approval; command_patterns;
-    approve_command; approve_tool;
+    approve_command; approve_tool; before_request;
     history_rev = List.rev history; scoped_pending = [];
     on_change; on_delta; on_event; on_usage; on_phase; on_tool_event }
 
@@ -112,14 +115,24 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
     let system_text = if scoped = [] then t.system else
       t.system ^ "\n\nPath-scoped project instructions (lower priority than mobile safety):\n" ^
       String.concat "\n\n" scoped in
+    let definitions = Tools.available_for ~allow_shell:t.allow_shell
+      ~enabled:t.tool_available in
     let system : Protocol.message =
       { role = "system"; content = Some system_text; tool_calls = [];
         tool_call_id = None; tool_result_content = None; provider_state = None;
         attachments = [] } in
-    let definitions =
-      Tools.available_for ~allow_shell:t.allow_shell ~enabled:t.tool_available in
     (match t.on_phase with None -> () | Some notify -> notify Model);
-    let transcript = system :: messages t in
+    let request_messages = match t.before_request with
+      | None -> messages t
+      | Some prepare ->
+          let current = messages t in
+          (match prepare ~cancel ~system:system_text ~messages:current
+            ~tools:definitions with
+           | None -> current
+           | Some replacement ->
+               t.history_rev <- List.rev replacement;
+               replacement) in
+    let transcript = system :: request_messages in
     let reply =
       if t.stream then Provider.complete ~authentication:t.authentication
         ?resolve_credential:t.resolve_credential ~on_text:t.on_delta

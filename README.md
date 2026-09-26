@@ -109,6 +109,8 @@ pave --provider github-copilot --model "$COPILOT_MODEL" --prompt 'Inspect this p
 
 # Local Ollama; pull a model with Ollama before invoking Pave.
 pave --provider ollama --model "$LOCAL_MODEL" --prompt 'Inspect this project'
+# Automatic budgeting uses an explicit window for the exact provider/model/API (set its real value).
+pave --provider openai --api responses --model "$MODEL_ID" --context-window "$CONTEXT_WINDOW" --session /private/path/pave.jsonl
 ```
 
 ### Provider-specific notes
@@ -225,7 +227,7 @@ Command patterns apply to shell arguments and use `*` for wildcard matching: den
 | `/cancel` · `/settings` | Stop the active request/command; edit typed project defaults for the next launch |
 | `/queue MESSAGE` | Queue a follow-up while a turn is active; when idle, send it immediately. |
 | `/tools [NAME]` | List the tools actually offered to the model, or inspect one tool's description; shell availability follows `--allow-shell` and still requires per-command approval |
-| `/context` | Inspect the actual model/route, saved branch and retained conversation count; show only provider-reported input/output tokens from OpenAI Responses, Codex subscription Responses, Anthropic Messages, Google Gemini, Ollama and Chat Completions routes that supply complete usage (the official OpenAI Chat stream explicitly requests it), on the selected ancestry or cumulative ephemeral conversation; other requests, context limit and cost remain untracked |
+| `/context` | Inspect the actual model/route and selected branch; show provider-reported usage and, only when explicitly configured, the context-window byte proxy. Limits are never inferred from model names; image token cost remains unknown |
 | `/usage` | Inspect only recorded provider-reported tokens; private journals group the selected branch's input/output totals by model, while ephemeral conversations show the combined measured total without claiming per-model provenance |
 | `/retry` | Reissue the last user turn only if it made no tool calls; saved sessions retain the prior answer on an abandoned branch, while ephemeral answers are replaced; both requests may incur usage |
 | `/hotkeys` | Display actual interactive keyboard shortcuts (including search, word editing, paste and tool expansion); headless CLI does not claim terminal keys work |
@@ -249,8 +251,19 @@ On macOS, `/help` labels Meta as `Option` and Enter as `Return`; other supported
 - **Context and metadata:** Model/API, approval mode, tool availability, thinking-level metadata and entry labels are typed journal entries, never provider messages. Model/API, approval, tool, thinking and label state follows the selected branch; titles and pins are session-wide. `/thinking` records metadata only and leaves provider/model defaults unchanged. `/clear` appends a reset boundary, preserves earlier journal history and settings, and refuses while tool calls remain unresolved. `/fresh` rebuilds the local agent on the next prompt without writing to the journal.
 - **Images and privacy:** Attachments are base64 data stored with the user journal entry, separate from its provider-message record; journals are unencrypted and may contain sensitive image data. Pave displays image names/placeholders, never base64. Image-capable routes receive native image fields; unsupported routes reject attached prompts before authentication/network I/O.
 - **Branch metadata:** Provider/model/API changes belong to branches, not provider messages. `/resume`, `--session` and `/branch` restore selected branch settings; explicit `--provider`, `--model`, `--api` or `--endpoint` wins. Credentials and custom endpoints are not stored as model metadata, and a removed route must be overridden on reopen.
-- **Recovery and privacy:** Reopening marks interrupted tool calls failed instead of rerunning them. Keep journals out of version control: Gemini 3 replay can persist model-issued thought text and signatures. `/compact` retains the entire journal, but summarization can fail when the provider context limit is exceeded.
+- **Recovery and privacy:** Reopening marks interrupted tool calls failed instead of rerunning them. Keep journals out of version control: Gemini 3 replay can persist model-issued thought text and signatures. `/compact` and automatic compaction append branch-local markers; the complete original journal remains intact. Matching signed provider state is retained only on its exact route/model; OpenAI Responses uses opaque route/model-bound compaction state, while other matching signed prefixes fail closed rather than being generically summarized.
 - **Tree picker:** `/tree` searches at most 1,024 parent-linked entries by their sanitized previews and IDs, highlights the active tip and keeps older ancestry reachable through `/branch ID`. `/branch` and `/fork` use the selected branch's durable messages and metadata; canceled selection leaves the branch and draft unchanged.
+
+### Context budgeting
+
+Set `--context-window TOKENS` only when the exact initial provider, model and API route are selected. Pave never infers limits from model names, and changing provider/model/API disables that configured budget. `/context` shows the supplied token window, the output reserve and a conservative UTF-8 request-byte proxy; it is not a provider tokenizer or a reported token count. Image token costs are not measured.
+
+Before each request, Pave trims oversized text tool results only in the provider-facing copy, then summarizes older complete turns in bounded chunks when needed. It keeps the newest user turn and its attachments, preserves tool-call/result adjacency, and appends a branch-local compaction marker only after every summary succeeds; the append-only journal and full tool outputs remain unchanged.
+
+The direct OpenAI API-key Responses route calls `/responses/compact` and replays opaque returned items only for the matching provider/route/model. It is the only native path; other matching signed state fails closed rather than being generically summarized. If no text summary is returned, the marker contains a route-bound placeholder, not portable semantic context. See [compaction behavior and limits](docs/compaction.md).
+
+Without an explicit window, `/compact` has no local byte-proxy preflight; the legacy generic path uses one unbounded summary request, while native OpenAI Responses may be rejected by the provider if its input is too large. A prompt/system/tool schema that already exceeds the byte allowance cannot be compacted without an older safe turn.
+
 
 ## Providers
 
@@ -348,7 +361,7 @@ Use `pave --providers` for the live list. This reference separates wire transpor
 | --- | --- |
 | Seven wire payload formats with distinct provider routes; bounded buffered and incremental-stream decoders; model-bound Codex/Gemini native state replay | Most provider-specific thinking/usage/multimodal parity and full model catalog |
 | Mobile manifest detection, workspace file read/search/edit/write, bounded agent turns | LSP/DAP, subagents, extensions and full tool catalog |
-| Grapheme-aware CJK input, cancellable streaming with queued follow-ups, searchable dynamic model picker, branching sessions and manual compaction | Automatic context budgeting/compaction and full structured session resume |
+| Grapheme-aware CJK input, cancellable streaming with queued follow-ups, searchable model picker, branching sessions, explicit-window byte-proxy budgeting, automatic/manual journal-safe summaries, native OpenAI Responses replay compaction | Tokenizer/provider-reported context limits, image token estimates, other provider-native compaction, LSP/DAP, subagents and extensions |
 
 **Shell safety:** model-requested shell execution is off by default. `--allow-shell` advertises shell commands but still asks for **each** command in an interactive terminal, even with `--approval-mode yolo` or a per-tool allow; noninteractive runs deny shell execution. Approved commands are **not sandboxed** and can access files outside the workspace. Check the impact preview and exact command before approving it; Pave does not install mobile SDKs, sign apps or deploy to devices for you.
 

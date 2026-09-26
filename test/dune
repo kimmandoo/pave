@@ -16,6 +16,21 @@
  (libraries pave unix yojson))
 
 (test
+ (name test_context_budget)
+ (modules test_context_budget)
+ (libraries pave unix yojson))
+
+(test
+ (name test_context_compaction)
+ (modules test_context_compaction)
+ (libraries pave unix yojson))
+
+(test
+ (name test_agent_context_hook)
+ (modules test_agent_context_hook)
+ (libraries pave unix yojson))
+
+(test
  (name test_openai_stream)
  (modules test_openai_stream)
  (libraries pave unix yojson))
@@ -28,6 +43,11 @@
 (test
  (name test_provider_http)
  (modules test_provider_http)
+ (libraries pave unix yojson))
+
+(test
+ (name test_context_compaction_http)
+ (modules test_context_compaction_http)
  (libraries pave unix yojson))
 
 (test

@@ -1,5 +1,19 @@
 # Troubleshooting
 
+### [2026-09-26] Manual compaction could leave the retained prompt over budget
+
+- **Context / Symptom:** Inspection found that an explicitly bounded manual summary could fit its own summary request while the resulting system prompt, tools, summary and newest turn still exceeded the configured prompt allowance. The automatic path checked this projected context; `/compact` did not.
+- **Root Cause:** Manual compaction appended its journal marker immediately after summarization without estimating the projected post-compaction request.
+- **Solution:** Added provider-facing tool-text trimming and a projected-context check against the active system prompt and tool schemas before `Session.compact`. A local TUI scenario returned an oversized fixed-prompt failure, kept the journal prefix unchanged, wrote no compaction marker and exited cleanly.
+- **Prevention / Reference:** Validate the summary plus retained current turn against the active request contract before committing a branch-local marker; a bounded summary request alone does not prove the next model request fits.
+
+### [2026-09-25] Minimal explicit context window could not fit fixed prompt
+
+- **Context / Symptom:** A headless request with `--context-window 8192` failed before provider I/O because the byte proxy's 4,096-byte prompt allowance was smaller than Pave's system instructions and tool schemas. The old error incorrectly attributed this to the current user turn.
+- **Root Cause:** The configured model window is a token count, but Pave deliberately compares a conservative UTF-8 byte proxy against its prompt allowance; the minimum accepted window does not guarantee that fixed prompt content fits.
+- **Solution:** Changed the fail-closed diagnostic to identify the system instructions, tool schemas or current prompt as the possible cause. A post-fix local CLI run returned that exact explanation without contacting the provider.
+- **Prevention / Reference:** `/context` shows the byte proxy and token allowance separately. Set an explicit larger window for the exact route or reduce prompt/tool context; model names do not select limits.
+
 ### [2026-09-25] Codex image serializer inferred the wrong record type
 
 - **Context / Symptom:** `opam exec -- dune runtest --force` failed to compile `lib/provider/transports/codex_wire.ml` with `This expression has type attachment; There is no field arguments within type attachment`.
