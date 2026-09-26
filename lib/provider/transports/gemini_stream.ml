@@ -11,6 +11,7 @@ type t = {
   native_calls : (Yojson.Basic.t, unit) Hashtbl.t;
   ids : (string, unit) Hashtbl.t;
   mutable finished : bool;
+  mutable failed : bool;
   mutable usage : Protocol.usage option;
   mutable wire_bytes : int;
   mutable response_bytes : int;
@@ -126,30 +127,40 @@ let create ~model ~on_text =
     signature_seen = false; parts = []; native_calls = Hashtbl.create 4;
     signatures = Hashtbl.create 4;
     calls = []; call_count = 0; ids = Hashtbl.create 4;
-    finished = false; usage = None;
+    finished = false; failed = false; usage = None;
     response_bytes = 0; wire_bytes = 0; parser = None } in
   t.parser <- Some (Sse.create ~on_event:(handle_event t));
   t
 
 let feed t bytes =
-  match t.parser with
+  if t.failed then invalid "stream is invalid";
+  try match t.parser with
   | Some parser -> Sse.feed parser bytes
   | None -> invalid "SSE parser was not initialized"
+  with Protocol.Invalid_response _ as error ->
+    t.failed <- true;
+    raise error
 
-let is_done t = t.finished && t.usage <> None
-let is_finished t = t.finished
+let is_done t = t.finished && not t.failed && t.usage <> None
+let is_finished t = t.finished && not t.failed
 
-let usage t = if t.finished then t.usage else None
+let usage t = if t.finished && not t.failed then t.usage else None
 let finish t =
-  (match t.parser with
-   | Some parser -> Sse.finish parser
-   | None -> invalid "SSE parser was not initialized");
-  if not t.finished then invalid "missing finish reason";
-  if (not t.text_seen || Buffer.length t.content = 0) && t.calls = [] then
-    invalid "empty response";
-  if t.calls <> [] && not t.signature_seen then
-    invalid "Gemini tool turn lacks native thought signature";
-  { Protocol.role = "assistant"; content = (if t.text_seen then Some (Buffer.contents t.content) else None);
-  tool_calls = List.rev t.calls; tool_call_id = None; tool_result_content = None; provider_state = (if t.signature_seen then
-    Some (Gemini_wire.native_state ~model:t.model (List.rev t.parts))
-    else None); attachments = [] }
+  if t.failed then invalid "stream is invalid";
+  try
+    (match t.parser with
+     | Some parser -> Sse.finish parser
+     | None -> invalid "SSE parser was not initialized");
+    if not t.finished then invalid "missing finish reason";
+    if (not t.text_seen || Buffer.length t.content = 0) && t.calls = [] then
+      invalid "empty response";
+    if t.calls <> [] && not t.signature_seen then
+      invalid "Gemini tool turn lacks native thought signature";
+    { Protocol.role = "assistant"; content = (if t.text_seen then Some (Buffer.contents t.content) else None);
+    tool_calls = List.rev t.calls; tool_call_id = None; tool_result_content = None; provider_state = (if t.signature_seen then
+      Some (Gemini_wire.native_state ~model:t.model (List.rev t.parts))
+      else None); attachments = [] }
+  with Protocol.Invalid_response _ as error ->
+    t.failed <- true;
+    raise error
+

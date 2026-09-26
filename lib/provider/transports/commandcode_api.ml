@@ -211,6 +211,7 @@ let messages_request ~model ~max_tokens messages tools =
                 | _ -> invalid "malformed Messages assistant state" in
               validate_messages_blocks blocks;
               let decoded = Anthropic_wire.parse_response (`Assoc [
+                "type", `String "message"; "role", `String "assistant";
                 "content", `List blocks;
                 "stop_reason", `String
                   (if msg.tool_calls = [] then "end_turn" else "tool_use")]) in

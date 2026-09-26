@@ -44,10 +44,23 @@ let summary (entry : Session.entry) =
   | Session.Pin pinned ->
       "pin · " ^ (if pinned then "pinned" else "unpinned")
   | Session.Reset_boundary -> "cleared model context"
-  | Session.Usage { provider; model; tokens } ->
-      Printf.sprintf "usage · %s · %d in / %d out"
-        (first_line (provider ^ "/" ^ model))
-        tokens.input_tokens tokens.output_tokens
+  | Session.Usage { provider; account_id; route; model; tokens } ->
+      let identity = match route with
+        | None -> provider
+        | Some route -> provider ^ "@" ^ route in
+      let identity = identity ^
+        Option.fold ~none:"" ~some:(fun account -> "#" ^ account) account_id ^
+        "/" ^ model in
+      let details = List.filter_map Fun.id [
+        Option.map (fun value -> Printf.sprintf "%d cached" value)
+          tokens.cached_input_tokens;
+        Option.map (fun value -> Printf.sprintf "%d cache creation" value)
+          tokens.cache_creation_input_tokens;
+        Option.map (fun value -> Printf.sprintf "%d reasoning" value)
+          tokens.reasoning_output_tokens ] in
+      Printf.sprintf "usage · %s · %d in / %d out%s"
+        (first_line identity) tokens.input_tokens tokens.output_tokens
+        (if details = [] then "" else " · " ^ String.concat " · " details)
   | Session.Tool_lifecycle { name; state; _ } ->
       let state = match state with
         | Session.Tool_started -> "started"

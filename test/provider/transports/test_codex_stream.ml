@@ -73,7 +73,9 @@ let () =
   assert (Codex_stream.is_done t && Codex_stream.is_finished t);
   let result = Codex_stream.finish t in
   assert (Codex_stream.usage t =
-    Some { Protocol.input_tokens = 5; output_tokens = 3 });
+    Some { Protocol.input_tokens = 5; output_tokens = 3;
+      cached_input_tokens = None; cache_creation_input_tokens = None;
+      reasoning_output_tokens = None });
   assert (List.rev !chunks = ["Reading "; "file"]);
   assert (result.content = Some "Reading file");
   assert (result.tool_calls = [{ Protocol.id = "call_1"; name = "read_file";
@@ -145,4 +147,13 @@ let () =
     added initial_message ^ done_item final_message ^
     event "response.completed" ["response", `Assoc [
       "id", `String "wrong-response-id"; "status", `String "completed"]]);
+  let poisoned = Codex_stream.create ~model ~on_text:(fun _ -> ()) in
+  Codex_stream.feed poisoned (completed ~output:[final_message] ());
+  (match Codex_stream.feed poisoned (event "response.created" ["id", `String "resp_1"]) with
+   | exception Protocol.Invalid_response _ -> ()
+   | _ -> failwith "expected invalid event after Codex completion");
+  (match Codex_stream.finish poisoned with
+   | exception Protocol.Invalid_response _ -> ()
+   | _ -> failwith "failed Codex stream must not finish successfully");
+  assert (Codex_stream.usage poisoned = None);
   print_endline "Codex stream: ok"

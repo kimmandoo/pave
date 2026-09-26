@@ -17,7 +17,15 @@ let usage json =
     when input_tokens >= 0 && candidates >= 0 ->
       if thoughts > max_int - candidates then
         invalid "output token total exceeds host integer";
-      Some { input_tokens; output_tokens = candidates + thoughts }
+      let output_tokens = candidates + thoughts in
+      let cached_input_tokens = match field "cachedContentTokenCount" reported with
+        | `Int count when count >= 0 && count <= input_tokens -> Some count
+        | _ -> None in
+      let reasoning_output_tokens = match field "thoughtsTokenCount" reported with
+        | `Int count when count >= 0 && count <= output_tokens -> Some count
+        | _ -> None in
+      Some { input_tokens; output_tokens; cached_input_tokens;
+        cache_creation_input_tokens = None; reasoning_output_tokens }
   | _ -> None
 
 let call_sequence = ref 0

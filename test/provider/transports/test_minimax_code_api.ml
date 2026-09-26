@@ -190,7 +190,7 @@ let () =
     (* Split-thinking responses are optional: if returned, retain both native
        fields verbatim on the assistant turn without model-name dispatch. *)
     let split = Coding.parse_completion (Yojson.Basic.from_string
-      {|{"choices":[{"finish_reason":"tool_calls","message":{"content":null,"reasoning_content":"Add both values.","reasoning_details":[{"type":"reasoning.text","id":"reasoning-text-1","format":"MiniMax-response-v1","index":0,"text":"Add both values."}],"tool_calls":[{"id":"call_minimax_14","type":"function","function":{"name":"add","arguments":"{\"left\":8,\"right\":13}"}}]}}]}|}) in
+      {|{"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","content":null,"reasoning_content":"Add both values.","reasoning_details":[{"type":"reasoning.text","id":"reasoning-text-1","format":"MiniMax-response-v1","index":0,"text":"Add both values."}],"tool_calls":[{"id":"call_minimax_14","type":"function","function":{"name":"add","arguments":"{\"left\":8,\"right\":13}"}}]}}]}|}) in
     assert (split.provider_state = Some (`Assoc
       ["reasoning_details", reasoning_details;
        "reasoning_content", `String "Add both values."]));

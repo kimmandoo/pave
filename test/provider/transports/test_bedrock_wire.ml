@@ -221,7 +221,9 @@ let () =
   expect_invalid (fun () -> Wire.request
     [Pave.Protocol.user "Find alpha"; history;
       Pave.Protocol.tool_result call.id "value-alpha"] []);
-  assert (Wire.usage final_answer = Some { Pave.Protocol.input_tokens = 12; output_tokens = 7 });
+  assert (Wire.usage final_answer = Some { Pave.Protocol.input_tokens = 12;
+    output_tokens = 7; cached_input_tokens = None;
+    cache_creation_input_tokens = None; reasoning_output_tokens = None });
   let typed_result blocks = Pave.Protocol.tool_result_blocks call.id blocks in
   let assistant_message : Pave.Protocol.message = {
     role = "assistant"; content = None; tool_calls = [call]; tool_call_id = None;

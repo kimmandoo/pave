@@ -141,6 +141,7 @@ let validate_reasoning output =
 let replay_anthropic (msg : Protocol.message) content =
   validate_thinking content;
   let decoded = Anthropic_wire.parse_response (`Assoc [
+    "type", `String "message"; "role", `String "assistant";
     "stop_reason", `String
       (if msg.tool_calls = [] then "end_turn" else "tool_use");
     "content", `List content]) in

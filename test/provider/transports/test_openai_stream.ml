@@ -40,7 +40,9 @@ let () =
   assert ((Openai_stream.finish parser).content = Some "Hello");
   let counted = Openai_stream.create ~on_text:(fun _ -> ()) in
   let usage = `Assoc [
-    "prompt_tokens", `Int 19; "completion_tokens", `Int 7 ] in
+    "prompt_tokens", `Int 19; "completion_tokens", `Int 7;
+    "prompt_tokens_details", `Assoc ["cached_tokens", `Int 5];
+    "completion_tokens_details", `Assoc ["reasoning_tokens", `Int 2] ] in
   let usage_only = event (Yojson.Basic.to_string (`Assoc [
     "choices", `List []; "usage", usage ])) in
   Openai_stream.feed counted
@@ -49,7 +51,20 @@ let () =
      usage_only ^ done_event);
   ignore (Openai_stream.finish counted);
   assert (Openai_stream.usage counted =
-    Some { Protocol.input_tokens = 19; output_tokens = 7 });
+    Some { Protocol.input_tokens = 19; output_tokens = 7;
+      cached_input_tokens = Some 5; cache_creation_input_tokens = None;
+      reasoning_output_tokens = Some 2 });
+  let gated = Openai_stream.create ~on_text:(fun _ -> ()) in
+  Openai_stream.feed gated
+    (event (chunk (text "metered")) ^
+     event (chunk ~finish:(`String "stop") (`Assoc [])) ^ usage_only);
+  assert (Openai_stream.usage gated = None);
+  Openai_stream.feed gated done_event;
+  assert (Openai_stream.usage gated =
+    Some { Protocol.input_tokens = 19; output_tokens = 7;
+      cached_input_tokens = Some 5; cache_creation_input_tokens = None;
+      reasoning_output_tokens = Some 2 });
+  ignore (Openai_stream.finish gated);
   invalid (fun () -> stream
     (event (chunk (text "metered")) ^
      event (chunk ~finish:(`String "stop") (`Assoc [])) ^
@@ -75,8 +90,10 @@ let () =
     { Protocol.id = "call-second"; name = "write";
       arguments = `Assoc [ "value", `Int 42 ] } ]);
   invalid (fun () -> stream (event (chunk (text "partial"))));
-  assert ((stream (event (chunk ~finish:(`String "stop") (text "complete")))).content
-    = Some "complete");
+  assert ((stream (event (chunk ~finish:(`String "stop") (text "complete"))
+    ^ done_event)).content = Some "complete");
+  invalid (fun () -> stream
+    (event (chunk ~finish:(`String "stop") (text "truncated"))));
   invalid (fun () -> stream (event (chunk (text "done only")) ^ done_event));
   invalid (fun () -> stream
     (event (chunk (calls [ call 0 ~id:"call" ~name:"read" ~arguments:"{}" () ]))
@@ -89,5 +106,17 @@ let () =
     (event (chunk (calls [ call 0 ~id:"duplicate" ~name:"a" ~arguments:"{}" ();
                            call 1 ~id:"duplicate" ~name:"b" ~arguments:"{}" () ]))
      ^ event (chunk ~finish:(`String "tool_calls") (`Assoc [])) ^ done_event));
+  invalid (fun () -> stream
+    (event (chunk (calls [ call 0 ~id:"call" ~name:"read" ~arguments:"[]" () ]))
+     ^ event (chunk ~finish:(`String "tool_calls") (`Assoc [])) ^ done_event));
+  invalid (fun () -> stream
+    (event (chunk (`Assoc ["refusal", `String "No"])) ^
+     event (chunk ~finish:(`String "stop") (`Assoc [])) ^ done_event));
   invalid (fun () -> stream ("data: " ^ String.make 1_048_577 'a'));
+  let poisoned = Openai_stream.create ~on_text:(fun _ -> ()) in
+  Openai_stream.feed poisoned
+    (event (chunk ~finish:(`String "stop") (text "complete")) ^ done_event);
+  invalid (fun () -> Openai_stream.feed poisoned (event (chunk (text "after terminal"))));
+  invalid (fun () -> Openai_stream.finish poisoned);
+  assert (Openai_stream.usage poisoned = None);
   print_endline "OpenAI incremental stream: ok"

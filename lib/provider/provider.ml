@@ -237,6 +237,40 @@ let error_message key json =
   match message with
   | Some message when message <> "" -> Some (redact key message)
   | _ -> None
+let context_limit_error json =
+  let error = Protocol.member "error" json in
+  let candidates =
+    List.map (fun key -> Protocol.member key error) ["code"; "type"; "status"] @
+    [Protocol.member "code" json; Protocol.member "status" json] in
+  List.exists (function
+    | `String code ->
+        List.mem (String.lowercase_ascii code) [
+          "context_length_exceeded"; "context_window_exceeded";
+          "context_limit_exceeded"; "prompt_too_long"; "prompt_is_too_long";
+          "input_too_long"; "max_input_tokens_exceeded";
+          "token_limit_exceeded" ]
+    | _ -> false) candidates
+
+let http_error_reason secret status json =
+  let category = match status with
+    | 400 when context_limit_error json -> "provider context limit exceeded"
+    | 400 -> "invalid provider request"
+    | 401 -> "provider authentication failed"
+    | 403 -> "provider permission denied"
+    | 404 -> "provider model or endpoint not found"
+    | 408 -> "provider request timed out"
+    | 413 -> "provider request exceeds its context or size limit"
+    | 429 -> "provider rate limited"
+    | code when code >= 500 && code <= 599 ->
+        "provider unavailable (HTTP " ^ string_of_int code ^ ")"
+    | code -> "HTTP " ^ string_of_int code in
+  let category = match status with
+    | 400 | 401 | 403 | 404 | 408 | 413 | 429 ->
+        Printf.sprintf "%s (HTTP %d)" category status
+    | _ -> category in
+  match error_message secret json with
+  | Some detail -> category ^ ": " ^ detail
+  | None -> category
 
 let gemini_model_path model =
   let model = if String.starts_with ~prefix:"models/" model then
@@ -397,7 +431,9 @@ let post_json ?(local = false) ?cancel ~endpoint ~headers ~secret body_json =
         curl_options ~local ~endpoint ~headers ~body_path
         ^ option "output" response_path
         ^ option "write-out" "%{http_code}" in
-      let status = run_curl ?cancel configuration in
+      let status = try run_curl ?cancel configuration with
+        | Provider_error "curl failed (exit status 28)" ->
+            raise (Provider_error "provider request timed out before a response was available") in
       check_cancel cancel;
       let response = read_file response_path in
       let json =
@@ -406,12 +442,9 @@ let post_json ?(local = false) ?cancel ~endpoint ~headers ~secret body_json =
       let http_status =
         try int_of_string status
         with Failure _ -> raise (Provider_error "curl returned an invalid HTTP status") in
-      if http_status < 200 || http_status >= 300 then (
-        let detail = match json with
-          | Some value -> error_message secret value
-          | None -> None in
-        let suffix = match detail with None -> "" | Some message -> ": " ^ message in
-        raise (Provider_error (Printf.sprintf "HTTP %d%s" http_status suffix)));
+      if http_status < 200 || http_status >= 300 then
+        raise (Provider_error (http_error_reason secret http_status
+          (Option.value ~default:`Null json)));
       match json with
       | None -> raise (Provider_error "invalid JSON in completion response")
       | Some json ->
@@ -444,8 +477,10 @@ let post_stream ?(local = false) ?cancel ~endpoint ~headers ~secret body_json ~o
         ^ option "speed-time" "30"
         ^ option "speed-limit" "1" in
       let status = ref None in
+      let response_body_seen = ref false in
       let pending = Buffer.create 256 in
       let consume chunk =
+        if chunk <> "" then response_body_seen := true;
         if !status = None then status := status_from_headers (read_file header_path);
         match !status with
         | Some code when code >= 200 && code < 300 ->
@@ -458,17 +493,21 @@ let post_stream ?(local = false) ?cancel ~endpoint ~headers ~secret body_json ~o
               raise (Provider_error "HTTP error or missing response headers exceeded 16 KiB");
             Buffer.add_string pending chunk in
       (try ignore (run_curl ~on_chunk:consume ~is_done ~is_finished ?cancel configuration)
-       with Stream_complete -> ());
+       with
+       | Stream_complete -> ()
+       | Provider_error "curl failed (exit status 28)" ->
+           let phase = if !response_body_seen then
+             "after response data (stream idle or total request timeout)"
+             else "before the first response data byte" in
+           raise (Provider_error ("provider stream timed out " ^ phase)));
       check_cancel cancel;
       let code = match status_from_headers (read_file header_path) with
         | Some code -> code
         | None -> raise (Provider_error "missing HTTP response status") in
       if code < 200 || code >= 300 then (
-        let detail = try
-          error_message secret (Yojson.Basic.from_string (Buffer.contents pending))
-          with Yojson.Json_error _ -> None in
-        let suffix = match detail with None -> "" | Some message -> ": " ^ message in
-        raise (Provider_error (Printf.sprintf "HTTP %d%s" code suffix)));
+        let error = try Yojson.Basic.from_string (Buffer.contents pending)
+          with Yojson.Json_error _ -> `Null in
+        raise (Provider_error (http_error_reason secret code error)));
       if Buffer.length pending <> 0 then on_chunk (Buffer.contents pending)))
 
 let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage ?cancel
@@ -849,7 +888,9 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage 
       (match on_usage, usage with
        | Some report, Some (input_tokens, output_tokens) ->
            check_cancel cancel;
-           report { Protocol.input_tokens = input_tokens; output_tokens }
+           report { Protocol.input_tokens = input_tokens; output_tokens;
+             cached_input_tokens = None; cache_creation_input_tokens = None;
+             reasoning_output_tokens = None }
        | _ -> ());
       (match on_text, reply.content with
        | Some emit, Some text -> check_cancel cancel; emit text
@@ -900,12 +941,14 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage 
        | _ -> ());
       reply
   | Anthropic_messages ->
-      let allow_compaction = authentication = Api_key &&
+      let allow_direct_api_key_features = authentication = Api_key &&
         config.endpoint = "https://api.anthropic.com/v1/messages" in
+      let allow_compaction = allow_direct_api_key_features in
+      let allow_prompt_caching = allow_direct_api_key_features in
       let compaction_beta = allow_compaction &&
         Anthropic_wire.requires_compaction_beta ~model:config.model messages in
       let body = parse (fun () ->
-        Anthropic_wire.request ~allow_compaction
+        Anthropic_wire.request ~allow_compaction ~allow_prompt_caching
           ~model:config.model ~max_tokens:4096 messages tools) in
       let headers = [ "anthropic-version: 2023-06-01" ] @
         (if compaction_beta then
@@ -1182,8 +1225,8 @@ let compact_anthropic_messages ?(authentication = Api_key) ?resolve_credential
   reject_controls "API key" api_key;
   if api_key = "" then raise (Provider_error "missing Anthropic API key");
   check_cancel cancel;
-  let body = Anthropic_wire.compaction_request ~model:config.model
-    ~max_tokens:4096 ~instructions messages tools in
+  let body = Anthropic_wire.compaction_request ~allow_prompt_caching:true
+    ~model:config.model ~max_tokens:4096 ~instructions messages tools in
   let headers = [
     "anthropic-version: 2023-06-01";
     "anthropic-beta: " ^ Anthropic_wire.compaction_beta;

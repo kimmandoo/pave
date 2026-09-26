@@ -42,7 +42,9 @@ let () =
       "eval_count", `Int 7] ());
   ignore (Pave.Ollama_stream.finish measured);
   assert (Pave.Ollama_stream.usage measured =
-    Some { Pave.Protocol.input_tokens = 18; output_tokens = 7 });
+    Some { Pave.Protocol.input_tokens = 18; output_tokens = 7;
+      cached_input_tokens = None; cache_creation_input_tokens = None;
+      reasoning_output_tokens = None });
   let fragments =
     call_chunk [ tool ~index:0 "search" (`String {|{"query":"東|}) ] ^
     call_chunk [ tool ~index:0 "search" (`String {|京"}|}) ] ^
@@ -67,6 +69,14 @@ let () =
   expect_invalid (chunk "partial" ^ done_frame ~reason:"length" ());
   expect_invalid (chunk "partial" ^ done_frame ~reason:"load" ());
   expect_invalid (done_frame ());
+  let poisoned = Pave.Ollama_stream.create ~on_text:(fun _ -> ()) in
+  (match Pave.Ollama_stream.feed poisoned
+    (chunk "complete" ^ done_frame () ^ chunk "late") with
+   | exception Pave.Protocol.Invalid_response _ -> ()
+   | _ -> failwith "expected trailing Ollama frame to invalidate stream");
+  (match Pave.Ollama_stream.finish poisoned with
+   | exception Pave.Protocol.Invalid_response _ -> ()
+   | _ -> failwith "invalid Ollama stream was accepted by finish");
   expect_invalid (done_frame () ^ chunk "too late");
   expect_invalid (call_chunk [ tool ~index:0 "search" (`String "{broken") ] ^ done_frame ());
   expect_invalid (call_chunk [ tool "search" (`String "{broken") ] ^ done_frame ());

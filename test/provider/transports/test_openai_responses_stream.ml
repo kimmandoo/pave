@@ -72,11 +72,15 @@ let () =
   let metered = Openai_responses_stream.create ~on_text:(fun _ -> ()) in
   let measured = event "response.completed" [ "response", `Assoc [
     "status", `String "completed"; "output", `List [final_message];
-    "usage", `Assoc ["input_tokens", `Int 21; "output_tokens", `Int 9] ] ] in
+    "usage", `Assoc ["input_tokens", `Int 21; "output_tokens", `Int 9;
+      "input_tokens_details", `Assoc ["cached_tokens", `Int 6];
+      "output_tokens_details", `Assoc ["reasoning_tokens", `Int 4]] ] ] in
   Openai_responses_stream.feed metered measured;
   ignore (Openai_responses_stream.finish metered);
   assert (Openai_responses_stream.usage metered =
-    Some { Protocol.input_tokens = 21; output_tokens = 9 });
+    Some { Protocol.input_tokens = 21; output_tokens = 9;
+      cached_input_tokens = Some 6; cache_creation_input_tokens = None;
+      reasoning_output_tokens = Some 4 });
   let without_deltas = added 0 initial_message ^ done_item 0 final_message
     ^ completion [ final_message ] in
   let deltas = ref [] in
@@ -103,10 +107,25 @@ let () =
   invalid (added 1 initial_call ^ done_item 1 final_call ^
     completion [ final_message; call "fc_1" "call_1" "read_file" {|{"path":"other.txt"}|} ]);
   invalid (added 0 initial_message ^ done_item 0 final_message ^ failed);
+  invalid (event "response.completed" ["response", `Assoc [
+    "status", `String "completed";
+    "incomplete_details", `Assoc ["reason", `String "max_output_tokens"];
+    "output", `List [final_message]]]);
   invalid (added 1 initial_call ^ done_item 1
     (call "fc_1" "call_1" "read_file" "{bad") ^ completion [ final_message; final_call ]);
   invalid (added 0 initial_message ^ done_item 0 final_message);
   invalid ("data: [DONE]\r\n\r\n");
   invalid ("event: error\r\ndata: {\"type\":\"error\",\"message\":\"bad\"}\r\n\r\n");
   invalid ("event: response.completed\r\ndata: {bad}\r\n\r\n");
+  let poisoned = Openai_responses_stream.create ~on_text:(fun _ -> ()) in
+  Openai_responses_stream.feed poisoned
+    (completion [ final_message ] ^ "data: [DONE]\r\n\r\n");
+  (match Openai_responses_stream.feed poisoned
+      (event "response.created" ["response", `Assoc []]) with
+   | exception Protocol.Invalid_response _ -> ()
+   | _ -> failwith "expected invalid event after terminal response");
+  (match Openai_responses_stream.finish poisoned with
+   | exception Protocol.Invalid_response _ -> ()
+   | _ -> failwith "failed Responses stream must not finish successfully");
+  assert (Openai_responses_stream.usage poisoned = None);
   print_endline "OpenAI Responses stream: ok"

@@ -19,7 +19,7 @@ let stream_body =
 
 let anthropic_stream =
   "event: message_start\ndata: " ^
-  {|{"type":"message_start","message":{"id":"msg_1","role":"assistant","usage":{"input_tokens":2}}}|} ^
+  {|{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","usage":{"input_tokens":2}}}|} ^
   "\n\n" ^
   "event: content_block_start\ndata: " ^
   {|{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}|} ^
@@ -55,6 +55,83 @@ let read_request ic =
   path, !headers, body
 
 let has_header prefix headers = List.exists (String.starts_with ~prefix) headers
+
+let write_file path contents =
+  let oc = open_out_bin path in
+  Fun.protect ~finally:(fun () -> close_out_noerr oc) (fun () ->
+    output_string oc contents)
+
+let read_capture path =
+  let ic = open_in_bin path in
+  Fun.protect ~finally:(fun () -> close_in_noerr ic) (fun () ->
+    really_input_string ic (in_channel_length ic))
+
+let curl_timeout_smoke () =
+  let directory = Filename.temp_file "pave-provider-timeout-" "" in
+  Sys.remove directory;
+  Unix.mkdir directory 0o700;
+  let curl = Filename.concat directory "curl" in
+  let captured_config = Filename.concat directory "config" in
+  let calls = Filename.concat directory "calls" in
+  write_file curl {|#!/bin/sh
+set -eu
+[ "$1" = "--disable" ] && [ "$2" = "--config" ] && [ "$3" = "-" ]
+printf '%s\n' "$PAVE_PROVIDER_HTTP_TIMEOUT_MODE" >> "$PAVE_PROVIDER_HTTP_TIMEOUT_CALLS"
+cat > "$PAVE_PROVIDER_HTTP_TIMEOUT_CONFIG"
+header=$(sed -n 's/^dump-header = "\(.*\)"/\1/p' "$PAVE_PROVIDER_HTTP_TIMEOUT_CONFIG" | tail -n 1)
+if [ -n "$header" ]; then printf 'HTTP/1.1 200 OK\r\n\r\n' > "$header"; fi
+if [ "$PAVE_PROVIDER_HTTP_TIMEOUT_MODE" = body ]; then
+  printf 'data: {"choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}]}\n\n'
+fi
+exit 28
+|};
+  Unix.chmod curl 0o700;
+  let old_path = Sys.getenv_opt "PATH"
+  and old_mode = Sys.getenv_opt "PAVE_PROVIDER_HTTP_TIMEOUT_MODE"
+  and old_config = Sys.getenv_opt "PAVE_PROVIDER_HTTP_TIMEOUT_CONFIG"
+  and old_calls = Sys.getenv_opt "PAVE_PROVIDER_HTTP_TIMEOUT_CALLS" in
+  let restore name = function
+    | Some value -> Unix.putenv name value
+    | None -> Unix.putenv name "" in
+  Fun.protect
+    ~finally:(fun () ->
+      restore "PATH" old_path;
+      restore "PAVE_PROVIDER_HTTP_TIMEOUT_MODE" old_mode;
+      restore "PAVE_PROVIDER_HTTP_TIMEOUT_CONFIG" old_config;
+      restore "PAVE_PROVIDER_HTTP_TIMEOUT_CALLS" old_calls;
+      List.iter (fun path -> if Sys.file_exists path then Sys.remove path)
+        [curl; captured_config; calls];
+      Unix.rmdir directory)
+    (fun () ->
+      Unix.putenv "PATH" (directory ^ ":" ^ Option.value ~default:"" old_path);
+      Unix.putenv "PAVE_PROVIDER_HTTP_TIMEOUT_CONFIG" captured_config;
+      Unix.putenv "PAVE_PROVIDER_HTTP_TIMEOUT_CALLS" calls;
+      let config : Pave.Provider.config = {
+        endpoint = "http://127.0.0.1:1/complete"; api_key = "mock-openai";
+        model = "timeout-fixture"; api = Pave.Provider.Openai_completions } in
+      let expect prefix f =
+        match f () with
+        | exception Pave.Provider.Provider_error message ->
+            assert (String.starts_with ~prefix message);
+            assert (not (leaks_key message))
+        | _ -> failwith ("expected timeout classification: " ^ prefix) in
+      Unix.putenv "PAVE_PROVIDER_HTTP_TIMEOUT_MODE" "buffered";
+      expect "provider request timed out" (fun () ->
+        Pave.Provider.complete config [Pave.Protocol.user "timeout"] []);
+      Unix.putenv "PAVE_PROVIDER_HTTP_TIMEOUT_MODE" "empty";
+      expect "provider stream timed out before the first response data byte" (fun () ->
+        Pave.Provider.complete ~on_text:(fun _ -> ()) config
+          [Pave.Protocol.user "timeout"] []);
+      Unix.putenv "PAVE_PROVIDER_HTTP_TIMEOUT_MODE" "body";
+      let visible = ref [] in
+      expect "provider stream timed out after response data" (fun () ->
+        Pave.Provider.complete ~on_text:(fun text -> visible := text :: !visible)
+          config [Pave.Protocol.user "timeout"] []);
+      assert (List.rev !visible = ["partial"]);
+      let requests =
+        read_capture calls |> String.split_on_char '\n'
+        |> List.filter (fun line -> line <> "") in
+      assert (List.length requests = 3))
 
 let serve client step signal_write closed_write =
   let ic = Unix.in_channel_of_descr client in
@@ -145,7 +222,27 @@ let serve client step signal_write closed_write =
             "finish_reason", `String "stop";
             "message", `Assoc ["role", `String "assistant";
               "content", `String (provider ^ "-reply")]]]]))
-    | _ -> failwith "unexpected request" in
+    | 24 -> assert (has_header "authorization: bearer mock-openai" headers);
+        401, "application/json",
+        {|{"error":{"message":"invalid key mock-openai"}}|}
+    | 25 -> assert (has_header "authorization: bearer mock-openai" headers);
+        403, "application/json", {|{"error":{"message":"permission denied"}}|}
+    | 26 -> assert (has_header "authorization: bearer mock-openai" headers);
+        404, "application/json", {|{"error":{"message":"model not found"}}|}
+    | 27 -> assert (has_header "authorization: bearer mock-openai" headers);
+        413, "application/json", {|{"error":{"message":"request too large"}}|}
+    | 28 -> assert (has_header "authorization: bearer mock-openai" headers);
+        429, "application/json", {|{"error":{"message":"rate limited"}}|}
+    | 29 -> assert (has_header "authorization: bearer mock-openai" headers);
+        503, "application/json", {|{"error":{"message":"overloaded"}}|}
+    | 30 -> assert (has_header "authorization: bearer mock-openai" headers);
+        400, "application/json",
+        {|{"error":{"code":"context_length_exceeded","message":"too many tokens"}}|}
+    | 31 -> assert (has_header "authorization: bearer mock-openai" headers);
+        400, "application/json",
+        {|{"error":{"type":"invalid_request_error","message":"bad request"}}|}
+    | _ -> assert false
+  in
   if step = 5 then (
     Printf.fprintf oc "HTTP/1.1 %d Mock\r\nContent-Type: %s\r\nConnection: keep-alive\r\n\r\n%s"
       status content_type body;
@@ -178,7 +275,7 @@ let () =
   if child = 0 then (
     Unix.close signal_read;
     Unix.close closed_read;
-    (try for step = 0 to 23 do
+    (try for step = 0 to 31 do
        let client, _ = Unix.accept socket in serve client step signal_write closed_write
      done with exn -> prerr_endline (Printexc.to_string exn); exit 2);
     exit 0);
@@ -272,12 +369,14 @@ let () =
     assert (reply.content = Some "Inspected.");
     (match Pave.Provider.complete openai [ system; user ] [] with
      | exception Pave.Provider.Provider_error message ->
+         assert (String.starts_with ~prefix:"provider rate limited" message);
          assert (not (leaks_key message))
      | _ -> failwith "expected HTTP error");
     let emitted = ref false in
     (match Pave.Provider.complete ~on_text:(fun _ -> emitted := true)
       openai [ system; user ] [] with
      | exception Pave.Provider.Provider_error message ->
+         assert (String.starts_with ~prefix:"provider rate limited" message);
          assert (not (leaks_key message))
      | _ -> failwith "expected streaming HTTP error");
     assert (not !emitted);
@@ -356,5 +455,20 @@ let () =
         "fireworks", "https://api.fireworks.ai/inference/v1/chat/completions", "FIREWORKS_API_KEY";
         "baseten", "https://inference.baseten.co/v1/chat/completions", "BASETEN_API_KEY";
         "huggingface", "https://router.huggingface.co/v1/chat/completions", "HF_TOKEN";
-        "nanogpt", "https://api.nano-gpt.com/api/v1/chat/completions", "NANO_GPT_API_KEY" ]);
+        "nanogpt", "https://api.nano-gpt.com/api/v1/chat/completions", "NANO_GPT_API_KEY" ];
+    List.iter (fun expected ->
+      match Pave.Provider.complete openai [system; user] [] with
+      | exception Pave.Provider.Provider_error message ->
+          assert (String.starts_with ~prefix:expected message);
+          assert (not (leaks_key message))
+      | _ -> failwith ("expected classified provider error: " ^ expected)) [
+        "provider authentication failed";
+        "provider permission denied";
+        "provider model or endpoint not found";
+        "provider request exceeds its context or size limit";
+        "provider rate limited";
+        "provider unavailable";
+        "provider context limit exceeded";
+        "invalid provider request" ];
+    curl_timeout_smoke ());
   print_endline "provider HTTP: ok"

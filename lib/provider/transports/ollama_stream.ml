@@ -19,6 +19,7 @@ type t = {
   mutable content_seen : bool;
   mutable after_cr : bool;
   mutable done_seen : bool;
+  mutable failed : bool;
   mutable response_bytes : int;
   mutable next_call : int;
   calls : call list ref;
@@ -29,7 +30,7 @@ type t = {
 
 let create ~on_text =
   { on_text; line = Buffer.create 256; content = Buffer.create 256;
-    content_seen = false; after_cr = false; done_seen = false;
+    content_seen = false; after_cr = false; done_seen = false; failed = false;
     response_bytes = 0; next_call = 0; calls = ref [];
     indexed = Hashtbl.create 4; result = None; usage = None }
 
@@ -148,23 +149,33 @@ let process_line t =
   handle_frame t line
 
 let feed t bytes =
-  String.iter (fun byte ->
-    if t.after_cr && byte = '\n' then t.after_cr <- false
-    else (
-      t.after_cr <- false;
-      match byte with
-      | '\n' -> process_line t
-      | '\r' -> process_line t; t.after_cr <- true
-      | _ ->
-          if Buffer.length t.line >= max_line_bytes then invalid "NDJSON line exceeds 1 MiB";
-          Buffer.add_char t.line byte)) bytes
+  if t.failed then invalid "stream is invalid";
+  try
+    String.iter (fun byte ->
+      if t.after_cr && byte = '\n' then t.after_cr <- false
+      else (
+        t.after_cr <- false;
+        match byte with
+        | '\n' -> process_line t
+        | '\r' -> process_line t; t.after_cr <- true
+        | _ ->
+            if Buffer.length t.line >= max_line_bytes then invalid "NDJSON line exceeds 1 MiB";
+            Buffer.add_char t.line byte)) bytes
+  with Protocol.Invalid_response _ as error ->
+    t.failed <- true;
+    raise error
 
-let is_done t = t.done_seen
-let is_finished t = t.done_seen
+let is_done t = t.done_seen && not t.failed
+let is_finished t = t.done_seen && not t.failed
 
-let usage t = t.usage
+let usage t = if t.done_seen && not t.failed then t.usage else None
 let finish t =
-  if Buffer.length t.line <> 0 then process_line t;
-  match t.result with
-  | Some result -> result
-  | None -> invalid "missing done frame"
+  if t.failed then invalid "stream is invalid";
+  try
+    if Buffer.length t.line <> 0 then process_line t;
+    match t.result with
+    | Some result -> result
+    | None -> invalid "missing done frame"
+  with Protocol.Invalid_response _ as error ->
+    t.failed <- true;
+    raise error

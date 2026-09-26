@@ -32,8 +32,8 @@ let () =
     name = "read_file"; arguments = args } ]);
   assert (Pave.Gemini_stream.usage stream = None);
   let reported = `Assoc [
-    "promptTokenCount", `Int 12; "candidatesTokenCount", `Int 5;
-    "thoughtsTokenCount", `Int 3 ] in
+    "promptTokenCount", `Int 12; "cachedContentTokenCount", `Int 7;
+    "candidatesTokenCount", `Int 5; "thoughtsTokenCount", `Int 3 ] in
   let final_with_usage = event (Yojson.Basic.to_string (`Assoc [
     "candidates", `List [ `Assoc [
       "finishReason", `String "STOP";
@@ -45,7 +45,9 @@ let () =
   ignore (Pave.Gemini_stream.finish measured);
   assert (Pave.Gemini_stream.is_done measured);
   assert (Pave.Gemini_stream.usage measured =
-    Some { Pave.Protocol.input_tokens = 12; output_tokens = 8 });
+    Some { Pave.Protocol.input_tokens = 12; output_tokens = 8;
+      cached_input_tokens = Some 7; cache_creation_input_tokens = None;
+      reasoning_output_tokens = Some 3 });
   let trailing = Pave.Gemini_stream.create ~model:"gemini-2.5-flash"
     ~on_text:(fun _ -> ()) in
   Pave.Gemini_stream.feed trailing
@@ -54,7 +56,9 @@ let () =
        "usageMetadata", reported ])));
   ignore (Pave.Gemini_stream.finish trailing);
   assert (Pave.Gemini_stream.usage trailing =
-    Some { Pave.Protocol.input_tokens = 12; output_tokens = 8 });
+    Some { Pave.Protocol.input_tokens = 12; output_tokens = 8;
+      cached_input_tokens = Some 7; cache_creation_input_tokens = None;
+      reasoning_output_tokens = Some 3 });
   let result_without_id = Pave.Gemini_stream.create ~model:"gemini-2.5-flash" ~on_text:(fun _ -> ()) in
   Pave.Gemini_stream.feed result_without_id
     (chunk [ `Assoc [ "functionCall", `Assoc [ "name", `String "read_file";
@@ -105,6 +109,17 @@ let () =
      chunk [ `Assoc [ "text", `String "Hello again";
        "thoughtSignature", `String "c2ln" ] ] true);
   invalid (chunk [ text "finished" ] true ^ chunk [ text "extra" ] true);
+  let poisoned = Pave.Gemini_stream.create ~model:"gemini-2.5-flash"
+    ~on_text:(fun _ -> ()) in
+  (match Pave.Gemini_stream.feed poisoned
+    (chunk [ text "complete" ] true ^ chunk [ text "late" ] false) with
+   | exception Pave.Protocol.Invalid_response _ -> ()
+   | _ -> failwith "expected trailing Gemini event to invalidate stream");
+  (match Pave.Gemini_stream.finish poisoned with
+   | exception Pave.Protocol.Invalid_response _ -> ()
+   | _ -> failwith "invalid Gemini stream was accepted by finish");
+  assert (not (Pave.Gemini_stream.is_finished poisoned));
+  assert (Pave.Gemini_stream.usage poisoned = None);
   invalid "data: {\"candidates\": [\r\n\r\n";
   invalid "data: {\"candidates\":[]}";
   let oversized = Pave.Gemini_stream.create ~model:"gemini-3-pro"

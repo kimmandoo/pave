@@ -10,6 +10,8 @@ let side_effect_call = event
   {|{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"write-mobile","function":{"name":"write_file","arguments":"{\"path\":\"MUST_NOT_EXIST\",\"content\":\"bad\"}"}}]},"finish_reason":null}]}|}
   ^ event {|{"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}|}
   ^ event "[DONE]"
+let truncated_side_effect_call = event
+  {|{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"truncated-write","function":{"name":"write_file","arguments":"{\"path\":\"MUST_NOT_EXIST\",\"content\":\"bad\"}"}}]},"finish_reason":null}]}|}
 let two_calls = event
   {|{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"read-once","function":{"name":"read_file","arguments":"{\"path\":\"App.swift\"}"}},{"index":1,"id":"write-twice","function":{"name":"write_file","arguments":"{\"path\":\"MUST_NOT_EXIST\",\"content\":\"bad\"}"}}]},"finish_reason":null}]}|}
   ^ event {|{"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}|}
@@ -108,6 +110,9 @@ let serve client step =
                     | _ -> false)
                 | None -> false)) ["parallel-first"; "parallel-second"]
         | _ -> assert (results = []));
+       if step = 12 then (
+         assert (results = []);
+         assert (contains_tool "write_file"));
        if step = 5 then assert (contains_tool "write_file");
        if step = 6 || step = 7 then assert (not (contains_tool "write_file"));
        if step = 8 || step = 9 then assert (contains_tool "run_command");
@@ -118,7 +123,8 @@ let serve client step =
     | 3 -> two_calls | 4 -> shell_call | 5 -> dynamic_first_call
     | 6 -> stale_dynamic_call | 7 -> dynamic_answer
     | 8 -> invalid_shell_call | 9 -> invalid_shell_answer
-    | 10 -> parallel_read_calls | _ -> parallel_read_answer in
+    | 10 -> parallel_read_calls | 11 -> parallel_read_answer
+    | _ -> truncated_side_effect_call in
   Printf.fprintf oc "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s"
     (String.length body) body;
   flush oc;
@@ -134,7 +140,7 @@ let () =
   let port = match Unix.getsockname socket with Unix.ADDR_INET (_, port) -> port | _ -> assert false in
   let child = Unix.fork () in
   if child = 0 then (
-    (try for step = 0 to 11 do
+    (try for step = 0 to 12 do
       let client, _ = Unix.accept socket in serve client step
     done with exn -> prerr_endline (Printexc.to_string exn); exit 2);
     exit 0);
@@ -379,6 +385,18 @@ let () =
          Pave.Agent.Tool_settled {
            call_id = "parallel-second"; is_error = false; _
          } ] -> ()
-     | _ -> failwith "shared tool lifecycle events lost provider order")
+     | _ -> failwith "shared tool lifecycle events lost provider order");
+    let invalid_tool_events = ref [] in
+    let invalid_agent = Pave.Agent.create ~provider ~root
+      ~system:"inspect the mobile repo" ~stream:true ~on_event:(fun _ -> ())
+      ~on_tool_event:(fun event -> invalid_tool_events := event :: !invalid_tool_events) () in
+    (match Pave.Agent.run invalid_agent "Write only after a complete reply" with
+     | exception Pave.Provider.Provider_error _ -> ()
+     | _ -> failwith "truncated streamed response reached tool execution");
+    assert (not (Sys.file_exists (Filename.concat root "MUST_NOT_EXIST")));
+    assert (!invalid_tool_events = []);
+    (match Pave.Agent.messages invalid_agent with
+     | [user] -> assert (user.Pave.Protocol.role = "user")
+     | _ -> failwith "invalid streamed tool request entered agent history")
   );
   print_endline "streamed agent loop: ok"

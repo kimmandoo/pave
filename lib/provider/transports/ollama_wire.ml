@@ -140,7 +140,8 @@ let usage json =
   match field "prompt_eval_count" json, field "eval_count" json with
   | `Int input_tokens, `Int output_tokens
     when input_tokens >= 0 && output_tokens >= 0 ->
-      Some { Protocol.input_tokens; output_tokens }
+      Some { Protocol.input_tokens; output_tokens; cached_input_tokens = None;
+        cache_creation_input_tokens = None; reasoning_output_tokens = None }
   | _ -> None
 
 let parse_completion json =

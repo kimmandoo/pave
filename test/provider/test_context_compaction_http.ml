@@ -120,10 +120,13 @@ printf '200'
       assert (member "signature" compacted.provider_state =
         `String "signed-by-anthropic");
       assert (!usage = Some { Pave.Protocol.input_tokens = 7;
-        output_tokens = 3 });
+        output_tokens = 3; cached_input_tokens = None;
+        cache_creation_input_tokens = None; reasoning_output_tokens = None });
       let request, config = captured_request () in
       verify_headers config ~compaction_beta:true;
       assert (member "system" request = `String "stable system prompt");
+      assert (member "cache_control" request =
+        `Assoc ["type", `String "ephemeral"]);
       assert (member "compaction" request = `Assoc [
         "type", `String "summarize";
         "instructions", `String "preserve decisions"]);
@@ -144,10 +147,14 @@ printf '200'
       let ordinary, config = captured_request () in
       verify_headers config ~compaction_beta:false;
       assert (member "compaction" ordinary = `Null);
+      assert (member "cache_control" ordinary =
+        `Assoc ["type", `String "ephemeral"]);
       ignore (Pave.Provider.complete provider
         [signed_marker; Pave.Protocol.user "after summary"] []);
       let replay, config = captured_request () in
       verify_headers config ~compaction_beta:true;
+      assert (member "cache_control" replay =
+        `Assoc ["type", `String "ephemeral"]);
       assert (member "messages" replay = `List [
         `Assoc ["role", `String "assistant"; "content", `List [
           `Assoc ["type", `String "compaction";
@@ -162,6 +169,7 @@ printf '200'
       assert (contains config
         "url = \"https://gateway.example/v1/messages\"");
       assert (not (contains config "anthropic-beta: compact-2026-09-04"));
+      assert (member "cache_control" fallback = `Null);
       assert (member "messages" fallback = `List [
         `Assoc ["role", `String "user"; "content", `String "signed summary"];
         `Assoc ["role", `String "user"; "content", `String "after summary"]]);

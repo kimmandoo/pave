@@ -14,7 +14,8 @@ let system text : Pave.Protocol.message =
 let block kind fields = `Assoc (("type", `String kind) :: fields)
 let message role blocks = `Assoc [ "role", `String role; "content", `List blocks ]
 let response stop blocks =
-  `Assoc [ "stop_reason", `String stop; "content", `List blocks ]
+  `Assoc [ "type", `String "message"; "role", `String "assistant";
+    "stop_reason", `String stop; "content", `List blocks ]
 
 let () =
   let open Pave.Protocol in
@@ -50,6 +51,11 @@ let () =
       block "tool_result" [ "tool_use_id", `String "use-1";
         "content", `String "alpha body" ] ];
     message "assistant" [ block "text" [ "text", `String "Done" ] ] ]);
+  assert (field "cache_control" wire = `Null);
+  let cached_request = Pave.Anthropic_wire.request ~allow_prompt_caching:true
+    ~model:"claude-test" ~max_tokens:4096 transcript [definition] in
+  assert (field "cache_control" cached_request =
+    `Assoc ["type", `String "ephemeral"]);
   let native_content = "signed context" and native_signature = "opaque-signature" in
   let native_state = Pave.Anthropic_wire.compaction_state ~model:"claude-test"
     ~content:native_content ~signature:native_signature in
@@ -57,6 +63,13 @@ let () =
   let native_request = Pave.Anthropic_wire.compaction_request
     ~model:"claude-test" ~max_tokens:4096 ~instructions:"preserve decisions"
     [system "Follow instructions"; compacted; user "recent turn"] [definition] in
+  assert (field "cache_control" native_request = `Null);
+  let cached_compaction = Pave.Anthropic_wire.compaction_request
+    ~allow_prompt_caching:true ~model:"claude-test" ~max_tokens:4096
+    ~instructions:"preserve decisions"
+    [system "Follow instructions"; compacted; user "recent turn"] [definition] in
+  assert (field "cache_control" cached_compaction =
+    `Assoc ["type", `String "ephemeral"]);
   assert (field "system" native_request = `String "Follow instructions");
   assert (field "tools" native_request = `List [
     `Assoc ["name", `String "read_file"; "input_schema", schema;
@@ -147,12 +160,25 @@ let () =
   let answer = Pave.Anthropic_wire.parse_response
     (response "end_turn" [ text "Hello "; text "world" ]) in
   assert (answer = assistant (Some "Hello world") []);
+  expect_invalid (fun () -> Pave.Anthropic_wire.parse_response
+    (`Assoc [ "type", `String "error"; "role", `String "assistant";
+      "stop_reason", `String "end_turn"; "content", `List [text "ignored"] ]));
+  expect_invalid (fun () -> Pave.Anthropic_wire.parse_response
+    (`Assoc [ "type", `String "message"; "role", `String "user";
+      "stop_reason", `String "end_turn"; "content", `List [text "ignored"] ]));
   let counted = `Assoc [
     "usage", `Assoc [
       "input_tokens", `Int 2; "cache_creation_input_tokens", `Int 3;
       "cache_read_input_tokens", `Int 4; "output_tokens", `Int 7 ] ] in
   assert (Pave.Anthropic_wire.usage counted =
-    Some { input_tokens = 9; output_tokens = 7 });
+    Some { input_tokens = 9; output_tokens = 7;
+      cached_input_tokens = Some 4; cache_creation_input_tokens = Some 3;
+      reasoning_output_tokens = None });
+  assert (Pave.Anthropic_wire.usage (`Assoc [
+    "usage", `Assoc ["input_tokens", `Int 2; "output_tokens", `Int 7] ]) =
+    Some { input_tokens = 2; output_tokens = 7;
+      cached_input_tokens = None; cache_creation_input_tokens = None;
+      reasoning_output_tokens = None });
   assert (Pave.Anthropic_wire.usage (response "end_turn" [text "Hello"]) = None);
   assert (Pave.Anthropic_wire.usage (`Assoc [
     "usage", `Assoc ["input_tokens", `Int 2; "output_tokens", `Int 7;

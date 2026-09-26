@@ -179,9 +179,7 @@ let () =
   Unix.close socket;
   Fun.protect ~finally:(fun () ->
     (try Unix.kill child Sys.sigkill with Unix.Unix_error _ -> ());
-    match Unix.waitpid [] child with
-    | _, Unix.WEXITED 0 -> ()
-    | _ -> failwith "local fixture server failed") (fun () ->
+    ignore (Unix.waitpid [] child)) (fun () ->
       Unix.putenv "HTTP_PROXY" "http://127.0.0.1:1";
       Unix.putenv "ALL_PROXY" "http://127.0.0.1:1";
       List.iter (fun provider ->

@@ -47,6 +47,7 @@ type t = {
   mutable completed : Protocol.message option;
   mutable usage : Protocol.usage option;
   mutable done_seen : bool;
+  mutable failed : bool;
   mutable parser : Sse.t option;
 }
 
@@ -338,19 +339,29 @@ let create ~model ~on_text =
   if model = "" then invalid_arg "empty Codex model";
   let t = { model; on_text; items = Hashtbl.create 4; ids = Hashtbl.create 4;
     bytes = 0; response_id = None; completed = None; usage = None;
-    done_seen = false; parser = None } in
+    done_seen = false; failed = false; parser = None } in
   t.parser <- Some (Sse.create ~on_event:(handle_event t));
   t
 
 let parser t = match t.parser with
   | Some parser -> parser
   | None -> invalid "SSE parser not initialized"
-let feed t bytes = Sse.feed (parser t) bytes
-let is_done t = t.done_seen
-let is_finished t = t.completed <> None
-let usage t = if t.completed <> None then t.usage else None
+let feed t bytes =
+  if t.failed then invalid "stream is invalid";
+  try Sse.feed (parser t) bytes
+  with Invalid_response _ as error ->
+    t.failed <- true;
+    raise error
+let is_done t = t.done_seen && not t.failed
+let is_finished t = t.completed <> None && not t.failed
+let usage t = if t.completed <> None && not t.failed then t.usage else None
 let finish t =
-  Sse.finish (parser t);
-  match t.completed with
-  | Some response -> response
-  | None -> invalid "missing response completion"
+  if t.failed then invalid "stream is invalid";
+  try
+    Sse.finish (parser t);
+    match t.completed with
+    | Some response -> response
+    | None -> invalid "missing response completion"
+  with Invalid_response _ as error ->
+    t.failed <- true;
+    raise error

@@ -560,12 +560,33 @@ let () =
     let record_usage tokens =
       match !journal with
       | Some current ->
-          Pave.Session.append_usage current ~provider:!active_descriptor.id
+          let account_id = Option.bind !active_identity
+            (fun (identity : Pave.Model_identity.t) -> identity.account_id) in
+          Pave.Session.append_usage ?account_id current
+            ~provider:!active_descriptor.id ~route:!active_route.name
             ~model:!active_model tokens
       | None ->
           ephemeral_usage := Some (match !ephemeral_usage with
             | None -> tokens
             | Some previous -> Pave.Protocol.add_usage previous tokens) in
+    let usage_identity provider account_id route model =
+      let identity = match route with
+        | None -> provider
+        | Some route -> provider ^ "@" ^ route in
+      identity ^ Option.fold ~none:"" ~some:(fun account -> "#" ^ account)
+        account_id ^ "/" ^ model in
+    let usage_detail_lines (usage : Pave.Protocol.usage) =
+      let count label = function
+        | None -> None
+        | Some value -> Some (Printf.sprintf "%d %s" value label) in
+      let details = List.filter_map Fun.id [
+        count "cached input tokens" usage.cached_input_tokens;
+        count "cache-creation input tokens" usage.cache_creation_input_tokens;
+        count "reasoning output tokens" usage.reasoning_output_tokens ] in
+      match details with
+      | [] -> []
+      | details -> "Provider-reported details" ::
+          List.map (fun detail -> "· " ^ detail) details in
     let refresh_usage screen =
       let tokens = match !journal with
         | Some current -> Pave.Session.usage current
@@ -1784,39 +1805,45 @@ let () =
                    | Some _ -> "on branch"
                    | None -> "in ephemeral session" in
                  [Printf.sprintf "Provider-reported %s: %d in · %d out tokens"
-                    source usage.input_tokens usage.output_tokens;
-                  "Other routes/context limit/cost · not tracked"]) in
+                    source usage.input_tokens usage.output_tokens] @
+                   usage_detail_lines usage @
+                  ["/context combines routes; /usage separates them; dollar cost unknown"]) in
           (match !ui with
            | Some screen -> Tui.events screen lines
            | None -> List.iter on_event lines)
         | Pave.Interaction.Usage ->
-          let lines = match !journal with
+          let lines = (match !journal with
             | None ->
                 ["Usage · ephemeral conversation"] @
                 (match !ephemeral_usage with
                  | None -> ["No provider-reported tokens yet"]
                  | Some tokens ->
                      [Printf.sprintf "Reported · %d input / %d output tokens"
-                        tokens.input_tokens tokens.output_tokens])
+                        tokens.input_tokens tokens.output_tokens] @
+                       usage_detail_lines tokens)
             | Some current ->
-                let by_model = Pave.Session.usage_by_model current in
+                let by_route = Pave.Session.usage_by_route current in
                 ["Usage · selected journal branch"] @
-                (match by_model with
+                (match by_route with
                  | [] -> ["No provider-reported tokens on this branch"]
                  | rows ->
-                     let total = List.fold_left (fun summed (_, tokens) ->
-                       Pave.Protocol.add_usage summed tokens)
-                       { Pave.Protocol.input_tokens = 0; output_tokens = 0 }
-                       rows in
+                     let total = match rows with
+                       | ((_, _, _, _), first) :: rest ->
+                           List.fold_left (fun summed (_, tokens) ->
+                             Pave.Protocol.add_usage summed tokens) first rest
+                       | [] -> assert false in
                      [Printf.sprintf "Total · %d input / %d output tokens"
                         total.input_tokens total.output_tokens] @
-                     List.concat_map (fun ((provider, model), (tokens : Pave.Protocol.usage)) ->
-                       [Pave.Session_tree.first_line (provider ^ "/" ^ model);
+                     usage_detail_lines total @
+                     List.concat_map (fun ((provider, account_id, route, model),
+                         (tokens : Pave.Protocol.usage)) ->
+                       [Pave.Session_tree.first_line
+                          (usage_identity provider account_id route model);
                         Printf.sprintf "%d input · %d output"
-                          tokens.input_tokens tokens.output_tokens]) rows) in
-          let lines = lines @
-            ["Reported routes only"; "Others untracked";
-             "Limits/cost untracked"] in
+                          tokens.input_tokens tokens.output_tokens] @
+                        usage_detail_lines tokens) by_route)) @
+            ["Provider/account/model/route provenance retained";
+             "Unreported premium usage, prices, and dollar cost remain unknown"] in
           (match !ui with
            | Some screen -> Tui.events screen lines
            | None -> List.iter on_event lines)
@@ -1865,10 +1892,11 @@ let () =
                       (if pinned then "pinned" else "unpinned"))
                  | Pave.Session.Reset_boundary ->
                      Some (entry.id ^ " reset boundary")
-                 | Pave.Session.Usage { provider; model; tokens } ->
+                 | Pave.Session.Usage {
+                     provider; account_id; route; model; tokens } ->
                      Some (Printf.sprintf "%s usage %s · %d in / %d out"
                        entry.id (Pave.Session_tree.first_line
-                         (provider ^ "/" ^ model))
+                         (usage_identity provider account_id route model))
                        tokens.input_tokens tokens.output_tokens)
                  | Pave.Session.Tool_lifecycle { call_id; name; state } ->
                      let status = match state with

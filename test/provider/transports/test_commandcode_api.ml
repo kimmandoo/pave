@@ -94,7 +94,7 @@ let fake_curl () =
     | 0 ->
         assert (field "messages" body = `List [
           `Assoc ["role", `String "user"; "content", `String "Eight plus thirteen?"]]);
-        {|{"content":[{"type":"thinking","thinking":"Add 8 and 13.","signature":"sig-opaque"},{"type":"tool_use","id":"call_command_7","name":"add","input":{"left":8,"right":13}}],"stop_reason":"tool_use"}|}
+        {|{"type":"message","role":"assistant","content":[{"type":"thinking","thinking":"Add 8 and 13.","signature":"sig-opaque"},{"type":"tool_use","id":"call_command_7","name":"add","input":{"left":8,"right":13}}],"stop_reason":"tool_use"}|}
     | 1 ->
         assert (field "messages" body = `List [
           `Assoc ["role", `String "user"; "content", `String "Eight plus thirteen?"];
@@ -107,7 +107,7 @@ let fake_curl () =
           `Assoc ["role", `String "user"; "content", `List [
             `Assoc ["type", `String "tool_result";
               "tool_use_id", `String call_id; "content", `String "21"]]]]);
-        {|{"content":[{"type":"text","text":"21"}],"stop_reason":"end_turn"}|}
+        {|{"type":"message","role":"assistant","content":[{"type":"text","text":"21"}],"stop_reason":"end_turn"}|}
     | _ -> fail "unexpected Messages request"))
   else (
     assert (field "store" body = `Bool false);
@@ -220,7 +220,8 @@ let () =
     assert (Command.discover ~api_key:"bad\nheader" ~http:(fun ~url:_ ~headers:_ ->
       fail "invalid key reached discovery executor") () = Error Command.Invalid_credential);
     expect_invalid (fun () -> Command.parse_messages_completion ~model
-      (`Assoc ["stop_reason", `String "tool_use";
+      (`Assoc ["type", `String "message"; "role", `String "assistant";
+        "stop_reason", `String "tool_use";
         "content", `List [
           `Assoc ["type", `String "thinking"; "thinking", `String "opaque"];
           `Assoc ["type", `String "tool_use"; "id", `String call_id;
