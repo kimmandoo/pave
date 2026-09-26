@@ -192,7 +192,7 @@ The P0–P6 cards above remain the detailed acceptance criteria; this roadmap is
 
 ### R3 — Compatible gateways and API-key provider coverage
 
-- [ ] Complete P1 discovery coverage, custom-provider policy/enforcement, compatible-gateway overlays and remaining documented API-key text-provider increments. Each provider stays pinned to its documented host/auth/route and passes model discovery plus a real tool-result fixture where supported.
+- [x] Completed P1 discovery coverage, user-scoped custom-provider policy/enforcement, provider-specific gateway overlays and documented API-key route increments with pinned endpoints and honest model capability limits. The forced suite, install build, opam lint, `--providers` (71 IDs), MiniMax/Umans live-listing-to-exact-selection two-request tool-result CLI smokes, and Fireworks/Alibaba reasoning-state fixtures passed. Public v0.1.44 passed the four Linux/macOS arm64/x86-64 jobs and release publication; all four archives and `SHA256SUMS` were downloaded and verified, and the extracted macOS arm64 binary passed `--help` and provider-list smokes. No live vendor credentials, entitlement or pricing were inferred. https://github.com/kimmandoo/pave/releases/tag/v0.1.44 (https://github.com/kimmandoo/pave/actions/runs/36274279742).
 
 ### R4 — Credential and account security
 
