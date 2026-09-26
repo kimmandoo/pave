@@ -109,4 +109,29 @@ let () =
       "content", `List [ text "bad role" ] ] ]));
   invalid (fun () -> Openai_responses_wire.parse_completion
     (completed [ message [ item "refusal" [ "refusal", `String "No" ] ] ]));
+  let compaction_item = item "compaction"
+    ["encrypted_content", `String "opaque compact payload"] in
+  let preserved_item = message [text "retained native message"] in
+  let compact_state = `Assoc [
+    "provider", `String "openai"; "route", `String "responses";
+    "model", `String "gpt-test";
+    "items", `List [preserved_item; compaction_item] ] in
+  let compacted = {(Protocol.user "display summary") with
+    provider_state = Some compact_state} in
+  let latest = Protocol.user "latest prompt" in
+  let replay = Openai_responses_wire.request ~model:"gpt-test"
+    [compacted; latest] [] in
+  assert (field "input" replay = `List [
+    preserved_item; compaction_item;
+    `Assoc ["role", `String "user"; "content", `List [
+      `Assoc ["type", `String "input_text"; "text", `String "latest prompt"]]]]);
+  invalid (fun () -> Openai_responses_wire.request ~model:"other-model"
+    [compacted] []);
+  let malformed = {(Protocol.user "display summary") with
+    provider_state = Some (`Assoc [
+      "provider", `String "openai"; "route", `String "responses";
+      "model", `String "gpt-test";
+      "items", `List [preserved_item]])} in
+  invalid (fun () -> Openai_responses_wire.request ~model:"gpt-test"
+    [malformed] []);
   print_endline "OpenAI Responses wire: ok"

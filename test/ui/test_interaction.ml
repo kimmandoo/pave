@@ -99,13 +99,15 @@ let () =
     "output", `List [] ] in
   let assistant : Pave.Protocol.message = { role = "assistant"; content = Some "visible answer"; tool_calls = [];
   tool_call_id = None; tool_result_content = None; provider_state = Some native; attachments = [] } in
-  let history = [ Pave.Protocol.user "original prompt"; assistant ] in
-  let same = history_for_model ~wire:Pave.Provider.Codex_responses
-    ~model:"codex-model-a" history in
-  let other_model = history_for_model ~wire:Pave.Provider.Codex_responses
-    ~model:"codex-model-b" history in
-  let other_protocol = history_for_model ~wire:Pave.Provider.Openai_completions
-    ~model:"codex-model-a" history in
+  let history = [Pave.Protocol.user "original prompt"; assistant] in
+  let history_for ~provider ~route ~wire ~model messages =
+    history_for_model ~provider ~route ~wire ~model messages in
+  let same = history_for ~provider:"openai-codex" ~route:"responses"
+    ~wire:Pave.Provider.Codex_responses ~model:"codex-model-a" history in
+  let other_model = history_for ~provider:"openai-codex" ~route:"responses"
+    ~wire:Pave.Provider.Codex_responses ~model:"codex-model-b" history in
+  let other_protocol = history_for ~provider:"openai-codex" ~route:"responses"
+    ~wire:Pave.Provider.Openai_completions ~model:"codex-model-a" history in
   let state = function
     | [ _; (message : Pave.Protocol.message) ] ->
         if message.content <> Some "visible answer" then fail "visible history lost";
@@ -119,12 +121,15 @@ let () =
     "parts", `List [] ] in
   let google_history = [ Pave.Protocol.user "original prompt";
     { assistant with provider_state = Some signed } ] in
-  if state (history_for_model ~wire:Pave.Provider.Gemini_direct
-       ~model:"gemini-3-pro" google_history) <> Some signed ||
-     state (history_for_model ~wire:Pave.Provider.Gemini_direct
-       ~model:"gemini-3-flash" google_history) <> None ||
-     state (history_for_model ~wire:Pave.Provider.Codex_responses
-       ~model:"gemini-3-pro" google_history) <> None then
+  if state (history_for ~provider:"google" ~route:"generate"
+       ~wire:Pave.Provider.Gemini_direct ~model:"gemini-3-pro" google_history)
+       <> Some signed ||
+     state (history_for ~provider:"google" ~route:"generate"
+       ~wire:Pave.Provider.Gemini_direct ~model:"gemini-3-flash" google_history)
+       <> None ||
+     state (history_for ~provider:"openai-codex" ~route:"responses"
+       ~wire:Pave.Provider.Codex_responses ~model:"gemini-3-pro" google_history)
+       <> None then
     fail "signed Gemini state crossed the model or protocol boundary";
   let check_native ~provider ~wire ~other_wire ?route () =
     let fields = ["provider", `String provider; "model", `String "same-model"] in
@@ -134,9 +139,12 @@ let () =
     let native = `Assoc fields in
     let messages = [Pave.Protocol.user "prompt";
       { assistant with provider_state = Some native }] in
-    if state (history_for_model ~wire ~model:"same-model" messages) <> Some native ||
-       state (history_for_model ~wire ~model:"different-model" messages) <> None ||
-       state (history_for_model ~wire:other_wire ~model:"same-model" messages) <> None
+    if state (history_for ~provider ~route:(Option.value ~default:"responses" route)
+         ~wire ~model:"same-model" messages) <> Some native ||
+       state (history_for ~provider ~route:(Option.value ~default:"responses" route)
+         ~wire ~model:"different-model" messages) <> None ||
+       state (history_for ~provider ~route:(Option.value ~default:"responses" route)
+         ~wire:other_wire ~model:"same-model" messages) <> None
     then fail ("native signed state lost or crossed route: " ^ provider) in
   check_native ~provider:"meta" ~wire:Pave.Provider.Meta_responses
     ~other_wire:Pave.Provider.Openai_responses ();
@@ -151,4 +159,24 @@ let () =
   check_native ~provider:"gitlab-duo" ~route:"anthropic"
     ~wire:Pave.Provider.Gitlab_duo_messages
     ~other_wire:Pave.Provider.Gitlab_duo_responses ();
+  let openai_state = `Assoc [
+    "provider", `String "openai"; "route", `String "responses";
+    "model", `String "same-model";
+    "items", `List [`Assoc [
+      "type", `String "compaction"; "encrypted_content", `String "opaque"]]] in
+  let compacted = [{ (Pave.Protocol.user "native summary") with
+    provider_state = Some openai_state }] in
+  let state_on_summary = function
+    | [(message : Pave.Protocol.message)] -> message.provider_state
+    | _ -> fail "native compaction summary changed history length" in
+  if state_on_summary (history_for ~provider:"openai" ~route:"responses"
+       ~wire:Pave.Provider.Openai_responses ~model:"same-model" compacted)
+       <> Some openai_state ||
+     state_on_summary (history_for ~provider:"openai" ~route:"chat"
+       ~wire:Pave.Provider.Openai_responses ~model:"same-model" compacted)
+       <> None ||
+     state_on_summary (history_for ~provider:"sakana" ~route:"responses"
+       ~wire:Pave.Provider.Openai_responses ~model:"same-model" compacted)
+       <> None then
+    fail "OpenAI compaction state crossed provider, API or model boundaries";
   print_endline "interactive model routing: ok"

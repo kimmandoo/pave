@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-09-26
+
+- feat(context): added explicit exact-route context windows with a conservative UTF-8 byte proxy, output reserve, provider-facing tool-result trimming and bounded journal-safe automatic/manual summaries. Added route/model-bound OpenAI Responses native replay compaction and truthful `/context` diagnostics; tokenizer-exact limits, image token costs and other provider-native routes remained unsupported. The forced full test suite, install build and opam lint passed. Local generic/native automatic-compaction scenarios, failed-compaction no-marker behavior, manual projected-overflow rejection, successful bounded native `/compact`, minimum-window no-I/O guard and `/context` PTY all passed.
+
 ## 2026-09-25
 - feat(session): persisted branch-local model/API, thinking, tool and approval metadata, entry labels, global titles/pins, parent lineage and top-level image attachments. Added private recent search, session lifecycle/navigation commands and attachment-preserving retry/cancel flows. Workspace image loading enforced path, MIME and size bounds; providers serialized native image formats or rejected unsupported Devin requests before authentication. Managed filenames matched journal IDs, tree previews hid base64, and exact slash commands ran on Return. Full tests, install build, opam lint and isolated 70×18 TUI/headless provider smokes passed.
 

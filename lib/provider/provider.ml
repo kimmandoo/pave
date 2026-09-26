@@ -1152,3 +1152,80 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage 
   in
   check_cancel cancel;
   result
+
+type native_compaction = {
+  summary : string;
+  provider_state : Yojson.Basic.t;
+}
+
+let compact_openai_responses ?(authentication = Api_key) ?resolve_credential
+    ?cancel ?on_usage config ~instructions messages =
+  if config.api <> Openai_responses || authentication <> Api_key then
+    raise (Provider_error "native compaction requires the OpenAI Responses API-key route");
+  if config.model = "" then raise (Provider_error "empty Responses model");
+  reject_controls "model" config.model;
+  let endpoint =
+    if String.ends_with ~suffix:"/responses" config.endpoint &&
+       not (String.contains config.endpoint '?' ||
+            String.contains config.endpoint '#')
+    then config.endpoint ^ "/compact"
+    else raise (Provider_error
+      "native compaction requires a Responses endpoint ending in /responses") in
+  let credential = match resolve_credential with
+    | Some resolve -> resolve ()
+    | None -> { access = config.api_key; account_id = None; residency = None } in
+  let api_key = credential.access in
+  reject_controls "API key" api_key;
+  if api_key = "" then raise (Provider_error "missing OpenAI API key");
+  check_cancel cancel;
+  let wire = Openai_responses_wire.request ~model:config.model messages [] in
+  let input = match Protocol.member "input" wire with
+    | `List input -> input
+    | _ -> raise (Provider_error "Responses compaction input is missing") in
+  let body = `Assoc [
+    "model", `String config.model;
+    "input", `List input;
+    "instructions", `String instructions ] in
+  let json = post_json ?cancel ~endpoint
+    ~headers:["Authorization: Bearer " ^ api_key] ~secret:api_key body in
+  let raw_output = match Protocol.member "output" json with
+    | `List items -> items
+    | _ -> raise (Protocol.Invalid_response
+        "invalid OpenAI compaction response: missing output items") in
+  let kept = List.filter (fun item ->
+    match Protocol.member "type" item with
+    | `String "compaction" ->
+        (match Protocol.member "encrypted_content" item with
+         | `String value -> value <> ""
+         | _ -> false)
+    | `String "compaction_summary" ->
+        (match Protocol.member "summary" item with
+         | `String value -> String.trim value <> ""
+         | _ -> false)
+    | `String "message" ->
+        List.mem (Protocol.member "role" item)
+          [`String "assistant"; `String "user"]
+    | _ -> false) raw_output in
+  if not (List.exists (fun item ->
+    match Protocol.member "type" item with
+    | `String ("compaction" | "compaction_summary") -> true
+    | _ -> false) kept) then
+    raise (Protocol.Invalid_response
+      "invalid OpenAI compaction response: missing native compaction item");
+  check_cancel cancel;
+  (match on_usage, Openai_responses_wire.usage json with
+   | Some report, Some usage -> report usage
+   | _ -> ());
+  let summary = match List.find_opt (fun item ->
+    Protocol.member "type" item = `String "compaction_summary") kept with
+    | Some item ->
+        (match Protocol.member "summary" item with
+         | `String text when String.trim text <> "" -> String.trim text
+         | _ -> assert false)
+    | None -> "OpenAI Responses compacted context" in
+  { summary;
+    provider_state = `Assoc [
+      "provider", `String "openai";
+      "route", `String "responses";
+      "model", `String config.model;
+      "items", `List kept ] }

@@ -16,11 +16,18 @@ let () =
      | exception Pave.Protocol.Invalid_response _ -> ()
      | _ -> failwith "compaction accepted an earlier boundary");
     assert (Pave.Session.history session = before);
-    let marker = Pave.Session.compact session ~summary:"Summary of old request and answer"
-      ~first_kept_id:current in
+    let summary = "Summary of old request and answer" in
+    let native_state = `Assoc [
+      "provider", `String "openai"; "route", `String "responses";
+      "model", `String "fixture-model";
+      "items", `List [`Assoc [
+        "type", `String "compaction";
+        "encrypted_content", `String "opaque payload"]] ] in
+    let compacted = { (user summary) with provider_state = Some native_state } in
+    let marker = Pave.Session.compact ~provider_state:native_state session
+      ~summary ~first_kept_id:current in
     assert (Pave.Session.history session = before);
-    assert (Pave.Session.context session =
-      [ user "Summary of old request and answer"; user "recent request" ]);
+    assert (Pave.Session.context session = [compacted; user "recent request"]);
     let call : Pave.Protocol.tool_call = { id = "call-1"; name = "read_file";
       arguments = `Assoc [ "path", `String "App.swift" ] } in
     ignore (Pave.Session.append session { role = "assistant"; content = None;
@@ -36,9 +43,22 @@ let () =
     Pave.Session.branch reopened original;
     assert (Pave.Session.context reopened = [ user "old request" ]);
     Pave.Session.branch reopened marker;
-    assert (Pave.Session.context reopened =
-      [ user "Summary of old request and answer"; user "recent request" ]);
+    assert (Pave.Session.context reopened = [compacted; user "recent request"]);
     assert (Pave.Session.history reopened = before);
+    let single_path = Filename.temp_file "pave-compaction-single-" ".jsonl" in
+    Sys.remove single_path;
+    Fun.protect ~finally:(fun () -> Sys.remove single_path) (fun () ->
+      let single = Pave.Session.open_file single_path in
+      ignore (Pave.Session.append single (user "older request"));
+      let latest = Pave.Session.append single (user "latest request") in
+      let before = Pave.Session.history single in
+      let first_kept_id, prefix = Pave.Session.compaction_plan single in
+      assert (first_kept_id = latest && prefix = [user "older request"]);
+      ignore (Pave.Session.compact single ~summary:"Older request summary"
+        ~first_kept_id);
+      assert (Pave.Session.history single = before);
+      assert (Pave.Session.context single =
+        [user "Older request summary"; user "latest request"]));
     let fork_path = path ^ ".fork" in
     Fun.protect ~finally:(fun () -> Sys.remove fork_path) (fun () ->
       let fork = Pave.Session.fork reopened fork_path in

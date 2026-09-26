@@ -14,7 +14,10 @@ type pending_tool_call = {
 type exit_kind = Normal | Signal | Fatal | Process_exit
 type kind =
   | Message of Protocol.message
-  | Compaction of { summary : string; first_kept_id : string }
+  | Compaction of {
+      summary : string; first_kept_id : string;
+      provider_state : Yojson.Basic.t option
+    }
   | Model of { provider : string; model : string; api : string option }
   | Thinking of string option
   | Tool_selection of string list
@@ -93,9 +96,11 @@ let entry_json entry =
         (if message.attachments = [] then [] else
           ["attachments", `List (List.map Protocol.attachment_to_json
             message.attachments)]))
-  | Compaction { summary; first_kept_id } ->
+  | Compaction { summary; first_kept_id; provider_state } ->
       `Assoc (fields @ [ "summary", `String summary;
-                         "firstKeptEntryId", `String first_kept_id ])
+                         "firstKeptEntryId", `String first_kept_id ] @
+        (match provider_state with
+         | None -> [] | Some state -> ["providerState", state]))
   | Model { provider; model; api } ->
       `Assoc (fields @ ["provider", `String provider; "model", `String model] @
         (match api with None -> [] | Some api -> ["api", `String api]))
@@ -249,10 +254,12 @@ let parse_entry json =
           invalid "attachments on a non-user message";
         Message { message with attachments }
     | `String "compaction" ->
-        (match get "summary", get "firstKeptEntryId" with
-         | `String summary, `String first_kept_id
+        (match get "summary", get "firstKeptEntryId", get "providerState" with
+         | `String summary, `String first_kept_id, provider_state
            when String.trim summary <> "" && first_kept_id <> "" ->
-             Compaction { summary; first_kept_id }
+             Compaction { summary; first_kept_id;
+               provider_state = (match provider_state with
+                 | `Null -> None | value -> Some value) }
          | _ -> invalid "invalid compaction")
     | `String "model" ->
         (match get "provider", get "model", get "api" with
@@ -488,8 +495,8 @@ let retry_candidate t =
 let context t =
   let path = branch_entries t in
   let latest = List.fold_left (fun found entry -> match entry.kind with
-    | Compaction { summary; first_kept_id } ->
-        `Compaction (entry.id, summary, first_kept_id)
+    | Compaction { summary; first_kept_id; provider_state } ->
+        `Compaction (entry.id, summary, first_kept_id, provider_state)
     | Reset_boundary -> `Reset entry.id
     | Message _ | Model _ | Thinking _ | Tool_selection _ | Mode_change _
     | Title _ | Label _ | Pin _ | Usage _ | Branch | Tool_lifecycle _ | Session_exit _ -> found)
@@ -502,7 +509,7 @@ let context t =
         | entry :: rest when entry.id = marker_id -> messages rest
         | _ :: rest -> after rest in
       after path
-  | `Compaction (marker_id, summary, first_kept_id) ->
+  | `Compaction (marker_id, summary, first_kept_id, provider_state) ->
       let rec split before = function
         | [] -> invalid "compaction marker missing from branch"
         | entry :: after when entry.id = marker_id -> List.rev before, after
@@ -512,7 +519,8 @@ let context t =
         | [] -> invalid "compaction boundary missing from branch"
         | entry :: rest when entry.id = first_kept_id -> entry :: rest
         | _ :: rest -> kept rest in
-      Protocol.user summary :: messages (kept before @ after)
+      { (Protocol.user summary) with provider_state } ::
+        messages (kept before @ after)
 
 
 let compaction_plan t =
@@ -534,7 +542,7 @@ let compaction_plan t =
         | message :: rest when message.Protocol.role = "user" -> List.rev rest
         | _ :: rest -> before_last_user rest in
       let prefix = before_last_user (List.rev (context t)) in
-      if List.length prefix < 2 then invalid "nothing to compact";
+      if prefix = [] then invalid "nothing to compact";
       first_kept_id, prefix
 
 let unresolved_tool_calls entries =
@@ -609,12 +617,12 @@ let recover_pending_tools t =
       call_id = call.call_id; name = call.name; state
     }))) recovery_state) (missing_results (branch_entries t))
 
-let compact t ~summary ~first_kept_id =
+let compact ?provider_state t ~summary ~first_kept_id =
   if String.trim summary = "" then invalid "empty compaction summary";
   let planned_id, _ = compaction_plan t in
   if planned_id <> first_kept_id then invalid "compaction must retain the latest user turn";
   if missing_results (branch_entries t) <> [] then invalid "unresolved tool results";
-  (append_entry t (Compaction { summary; first_kept_id })).id
+  (append_entry t (Compaction { summary; first_kept_id; provider_state })).id
 
 let append t (message : Protocol.message) =
   (match message.role, message.content, message.tool_calls, message.tool_call_id with

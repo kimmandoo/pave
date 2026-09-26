@@ -48,6 +48,46 @@ let tool_result_output (msg : message) =
 
 
 
+
+let native_compaction_items ~model (message : Protocol.message) =
+  match message.provider_state with
+  | None -> None
+  | Some state ->
+      if Protocol.member "provider" state <> `String "openai" ||
+         Protocol.member "route" state <> `String "responses" ||
+         Protocol.member "model" state <> `String model then
+        invalid "native compaction state belongs to a different route or model";
+      if message.content = None || message.attachments <> [] ||
+         message.tool_calls <> [] || message.tool_call_id <> None ||
+         message.tool_result_content <> None then
+        invalid "native compaction state is malformed";
+      let items = match Protocol.member "items" state with
+        | `List items -> items
+        | _ -> invalid "native compaction state has no replay items" in
+      let valid_item item =
+        match Protocol.member "type" item with
+        | `String "compaction" ->
+            (match Protocol.member "encrypted_content" item with
+             | `String value -> value <> ""
+             | _ -> false)
+        | `String "compaction_summary" ->
+            (match Protocol.member "summary" item with
+             | `String value -> String.trim value <> ""
+             | _ -> false)
+        | `String "message" ->
+            List.mem (Protocol.member "role" item)
+              [`String "assistant"; `String "user"]
+        | _ -> false in
+      if items = [] || not (List.for_all valid_item items) ||
+         not (List.exists (fun item ->
+           match Protocol.member "type" item with
+           | `String ("compaction" | "compaction_summary") -> true
+           | _ -> false) items) then
+        invalid "native compaction state has no valid compaction item";
+      Some items
+
+
+
 let request ?(stream = false) ~model messages tools =
   if model = "" then invalid_arg "empty Responses model";
   let instructions = ref [] and input = ref [] and pending = ref [] in
@@ -63,18 +103,21 @@ let request ?(stream = false) ~model messages tools =
     | "user" ->
         if !pending <> [] || msg.tool_calls <> [] || msg.tool_call_id <> None then
           invalid "user message during tool results";
-        let content =
-          (match msg.content with
-          | Some text -> [`Assoc ["type", `String "input_text"; "text", `String text]]
-          | None -> []) @
-          List.map (fun (attachment : attachment) ->
-            if not (List.mem attachment.mime_type ["image/png"; "image/jpeg"; "image/webp"])
-            then invalid ("unsupported user image MIME type " ^ attachment.mime_type);
-            `Assoc ["type", `String "input_image";
-              "image_url", `String ("data:" ^ attachment.mime_type ^ ";base64," ^ attachment.data)])
-            msg.attachments in
-        if content = [] then invalid "user message without content";
-        emit (`Assoc ["role", `String "user"; "content", `List content])
+        (match native_compaction_items ~model msg with
+         | Some items -> List.iter emit items
+         | None ->
+             let content =
+               (match msg.content with
+               | Some text -> [`Assoc ["type", `String "input_text"; "text", `String text]]
+               | None -> []) @
+               List.map (fun (attachment : attachment) ->
+                 if not (List.mem attachment.mime_type ["image/png"; "image/jpeg"; "image/webp"])
+                 then invalid ("unsupported user image MIME type " ^ attachment.mime_type);
+                 `Assoc ["type", `String "input_image";
+                   "image_url", `String ("data:" ^ attachment.mime_type ^ ";base64," ^ attachment.data)])
+                 msg.attachments in
+             if content = [] then invalid "user message without content";
+             emit (`Assoc ["role", `String "user"; "content", `List content]))
     | "assistant" ->
         if !pending <> [] || msg.tool_call_id <> None then
           invalid "assistant message during tool results";
