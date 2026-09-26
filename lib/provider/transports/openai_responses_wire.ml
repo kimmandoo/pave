@@ -5,12 +5,22 @@ let invalid detail = raise (Invalid_response ("invalid Responses API response: "
 let required_string name json = match member name json with
   | `String value when value <> "" -> value
   | _ -> invalid ("missing or invalid " ^ name)
+let optional_token_detail reported group key total =
+  match member key (member group reported) with
+  | `Int count when count >= 0 && count <= total -> Some count
+  | _ -> None
+
 let usage json =
   let reported = member "usage" json in
   match member "input_tokens" reported, member "output_tokens" reported with
   | `Int input_tokens, `Int output_tokens
     when input_tokens >= 0 && output_tokens >= 0 ->
-      Some { input_tokens; output_tokens }
+      let cached_input_tokens = optional_token_detail reported
+        "input_tokens_details" "cached_tokens" input_tokens in
+      let reasoning_output_tokens = optional_token_detail reported
+        "output_tokens_details" "reasoning_tokens" output_tokens in
+      Some { input_tokens; output_tokens; cached_input_tokens;
+        cache_creation_input_tokens = None; reasoning_output_tokens }
   | _ -> None
 
 let tool_schema json =
@@ -158,6 +168,9 @@ let parse_completion json =
    | `String "failed" -> invalid "failed response"
    | _ -> invalid "response not completed");
   (match member "error" json with `Null -> () | _ -> invalid "response error");
+  (match member "incomplete_details" json with
+   | `Null -> ()
+   | _ -> invalid "incomplete response details");
   let outputs = match member "output" json with
     | `List outputs -> outputs
     | _ -> invalid "missing output items" in

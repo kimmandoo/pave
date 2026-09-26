@@ -80,9 +80,12 @@ let () =
   assert (Openai_responses_wire.parse_completion response = assistant (Some "Hello world") []);
   let reported = `Assoc [
     "input_tokens", `Int 21; "output_tokens", `Int 9;
+    "input_tokens_details", `Assoc ["cached_tokens", `Int 6];
     "output_tokens_details", `Assoc ["reasoning_tokens", `Int 4] ] in
   assert (Openai_responses_wire.usage (`Assoc ["usage", reported]) =
-    Some { Protocol.input_tokens = 21; output_tokens = 9 });
+    Some { Protocol.input_tokens = 21; output_tokens = 9;
+      cached_input_tokens = Some 6; cache_creation_input_tokens = None;
+      reasoning_output_tokens = Some 4 });
   assert (Openai_responses_wire.usage response = None);
   assert (Openai_responses_wire.usage (`Assoc [
     "usage", `Assoc ["input_tokens", `Int 21] ]) = None);
@@ -99,6 +102,10 @@ let () =
     [ assistant None [ use ]; Protocol.tool_result "wrong" "result" ] []);
   invalid (fun () -> Openai_responses_wire.parse_completion
     (`Assoc [ "status", `String "incomplete"; "output", `List [ message [ text "partial" ] ] ]));
+  invalid (fun () -> Openai_responses_wire.parse_completion (`Assoc [
+    "status", `String "completed";
+    "incomplete_details", `Assoc ["reason", `String "max_output_tokens"];
+    "output", `List [message [text "partial"]] ]));
   invalid (fun () -> Openai_responses_wire.parse_completion
     (completed [ function_call "call_A" "read_file" "{broken" ]));
   invalid (fun () -> Openai_responses_wire.parse_completion

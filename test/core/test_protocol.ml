@@ -20,7 +20,9 @@ let () =
     "prompt_tokens_details", `Assoc [ "cached_tokens", `Int 5 ];
     "completion_tokens_details", `Assoc [ "reasoning_tokens", `Int 2 ] ] ] in
   assert (completion_usage counted =
-    Some { input_tokens = 19; output_tokens = 7 });
+    Some { input_tokens = 19; output_tokens = 7;
+      cached_input_tokens = Some 5; cache_creation_input_tokens = None;
+      reasoning_output_tokens = Some 2 });
   assert (completion_usage completed = None);
   assert (completion_usage (`Assoc [ "usage", `Assoc [
     "prompt_tokens", `Int 5; "completion_tokens", `Int (-1) ] ]) = None);
@@ -29,6 +31,22 @@ let () =
   expect_invalid (fun () -> parse_completion (`Assoc [ "choices", `List [ `Assoc [
     "finish_reason", `String "length";
     "message", message_to_json assistant ] ] ]));
+  let choice = match member "choices" completed with
+    | `List [choice] -> choice | _ -> assert false in
+  expect_invalid (fun () -> parse_completion (`Assoc [
+    "choices", `List [choice; choice]]));
+  expect_invalid (fun () -> parse_completion (`Assoc ["choices", `List [`Assoc [
+    "index", `Int 1; "finish_reason", `String "tool_calls";
+    "message", message_to_json assistant]]]));
+  expect_invalid (fun () -> parse_completion (`Assoc ["choices", `List [`Assoc [
+    "index", `Int 0; "finish_reason", `String "stop";
+    "message", `Assoc ["content", `String "No"; "refusal", `String "No"]]]]));
+  expect_invalid (fun () -> parse_completion (`Assoc ["choices", `List [`Assoc [
+    "index", `Int 0; "finish_reason", `String "stop";
+    "message", `Assoc ["role", `String "user"; "content", `String "No"]]]]));
+  expect_invalid (fun () -> parse_completion (`Assoc ["choices", `List [`Assoc [
+    "index", `Int 0; "finish_reason", `String "stop";
+    "message", `Assoc ["content", `String "No"]]]]));
   let duplicate = { assistant with tool_calls = [ call; call ] } in
   expect_invalid (fun () -> parse_completion (`Assoc [ "choices", `List [ `Assoc [
     "finish_reason", `String "tool_calls";

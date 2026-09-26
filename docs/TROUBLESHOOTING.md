@@ -1,5 +1,26 @@
 # Troubleshooting
 
+### [2026-09-27] Chat SSE accepted completion without a terminal finish reason
+
+- **Context / Symptom:** The forced suite showed OpenAI-compatible Chat SSE ending in `[DONE]` without any `finish_reason` could still return a successful, incomplete assistant message. Strict Anthropic envelope checks also exposed provider fixtures and synthetic Command Code/GitLab replay responses that omitted Anthropic's required message type/assistant role.
+- **Root Cause:** The Chat stream finalizer checked only for `[DONE]`, not a validated finish reason. The stricter Anthropic parser correctly required a complete `message` envelope, but internal response reconstruction and old fixtures did not preserve that envelope.
+- **Solution:** Required `finish_reason` before accepting Chat `[DONE]`; updated Anthropic stream/response fixtures and synthetic replay envelopes to carry `type=message` and `role=assistant`. Added invalid-finish and streamed-tool-side-effect regressions. The forced suite passed.
+- **Prevention / Reference:** Treat a transport terminator as framing, not proof of a complete provider response; validate the protocol's semantic terminal event before committing assistant state or dispatching tools.
+
+### [2026-09-27] Redirect errors duplicated their HTTP status
+
+- **Context / Symptom:** The local compatibility regression reported `HTTP 302 (HTTP 302)` instead of its stable generic `HTTP 302`. Its cleanup also asserted that a deliberately killed fixture server exited normally, which masked the original provider assertion with `Finally_raised`.
+- **Root Cause:** Generic non-categorized statuses were given a second status suffix, and fixture cleanup conflated expected SIGKILL reaping with a successful server exit.
+- **Solution:** Kept generic statuses as `HTTP N`, appending status context only to recognized classifications; reaped the fixture child without asserting normal exit. The local compatibility regression then passed.
+- **Prevention / Reference:** Keep generic provider errors backward-compatible and make test cleanup preserve the primary failure rather than replacing it with expected process teardown.
+
+### [2026-09-27] Usage provenance screen failed the install build
+
+- **Context / Symptom:** `opam exec -- dune build @install` reported a usage-branch syntax error, then rejected the aggregation pattern because `Session.usage_by_route` returns `(route_key, usage)` map bindings rather than flattened tuple rows. The first combined detail row also wrapped a token label at 100 columns.
+- **Root Cause:** The usage footer was not appended to the complete journal/ephemeral match expression, and the fold destructured a map binding as a four-field row.
+- **Solution:** Appended the common unknown-price footer after the full match, destructured `(key, usage)` bindings, and rendered cache/reasoning details as separate short rows. The forced suite, install build, opam lint and a 100×24 PTY `/usage` smoke passed with provider/account/route/model, totals, cache/reasoning fields and unknown-cost disclaimer.
+- **Prevention / Reference:** Match the actual collection's key/value type at UI aggregation boundaries, and exercise usage output with real terminal dimensions rather than relying on compilation alone.
+
 ### [2026-09-26] Anthropic compaction integration did not compile
 
 - **Context / Symptom:** `opam exec -- dune build @install` reported a syntax error in `Model_discovery.discover`, `Unbound value parse` in the new Anthropic compaction helper, then an undefined `retrieved_at` field in the listing-source record.

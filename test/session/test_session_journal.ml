@@ -232,11 +232,21 @@ let () =
     let first = Pave.Session.append metadata (message "first") in
     Pave.Session.set_model metadata ollama_model;
     let second = Pave.Session.append metadata (message "second") in
-    let counted : Pave.Protocol.usage =
-      { input_tokens = 18; output_tokens = 7 } in
+    let counted : Pave.Protocol.usage = {
+      input_tokens = 18; output_tokens = 7; cached_input_tokens = None;
+      cache_creation_input_tokens = None; reasoning_output_tokens = None } in
     Pave.Session.append_usage metadata ~provider:"ollama" ~model:"local" counted;
+    let detailed : Pave.Protocol.usage = {
+      input_tokens = 12; output_tokens = 9; cached_input_tokens = Some 5;
+      cache_creation_input_tokens = Some 2; reasoning_output_tokens = Some 3 } in
+    Pave.Session.append_usage ~account_id:"anthropic-account-1" ~route:"messages"
+      metadata ~provider:"anthropic" ~model:"claude-test" detailed;
+    let combined = Pave.Protocol.add_usage counted detailed in
     let measured_tip = Option.get (Pave.Session.leaf_id metadata) in
-    assert (Pave.Session.usage metadata = Some counted);
+    assert (Pave.Session.usage metadata = Some combined);
+    assert (List.assoc ("anthropic", Some "anthropic-account-1",
+      Some "messages", "claude-test") (Pave.Session.usage_by_route metadata)
+      = detailed);
     assert (Pave.Session.model metadata = Some ollama_model);
     Pave.Session.branch metadata first;
     assert (Pave.Session.model metadata = Some openai_model);
@@ -248,21 +258,48 @@ let () =
     assert (Pave.Session.model_at branched (Some second) = Some ollama_model);
     Pave.Session.branch branched branch_marker;
     Pave.Session.branch branched measured_tip;
-    assert (Pave.Session.usage branched = Some counted);
+    assert (Pave.Session.usage branched = Some combined);
+    assert (List.assoc ("anthropic", Some "anthropic-account-1",
+      Some "messages", "claude-test") (Pave.Session.usage_by_route branched)
+      = detailed);
     assert (Pave.Session.history branched = [message "first"; message "second"]);
     let copy = Pave.Session.fork branched metadata_fork in
-    assert (Pave.Session.usage copy = Some counted);
+    assert (Pave.Session.usage copy = Some combined);
     assert (Pave.Session.history copy = [message "first"; message "second"]);
     Pave.Session.append_usage copy ~provider:"ollama" ~model:"local"
-      { input_tokens = 3; output_tokens = 2 };
+      { input_tokens = 3; output_tokens = 2; cached_input_tokens = None;
+        cache_creation_input_tokens = None; reasoning_output_tokens = None };
     Pave.Session.append_usage copy ~provider:"ollama" ~model:"other"
-      { input_tokens = 1; output_tokens = 1 };
-    assert (Pave.Session.usage_by_model copy =
-      [(("ollama", "local"), { input_tokens = 21; output_tokens = 9 });
-       (("ollama", "other"), { input_tokens = 1; output_tokens = 1 })]);
+      { input_tokens = 1; output_tokens = 1; cached_input_tokens = None;
+        cache_creation_input_tokens = None; reasoning_output_tokens = None };
+    Pave.Session.append_usage ~account_id:"anthropic-account-1" ~route:"responses"
+      copy ~provider:"anthropic" ~model:"claude-test"
+      { input_tokens = 2; output_tokens = 1; cached_input_tokens = None;
+        cache_creation_input_tokens = None; reasoning_output_tokens = None };
+    Pave.Session.append_usage ~account_id:"anthropic-account-2" ~route:"messages"
+      copy ~provider:"anthropic" ~model:"claude-test"
+      { input_tokens = 3; output_tokens = 1; cached_input_tokens = None;
+        cache_creation_input_tokens = None; reasoning_output_tokens = None };
+    let by_route = Pave.Session.usage_by_route copy in
+    assert (List.assoc ("anthropic", Some "anthropic-account-1",
+      Some "messages", "claude-test") by_route = detailed);
+    assert (List.assoc ("anthropic", Some "anthropic-account-1",
+      Some "responses", "claude-test") by_route = {
+        input_tokens = 2; output_tokens = 1; cached_input_tokens = None;
+        cache_creation_input_tokens = None; reasoning_output_tokens = None });
+    assert (List.assoc ("anthropic", Some "anthropic-account-2",
+      Some "messages", "claude-test") by_route = {
+        input_tokens = 3; output_tokens = 1; cached_input_tokens = None;
+        cache_creation_input_tokens = None; reasoning_output_tokens = None });
+    assert (List.assoc ("ollama", None, None, "local") by_route = {
+      input_tokens = 21; output_tokens = 9; cached_input_tokens = None;
+      cache_creation_input_tokens = None; reasoning_output_tokens = None });
+    assert (List.assoc ("ollama", None, None, "other") by_route = {
+      input_tokens = 1; output_tokens = 1; cached_input_tokens = None;
+      cache_creation_input_tokens = None; reasoning_output_tokens = None });
     Pave.Session.branch copy first;
     assert (Pave.Session.usage copy = None);
-    assert (Pave.Session.usage_by_model copy = []);
+    assert (Pave.Session.usage_by_route copy = []);
     Pave.Session.branch branched branch_marker;
     assert (Pave.Session.model branched = Some openai_model);
     assert (Pave.Session.history (Pave.Session.open_file metadata_path) =

@@ -12,6 +12,9 @@ type t = {
   mutable response_bytes : int;
   mutable input_tokens : int option;
   mutable output_tokens : int option;
+  mutable cached_input_tokens : int option;
+  mutable cache_creation_input_tokens : int option;
+  mutable failed : bool;
   mutable parser : Sse.t option;
 }
 
@@ -102,10 +105,16 @@ let handle_event t event data =
       invalid message
   | "message_start" ->
       if t.started then invalid "duplicate message_start";
-      if field "role" (field "message" json) <> `String "assistant" then
-        invalid "unexpected message role";
-      t.input_tokens <- Anthropic_wire.input_usage
-        (field "usage" (field "message" json));
+      let message = field "message" json in
+      if field "type" message <> `String "message" ||
+         field "role" message <> `String "assistant" then
+        invalid "unexpected message type or role";
+      (match Anthropic_wire.input_usage (field "usage" message) with
+       | Some (input_tokens, cache_creation, cache_read) ->
+           t.input_tokens <- Some input_tokens;
+           t.cache_creation_input_tokens <- cache_creation;
+           t.cached_input_tokens <- cache_read
+       | None -> ());
       t.started <- true
   | "content_block_start" ->
       if not t.started || t.reason <> None then invalid "block outside active message";
@@ -130,44 +139,58 @@ let handle_event t event data =
 let create ~on_text =
   let t = { on_text; blocks = Hashtbl.create 4; started = false; stopped = false;
     reason = None; input_tokens = None; output_tokens = None;
-    response_bytes = 0; parser = None } in
+    cached_input_tokens = None; cache_creation_input_tokens = None;
+    failed = false; response_bytes = 0; parser = None } in
   t.parser <- Some (Sse.create ~on_event:(handle_event t));
   t
 
-let feed t bytes = match t.parser with
+let feed t bytes =
+  if t.failed then invalid "stream is invalid";
+  try match t.parser with
   | Some parser -> Sse.feed parser bytes
   | None -> invalid "SSE parser was not initialized"
+  with Protocol.Invalid_response _ as error ->
+    t.failed <- true;
+    raise error
 
-let is_done t = t.stopped
-let is_finished t = t.reason <> None
+let is_done t = t.stopped && not t.failed
+let is_finished t = t.reason <> None && not t.failed
 
-let usage t = match t.stopped, t.input_tokens, t.output_tokens with
-  | true, Some input_tokens, Some output_tokens ->
-      Some { Protocol.input_tokens; output_tokens }
+let usage t = match t.stopped, t.failed, t.input_tokens, t.output_tokens with
+  | true, false, Some input_tokens, Some output_tokens ->
+      Some { Protocol.input_tokens; output_tokens;
+        cached_input_tokens = t.cached_input_tokens;
+        cache_creation_input_tokens = t.cache_creation_input_tokens;
+        reasoning_output_tokens = None }
   | _ -> None
 let finish t =
-  (match t.parser with Some parser -> Sse.finish parser | None -> invalid "missing parser");
-  if not t.started || t.reason = None then invalid "incomplete message";
-  let blocks = Hashtbl.fold (fun n (block, closed) items ->
-    if not closed then invalid "unclosed content block";
-    (n, block) :: items) t.blocks [] |> List.sort (fun (a, _) (b, _) -> Int.compare a b) in
-  let text = Buffer.create 128 in
-  let calls = ref [] in
-  List.iter (fun (_, block) -> match block with
-    | Text part -> Buffer.add_buffer text part
-    | Tool (id, name, input, partial) ->
-        let arguments = if Buffer.length partial = 0 then input else
-          parse_json (Buffer.contents partial) in
-        (match arguments with `Assoc _ -> () | _ -> invalid "tool input must be an object");
-        if List.exists (fun (call : Protocol.tool_call) -> call.id = id) !calls then
-          invalid "duplicate tool id";
-        calls := { Protocol.id; name; arguments } :: !calls
-    | Ignored -> ()) blocks;
-  let calls = List.rev !calls in
-  (match t.reason with
-   | Some "end_turn" when calls = [] -> ()
-   | Some "tool_use" when calls <> [] -> ()
-   | Some reason -> invalid ("unexpected stop_reason: " ^ reason)
-   | None -> assert false);
-  { Protocol.role = "assistant"; content = (if Buffer.length text = 0 then None else Some (Buffer.contents text));
-  tool_calls = calls; tool_call_id = None; tool_result_content = None; provider_state = None; attachments = [] }
+  if t.failed then invalid "stream is invalid";
+  try
+    (match t.parser with Some parser -> Sse.finish parser | None -> invalid "missing parser");
+    if not t.started || t.reason = None then invalid "incomplete message";
+    let blocks = Hashtbl.fold (fun n (block, closed) items ->
+      if not closed then invalid "unclosed content block";
+      (n, block) :: items) t.blocks [] |> List.sort (fun (a, _) (b, _) -> Int.compare a b) in
+    let text = Buffer.create 128 in
+    let calls = ref [] in
+    List.iter (fun (_, block) -> match block with
+      | Text part -> Buffer.add_buffer text part
+      | Tool (id, name, input, partial) ->
+          let arguments = if Buffer.length partial = 0 then input else
+            parse_json (Buffer.contents partial) in
+          (match arguments with `Assoc _ -> () | _ -> invalid "tool input must be an object");
+          if List.exists (fun (call : Protocol.tool_call) -> call.id = id) !calls then
+            invalid "duplicate tool id";
+          calls := { Protocol.id; name; arguments } :: !calls
+      | Ignored -> ()) blocks;
+    let calls = List.rev !calls in
+    (match t.reason with
+     | Some "end_turn" when calls = [] -> ()
+     | Some "tool_use" when calls <> [] -> ()
+     | Some reason -> invalid ("unexpected stop_reason: " ^ reason)
+     | None -> assert false);
+    { Protocol.role = "assistant"; content = (if Buffer.length text = 0 then None else Some (Buffer.contents text));
+    tool_calls = calls; tool_call_id = None; tool_result_content = None; provider_state = None; attachments = [] }
+  with Protocol.Invalid_response _ as error ->
+    t.failed <- true;
+    raise error

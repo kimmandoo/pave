@@ -17,6 +17,7 @@ type t = {
   mutable completed : Protocol.message option;
   mutable usage : Protocol.usage option;
   mutable done_seen : bool;
+  mutable failed : bool;
   mutable parser : Sse.t option;
 }
 
@@ -208,20 +209,30 @@ let handle_event t event data =
 
 let create ~on_text =
   let t = { on_text; items = Hashtbl.create 4; response_bytes = 0;
-    completed = None; usage = None; done_seen = false; parser = None } in
+    completed = None; usage = None; done_seen = false; failed = false; parser = None } in
   t.parser <- Some (Sse.create ~on_event:(handle_event t));
   t
 
-let feed t bytes = match t.parser with
+let feed t bytes =
+  if t.failed then invalid "stream is invalid";
+  try match t.parser with
   | Some parser -> Sse.feed parser bytes
   | None -> invalid "SSE parser not initialized"
-let is_done t = t.done_seen
-let is_finished t = t.completed <> None
+  with Protocol.Invalid_response _ as error ->
+    t.failed <- true;
+    raise error
+let is_done t = t.done_seen && not t.failed
+let is_finished t = t.completed <> None && not t.failed
 
-let usage t = t.usage
+let usage t = if t.failed then None else t.usage
 let finish t =
-  (match t.parser with Some parser -> Sse.finish parser
-   | None -> invalid "SSE parser not initialized");
-  match t.completed with
-  | Some response -> response
-  | None -> invalid "missing response.completed"
+  if t.failed then invalid "stream is invalid";
+  try
+    (match t.parser with Some parser -> Sse.finish parser
+     | None -> invalid "SSE parser not initialized");
+    match t.completed with
+    | Some response -> response
+    | None -> invalid "missing response.completed"
+  with Protocol.Invalid_response _ as error ->
+    t.failed <- true;
+    raise error

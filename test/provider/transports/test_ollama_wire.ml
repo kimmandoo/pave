@@ -81,7 +81,8 @@ let () =
   let reported = `Assoc [ "prompt_eval_count", `Int 18;
     "eval_count", `Int 7 ] in
   assert (Pave.Ollama_wire.usage reported =
-    Some { input_tokens = 18; output_tokens = 7 });
+    Some { input_tokens = 18; output_tokens = 7; cached_input_tokens = None;
+      cache_creation_input_tokens = None; reasoning_output_tokens = None });
   assert (Pave.Ollama_wire.usage (completion message) = None);
   assert (Pave.Ollama_wire.usage (`Assoc [ "prompt_eval_count", `Int 18 ]) = None);
   assert (Pave.Ollama_wire.usage (`Assoc [ "prompt_eval_count", `Int (-1);

@@ -17,6 +17,7 @@ type t = {
   mutable finish_reason : string option;
   mutable content_seen : bool;
   mutable usage : Protocol.usage option;
+  mutable failed : bool;
   content : Buffer.t;
   calls : (int, call) Hashtbl.t;
   mutable response_bytes : int;
@@ -94,6 +95,10 @@ let parse_choice t json =
        (match optional_string "assistant role" (field "role" delta) with
         | None | Some "assistant" -> ()
         | Some _ -> invalid "unexpected streamed message role");
+       (match field "refusal" delta with
+        | `Null | `String "" -> ()
+        | `String _ -> invalid "refusal"
+        | _ -> invalid "invalid refusal");
        (match optional_string "content" (field "content" delta) with
         | None -> ()
         | Some text ->
@@ -142,39 +147,51 @@ let handle_event t event data =
 
 let create ~on_text =
   let t = { on_text; done_seen = false; finish_reason = None;
-    content_seen = false; usage = None; content = Buffer.create 256;
+    content_seen = false; usage = None; failed = false;
+    content = Buffer.create 256;
     calls = Hashtbl.create 4; response_bytes = 0; parser = None } in
   t.parser <- Some (Sse.create ~on_event:(handle_event t));
   t
 
 let feed t bytes =
-  match t.parser with
+  if t.failed then invalid "stream is invalid";
+  try match t.parser with
   | Some parser -> Sse.feed parser bytes
   | None -> invalid "SSE parser was not initialized"
-let is_done t = t.done_seen
-let is_finished t = t.finish_reason <> None
-let usage t = if t.finish_reason <> None then t.usage else None
+  with Protocol.Invalid_response _ as error ->
+    t.failed <- true;
+    raise error
+let is_done t = t.done_seen && not t.failed
+let is_finished t = t.finish_reason <> None && not t.failed
+let usage t = if t.done_seen && not t.failed && t.finish_reason <> None then t.usage else None
 
 
 let finish t =
-  (match t.parser with Some parser -> Sse.finish parser
-    | None -> invalid "SSE parser was not initialized");
-  if t.finish_reason = None then invalid "missing finish_reason";
-  let calls = Hashtbl.fold (fun _ call acc -> call :: acc) t.calls []
-    |> List.sort (fun a b -> Int.compare a.index b.index) in
-  let ids = Hashtbl.create (List.length calls) in
-  let calls = List.map (fun call ->
-    let id = Buffer.contents call.id in
-    let name = Buffer.contents call.name in
-    if id = "" || name = "" then invalid "empty tool call id or name";
-    if Hashtbl.mem ids id then invalid "duplicate tool call id";
-    Hashtbl.add ids id ();
-    let arguments = try Yojson.Basic.from_string (Buffer.contents call.arguments)
-      with Yojson.Json_error _ -> invalid "invalid function arguments JSON" in
-    { Protocol.id = id; name; arguments }) calls in
-  (match t.finish_reason, calls with
-   | Some "tool_calls", [] -> invalid "finish_reason tool_calls without tool calls"
-   | Some "stop", _ :: _ -> invalid "finish_reason stop with tool calls"
-   | _ -> ());
-  { Protocol.role = "assistant"; content = (if t.content_seen then Some (Buffer.contents t.content) else None);
-  tool_calls = calls; tool_call_id = None; tool_result_content = None; provider_state = None; attachments = [] }
+  if t.failed then invalid "stream is invalid";
+  try
+    (match t.parser with Some parser -> Sse.finish parser
+      | None -> invalid "SSE parser was not initialized");
+    if not t.done_seen then invalid "missing [DONE] event";
+    if t.finish_reason = None then invalid "missing finish_reason";
+    let calls = Hashtbl.fold (fun _ call acc -> call :: acc) t.calls []
+      |> List.sort (fun a b -> Int.compare a.index b.index) in
+    let ids = Hashtbl.create (List.length calls) in
+    let calls = List.map (fun call ->
+      let id = Buffer.contents call.id in
+      let name = Buffer.contents call.name in
+      if id = "" || name = "" then invalid "empty tool call id or name";
+      if Hashtbl.mem ids id then invalid "duplicate tool call id";
+      Hashtbl.add ids id ();
+      let arguments = try Yojson.Basic.from_string (Buffer.contents call.arguments)
+        with Yojson.Json_error _ -> invalid "invalid function arguments JSON" in
+      (match arguments with `Assoc _ -> () | _ -> invalid "tool arguments must be an object");
+      { Protocol.id = id; name; arguments }) calls in
+    (match t.finish_reason, calls with
+     | Some "tool_calls", [] -> invalid "finish_reason tool_calls without tool calls"
+     | Some "stop", _ :: _ -> invalid "finish_reason stop with tool calls"
+     | _ -> ());
+    { Protocol.role = "assistant"; content = (if t.content_seen then Some (Buffer.contents t.content) else None);
+    tool_calls = calls; tool_call_id = None; tool_result_content = None; provider_state = None; attachments = [] }
+  with Protocol.Invalid_response _ as error ->
+    t.failed <- true;
+    raise error

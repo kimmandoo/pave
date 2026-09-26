@@ -1,6 +1,12 @@
 type tool_call = { id : string; name : string; arguments : Yojson.Basic.t }
 
-type usage = { input_tokens : int; output_tokens : int }
+type usage = {
+  input_tokens : int;
+  output_tokens : int;
+  cached_input_tokens : int option;
+  cache_creation_input_tokens : int option;
+  reasoning_output_tokens : int option;
+}
 type content_block =
   | Text of string
   | Image of { mime_type : string; data : string }
@@ -68,12 +74,25 @@ let validate_content_blocks blocks =
     | Image { mime_type; data } when valid_image_content mime_type data -> ()
     | Image _ -> raise (Invalid_response "invalid tool-result image content")
     | Text _ -> ()) blocks
-let add_usage left right =
-  if right.input_tokens > max_int - left.input_tokens ||
-    right.output_tokens > max_int - left.output_tokens then
+let checked_token_sum left right =
+  if right > max_int - left then
     raise (Invalid_response "provider token totals exceed host integer");
-  { input_tokens = left.input_tokens + right.input_tokens;
-    output_tokens = left.output_tokens + right.output_tokens }
+  left + right
+
+let add_optional_tokens left right =
+  match left, right with
+  | Some left, Some right -> Some (checked_token_sum left right)
+  | _ -> None
+
+let add_usage left right =
+  { input_tokens = checked_token_sum left.input_tokens right.input_tokens;
+    output_tokens = checked_token_sum left.output_tokens right.output_tokens;
+    cached_input_tokens = add_optional_tokens left.cached_input_tokens
+      right.cached_input_tokens;
+    cache_creation_input_tokens = add_optional_tokens
+      left.cache_creation_input_tokens right.cache_creation_input_tokens;
+    reasoning_output_tokens = add_optional_tokens left.reasoning_output_tokens
+      right.reasoning_output_tokens }
 
 let user ?(attachments = []) content =
   validate_attachments attachments;
@@ -301,20 +320,48 @@ let message_from_json json =
 
 let parse_completion json =
   match member "choices" json with
-  | `List (choice :: _) ->
-      let msg = member "message" choice |> parse_message in
+  | `List [choice] ->
+      let member name value = match value with
+        | `Assoc _ -> member name value
+        | _ -> raise (Invalid_response ("invalid " ^ name ^ " object")) in
+      (match member "index" choice with
+       | `Null | `Int 0 -> ()
+       | `Int _ -> raise (Invalid_response "unexpected choice index")
+       | _ -> raise (Invalid_response "invalid choice index"));
+      let response = member "message" choice in
+      (match member "role" response with
+       | `String "assistant" -> ()
+       | _ -> raise (Invalid_response "completion message role is not assistant"));
+      let refusal = member "refusal" response in
+      (match refusal with
+       | `Null | `String "" -> ()
+       | `String _ -> raise (Invalid_response "assistant refusal")
+       | _ -> raise (Invalid_response "invalid refusal"));
+      let msg = parse_message response in
       let finish = member "finish_reason" choice in
       (match finish with
       | `String "stop" when msg.tool_calls = [] -> msg
       | `String "tool_calls" when msg.tool_calls <> [] -> msg
       | `String reason -> raise (Invalid_response ("unexpected finish_reason: " ^ reason))
       | _ -> raise (Invalid_response "missing finish_reason"))
+  | `List [] -> raise (Invalid_response "missing choices")
+  | `List _ -> raise (Invalid_response "multiple choices")
   | _ -> raise (Invalid_response "missing choices")
+
+let optional_token_detail json key total =
+  match member key json with
+  | `Int count when count >= 0 && count <= total -> Some count
+  | _ -> None
 
 let completion_usage json =
   let reported = member "usage" json in
   match member "prompt_tokens" reported, member "completion_tokens" reported with
   | `Int input_tokens, `Int output_tokens
     when input_tokens >= 0 && output_tokens >= 0 ->
-      Some { input_tokens; output_tokens }
+      let cached_input_tokens = optional_token_detail
+        (member "prompt_tokens_details" reported) "cached_tokens" input_tokens in
+      let reasoning_output_tokens = optional_token_detail
+        (member "completion_tokens_details" reported) "reasoning_tokens" output_tokens in
+      Some { input_tokens; output_tokens; cached_input_tokens;
+        cache_creation_input_tokens = None; reasoning_output_tokens }
   | _ -> None

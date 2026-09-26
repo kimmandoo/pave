@@ -26,7 +26,10 @@ type kind =
   | Label of { target_id : string; label : string option }
   | Pin of bool
   | Reset_boundary
-  | Usage of { provider : string; model : string; tokens : Protocol.usage }
+  | Usage of {
+      provider : string; account_id : string option; route : string option;
+      model : string; tokens : Protocol.usage
+    }
   | Branch
   | Tool_lifecycle of tool_lifecycle
   | Session_exit of { kind : exit_kind; pending_tool_calls : pending_tool_call list }
@@ -125,10 +128,21 @@ let entry_json entry =
         "label", option_json label])
   | Pin pinned -> `Assoc (fields @ ["pinned", `Bool pinned])
   | Reset_boundary | Branch -> `Assoc fields
-  | Usage { provider; model; tokens } ->
-      `Assoc (fields @ ["provider", `String provider; "model", `String model;
-        "inputTokens", `Int tokens.input_tokens;
-        "outputTokens", `Int tokens.output_tokens])
+  | Usage { provider; account_id; route; model; tokens } ->
+      let optional_count name = function
+        | None -> []
+        | Some count -> [name, `Int count] in
+      let optional_text name = function
+        | None -> []
+        | Some value -> [name, `String value] in
+      `Assoc (fields @ ["provider", `String provider; "model", `String model] @
+        optional_text "accountId" account_id @ optional_text "route" route @
+        ["inputTokens", `Int tokens.input_tokens;
+         "outputTokens", `Int tokens.output_tokens] @
+        optional_count "cachedInputTokens" tokens.cached_input_tokens @
+        optional_count "cacheCreationInputTokens"
+          tokens.cache_creation_input_tokens @
+        optional_count "reasoningOutputTokens" tokens.reasoning_output_tokens)
   | Tool_lifecycle { call_id; name; state } ->
       let state_fields = match state with
         | Tool_started -> ["state", `String "started"]
@@ -345,12 +359,42 @@ let parse_entry json =
          | _ -> invalid "invalid pin metadata")
     | `String "reset_boundary" -> Reset_boundary
     | `String "usage" ->
+        let optional_count name = match get name with
+          | `Null -> None
+          | `Int count when count >= 0 -> Some count
+          | _ -> invalid "invalid provider token usage detail" in
+        let account_id = match get "accountId" with
+          | `Null -> None
+          | `String account when valid_model_field account -> Some account
+          | _ -> invalid "invalid provider usage account ID" in
+        let route = match get "route" with
+          | `Null -> None
+          | `String route when valid_model_field route -> Some route
+          | _ -> invalid "invalid provider usage route" in
         (match get "provider", get "model",
           get "inputTokens", get "outputTokens" with
          | `String provider, `String model, `Int input_tokens, `Int output_tokens
            when valid_model_field provider && valid_model_field model &&
              input_tokens >= 0 && output_tokens >= 0 ->
-             Usage { provider; model; tokens = { input_tokens; output_tokens } }
+             let cached_input_tokens = optional_count "cachedInputTokens"
+             and cache_creation_input_tokens =
+               optional_count "cacheCreationInputTokens"
+             and reasoning_output_tokens = optional_count "reasoningOutputTokens" in
+             let within total = function
+               | None -> true
+               | Some detail -> detail <= total in
+             let cache_details_fit = match cached_input_tokens,
+               cache_creation_input_tokens with
+               | Some cached, Some created ->
+                   cached <= input_tokens && created <= input_tokens - cached
+               | cached, created ->
+                   within input_tokens cached && within input_tokens created in
+             if not cache_details_fit ||
+                not (within output_tokens reasoning_output_tokens) then
+               invalid "provider usage detail exceeds reported totals";
+             Usage { provider; account_id; route; model; tokens = {
+               input_tokens; output_tokens; cached_input_tokens;
+               cache_creation_input_tokens; reasoning_output_tokens } }
          | _ -> invalid "invalid provider token usage")
     | `String "branch" -> Branch
     | `String "tool" ->
@@ -477,23 +521,23 @@ let usage t =
     | Mode_change _ | Title _ | Label _ | Pin _ | Reset_boundary | Branch
     | Tool_lifecycle _ | Session_exit _ -> total)
     None (branch_entries t)
-module Usage_models = Map.Make (struct
-  type t = string * string
+module Usage_routes = Map.Make (struct
+  type t = string * string option * string option * string
   let compare = Stdlib.compare
 end)
 
-let usage_by_model t =
-  let models = List.fold_left (fun models entry -> match entry.kind with
-    | Usage { provider; model; tokens } ->
-        let key = provider, model in
-        Usage_models.update key (function
+let usage_by_route t =
+  let routes = List.fold_left (fun routes entry -> match entry.kind with
+    | Usage { provider; account_id; route; model; tokens } ->
+        let key = provider, account_id, route, model in
+        Usage_routes.update key (function
           | None -> Some tokens
-          | Some previous -> Some (Protocol.add_usage previous tokens)) models
+          | Some previous -> Some (Protocol.add_usage previous tokens)) routes
     | Message _ | Compaction _ | Model _ | Thinking _ | Tool_selection _
     | Mode_change _ | Title _ | Label _ | Pin _ | Reset_boundary | Branch
-    | Tool_lifecycle _ | Session_exit _ -> models)
-    Usage_models.empty (branch_entries t) in
-  Usage_models.bindings models
+    | Tool_lifecycle _ | Session_exit _ -> routes)
+    Usage_routes.empty (branch_entries t) in
+  Usage_routes.bindings routes
 
 let messages entries =
   List.filter_map (fun entry -> match entry.kind with
@@ -762,12 +806,31 @@ let pinned t =
 let set_pinned t selected =
   if pinned t <> selected then ignore (append_entry t (Pin selected))
 
-let append_usage t ~provider ~model (tokens : Protocol.usage) =
-  if not (valid_model_field provider && valid_model_field model) ||
-    tokens.input_tokens < 0 || tokens.output_tokens < 0 then
+let append_usage ?account_id ?route t ~provider ~model (tokens : Protocol.usage) =
+  let within total = function
+    | None -> true | Some detail -> detail >= 0 && detail <= total in
+  let cache_details_fit = match tokens.cached_input_tokens,
+    tokens.cache_creation_input_tokens with
+    | Some cached, Some created ->
+        cached >= 0 && created >= 0 && cached <= tokens.input_tokens &&
+        created <= tokens.input_tokens - cached
+    | cached, created ->
+        within tokens.input_tokens cached && within tokens.input_tokens created in
+  let route_valid = match route with
+    | None -> true
+    | Some value -> valid_model_field value in
+  let account_valid = match account_id with
+    | None -> true
+    | Some value -> valid_model_field value in
+  if not (valid_model_field provider && valid_model_field model &&
+    account_valid && route_valid) ||
+    tokens.input_tokens < 0 || tokens.output_tokens < 0 ||
+    not cache_details_fit ||
+    not (within tokens.output_tokens tokens.reasoning_output_tokens) then
     invalid "invalid provider token usage";
   let entry = { id = fresh_id (); parent_id = t.leaf;
-    timestamp = timestamp (); kind = Usage { provider; model; tokens } } in
+    timestamp = timestamp ();
+    kind = Usage { provider; account_id; route; model; tokens } } in
   append_line t (entry_json entry);
   t.records_rev <- entry :: t.records_rev;
   Hashtbl.add t.by_id entry.id entry;

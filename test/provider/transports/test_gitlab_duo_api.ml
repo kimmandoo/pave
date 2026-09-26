@@ -56,7 +56,8 @@ let assert_initial route body =
          "role", `String "user"; "content", `String "What is six times seven?"]]);
        assert (field "tools" body = `List [tool]))
 let tool_completion route = match route with
-  | Duo.Anthropic -> `Assoc ["stop_reason", `String "tool_use";
+  | Duo.Anthropic -> `Assoc ["type", `String "message";
+      "role", `String "assistant"; "stop_reason", `String "tool_use";
       "content", `List [signed_thinking; redacted_thinking;
         `Assoc ["type", `String "tool_use";
           "id", `String tool_id; "name", `String "multiply_seven";
@@ -73,7 +74,8 @@ let tool_completion route = match route with
 let answer_completion route number =
   let text = Printf.sprintf "Six times seven is %d." number in
   match route with
-  | Duo.Anthropic -> `Assoc ["stop_reason", `String "end_turn";
+  | Duo.Anthropic -> `Assoc ["type", `String "message";
+      "role", `String "assistant"; "stop_reason", `String "end_turn";
       "content", `List [`Assoc ["type", `String "text"; "text", `String text]]]
   | Duo.Openai_responses -> `Assoc ["status", `String "completed";
       "output", `List [`Assoc ["type", `String "message";
@@ -174,7 +176,8 @@ let test_route route =
        let strip key = function `Assoc fields ->
          `Assoc (List.remove_assoc key fields) | _ -> assert false in
        let malformed = match route with
-         | Duo.Anthropic -> `Assoc ["stop_reason", `String "tool_use";
+         | Duo.Anthropic -> `Assoc ["type", `String "message";
+             "role", `String "assistant"; "stop_reason", `String "tool_use";
              "content", `List [strip "signature" signed_thinking;
                redacted_thinking; `Assoc ["type", `String "tool_use";
                  "id", `String tool_id; "name", `String "multiply_seven";

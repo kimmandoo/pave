@@ -100,7 +100,9 @@ let () =
       "promptTokenCount", `Int 12; "cachedContentTokenCount", `Int 7;
       "candidatesTokenCount", `Int 5; "thoughtsTokenCount", `Int 3 ] ] in
   assert (Pave.Gemini_wire.usage counts =
-    Some { input_tokens = 12; output_tokens = 8 });
+    Some { input_tokens = 12; output_tokens = 8;
+      cached_input_tokens = Some 7; cache_creation_input_tokens = None;
+      reasoning_output_tokens = Some 3 });
   assert (Pave.Gemini_wire.usage (response [text "ok"] "STOP") = None);
   assert (Pave.Gemini_wire.usage (`Assoc [
     "usageMetadata", `Assoc [

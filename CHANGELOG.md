@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-09-27
+
+- release(distribution): published v0.1.42 after all four macOS/Linux arm64/x86-64 target jobs passed their native tests, executable builds, archive packaging and extracted-binary smokes. The release job uploaded four platform archives and `SHA256SUMS`; the public release is live at https://github.com/kimmandoo/pave/releases/tag/v0.1.42. Workflow: https://github.com/kimmandoo/pave/actions/runs/36236372667.
+- fix(provider): hardened Chat, Responses, Codex, Anthropic, Gemini and Ollama completion validation, stream recovery and HTTP timeout/error classification. Added route-gated Anthropic prompt caching, reported cache/reasoning usage and account/route-attributed journal usage; unknown prices and premium value stayed unknown. The forced full suite, install build, opam lint and a real 100×24 `/usage` provenance/detail PTY passed.
+
 ## 2026-09-26
 - feat(discovery): added canonical provider/account/route/upstream model identities, exact selectors, separate ID/capability provenance, bounded cancellable fresh snapshots, explicit provider statuses and strict duplicate-ID rejection. Migrated CLI, journal and model-picker consumers; inventoried all 83 sibling provider identities and recorded the prohibited Antigravity third-party login. The full suite, install build, opam lint, canonical local CLI discovery/inference and loopback-only TUI cancellation/Tab status-page smoke passed; remote listing requests were denied.
 

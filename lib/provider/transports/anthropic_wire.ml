@@ -8,16 +8,19 @@ let required_string name json =
   | _ -> invalid ("missing or invalid " ^ name)
 let input_usage reported =
   let cache key = match member key reported with
-    | `Null -> Some 0
-    | `Int count when count >= 0 -> Some count
-    | _ -> None in
+    | `Null -> Ok None
+    | `Int count when count >= 0 -> Ok (Some count)
+    | _ -> Error () in
   match member "input_tokens" reported,
     cache "cache_creation_input_tokens",
     cache "cache_read_input_tokens" with
-  | `Int input, Some created, Some read when input >= 0 ->
-      if created > max_int - input || read > max_int - input - created then
+  | `Int input, Ok created, Ok read when input >= 0 ->
+      let created_count = Option.value ~default:0 created
+      and read_count = Option.value ~default:0 read in
+      if created_count > max_int - input ||
+         read_count > max_int - input - created_count then
         invalid "input token total exceeds host integer";
-      Some (input + created + read)
+      Some (input + created_count + read_count, created, read)
   | _ -> None
 
 let output_usage reported =
@@ -28,8 +31,10 @@ let output_usage reported =
 let usage json =
   let reported = member "usage" json in
   match input_usage reported, output_usage reported with
-  | Some input_tokens, Some output_tokens ->
-      Some { input_tokens; output_tokens }
+  | Some (input_tokens, cache_creation_input_tokens, cached_input_tokens),
+      Some output_tokens ->
+      Some { input_tokens; output_tokens; cached_input_tokens;
+        cache_creation_input_tokens; reasoning_output_tokens = None }
   | _ -> None
 
 
@@ -129,7 +134,8 @@ let compaction_block content signature =
     "content", `String content;
     "signature", `String signature ]
 
-let request ?(allow_compaction = false) ~model ~max_tokens messages tools =
+let request ?(allow_compaction = false) ?(allow_prompt_caching = false)
+    ~model ~max_tokens messages tools =
   if model = "" || max_tokens <= 0 then invalid_arg "invalid Anthropic model or max_tokens";
   let systems = ref [] in
   let wire = ref [] in
@@ -218,10 +224,15 @@ let request ?(allow_compaction = false) ~model ~max_tokens messages tools =
   let fields = match tools with
     | [] -> fields
     | definitions -> fields @ [ "tools", `List (List.map tool_schema definitions) ] in
+  let fields = if allow_prompt_caching then
+    fields @ [ "cache_control", `Assoc [ "type", `String "ephemeral" ] ]
+    else fields in
   `Assoc fields
 
-let compaction_request ~model ~max_tokens ~instructions messages tools =
-  match request ~allow_compaction:true ~model ~max_tokens messages tools with
+let compaction_request ?(allow_prompt_caching = false)
+    ~model ~max_tokens ~instructions messages tools =
+  match request ~allow_compaction:true ~allow_prompt_caching
+      ~model ~max_tokens messages tools with
   | `Assoc fields ->
       `Assoc (fields @ ["compaction", `Assoc [
         "type", `String "summarize";
@@ -250,6 +261,10 @@ let parse_compaction_response json =
   | _ -> invalid "compaction response must contain one signed compaction block"
 
 let parse_response json =
+  if member "type" json <> `String "message" then
+    invalid "response is not a message";
+  if member "role" json <> `String "assistant" then
+    invalid "response is not an assistant message";
   let blocks = match member "content" json with
     | `List blocks -> blocks
     | _ -> invalid "missing content blocks" in
