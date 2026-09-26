@@ -54,6 +54,46 @@ let credential (descriptor : Pave.Provider_catalog.descriptor) =
             Pave.Model_discovery.Codex_oauth
               (credential.access, account)) resolve)
   | _ -> None
+let supports_route (descriptor : Pave.Provider_catalog.descriptor)
+    (model : Pave.Model_discovery.model)
+    (route : Pave.Provider_catalog.route) =
+  Pave.Model_discovery.model_supports_endpoint ~provider:descriptor.id model
+    ~endpoint:route.endpoint
+
+let model_detail (descriptor : Pave.Provider_catalog.descriptor)
+    (model : Pave.Model_discovery.model) =
+  let display_name = Option.map
+    (fun value -> "display name " ^ value) model.name in
+  let context = Option.map
+    (fun tokens -> Printf.sprintf "context %d tokens" tokens)
+    model.context_window_tokens in
+  let endpoints = match model.supported_endpoints with
+    | None -> None
+    | Some _ ->
+        let names = List.filter_map
+          (fun (route : Pave.Provider_catalog.route) ->
+            if Pave.Model_discovery.model_supports_endpoint
+                ~provider:descriptor.id model ~endpoint:route.endpoint
+            then Some route.name else None) descriptor.routes in
+        if names = [] then None
+        else Some ("APIs " ^ String.concat "/" names) in
+  let tokenizer = Option.map
+    (Printf.sprintf "provider tokenizer type %s; metadata only")
+    model.provider_tokenizer in
+  let compaction = match model.native_compaction_supported with
+    | Some true -> Some "native compaction supported (provider-reported)"
+    | Some false -> Some "native compaction not supported (provider-reported)"
+    | None -> None in
+  match List.filter_map Fun.id
+    [context; compaction; display_name; endpoints; tokenizer] with
+  | [] -> None
+  | parts -> Some (String.concat " · " parts)
+
+let model_details (descriptor : Pave.Provider_catalog.descriptor) models =
+  List.filter_map (fun (model : Pave.Model_discovery.model) ->
+    Option.map (fun detail -> descriptor.id ^ "/" ^ model.id, detail)
+      (model_detail descriptor model)) models
+
 
 let choose screen ~(descriptor : Pave.Provider_catalog.descriptor) ?(intro = [])
     ?(plain = []) ?route_name ~title ~choices () =
@@ -88,23 +128,34 @@ let choose screen ~(descriptor : Pave.Provider_catalog.descriptor) ?(intro = [])
       let answer = !outcome in
       Mutex.unlock lock;
       match answer with
-      | Some (`Listing (Ok ids)) ->
+      | Some (`Listing (Ok listing)) ->
           let selected = Option.value ~default:descriptor.default_route route_name in
-          let routed = match Pave.Provider_catalog.route descriptor selected with
+          let route = Pave.Provider_catalog.route descriptor selected in
+          let routed_models = match route with
             | None -> []
-            | Some _ -> List.map (fun id -> descriptor.id ^ "/" ^ id) ids in
+            | Some route -> List.filter
+                (fun model -> supports_route descriptor model route) listing.models in
+          let routed = List.map
+            (fun (model : Pave.Model_discovery.model) ->
+              descriptor.id ^ "/" ^ model.id) routed_models in
+          let details = model_details descriptor routed_models in
           if Pave.Provider_catalog.unclassified_models descriptor.id then
-            Tui.update_choices screen ~verified:[] ~listed:routed
-              ~status:(if routed = [] && ids <> [] then
+            Tui.update_choices screen ~verified:[] ~listed:routed ~details
+              ~status:(if routed = [] && listing.models <> [] then
                 descriptor.id ^ ": choose an explicit API before selecting a model"
               else Printf.sprintf
                 "%s: %d listed IDs · Chat/tool compatibility unverified"
                 descriptor.id (List.length routed)) ()
           else
-            Tui.update_choices screen ~verified:routed
-              ~status:(Printf.sprintf "%s: %d live routable model%s"
+            let excluded = List.length listing.models - List.length routed_models in
+            Tui.update_choices screen ~verified:routed ~details
+              ~status:(Printf.sprintf "%s: %d live routable model%s%s"
                 descriptor.display_name (List.length routed)
-                (if List.length routed = 1 then "" else "s")) ()
+                (if List.length routed = 1 then "" else "s")
+                (if excluded = 0 then "" else
+                   Printf.sprintf " · %d don't advertise %s"
+                     excluded selected))
+              ()
       | Some (`Listing (Error error)) ->
           Tui.update_choices screen ~verified:[]
             ~status:(Pave.Model_discovery.message error) ()
@@ -185,22 +236,29 @@ let choose_all screen ~(active : Pave.Provider_catalog.descriptor)
       Mutex.unlock lock;
       List.iter (fun ((descriptor : Pave.Provider_catalog.descriptor), result) ->
         Hashtbl.replace completed descriptor.id result) ready;
-      let verified, listed = List.fold_left
-        (fun (verified, listed) (descriptor : Pave.Provider_catalog.descriptor) ->
+      let verified, listed, details = List.fold_left
+        (fun (verified, listed, details)
+            (descriptor : Pave.Provider_catalog.descriptor) ->
           match Hashtbl.find_opt completed descriptor.id with
-          | Some (`Listing (Ok ids)) ->
+          | Some (`Listing (Ok listing)) ->
               let selected_route = if descriptor.id = active.id
                 then current_route else descriptor.default_route in
               (match Pave.Provider_catalog.route descriptor selected_route with
-               | None -> verified, listed
-               | Some _ ->
-                   let items = List.map (fun id -> descriptor.id ^ "/" ^ id) ids in
+               | None -> verified, listed, details
+               | Some route ->
+                   let models = List.filter
+                     (fun model -> supports_route descriptor model route) listing.models in
+                   let items = List.map
+                     (fun (model : Pave.Model_discovery.model) ->
+                       descriptor.id ^ "/" ^ model.id) models in
+                   let details = model_details descriptor models :: details in
                    if Pave.Provider_catalog.unclassified_models descriptor.id then
-                     verified, items :: listed
-                   else items :: verified, listed)
-          | _ -> verified, listed) ([], []) sources in
+                     verified, items :: listed, details
+                   else items :: verified, listed, details)
+          | _ -> verified, listed, details) ([], [], []) sources in
       let verified = List.concat (List.rev verified) in
       let listed = List.concat (List.rev listed) in
+      let details = List.concat (List.rev details) in
       let checked = Hashtbl.length completed in
       let notes = List.filter_map (fun (descriptor : Pave.Provider_catalog.descriptor) ->
         match Hashtbl.find_opt completed descriptor.id with
@@ -209,11 +267,24 @@ let choose_all screen ~(active : Pave.Provider_catalog.descriptor)
             Some "Anthropic OAuth: listing needs ANTHROPIC_API_KEY; type an ID"
         | Some (`Listing (Error error)) ->
             Some (descriptor.id ^ ": " ^ Pave.Model_discovery.message error)
-        | Some (`Listing (Ok ids)) when ids <> [] &&
-            Pave.Provider_catalog.route descriptor
+        | Some (`Listing (Ok listing)) when listing.models <> [] ->
+            (match Pave.Provider_catalog.route descriptor
               (if descriptor.id = active.id then current_route
-               else descriptor.default_route) = None ->
-            Some (descriptor.id ^ ": choose an explicit API with /model provider@API/ID")
+               else descriptor.default_route) with
+             | None ->
+                 Some (descriptor.id ^ ": choose an explicit API with /model provider@API/ID")
+             | Some route ->
+                 let compatible = List.filter
+                   (fun model -> supports_route descriptor model route) listing.models in
+                 if compatible = [] then
+                   Some (descriptor.id ^ ": no listed model advertises " ^ route.name)
+                 else if List.length compatible < List.length listing.models then
+                   Some (Printf.sprintf "%s: %d listed model%s not available on %s"
+                     descriptor.id
+                     (List.length listing.models - List.length compatible)
+                     (if List.length listing.models - List.length compatible = 1 then "" else "s")
+                     route.name)
+                 else None)
         | _ -> None) sources in
       let note = match notes with
         | [] -> ""
@@ -223,7 +294,7 @@ let choose_all screen ~(active : Pave.Provider_catalog.descriptor)
       let status = Printf.sprintf "%d models · %d/%d providers checked%s"
         (List.length verified + List.length listed) checked (List.length sources)
         note in
-      Tui.update_choices screen ~verified ~listed ~status () in
+      Tui.update_choices screen ~verified ~listed ~details ~status () in
     Tui.choose screen ~allow_custom:true
       ~intro:["Account models appear together as provider/model IDs.";
         "A signed-in provider without a public listing needs a typed ID.";

@@ -170,8 +170,9 @@ let () =
       Unix.rmdir directory) (fun () ->
       Unix.putenv "PATH" (directory ^ ":" ^ old_path);
       Unix.putenv "PAVE_SYNTHETIC_FIXTURE_STATE" state;
-      let discovered = match Pave.Model_discovery.discover
-        ~provider:"synthetic" ~credential:(Pave.Model_discovery.Api_key key) () with
+      let discovered = match Result.map Pave.Model_discovery.model_ids
+        (Pave.Model_discovery.discover
+          ~provider:"synthetic" ~credential:(Pave.Model_discovery.Api_key key) ()) with
         | Ok ids when ids = [model; embedding] -> model
         | _ -> fail "production discovery lost unclassified IDs" in
       let config : Pave.Provider.config = {

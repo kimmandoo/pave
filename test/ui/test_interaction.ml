@@ -159,6 +159,31 @@ let () =
   check_native ~provider:"gitlab-duo" ~route:"anthropic"
     ~wire:Pave.Provider.Gitlab_duo_messages
     ~other_wire:Pave.Provider.Gitlab_duo_responses ();
+  check_native ~provider:"anthropic" ~route:"messages"
+    ~wire:Pave.Provider.Anthropic_messages
+    ~other_wire:Pave.Provider.Gemini_direct ();
+  let anthropic_state = `Assoc [
+    "provider", `String "anthropic"; "route", `String "messages";
+    "model", `String "same-model";
+    "content", `String "signed summary"; "signature", `String "opaque"] in
+  let signed_summary = { (Pave.Protocol.user "signed summary") with
+    provider_state = Some anthropic_state } in
+  let signed_summary_state = function
+    | [(message : Pave.Protocol.message)] ->
+        if message.content <> Some "signed summary" then
+          fail "signed summary text was lost";
+        message.provider_state
+    | _ -> fail "signed summary changed history length" in
+  if signed_summary_state (history_for ~provider:"anthropic" ~route:"messages"
+       ~wire:Pave.Provider.Anthropic_messages ~model:"same-model" [signed_summary])
+       <> Some anthropic_state ||
+     signed_summary_state (history_for ~provider:"anthropic" ~route:"messages"
+       ~wire:Pave.Provider.Anthropic_messages ~model:"different-model" [signed_summary])
+       <> None ||
+     signed_summary_state (history_for ~provider:"anthropic" ~route:"chat"
+       ~wire:Pave.Provider.Anthropic_messages ~model:"same-model" [signed_summary])
+       <> None then
+    fail "Anthropic compaction state crossed provider, API or model boundaries";
   let openai_state = `Assoc [
     "provider", `String "openai"; "route", `String "responses";
     "model", `String "same-model";

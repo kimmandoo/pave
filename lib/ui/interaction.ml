@@ -235,6 +235,7 @@ let history_for_model ~provider:active_provider ~route:active_route
           | Provider.Commandcode_responses -> "commandcode", Some "responses"
           | Provider.Gitlab_duo_messages -> "gitlab-duo", Some "anthropic"
           | Provider.Gitlab_duo_responses -> "gitlab-duo", Some "responses"
+          | Provider.Anthropic_messages -> "anthropic", Some "messages"
           | _ -> "", None in
         provider <> "" && active_provider = provider &&
         (match route with

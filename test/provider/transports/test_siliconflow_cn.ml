@@ -78,8 +78,9 @@ let () =
       Unix.rmdir dir) (fun () ->
       Unix.putenv "PATH" (dir ^ ":" ^ prior);
       Unix.putenv "PAVE_CN_FIXTURE_STATE" state;
-      let models = Pave.Model_discovery.discover ~provider:"siliconflow-cn"
-        ~credential:(Pave.Model_discovery.Api_key key) () in
+      let models = Result.map Pave.Model_discovery.model_ids
+        (Pave.Model_discovery.discover ~provider:"siliconflow-cn"
+          ~credential:(Pave.Model_discovery.Api_key key) ()) in
       assert (models = Ok [model]);
       let config : Pave.Provider.config = { endpoint = Wire.cn_chat_url;
         api_key = key; model; api = Pave.Provider.Siliconflow_cn_chat } in

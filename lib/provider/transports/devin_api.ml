@@ -13,6 +13,7 @@ let max_models = 4096
 type error = Invalid_credential | Transport_error | Http_error of int
   | Invalid_response of string
 type model = { id : string; name : string; router : bool;
+  context_window_tokens : int option; tokenizer_type : string option;
   max_tokens : int; supports_tools : bool; supports_parallel_tool_calls : bool }
 type http = url:string -> headers:(string * string) list -> body:string ->
   on_chunk:(string -> unit) -> (int, error) result
@@ -210,10 +211,20 @@ let model_of_config fs =
   let harness = entries 20 info in
   let router = (display = 3 || flag 25 info) && harness = [] in
   let features = submessage 6 info in
+  let context_window = integer 4 info in
+  let tokenizer = text 5 info in
+  let tokenizer_type =
+    if tokenizer <> "" && String.length tokenizer <= 128 &&
+        String.for_all (fun c -> Char.code c > 32 && Char.code c < 127)
+          tokenizer
+    then Some tokenizer else None in
   let max_tokens = integer 13 info in
   Some { id; name = (let label = String.trim (text 1 fs) in
     if label = "" then id else label);
-    router; max_tokens = (if max_tokens > 0 then max_tokens else 64000);
+    router;
+    context_window_tokens = (if context_window > 0 then Some context_window else None);
+    tokenizer_type;
+    max_tokens = (if max_tokens > 0 then max_tokens else 64000);
     supports_tools = features = [] || flag 12 features;
     supports_parallel_tool_calls = flag 21 features }
 let discover ?http ?cancel ~api_key () = protect (fun () ->

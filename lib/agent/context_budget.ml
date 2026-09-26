@@ -10,7 +10,13 @@ let add_text size = function
   | Some text -> add size (String.length text)
 
 let message_estimate (message : Protocol.message) =
-  let size = ref 128 and images = ref (List.length message.attachments) in
+  let size = ref 128 and images = ref 0 in
+  let add_image mime_type data =
+    incr images;
+    size := add !size (add 64
+      (add (String.length mime_type) (String.length data))) in
+  List.iter (fun (attachment : Protocol.attachment) ->
+    add_image attachment.mime_type attachment.data) message.attachments;
   size := add_text !size message.tool_call_id;
   List.iter (fun (call : Protocol.tool_call) ->
     size := add !size (String.length call.id);
@@ -21,7 +27,7 @@ let message_estimate (message : Protocol.message) =
    | None -> size := add_text !size message.content
    | Some blocks -> List.iter (function
        | Protocol.Text text -> size := add !size (String.length text)
-       | Protocol.Image _ -> incr images) blocks);
+       | Protocol.Image image -> add_image image.mime_type image.data) blocks);
   Option.iter (fun state ->
     size := add !size (String.length (Yojson.Basic.to_string state)))
     message.provider_state;

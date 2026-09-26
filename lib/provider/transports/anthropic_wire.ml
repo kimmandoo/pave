@@ -87,7 +87,49 @@ let tool_schema json =
       `Assoc fields
   | _ -> invalid "invalid tool definition"
 
-let request ~model ~max_tokens messages tools =
+let compaction_beta = "compact-2026-09-04"
+let max_compaction_summary_bytes = 65_536
+let max_compaction_signature_bytes = 16_384
+
+let compaction_payload ~model (message : message) =
+  match message.provider_state with
+  | Some state when member "provider" state = `String "anthropic" ->
+      if message.role <> "user" ||
+         member "route" state <> `String "messages" ||
+         member "model" state <> `String model then
+        invalid "native compaction state belongs to a different route or model";
+      let content = required_string "content" state in
+      let signature = required_string "signature" state in
+      if String.trim content = "" ||
+         String.length content > max_compaction_summary_bytes ||
+         signature = "" ||
+         String.length signature > max_compaction_signature_bytes ||
+         message.content <> Some content || message.attachments <> [] ||
+         message.tool_calls <> [] || message.tool_call_id <> None ||
+         message.tool_result_content <> None then
+        invalid "malformed native compaction state";
+      Some (content, signature)
+  | _ -> None
+
+let requires_compaction_beta ~model messages =
+  List.exists (fun (message : message) ->
+    Option.is_some (compaction_payload ~model message)) messages
+
+let compaction_state ~model ~content ~signature =
+  `Assoc [
+    "provider", `String "anthropic";
+    "route", `String "messages";
+    "model", `String model;
+    "content", `String content;
+    "signature", `String signature ]
+
+let compaction_block content signature =
+  `Assoc [
+    "type", `String "compaction";
+    "content", `String content;
+    "signature", `String signature ]
+
+let request ?(allow_compaction = false) ~model ~max_tokens messages tools =
   if model = "" || max_tokens <= 0 then invalid_arg "invalid Anthropic model or max_tokens";
   let systems = ref [] in
   let wire = ref [] in
@@ -107,22 +149,34 @@ let request ~model ~max_tokens messages tools =
          | "user" ->
              if !pending <> [] || msg.tool_calls <> [] || msg.tool_call_id <> None then
                invalid "user message during tool results";
-             let content = match msg.attachments with
-               | [] ->
-                   (match msg.content with
-                   | Some text -> `String text
-                   | None -> invalid "user message without content")
-               | attachments ->
-                   let blocks = (match msg.content with
-                     | Some text when text <> "" -> [text_block text]
-                     | _ -> []) @ List.map (fun (attachment : attachment) ->
-                       if not (List.mem attachment.mime_type
-                         ["image/png"; "image/jpeg"; "image/webp"]) then
-                         invalid ("unsupported user image MIME type " ^ attachment.mime_type);
-                       image_block attachment.mime_type attachment.data) attachments in
-                   `List blocks in
-             append (wire_message "user" content);
-             replay rest
+             (match (if allow_compaction then
+                 compaction_payload ~model msg else None) with
+              | Some _ when !wire <> [] ->
+                  invalid "native compaction block must lead the message list"
+              | Some (content, signature) ->
+                  append (wire_message "assistant"
+                    (`List [compaction_block content signature]));
+                  replay rest
+              | None ->
+                  let content = match msg.attachments with
+                    | [] ->
+                        (match msg.content with
+                         | Some text -> `String text
+                         | None -> invalid "user message without content")
+                    | attachments ->
+                        let blocks = (match msg.content with
+                          | Some text when text <> "" -> [text_block text]
+                          | _ -> []) @ List.map
+                            (fun (attachment : attachment) ->
+                              if not (List.mem attachment.mime_type
+                                ["image/png"; "image/jpeg"; "image/webp"]) then
+                                invalid ("unsupported user image MIME type " ^
+                                  attachment.mime_type);
+                              image_block attachment.mime_type attachment.data)
+                            attachments in
+                        `List blocks in
+                  append (wire_message "user" content);
+                  replay rest)
          | "assistant" ->
              if !pending <> [] || msg.tool_call_id <> None then
                invalid "assistant message during tool results";
@@ -165,6 +219,35 @@ let request ~model ~max_tokens messages tools =
     | [] -> fields
     | definitions -> fields @ [ "tools", `List (List.map tool_schema definitions) ] in
   `Assoc fields
+
+let compaction_request ~model ~max_tokens ~instructions messages tools =
+  match request ~allow_compaction:true ~model ~max_tokens messages tools with
+  | `Assoc fields ->
+      `Assoc (fields @ ["compaction", `Assoc [
+        "type", `String "summarize";
+        "instructions", `String instructions]])
+  | _ -> assert false
+
+let parse_compaction_response json =
+  if member "type" json <> `String "message" ||
+     member "role" json <> `String "assistant" then
+    invalid "compaction response is not an assistant message";
+  if member "stop_reason" json <> `String "compaction" then
+    invalid "compaction response did not stop with compaction";
+  let blocks = match member "content" json with
+    | `List blocks -> blocks
+    | _ -> invalid "compaction response has no content blocks" in
+  match blocks with
+  | [block] when member "type" block = `String "compaction" ->
+      let content = required_string "content" block in
+      let signature = required_string "signature" block in
+      if String.trim content = "" ||
+         String.length content > max_compaction_summary_bytes ||
+         signature = "" ||
+         String.length signature > max_compaction_signature_bytes then
+        invalid "compaction response has an invalid signed block";
+      content, signature
+  | _ -> invalid "compaction response must contain one signed compaction block"
 
 let parse_response json =
   let blocks = match member "content" json with

@@ -212,8 +212,9 @@ let () =
       Unix.rmdir directory) (fun () ->
       Unix.putenv "PATH" (directory ^ ":" ^ old_path);
       Unix.putenv "PAVE_META_FIXTURE_STATE" state;
-      let listed = match Pave.Model_discovery.discover ~provider:"meta"
-        ~credential:(Pave.Model_discovery.Api_key key) () with
+      let listed = match Result.map Pave.Model_discovery.model_ids
+        (Pave.Model_discovery.discover ~provider:"meta"
+          ~credential:(Pave.Model_discovery.Api_key key) ()) with
         | Ok ids -> ids
         | _ -> fail "production authenticated Meta model discovery failed" in
       assert (listed = [model; other_model]);

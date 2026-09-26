@@ -3,7 +3,13 @@ open Notty
 (* Transcript limits live in Transcript_view; no duplicate storage here. *)
 let prompt = "  ❯ "
 
-type candidate = { value : string; custom : bool; verified : bool; listed : bool }
+type candidate = {
+  value : string;
+  custom : bool;
+  verified : bool;
+  listed : bool;
+  detail : string option;
+}
 
 type chooser = {
   title : string;
@@ -159,6 +165,53 @@ let shorten_width width text =
   let measure = measure_text in
   if measure text <= width then text
   else (Transcript_view.wrap ~columns:(width - 1) ~measure text).(0) ^ "…"
+let wrap_chooser_text ~columns ~max_rows text =
+  if max_rows <= 0 then [||]
+  else
+    let columns = max 1 columns in
+    let words = String.split_on_char ' ' (single_line text)
+      |> List.filter (fun word -> word <> "") in
+    let lines = ref [] in
+    let current = Buffer.create (min columns 128) and used = ref 0 in
+    let push () =
+      if Buffer.length current > 0 then (
+        lines := Buffer.contents current :: !lines;
+        Buffer.clear current;
+        used := 0) in
+    let add word width =
+      Buffer.add_string current word;
+      used := !used + width in
+    let append word =
+      let width = measure_text word in
+      if width > columns then (
+        push ();
+        let parts = Transcript_view.wrap ~columns ~measure:measure_text word in
+        for index = 0 to Array.length parts - 2 do
+          lines := parts.(index) :: !lines
+        done;
+        if Array.length parts > 0 then (
+          let last = parts.(Array.length parts - 1) in
+          Buffer.add_string current last;
+          used := measure_text last))
+      else if !used = 0 then add word width
+      else
+        let space_width = measure_text " " in
+        if !used + space_width + width > columns then (
+          push ();
+          add word width)
+        else (
+          Buffer.add_char current ' ';
+          used := !used + space_width;
+          add word width) in
+    List.iter append words;
+    push ();
+    let lines = Array.of_list (List.rev !lines) in
+    let count = min max_rows (Array.length lines) in
+    let visible = Array.sub lines 0 count in
+    if count < Array.length lines then
+      visible.(count - 1) <-
+        shorten_width columns (visible.(count - 1) ^ "…");
+    visible
 
 let matches chooser =
   match chooser.filtered with
@@ -183,15 +236,20 @@ let matches chooser =
         String.contains chooser.filter '/' &&
         not (List.exists (fun item -> item.value = chooser.filter) found) in
       let found = Array.of_list (if manual then
-        { value = chooser.filter; custom = true; verified = false; listed = false } :: found
+        { value = chooser.filter; custom = true; verified = false;
+          listed = false; detail = None } :: found
         else found) in
       chooser.filtered <- Some (chooser.filter, found);
       found
 
-let candidate_label chooser item =
+let candidate_label ?(columns = 80) chooser item =
   let source =
     if item.custom then "Use: "
     else if not chooser.dynamic || List.mem item.value chooser.plain then ""
+    else if columns < 40 then
+      if item.verified then "✓ "
+      else if item.listed then "? "
+      else "~ "
     else if item.verified then "[verified] "
     else if item.listed then "[listed · API unverified] "
     else "[suggested] " in
@@ -307,8 +365,10 @@ let paint t =
     string muted (usage ^ attached)) in
   let model = single_line t.model in
   let model =
-    if cols < 60 then match String.rindex_opt model '/' with
+    if cols < 60 then match String.index_opt model '/' with
       | None -> model
+      | Some split when cols < 45 ->
+          String.sub model (split + 1) (String.length model - split - 1)
       | Some split ->
           shorten_width 6 (String.sub model 0 split) ^ "/" ^
           String.sub model (split + 1) (String.length model - split - 1)
@@ -316,7 +376,7 @@ let paint t =
   let location = styled_line cols text_attr
     (if cols < 22 then " " ^ shorten_width (max 2 (cols - 1)) model
     else if cols < 60 then
-      "  MODEL " ^ shorten_width (cols - 22) model ^ "  ·  " ^
+      "  MODEL " ^ shorten_width (max 1 (cols - 22)) model ^ "  ·  " ^
       (if t.session then "SAVED" else "UNSAVED")
     else "  MODEL  " ^ model ^ "   ·   " ^
       (if t.session then "SESSION SAVED" else "SESSION UNSAVED") ^
@@ -340,14 +400,36 @@ let paint t =
         let found = matches chooser in
         let count = Array.length found in
         chooser.selected <- max 0 (min (count - 1) chooser.selected);
-        let intro_height =
+        let status_prefix = "  ◦  " in
+        let status_lines = match chooser.status with
+          | Some status when body_height >= 3 ->
+              wrap_chooser_text
+                ~columns:(max 1 (cols - measure_text status_prefix))
+                ~max_rows:3 status
+          | _ -> [||] in
+        let status_height = Array.length status_lines in
+        let detail_prefix = "  ↳ " in
+        let detail_lines =
+          if cols >= 45 && body_height >= 6 && count > 0 then
+            match found.(chooser.selected).detail with
+            | Some detail ->
+                wrap_chooser_text
+                  ~columns:(max 1 (cols - measure_text detail_prefix))
+                  ~max_rows:4 detail
+            | None -> [||]
+          else [||] in
+        let detail_height = Array.length detail_lines in
+        let intro_rows =
           if cols >= 52 && body_height >= 9 && chooser.filter = "" &&
-             Array.length chooser.intro > 0 then
+              Array.length chooser.intro > 0 then
             min 3 (Array.length chooser.intro) + 1
           else 0 in
-        let status_height =
-          if body_height >= 3 && chooser.status <> None then 1 else 0 in
-        let page = max 0 (body_height - 1 - intro_height - status_height) in
+        let intro_height =
+          if body_height - 1 - status_height - detail_height - intro_rows >=
+              min 3 count
+          then intro_rows else 0 in
+        let page = max 0
+          (body_height - 1 - intro_height - status_height - detail_height) in
         if chooser.selected < chooser.offset then chooser.offset <- chooser.selected;
         if page > 0 && chooser.selected >= chooser.offset + page then
           chooser.offset <- chooser.selected - page + 1;
@@ -358,17 +440,29 @@ let paint t =
           else if i <= intro_height then
             if i = intro_height then I.void cols 1
             else styled_line cols muted ("  " ^ chooser.intro.(i - 1))
-          else if status_height = 1 && i = intro_height + 1 then
+          else if i > intro_height &&
+              i <= intro_height + status_height then
+            let index = i - intro_height - 1 in
             styled_line cols text_attr
-              ("  ◦  " ^ Option.get chooser.status)
+              ((if index = 0 then status_prefix else "     ") ^
+                status_lines.(index))
+          else if i > intro_height + status_height &&
+              i <= intro_height + status_height + detail_height then
+            let index = i - intro_height - status_height - 1 in
+            styled_line cols muted
+              ((if index = 0 then detail_prefix else "    ") ^
+                detail_lines.(index))
           else
-            let index = chooser.offset + i - 1 - intro_height - status_height in
+            let index = chooser.offset + i - 1 - intro_height -
+              status_height - detail_height in
             if index >= count then I.void cols 1
             else let choice = found.(index) in
               styled_line cols
                 (if index = chooser.selected then selected_attr else text_attr)
-                ((if index = chooser.selected then "  ❯ " else "    ")
-                 ^ candidate_label chooser choice)))
+                ((if cols < 40 then
+                    if index = chooser.selected then "❯ " else "  "
+                  else if index = chooser.selected then "  ❯ " else "    ") ^
+                 candidate_label ~columns:cols chooser choice)))
     | None ->
         (match t.body_cache with
         | Some (width, height, revision, body)
@@ -399,11 +493,11 @@ let paint t =
         let found = matches chooser in
         let number = if Array.length found = 0 then 0 else chooser.selected + 1 in
         let status = match chooser.status with
-          | Some text when body_height < 3 -> " · " ^ text
+          | Some text when body_height < 3 -> " · " ^ single_line text
           | _ -> "" in
         if body_height < 2 then (
           let label = if Array.length found = 0 then "(no match)"
-            else candidate_label chooser found.(chooser.selected) in
+            else candidate_label ~columns:cols chooser found.(chooser.selected) in
           Printf.sprintf "  %d/%d %s · %s select · Esc cancel%s"
             number (Array.length found) label enter_key status)
         else if cols < 55 then
@@ -1031,7 +1125,7 @@ let read ?wake_fd ?on_wake ?on_interrupt ?on_dequeue ?on_completion t =
 
 (* Update live choices only on the UI thread; preserve an explicit selection
    while fresh provider IDs arrive. Listing alone does not verify an API route. *)
-let update_chooser chooser ~verified ~listed ~status =
+let update_chooser chooser ~verified ~listed ~details ~status =
   let previous = matches chooser in
   let selected = if chooser.selected < Array.length previous then
       Some previous.(chooser.selected).value else None in
@@ -1039,6 +1133,9 @@ let update_chooser chooser ~verified ~listed ~status =
   List.iter (fun value -> Hashtbl.replace confirmed value ()) verified;
   let discovered = Hashtbl.create (List.length listed) in
   List.iter (fun value -> Hashtbl.replace discovered value ()) listed;
+  let annotations = Hashtbl.create (List.length details) in
+  List.iter (fun (value, detail) ->
+    Hashtbl.replace annotations value detail) details;
   let seen = Hashtbl.create
     (Array.length chooser.suggestions + List.length verified + List.length listed) in
   let choices = ref [] in
@@ -1047,7 +1144,8 @@ let update_chooser chooser ~verified ~listed ~status =
       Hashtbl.add seen value ();
       choices := { value; custom = false;
         verified = Hashtbl.mem confirmed value;
-        listed = Hashtbl.mem discovered value } :: !choices) in
+        listed = Hashtbl.mem discovered value;
+        detail = Hashtbl.find_opt annotations value } :: !choices) in
   List.iter add verified;
   List.iter add listed;
   Array.iter (fun value ->
@@ -1069,10 +1167,10 @@ let update_chooser chooser ~verified ~listed ~status =
     | None -> 0);
   chooser.offset <- min chooser.offset chooser.selected
 
-let update_choices t ~verified ?(listed = []) ?status () =
+let update_choices t ~verified ?(listed = []) ?(details = []) ?status () =
   match t.chooser with
   | Some chooser when chooser.dynamic ->
-      update_chooser chooser ~verified ~listed ~status;
+      update_chooser chooser ~verified ~listed ~details ~status;
       paint t
   | _ -> invalid_arg "Tui.update_choices: no dynamic chooser is open"
 
@@ -1087,7 +1185,8 @@ let choose ?(allow_custom = false) ?(intro = []) ?(plain = [])
   let chooser = { title = sanitize title;
     intro = Array.of_list (List.map sanitize intro); plain; suggestions;
     choices = Array.map (fun value ->
-      { value; custom = false; verified = false; listed = false }) suggestions;
+      { value; custom = false; verified = false; listed = false;
+        detail = None }) suggestions;
     allow_custom; dynamic = Option.value dynamic
       ~default:(Option.is_some wake_fd); status = initial_status;
     filter = ""; selected = 0; offset = 0; touched = false;

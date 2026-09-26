@@ -18,7 +18,8 @@ let () =
   let approval_mode_override = ref None in
   let explicit_selection = ref false and session_supplied = ref false in
   let max_turns = ref None and list_providers = ref false
-    and list_models = ref false and context_window_tokens = ref None in
+    and list_models = ref false and context_window_tokens = ref None
+    and context_window_auto = ref false and context_window_set = ref false in
   let login = ref "" and login_manual = ref "" and logout = ref "" in
   let custom_prompt = ref None and prompt_template = ref None
     and append_prompt = ref None in
@@ -63,11 +64,18 @@ let () =
       "Additional instruction text (replaces discovered APPEND_SYSTEM.md)";
     "--max-turns", Arg.Int (fun count -> max_turns := Some count),
       "Maximum model turns per prompt (default: 20)";
-    "--context-window", Arg.Int (fun tokens ->
-      if tokens < 8192 || tokens > 20_000_000 then
-        raise (Arg.Bad "--context-window must be between 8192 and 20000000");
-      context_window_tokens := Some tokens),
-      "Explicit context-window tokens for the exact initial model/API; never inferred";
+    "--context-window", Arg.String (fun value ->
+      if !context_window_set then
+        raise (Arg.Bad "--context-window may be specified only once");
+      context_window_set := true;
+      if String.lowercase_ascii value = "auto" then
+        context_window_auto := true
+      else match int_of_string_opt value with
+        | Some tokens when tokens >= 8192 && tokens <= 20_000_000 ->
+            context_window_tokens := Some tokens
+        | _ -> raise (Arg.Bad
+            "--context-window must be auto or between 8192 and 20000000")),
+      "Context-window tokens, or auto for a live provider-reported exact model/API limit";
   ] in
   try
     if Array.length Sys.argv > 1 && Sys.argv.(1) = "update" then (
@@ -127,15 +135,46 @@ let () =
       (match Pave.Model_discovery.discover ~provider:descriptor.id
         ?credential () with
        | Error error -> failwith (Pave.Model_discovery.message error)
-       | Ok models ->
-           List.iter (fun id ->
-             Printf.printf "%s\t%s\n" id
-               (if Pave.Provider_catalog.unclassified_models descriptor.id then
-                  "listed; Chat/tool capability unverified"
-                else if Pave.Provider_catalog.route descriptor "" = None then
-                  "discovered; no supported inference route"
-                else "selectable")) models;
-           if models = [] then
+       | Ok listing ->
+           List.iter (fun (model : Pave.Model_discovery.model) ->
+             let endpoints = match model.supported_endpoints with
+               | None -> []
+               | Some _ ->
+                   List.filter_map (fun (route : Pave.Provider_catalog.route) ->
+                     if Pave.Model_discovery.model_supports_endpoint
+                         ~provider:descriptor.id model ~endpoint:route.endpoint
+                     then Some route.name else None) descriptor.routes in
+             let status =
+               if Pave.Provider_catalog.unclassified_models descriptor.id then
+                 "listed; Chat/tool capability unverified"
+               else if endpoints <> [] then "listed; per-model endpoints reported"
+               else if Pave.Provider_catalog.route descriptor "" = None then
+                 "discovered; no supported inference route"
+               else "selectable" in
+             let details = match model.name with
+               | None -> []
+               | Some name -> ["display name " ^ name] in
+             let details = match model.context_window_tokens with
+               | None -> details
+               | Some tokens ->
+                   Printf.sprintf "context %d tokens (provider-reported)" tokens
+                   :: details in
+             let details = if endpoints = [] then details
+               else ("endpoints " ^ String.concat "," endpoints) :: details in
+             let details = match model.provider_tokenizer with
+               | None -> details
+               | Some value ->
+                   Printf.sprintf "tokenizer type %s (provider-reported; metadata only)"
+                     value :: details in
+             let details = match model.native_compaction_supported with
+               | Some true -> "native compaction supported (provider-reported)" :: details
+               | Some false -> "native compaction not supported (provider-reported)" :: details
+               | None -> details in
+             Printf.printf "%s\t%s%s\n" model.id status
+               (if details = [] then "" else
+                  " · " ^ String.concat " · " (List.rev details)))
+             listing.models;
+           if listing.models = [] then
              Printf.printf "No models reported by %s.\n" descriptor.id);
       exit 0);
     let project_context = Pave.Project_context.load ~root () in
@@ -213,18 +252,80 @@ let () =
       "/" ^ model in
     let active_descriptor = ref descriptor and active_model = ref model
       and active_route = ref route and endpoint_override = ref !endpoint in
+    let context_window_source = ref None in
+    let context_window_tokenizer = ref None in
+    let anthropic_compaction_capability :
+      (string * string * string * string * bool option) option ref = ref None in
+    if !context_window_auto then (
+      let initial_endpoint =
+        if !endpoint_override = "" then route.endpoint else !endpoint_override in
+      if initial_endpoint <> route.endpoint then
+        failwith "--context-window auto cannot use a custom inference endpoint";
+      if model = "" then
+        failwith "--context-window auto requires an exact initial model selection";
+      if not (List.mem descriptor.id
+          ["anthropic"; "commandcode"; "devin"; "google"; "openai-codex"]) then
+        failwith "--context-window auto requires provider-reported metadata from Anthropic, Command Code, Devin, Google, or OpenAI Codex";
+      let credential = discovery_credential descriptor in
+      let listing = match Pave.Model_discovery.discover
+          ~provider:descriptor.id ?credential () with
+        | Ok listing -> listing
+        | Error error -> failwith
+            ("--context-window auto: " ^ Pave.Model_discovery.message error) in
+      let selected_model = match List.find_opt
+          (fun (candidate : Pave.Model_discovery.model) ->
+            candidate.id = model) listing.models with
+        | Some selected -> selected
+        | None -> failwith
+            "--context-window auto: selected model is absent from the live provider listing" in
+      if descriptor.id = "anthropic" then
+        anthropic_compaction_capability := Some
+          (descriptor.id, route.name, model, initial_endpoint,
+            selected_model.native_compaction_supported);
+      (match selected_model.supported_endpoints with
+       | Some _ when Pave.Model_discovery.model_supports_endpoint
+           ~provider:descriptor.id selected_model ~endpoint:route.endpoint -> ()
+       | Some _ -> failwith
+           "--context-window auto: the selected model does not advertise the active API route"
+       | None when List.mem descriptor.id
+           ["anthropic"; "devin"; "google"; "openai-codex"] &&
+           List.length descriptor.routes = 1 -> ()
+       | None -> failwith
+           "--context-window auto: the live listing did not report model API routes");
+      let tokens = match selected_model.context_window_tokens with
+        | Some tokens -> tokens
+        | None -> failwith
+            "--context-window auto: the provider did not report this model's context window" in
+      if tokens < 8192 || tokens > 20_000_000 then
+        failwith "--context-window auto: provider-reported context window is outside the supported 8192..20000000 range";
+      context_window_tokens := Some tokens;
+      context_window_tokenizer := selected_model.provider_tokenizer;
+      let observed = Unix.gmtime listing.source.retrieved_at in
+      let timestamp = Printf.sprintf "%04d-%02d-%02dT%02d:%02d:%02dZ"
+        (observed.tm_year + 1900) (observed.tm_mon + 1) observed.tm_mday
+        observed.tm_hour observed.tm_min observed.tm_sec in
+      context_window_source := Some
+        (Printf.sprintf "provider-reported by %s at %s (observed %s)"
+          listing.source.provider
+          (Option.value ~default:"pinned model listing" listing.source.endpoint)
+          timestamp)
+    ) else if Option.is_some !context_window_tokens then
+      context_window_source := Some "manually supplied for the exact initial provider/model/API";
     let context_window_target =
       match !context_window_tokens with
       | None -> None
       | Some _ when model = "" ->
           failwith "--context-window requires an exact initial model selection"
-      | Some _ -> Some (descriptor.id, model, route.name) in
+      | Some _ -> Some (descriptor.id, model, route.name,
+          if !endpoint_override = "" then route.endpoint else !endpoint_override) in
     let active_context_window () =
+      let endpoint = if !endpoint_override = "" then !active_route.endpoint
+        else !endpoint_override in
       match !context_window_tokens, context_window_target with
-      | Some tokens, Some (provider, selected_model, api)
+      | Some tokens, Some (provider, selected_model, api, target_endpoint)
         when !active_descriptor.id = provider &&
              !active_model = selected_model &&
-             !active_route.name = api -> Some tokens
+             !active_route.name = api && endpoint = target_endpoint -> Some tokens
       | _ -> None in
     let ui = ref None in
     let runner : Pave.Turn_runner.t option ref = ref None in
@@ -372,6 +473,58 @@ let () =
       native_openai_route () &&
       provider.Pave.Provider.api = Pave.Provider.Openai_responses &&
       String.ends_with ~suffix:"/responses" provider.endpoint in
+    let official_anthropic_route () =
+      let endpoint = if !endpoint_override = "" then !active_route.endpoint
+        else !endpoint_override in
+      !active_descriptor.id = "anthropic" &&
+      List.length !active_descriptor.routes = 1 &&
+      !active_route.name = "messages" &&
+      !active_route.wire = Pave.Provider.Anthropic_messages &&
+      endpoint = "https://api.anthropic.com/v1/messages" in
+    let native_anthropic_route provider =
+      official_anthropic_route () &&
+      provider.Pave.Provider.endpoint =
+        "https://api.anthropic.com/v1/messages" &&
+      provider.api = Pave.Provider.Anthropic_messages &&
+      provider.model = !active_model in
+    let native_anthropic_compaction ?cancel provider authentication =
+      if authentication <> Pave.Provider.Api_key ||
+         not (native_anthropic_route provider) then false
+      else
+        let endpoint = provider.Pave.Provider.endpoint in
+        let matches (provider_id, route, model, cached_endpoint, _) =
+          provider_id = !active_descriptor.id &&
+          route = !active_route.name && model = !active_model &&
+          cached_endpoint = endpoint in
+        match !anthropic_compaction_capability with
+        | Some cached when matches cached ->
+            (match cached with
+             | _, _, _, _, Some true -> true
+             | _ -> false)
+        | _ ->
+            let credential = discovery_credential !active_descriptor in
+            (match Pave.Model_discovery.discover ?cancel
+                ~provider:"anthropic" ?credential () with
+             | Ok listing
+               when listing.source.provider = "anthropic" &&
+                    listing.source.endpoint =
+                      Some Pave.Model_discovery.anthropic_url ->
+                 let supported = Option.bind
+                   (List.find_opt
+                     (fun (model : Pave.Model_discovery.model) ->
+                       model.id = !active_model) listing.models)
+                   (fun model -> model.native_compaction_supported) in
+                 anthropic_compaction_capability := Some
+                   (!active_descriptor.id, !active_route.name, !active_model,
+                    endpoint, supported);
+                 supported = Some true
+             | _ -> false) in
+    let system_prompt_message text : Pave.Protocol.message = {
+      role = "system"; content = Some text; tool_calls = [];
+      tool_call_id = None; tool_result_content = None;
+      provider_state = None; attachments = [] } in
+    let with_system_prompt text messages =
+      if text = "" then messages else system_prompt_message text :: messages in
     let record_compaction_usage usages =
       List.iter record_usage usages in
     let latest_user_split messages =
@@ -442,26 +595,41 @@ let () =
                         Option.is_some message.provider_state) prefix in
                     let provider, authentication, resolve_credential =
                       resolve_provider () in
-                    let native = native_openai_compaction provider in
+                    worker_event "Context over budget; checking compaction route and capabilities.";
+                    let native_openai = native_openai_compaction provider in
+                    let native_anthropic =
+                      native_anthropic_compaction ?cancel provider authentication in
+                    let native = native_openai || native_anthropic in
                     if signed_prefix && not native then
                       failwith "automatic summary compaction is disabled for older signed provider state on this route";
-                    worker_event "Context over budget; compacting older complete turns.";
                     let usages = ref [] in
                     let on_usage tokens = usages := tokens :: !usages in
                     let summary, provider_state =
                       let native_instruction =
                         Pave.Context_compaction.native_summary_instruction in
+                      let native_messages =
+                        if native_anthropic then
+                          with_system_prompt system_text prefix
+                        else prefix in
+                      let native_tools = if native_anthropic then tools else [] in
                       let native_fits = native &&
                         Pave.Context_budget.status ~window_tokens
                           ~reserve_tokens
                           (Pave.Context_budget.request
-                            ~system:native_instruction ~messages:prefix ~tools:[])
+                            ~system:native_instruction
+                            ~messages:native_messages ~tools:native_tools)
                         <> Pave.Context_budget.Over_budget in
                       if native_fits then
-                        let compacted = Pave.Provider.compact_openai_responses
-                          ~authentication ?resolve_credential ?cancel
-                          ~on_usage provider
-                          ~instructions:native_instruction prefix in
+                        let compacted = if native_anthropic then
+                          Pave.Provider.compact_anthropic_messages
+                            ~authentication ?resolve_credential ?cancel
+                            ~on_usage provider ~instructions:native_instruction
+                            ~messages:native_messages ~tools:native_tools
+                        else
+                          Pave.Provider.compact_openai_responses
+                            ~authentication ?resolve_credential ?cancel
+                            ~on_usage provider ~instructions:native_instruction
+                            prefix in
                         compacted.summary, Some compacted.provider_state
                       else if signed_prefix then
                         failwith "native compaction input exceeds the configured prompt allowance; no journal change was made"
@@ -684,9 +852,21 @@ let () =
             let signed_prefix = List.exists (fun (message : Pave.Protocol.message) ->
               Option.is_some message.provider_state) prefix in
             let provider, authentication, resolve_credential = resolve_provider () in
-            let native = native_openai_compaction provider in
+            let native_openai = native_openai_compaction provider in
+            (if !active_descriptor.id = "anthropic" then
+              on_event "Checking Anthropic model compaction capability…");
+            let native_anthropic =
+              native_anthropic_compaction provider authentication in
+            let native = native_openai || native_anthropic in
             if signed_prefix && not native then
               failwith "manual summary compaction is disabled for older signed provider state on this route";
+            let compaction_tools = Pave.Tools.available_for
+              ~allow_shell:!allow_shell
+              ~enabled:(fun name -> not (List.mem name !disabled_tools)) in
+            let native_messages =
+              if native_anthropic then with_system_prompt system prefix
+              else prefix in
+            let native_tools = if native_anthropic then compaction_tools else [] in
             let usages = ref [] in
             let collect_usage tokens = usages := tokens :: !usages in
             let native_fits = native && match active_context_window () with
@@ -698,17 +878,23 @@ let () =
                     ~reserve_tokens:reserve
                     (Pave.Context_budget.request
                       ~system:Pave.Context_compaction.native_summary_instruction
-                      ~messages:prefix ~tools:[]) <>
+                      ~messages:native_messages ~tools:native_tools) <>
                       Pave.Context_budget.Over_budget in
             if signed_prefix && not native_fits then
               failwith "native compaction input exceeds the configured prompt allowance; no journal change was made";
             let summary, provider_state =
               if native_fits then
-                let compacted = Pave.Provider.compact_openai_responses
-                  ~authentication ?resolve_credential ~on_usage:collect_usage
-                  provider
-                  ~instructions:Pave.Context_compaction.native_summary_instruction
-                  prefix in
+                let compacted = if native_anthropic then
+                  Pave.Provider.compact_anthropic_messages
+                    ~authentication ?resolve_credential
+                    ~on_usage:collect_usage provider
+                    ~instructions:Pave.Context_compaction.native_summary_instruction
+                    ~messages:native_messages ~tools:native_tools
+                else
+                  Pave.Provider.compact_openai_responses
+                    ~authentication ?resolve_credential ~on_usage:collect_usage
+                    provider ~instructions:Pave.Context_compaction.native_summary_instruction
+                    prefix in
                 compacted.summary, Some compacted.provider_state
               else
                 match active_context_window () with
@@ -748,13 +934,10 @@ let () =
              | Some window_tokens ->
                  let reserve =
                    Pave.Context_budget.output_reserve window_tokens in
-                 let tools = Pave.Tools.available_for
-                   ~allow_shell:!allow_shell
-                   ~enabled:(fun name -> not (List.mem name !disabled_tools)) in
                  let projected = trim_to_budget ~window_tokens
-                   ~reserve_tokens:reserve ~system ~tools projected in
+                   ~reserve_tokens:reserve ~system ~tools:compaction_tools projected in
                  match context_status ~window_tokens ~reserve_tokens:reserve
-                   ~system ~messages:projected ~tools with
+                   ~system ~messages:projected ~tools:compaction_tools with
                  | Pave.Context_budget.Over_budget ->
                      failwith "manual compaction did not bring the retained turn within the configured prompt allowance; no journal change was made"
                  | Pave.Context_budget.Within_budget
@@ -1341,14 +1524,15 @@ let () =
           let budget_lines = match !context_window_tokens,
               active_context_window () with
             | None, _ ->
-                ["Context window · unknown; automatic compaction disabled (set --context-window for the exact active provider/model/API)"]
+                ["Context window · unknown; automatic compaction disabled (set --context-window TOKENS or auto for a supported provider)"]
             | Some configured, None ->
                 let target = match context_window_target with
-                  | Some (provider, selected_model, api) ->
+                  | Some (provider, selected_model, api, _) ->
                       provider ^ "/" ^ selected_model ^ "@" ^ api
                   | None -> "(no exact initial target)" in
-                [Printf.sprintf "Configured context window · %d tokens for %s"
-                   configured target;
+                [Printf.sprintf "Configured context window · %d tokens for %s (%s)"
+                   configured target (Option.value
+                     ~default:"source unknown" !context_window_source);
                  "Automatic compaction · disabled after provider/model/API selection changed"]
             | Some window_tokens, Some _ ->
                 let reserve = Pave.Context_budget.output_reserve window_tokens in
@@ -1369,20 +1553,54 @@ let () =
                   | Pave.Context_budget.Images_unmeasured ->
                       "Budget state · byte proxy is within allowance; image token cost is unknown" in
                 ["Context window · " ^ string_of_int window_tokens ^
-                   " tokens (explicit exact-model input; no name-based inference)";
+                   " tokens (" ^ Option.value ~default:"source unknown"
+                     !context_window_source ^ "; prompt sizing remains a byte proxy)";
                  Printf.sprintf "Budget proxy · %d prompt bytes · %d-token prompt allowance · %d-token output reserve"
                    estimate.estimated_bytes (window_tokens - reserve) reserve;
                  (if estimate.unmeasured_images = 0 then
                     "Images · none in retained context; image token cost is not estimated"
-                  else Printf.sprintf "Images · %d retained; token cost unknown"
+                  else Printf.sprintf
+                    "Images · %d retained; payload bytes counted, token cost unknown"
                     estimate.unmeasured_images);
                  budget_state;
                  (if signed_prefix && native_openai_route () then
                     "Automatic compaction · OpenAI Responses preserves matching native replay state when bounded input fits"
+                  else if signed_prefix && official_anthropic_route () then
+                    "Automatic compaction · Anthropic signed replay requires model-listing support on the exact API-key route"
                   else if signed_prefix then
                     "Automatic compaction · blocked for signed provider state on this route"
                   else
                     "Automatic compaction · enabled for this exact provider/model/API")] in
+          let budget_lines = budget_lines @
+            (match !context_window_tokenizer with
+             | None -> []
+             | Some tokenizer ->
+                 ["Tokenizer metadata · provider reports " ^ tokenizer ^
+                  "; not used for local prompt sizing"]) in
+          let anthropic_capability_lines =
+            if !active_descriptor.id <> "anthropic" then []
+            else if not (official_anthropic_route ()) then
+              ["Anthropic native compaction · disabled for non-official endpoints"]
+            else
+              match !anthropic_compaction_capability with
+              | Some (provider, route, model, endpoint, Some true)
+                when provider = !active_descriptor.id &&
+                     route = !active_route.name && model = !active_model &&
+                     endpoint = "https://api.anthropic.com/v1/messages" ->
+                  ["Anthropic native compaction · advertised for this model; API-key auth required"]
+              | Some (provider, route, model, endpoint, Some false)
+                when provider = !active_descriptor.id &&
+                     route = !active_route.name && model = !active_model &&
+                     endpoint = "https://api.anthropic.com/v1/messages" ->
+                  ["Anthropic native compaction · provider listing reports unsupported"]
+              | Some (provider, route, model, endpoint, None)
+                when provider = !active_descriptor.id &&
+                     route = !active_route.name && model = !active_model &&
+                     endpoint = "https://api.anthropic.com/v1/messages" ->
+                  ["Anthropic native compaction · provider listing did not report support"]
+              | _ ->
+                  ["Anthropic native compaction · capability checked against the model listing before use"] in
+          let budget_lines = budget_lines @ anthropic_capability_lines in
           let lines = ["Context · " ^ model ^ " · " ^ !active_route.name] @
             conversation_lines @ budget_lines @
             ["Approval mode · " ^ Pave.Approval.string_of_mode

@@ -165,8 +165,9 @@ let () =
           `Assoc ["id", `String model; "status", `String "available"];
           `Assoc ["id", `String "disabled"; "status", `String "unavailable"];
           `Assoc ["id", `String "newly-enabled-model"]]])) in
-      assert (Model_discovery.discover ~provider:"bedrock-mantle"
-        ~credential:(Model_discovery.Api_key key) ~http () =
+      assert (Result.map Model_discovery.model_ids
+        (Model_discovery.discover ~provider:"bedrock-mantle"
+          ~credential:(Model_discovery.Api_key key) ~http ()) =
         Ok [model; "newly-enabled-model"]);
       assert (!requests = 1);
       (match Model_discovery.discover ~provider:"bedrock-mantle"

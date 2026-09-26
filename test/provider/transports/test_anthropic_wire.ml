@@ -50,6 +50,53 @@ let () =
       block "tool_result" [ "tool_use_id", `String "use-1";
         "content", `String "alpha body" ] ];
     message "assistant" [ block "text" [ "text", `String "Done" ] ] ]);
+  let native_content = "signed context" and native_signature = "opaque-signature" in
+  let native_state = Pave.Anthropic_wire.compaction_state ~model:"claude-test"
+    ~content:native_content ~signature:native_signature in
+  let compacted = { (user native_content) with provider_state = Some native_state } in
+  let native_request = Pave.Anthropic_wire.compaction_request
+    ~model:"claude-test" ~max_tokens:4096 ~instructions:"preserve decisions"
+    [system "Follow instructions"; compacted; user "recent turn"] [definition] in
+  assert (field "system" native_request = `String "Follow instructions");
+  assert (field "tools" native_request = `List [
+    `Assoc ["name", `String "read_file"; "input_schema", schema;
+      "description", `String "Read a file"]]);
+  assert (field "compaction" native_request = `Assoc [
+    "type", `String "summarize";
+    "instructions", `String "preserve decisions"]);
+  let native_block = block "compaction" [
+    "content", `String native_content;
+    "signature", `String native_signature] in
+  assert (field "messages" native_request = `List [
+    message "assistant" [native_block];
+    `Assoc ["role", `String "user"; "content", `String "recent turn"]]);
+  let fallback_request = Pave.Anthropic_wire.request ~model:"claude-test"
+    ~max_tokens:4096 [compacted; user "recent turn"] [] in
+  assert (field "messages" fallback_request = `List [
+    `Assoc ["role", `String "user"; "content", `String native_content];
+    `Assoc ["role", `String "user"; "content", `String "recent turn"]]);
+  let other_model = { compacted with provider_state = Some
+    (Pave.Anthropic_wire.compaction_state ~model:"other-model"
+      ~content:native_content ~signature:native_signature) } in
+  expect_invalid (fun () -> Pave.Anthropic_wire.request ~allow_compaction:true
+    ~model:"claude-test" ~max_tokens:4096 [other_model] []);
+  let changed_text = { compacted with content = Some "tampered" } in
+  expect_invalid (fun () -> Pave.Anthropic_wire.request ~allow_compaction:true
+    ~model:"claude-test" ~max_tokens:4096 [changed_text] []);
+  let wrong_route = { compacted with provider_state = Some (`Assoc [
+    "provider", `String "anthropic"; "route", `String "chat";
+    "model", `String "claude-test"; "content", `String native_content;
+    "signature", `String native_signature]) } in
+  expect_invalid (fun () -> Pave.Anthropic_wire.request ~allow_compaction:true
+    ~model:"claude-test" ~max_tokens:4096 [wrong_route] []);
+  let attached_marker = { compacted with attachments = [
+    { name = "extra.png"; mime_type = "image/png"; data = "aGVsbG8=" }] } in
+  expect_invalid (fun () -> Pave.Anthropic_wire.request ~allow_compaction:true
+    ~model:"claude-test" ~max_tokens:4096 [attached_marker] []);
+  expect_invalid (fun () ->
+    Pave.Anthropic_wire.request ~allow_compaction:true
+      ~model:"claude-test" ~max_tokens:4096
+      [user "summarized earlier turn"; compacted] []);
   let png = "iVBORw0KGgo=" in
   let typed_result id blocks = tool_result_blocks id blocks in
   let image_request = Pave.Anthropic_wire.request ~model:"claude-test" ~max_tokens:4096
@@ -131,4 +178,32 @@ let () =
     (response "tool_use" [ use "bad" "read_file" (`String "not JSON object") ]));
   expect_invalid (fun () -> Pave.Anthropic_wire.parse_response
     (`Assoc [ "stop_reason", `String "end_turn"; "content", `String "wrong shape" ]));
+  let native_response = `Assoc [
+    "type", `String "message"; "role", `String "assistant";
+    "stop_reason", `String "compaction";
+    "content", `List [native_block]] in
+  assert (Pave.Anthropic_wire.parse_compaction_response native_response =
+    (native_content, native_signature));
+  expect_invalid (fun () -> Pave.Anthropic_wire.parse_compaction_response
+    (`Assoc ["type", `String "message"; "role", `String "assistant";
+      "stop_reason", `String "compaction";
+      "content", `List [block "compaction" [
+        "content", `String native_content]]]));
+  expect_invalid (fun () -> Pave.Anthropic_wire.parse_compaction_response
+    (`Assoc ["type", `String "message"; "role", `String "assistant";
+      "stop_reason", `String "end_turn"; "content", `List [native_block]]));
+  expect_invalid (fun () -> Pave.Anthropic_wire.parse_compaction_response
+    (`Assoc ["type", `String "message"; "role", `String "user";
+      "stop_reason", `String "compaction"; "content", `List [native_block]]));
+  expect_invalid (fun () -> Pave.Anthropic_wire.parse_compaction_response
+    (`Assoc ["type", `String "message"; "role", `String "assistant";
+      "stop_reason", `String "compaction";
+      "content", `List [native_block; native_block]]));
+  expect_invalid (fun () -> Pave.Anthropic_wire.parse_compaction_response
+    (`Assoc ["type", `String "message"; "role", `String "assistant";
+      "stop_reason", `String "compaction";
+      "content", `List [block "compaction" [
+        "content", `String (String.make 65537 'x');
+        "signature", `String native_signature]]]));
+
   print_endline "anthropic wire: ok"

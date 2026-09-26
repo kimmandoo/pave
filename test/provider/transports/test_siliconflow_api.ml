@@ -159,8 +159,9 @@ let () =
       Unix.rmdir directory) (fun () ->
       Unix.putenv "PATH" (directory ^ ":" ^ old_path);
       Unix.putenv "PAVE_SILICONFLOW_FIXTURE_STATE" state;
-      let discovered = match Pave.Model_discovery.discover
-        ~provider:"siliconflow" ~credential:(Pave.Model_discovery.Api_key key) () with
+      let discovered = match Result.map Pave.Model_discovery.model_ids
+        (Pave.Model_discovery.discover
+          ~provider:"siliconflow" ~credential:(Pave.Model_discovery.Api_key key) ()) with
         | Ok [id; "other/chat"] -> id
         | _ -> failwith "production SiliconFlow chat discovery failed" in
       assert (discovered = model);
