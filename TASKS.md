@@ -188,7 +188,7 @@ The P0–P6 cards above remain the detailed acceptance criteria; this roadmap is
 
 ### R2 — Existing text-route reliability
 
-- [ ] Complete P1 existing Chat/Responses/Codex/Anthropic/Gemini/Ollama wire parity and provider error/retry/usage policy. Deliver strict request/response/continuation semantics without replaying partial tool calls or retrying visible side effects.
+- [x] Completed P1 Chat, Responses, Codex, Anthropic, Gemini and Ollama text-route reliability with strict provider-specific request/response/continuation, incomplete/error and terminal-stream semantics, cache-gated Anthropic requests, actual optional usage details, and no implicit replay of requests or partial tool calls. Categorized HTTP/timeout outcomes and safe retry policy; recorded provider/account/model/API-route provenance, leaving unsourced prices and premium value explicitly unknown. The forced full suite, install build, opam lint and `/usage` PTY passed. Public v0.1.43 followed four successful native target jobs and the release/publish job: https://github.com/kimmandoo/pave/releases/tag/v0.1.43 (https://github.com/kimmandoo/pave/actions/runs/36265196610).
 
 ### R3 — Compatible gateways and API-key provider coverage
 
