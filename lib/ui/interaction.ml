@@ -50,7 +50,7 @@ let commands = [
   { name = "/label"; usage = "[TEXT]"; summary = "Set or clear a label on the selected entry"; action = A_label };
   { name = "/pin"; usage = ""; summary = "Toggle this session in the pinned resume list"; action = A_pin };
   { name = "/approval"; usage = "[always-ask|write|yolo]"; summary = "Show or set this branch's approval mode"; action = A_approval };
-  { name = "/thinking"; usage = "[LEVEL|default]"; summary = "Store branch-local thinking-level metadata; provider defaults remain unchanged"; action = A_thinking };
+  { name = "/thinking"; usage = "[LEVEL|default]"; summary = "Store branch-local thinking level; compatible providers receive the selected reasoning control"; action = A_thinking };
   { name = "/tool"; usage = "enable|disable NAME"; summary = "Set branch-local tool availability"; action = A_tool };
   { name = "/attach"; usage = "PATH|clear"; summary = "Attach an image to the next prompt"; action = A_attach };
   { name = "/queue"; usage = "MESSAGE"; summary = "Queue a follow-up without interrupting the active turn"; action = A_queue };
@@ -183,9 +183,10 @@ let parse line =
     | Some A_tree -> no_args (); Tree
     | None -> Unknown line
 
-let selectable_providers () = Provider_catalog.all ()
+let selectable_providers ?registry () = Provider_catalog.all ?registry ()
 
-let resolve_model ?current_route ?current_account_id ~current_provider ~input () =
+let resolve_model ?registry ?current_route ?current_account_id
+    ~current_provider ~input () =
   let input = String.trim input in
   if input = "" || String.exists is_whitespace_or_control input then
     invalid_argument "model selector must be a nonempty single argument";
@@ -197,13 +198,13 @@ let resolve_model ?current_route ?current_account_id ~current_provider ~input ()
         let model = String.sub input (slash + 1)
           (String.length input - slash - 1) in
         if String.contains prefix '@' || String.contains prefix '#' ||
-           Provider_catalog.find prefix <> None then
+           Provider_catalog.find ?registry prefix <> None then
           let provider, route, account =
             Model_identity.parse_selector_prefix prefix in
           provider, route, account, model
         else current_provider, None, None, input in
   if model = "" then invalid_argument "model ID must not be empty";
-  let descriptor = match Provider_catalog.find provider_id with
+  let descriptor = match Provider_catalog.find ?registry provider_id with
     | Some descriptor -> descriptor
     | None -> invalid_argument ("unknown provider: " ^ provider_id) in
   let route_name = match selected_route with
@@ -215,12 +216,25 @@ let resolve_model ?current_route ?current_account_id ~current_provider ~input ()
     | Some route -> route
     | None -> invalid_argument
         ("no route for " ^ provider_id ^ "; use " ^ provider_id ^ "@API/MODEL") in
-  let account_id = match selected_account with
-    | Some _ -> selected_account
-    | None when provider_id = current_provider -> current_account_id
-    | None -> None in
+  let custom_route = Provider_catalog.custom_route
+      (Option.value ~default:Provider_catalog.builtin_registry registry)
+      ~provider:provider_id ~route:route.name in
+  let account_id = match custom_route with
+    | Some custom ->
+        if selected_account <> None && selected_account <> custom.account_id then
+          invalid_arg "custom provider account scope is configured on its route";
+        if provider_id = current_provider && current_account_id <> None &&
+           current_account_id <> custom.account_id then
+          invalid_arg "selected account does not match the configured custom route";
+        custom.account_id
+    | None ->
+        (match selected_account with
+         | Some _ -> selected_account
+         | None when provider_id = current_provider -> current_account_id
+         | None -> None) in
+  let config_revision = Option.map Custom_provider.fingerprint custom_route in
   let identity = Model_identity.make ~provider:provider_id ?account_id
-    ~route:route.name ~upstream_id:model () in
+    ?config_revision ~route:route.name ~upstream_id:model () in
   descriptor, identity, route
 
 let history_for_model ~provider:active_provider ~route:active_route

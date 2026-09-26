@@ -135,7 +135,7 @@ let compaction_block content signature =
     "signature", `String signature ]
 
 let request ?(allow_compaction = false) ?(allow_prompt_caching = false)
-    ~model ~max_tokens messages tools =
+    ?replay_assistant_content ~model ~max_tokens messages tools =
   if model = "" || max_tokens <= 0 then invalid_arg "invalid Anthropic model or max_tokens";
   let systems = ref [] in
   let wire = ref [] in
@@ -195,8 +195,13 @@ let request ?(allow_compaction = false) ?(allow_prompt_caching = false)
              let blocks = (match msg.content with
                | Some text when text <> "" -> [ text_block text ]
                | _ -> []) @ List.map call_block msg.tool_calls in
-             if blocks = [] then invalid "empty assistant message";
-             append (wire_message "assistant" (`List blocks));
+             let content = match replay_assistant_content with
+               | None -> `List blocks
+               | Some replay ->
+                   Option.value ~default:(`List blocks) (replay msg) in
+             if blocks = [] && content = `List [] then
+               invalid "empty assistant message";
+             append (wire_message "assistant" content);
              pending := ids;
              replay rest
          | "tool" ->
@@ -298,3 +303,45 @@ let parse_response json =
     | [] -> None
     | texts -> Some (String.concat "" texts) in
   { role = "assistant"; content; tool_calls; tool_call_id = None; tool_result_content = None; provider_state = None; attachments = [] }
+let native_thinking_block block =
+  match member "type" block with
+  | `String ("thinking" | "redacted_thinking") -> true
+  | _ -> false
+
+let native_state_tag provider model = [
+  "provider", `String provider;
+  "route", `String "messages";
+  "model", `String model;
+]
+
+let parse_native_completion ~provider ~model json =
+  let reply = parse_response json in
+  match member "content" json with
+  | `List blocks when List.exists native_thinking_block blocks ->
+      { reply with provider_state = Some (`Assoc (
+          native_state_tag provider model @ ["content", `List blocks])) }
+  | _ -> reply
+
+let replay_native_content ~provider ~model (message : message) =
+  match message.provider_state with
+  | Some (`Assoc fields)
+    when List.for_all
+      (fun (key, value) -> List.assoc_opt key fields = Some value)
+      (native_state_tag provider model) ->
+      (match List.assoc_opt "content" fields with
+       | Some (`List blocks)
+         when List.exists native_thinking_block blocks ->
+           let stop_reason = if message.tool_calls = [] then "end_turn"
+             else "tool_use" in
+           let canonical = parse_response (`Assoc [
+             "type", `String "message";
+             "role", `String "assistant";
+             "content", `List blocks;
+             "stop_reason", `String stop_reason;
+           ]) in
+           if canonical.content <> message.content ||
+              canonical.tool_calls <> message.tool_calls then
+             invalid "native thinking state does not match visible assistant message";
+           Some (`List blocks)
+       | _ -> None)
+  | _ -> None

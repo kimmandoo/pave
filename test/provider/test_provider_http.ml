@@ -175,16 +175,14 @@ let serve client step signal_write closed_write =
         (if step = 7 then
            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}]}\n\n"
          else {|{"choices":[{"message":{"role":"assistant","content":"partial|})
-    | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19
-    | 20 | 21 | 22 | 23 ->
+    | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19 | 20 | 21 ->
         let provider, key = match (step - 8) / 2 with
           | 0 -> "together", "mock-together"
           | 1 -> "cerebras", "mock-cerebras"
           | 2 -> "venice", "mock-venice"
           | 3 -> "deepinfra", "mock-deepinfra"
-          | 4 -> "fireworks", "mock-fireworks"
-          | 5 -> "baseten", "mock-baseten"
-          | 6 -> "huggingface", "mock-huggingface"
+          | 4 -> "baseten", "mock-baseten"
+          | 5 -> "huggingface", "mock-huggingface"
           | _ -> "nanogpt", "mock-nanogpt" in
         assert (path = "/chat/completions");
         assert (has_header ("authorization: bearer " ^ key) headers);
@@ -222,23 +220,23 @@ let serve client step signal_write closed_write =
             "finish_reason", `String "stop";
             "message", `Assoc ["role", `String "assistant";
               "content", `String (provider ^ "-reply")]]]]))
-    | 24 -> assert (has_header "authorization: bearer mock-openai" headers);
+    | 22 -> assert (has_header "authorization: bearer mock-openai" headers);
         401, "application/json",
         {|{"error":{"message":"invalid key mock-openai"}}|}
-    | 25 -> assert (has_header "authorization: bearer mock-openai" headers);
+    | 23 -> assert (has_header "authorization: bearer mock-openai" headers);
         403, "application/json", {|{"error":{"message":"permission denied"}}|}
-    | 26 -> assert (has_header "authorization: bearer mock-openai" headers);
+    | 24 -> assert (has_header "authorization: bearer mock-openai" headers);
         404, "application/json", {|{"error":{"message":"model not found"}}|}
-    | 27 -> assert (has_header "authorization: bearer mock-openai" headers);
+    | 25 -> assert (has_header "authorization: bearer mock-openai" headers);
         413, "application/json", {|{"error":{"message":"request too large"}}|}
-    | 28 -> assert (has_header "authorization: bearer mock-openai" headers);
+    | 26 -> assert (has_header "authorization: bearer mock-openai" headers);
         429, "application/json", {|{"error":{"message":"rate limited"}}|}
-    | 29 -> assert (has_header "authorization: bearer mock-openai" headers);
+    | 27 -> assert (has_header "authorization: bearer mock-openai" headers);
         503, "application/json", {|{"error":{"message":"overloaded"}}|}
-    | 30 -> assert (has_header "authorization: bearer mock-openai" headers);
+    | 28 -> assert (has_header "authorization: bearer mock-openai" headers);
         400, "application/json",
         {|{"error":{"code":"context_length_exceeded","message":"too many tokens"}}|}
-    | 31 -> assert (has_header "authorization: bearer mock-openai" headers);
+    | 29 -> assert (has_header "authorization: bearer mock-openai" headers);
         400, "application/json",
         {|{"error":{"type":"invalid_request_error","message":"bad request"}}|}
     | _ -> assert false
@@ -265,6 +263,29 @@ let serve client step signal_write closed_write =
   close_in_noerr ic; close_out_noerr oc
 
 let () =
+  let pinned = "https://api.example.test/v1/chat/completions" in
+  Pave.Provider.validate_endpoint_override
+    ~api:Pave.Provider.Openai_completions ~pinned_endpoint:pinned
+    ~requested:pinned;
+  let rejected = try
+    Pave.Provider.validate_endpoint_override
+      ~api:Pave.Provider.Openai_completions ~pinned_endpoint:pinned
+      ~requested:"https://attacker.example/v1/chat/completions";
+    false
+  with Pave.Provider.Provider_error _ -> true in
+  assert rejected;
+  Pave.Provider.validate_endpoint_override
+    ~api:Pave.Provider.Local_chat
+    ~pinned_endpoint:"http://127.0.0.1:1234/v1/chat/completions"
+    ~requested:"http://127.0.0.1:9000/v1/chat/completions";
+  let rejected_local = try
+    Pave.Provider.validate_endpoint_override
+      ~api:Pave.Provider.Local_chat
+      ~pinned_endpoint:"http://127.0.0.1:1234/v1/chat/completions"
+      ~requested:"http://provider.example/v1/chat/completions";
+    false
+  with Pave.Provider.Provider_error _ -> true in
+  assert rejected_local;
   let socket = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
   Unix.bind socket (Unix.ADDR_INET (Unix.inet_addr_loopback, 0));
   Unix.listen socket 8;
@@ -426,6 +447,7 @@ let () =
      | _ -> failwith "streamed request returned despite cancellation");
     assert (!streamed_text = [ "partial" ]);
     expect_disconnect ();
+    (* Fireworks enforces its pinned HTTPS route; test_r3_routes covers its fake curl. *)
     List.iter (fun (id, url, env) ->
       let descriptor = Option.get (Pave.Provider_catalog.find id) in
       assert (descriptor.api_key_env = Some env);
@@ -452,7 +474,6 @@ let () =
         "cerebras", "https://api.cerebras.ai/v1/chat/completions", "CEREBRAS_API_KEY";
         "venice", "https://api.venice.ai/api/v1/chat/completions", "VENICE_API_KEY";
         "deepinfra", "https://api.deepinfra.com/v1/openai/chat/completions", "DEEPINFRA_API_KEY";
-        "fireworks", "https://api.fireworks.ai/inference/v1/chat/completions", "FIREWORKS_API_KEY";
         "baseten", "https://inference.baseten.co/v1/chat/completions", "BASETEN_API_KEY";
         "huggingface", "https://router.huggingface.co/v1/chat/completions", "HF_TOKEN";
         "nanogpt", "https://api.nano-gpt.com/api/v1/chat/completions", "NANO_GPT_API_KEY" ];

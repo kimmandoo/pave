@@ -14,6 +14,11 @@ type api = Openai_completions | Local_chat | Anthropic_messages | Openai_respons
   | Devin_connect | Gitlab_duo_messages | Gitlab_duo_responses
   | Gitlab_duo_chat
   | Codex_responses | Copilot_chat
+  | Fireworks_chat
+  | Minimax_chat | Deepseek_chat | Mistral_chat | Openrouter_chat
+  | Umans_chat | Umans_messages | Cline_pass_chat | Alibaba_token_plan_chat
+  | Kimi_code_chat | Kimi_code_cn_chat
+  | Kimi_code_messages | Kimi_code_cn_messages
 type authentication = Api_key | OAuth
 type config = { endpoint : string; api_key : string; model : string; api : api }
 type credentials = {
@@ -391,6 +396,12 @@ let loopback_http endpoint =
          String.length digits <= 5 &&
          String.for_all (fun c -> c >= '0' && c <= '9') digits &&
          let number = int_of_string digits in number > 0 && number <= 65535)))
+let validate_endpoint_override ~api ~pinned_endpoint ~requested =
+  if requested = "" || requested = pinned_endpoint then ()
+  else if api = Local_chat then ignore (local_endpoint requested)
+  else raise (Provider_error
+    "remote endpoint overrides are disabled; define a custom provider in user settings")
+
 
 let request_body ~local ~endpoint ~headers body_json =
   if not (String.starts_with ~prefix:"https://" endpoint ||
@@ -510,8 +521,8 @@ let post_stream ?(local = false) ?cancel ~endpoint ~headers ~secret body_json ~o
         raise (Provider_error (http_error_reason secret code error)));
       if Buffer.length pending <> 0 then on_chunk (Buffer.contents pending)))
 
-let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage ?cancel
-    config messages tools =
+let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage
+    ?thinking ?cancel config messages tools =
   check_cancel cancel;
   let has_attachments = ref false in
   List.iter (fun (message : Protocol.message) ->
@@ -536,7 +547,11 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage 
        | Vercel_ai_gateway_chat | Cloudflare_ai_gateway_chat | Commandcode_chat
        | Commandcode_messages | Commandcode_responses | Gitlab_duo_messages
        | Gitlab_duo_responses | Gitlab_duo_chat | Codex_responses | Copilot_chat
-       | Opencode_zen_responses | Meta_responses -> true
+       | Opencode_zen_responses | Meta_responses | Minimax_chat | Deepseek_chat
+       | Mistral_chat | Openrouter_chat | Umans_chat | Umans_messages
+       | Cline_pass_chat | Alibaba_token_plan_chat | Kimi_code_chat
+       | Kimi_code_cn_chat | Kimi_code_messages | Kimi_code_cn_messages
+       | Fireworks_chat -> true
        | Devin_connect -> false) then
     raise (Provider_error "this provider route does not support user image attachments");
   let config = if config.api = Local_chat then
@@ -628,7 +643,14 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage 
   | Xiaomi_token_cn_chat | Xiaomi_token_sgp_chat
   | Minimax_code_chat | Minimax_code_cn_chat
   | Vercel_ai_gateway_chat | Cloudflare_ai_gateway_chat
-  | Commandcode_chat ->
+  | Commandcode_chat | Minimax_chat | Deepseek_chat | Mistral_chat
+  | Openrouter_chat | Umans_chat | Cline_pass_chat | Alibaba_token_plan_chat
+  | Kimi_code_chat | Kimi_code_cn_chat | Fireworks_chat ->
+      let openai_request () =
+        let fields = [ "model", `String config.model;
+          "messages", Protocol.chat_messages_to_json messages;
+          "stream", `Bool false ] in
+        `Assoc (if tools = [] then fields else fields @ ["tools", `List tools]) in
       let headers, body, parse_reply =
         (try match config.api with
         | Xai_chat ->
@@ -689,8 +711,10 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage 
             Kilo_api.parse_completion
         | Alibaba_coding_chat ->
             Alibaba_coding_api.chat_headers ~endpoint:config.endpoint ~api_key,
-            Alibaba_coding_api.request ~model:config.model messages tools,
-            Alibaba_coding_api.parse_completion
+            Alibaba_coding_api.request ~endpoint:config.endpoint
+              ~model:config.model ?thinking messages tools,
+            Alibaba_coding_api.parse_completion ~endpoint:config.endpoint
+              ~model:config.model
         | Singularity_dev_chat ->
             Singularity_dev_api.chat_headers ~endpoint:config.endpoint ~api_key,
             Singularity_dev_api.request ~model:config.model messages tools,
@@ -755,6 +779,49 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage 
             parse (fun () ->
               Commandcode_api.chat_request ~model:config.model messages tools),
             Commandcode_api.parse_chat_completion ~model:config.model
+        | Minimax_chat ->
+            Minimax_api.chat_headers ~endpoint:config.endpoint ~api_key,
+            Minimax_api.request ~model:config.model messages tools,
+            Minimax_api.parse_completion
+        | Deepseek_chat ->
+            Deepseek_api.chat_headers ~endpoint:config.endpoint ~api_key,
+            Deepseek_api.request ~model:config.model ?thinking messages tools,
+            Deepseek_api.parse_completion
+        | Mistral_chat ->
+            Mistral_api.chat_headers ~endpoint:config.endpoint ~api_key,
+            Mistral_api.request ~model:config.model ?thinking messages tools,
+            Mistral_api.parse_completion
+        | Openrouter_chat ->
+            Openrouter_api.chat_headers ~endpoint:config.endpoint ~api_key,
+            Openrouter_api.request ~model:config.model ?thinking messages tools,
+            Openrouter_api.parse_completion
+        | Umans_chat ->
+            Umans_api.chat_headers ~endpoint:config.endpoint ~api_key,
+            Umans_api.request ~model:config.model ?thinking messages tools,
+            Umans_api.parse_completion
+        | Fireworks_chat ->
+            Fireworks_api.chat_headers ~endpoint:config.endpoint ~api_key,
+            Fireworks_api.request ~model:config.model ?thinking messages tools,
+            Fireworks_api.parse_completion ~model:config.model
+        | Cline_pass_chat ->
+            Cline_pass_api.chat_headers ~endpoint:config.endpoint ~api_key,
+            openai_request (), Protocol.parse_completion
+        | Alibaba_token_plan_chat ->
+            Alibaba_token_plan_api.chat_headers
+              ~endpoint:config.endpoint ~api_key,
+            Alibaba_token_plan_api.request ~model:config.model ?thinking
+              messages tools,
+            Alibaba_token_plan_api.parse_completion ~model:config.model
+        | Kimi_code_chat ->
+            if config.endpoint <> Kimi_code_api.intl_openai_chat_url then
+              raise (Provider_error "Kimi Code international credentials require the international Chat endpoint");
+            Kimi_code_api.chat_headers ~endpoint:config.endpoint ~api_key,
+            openai_request (), Protocol.parse_completion
+        | Kimi_code_cn_chat ->
+            if config.endpoint <> Kimi_code_api.china_openai_chat_url then
+              raise (Provider_error "Kimi Code China credentials require the China Chat endpoint");
+            Kimi_code_api.chat_headers ~endpoint:config.endpoint ~api_key,
+            openai_request (), Protocol.parse_completion
         | _ -> assert false
         with Invalid_argument reason -> raise (Provider_error reason)) in
       let json = post_json ?cancel ~endpoint:config.endpoint
@@ -936,6 +1003,57 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage 
              | Duo.Openai_responses -> Openai_responses_wire.usage json
              | Duo.Openai_completions -> Protocol.completion_usage json in
            Option.iter report usage);
+      (match on_text, reply.content with
+       | Some emit, Some text -> check_cancel cancel; emit text
+       | _ -> ());
+      reply
+  | Umans_messages | Kimi_code_messages | Kimi_code_cn_messages ->
+      if authentication <> Api_key then
+        raise (Provider_error "this Messages route requires its API key");
+      let headers = try
+        match config.api with
+        | Umans_messages ->
+            Umans_api.messages_headers ~endpoint:config.endpoint ~api_key
+            |> List.map (fun (name, value) -> name ^ ": " ^ value)
+        | Kimi_code_messages ->
+            if config.endpoint <> Kimi_code_api.intl_messages_url then
+              raise (Provider_error "Kimi Code international credentials require the international Messages endpoint");
+            Kimi_code_api.messages_headers ~endpoint:config.endpoint ~api_key
+            |> List.map (fun (name, value) -> name ^ ": " ^ value)
+        | Kimi_code_cn_messages ->
+            if config.endpoint <> Kimi_code_api.china_messages_url then
+              raise (Provider_error "Kimi Code China credentials require the China Messages endpoint");
+            Kimi_code_api.messages_headers ~endpoint:config.endpoint ~api_key
+            |> List.map (fun (name, value) -> name ^ ": " ^ value)
+        | _ -> assert false
+        with Invalid_argument reason -> raise (Provider_error reason) in
+      let native_provider = match config.api with
+        | Umans_messages -> "umans"
+        | Kimi_code_messages -> "kimi-code"
+        | Kimi_code_cn_messages -> "kimi-code-cn"
+        | _ -> assert false in
+      let replay_assistant_content =
+        Anthropic_wire.replay_native_content ~provider:native_provider
+          ~model:config.model in
+      let body = parse (fun () ->
+        Anthropic_wire.request ~allow_compaction:false
+          ~allow_prompt_caching:false
+          ~replay_assistant_content ~model:config.model ~max_tokens:4096
+          messages tools) in
+      let body = if config.api = Umans_messages then
+        (try Umans_api.add_messages_reasoning_effort ~thinking body
+         with Invalid_argument reason -> raise (Provider_error reason))
+        else body in
+      let json = post_json ?cancel ~endpoint:config.endpoint
+        ~headers ~secret:api_key body in
+      let reply = parse (fun () ->
+        Anthropic_wire.parse_native_completion ~provider:native_provider
+          ~model:config.model json) in
+      (match on_usage with
+       | None -> ()
+       | Some report ->
+           check_cancel cancel;
+           Option.iter report (Anthropic_wire.usage json));
       (match on_text, reply.content with
        | Some emit, Some text -> check_cancel cancel; emit text
        | _ -> ());

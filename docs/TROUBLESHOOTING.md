@@ -1,5 +1,12 @@
 # Troubleshooting
 
+### [2026-09-27] Fireworks pinned route exposed a stale loopback fixture
+
+- **Context / Symptom:** The first forced suite run failed in `test_provider_http` with `Pave.Provider_error("Fireworks API key requires its pinned Chat endpoint")`. After excluding Fireworks from that arbitrary loopback route table, the fixture's later request numbering still failed.
+- **Root Cause:** Fireworks now uses a dedicated adapter that rejects endpoint overrides; the older shared fixture replaced each generic provider endpoint with a local HTTP server and assigned mock responses by provider position.
+- **Solution:** Removed Fireworks from the loopback provider list, kept its pinned-endpoint fake-curl coverage in `test_r3_routes`, and shifted the later mock response indices. The targeted HTTP fixture, forced suite, install build and opam lint passed.
+- **Prevention / Reference:** Keep route-pinned transports on fixed-endpoint fake-curl fixtures rather than arbitrary endpoint-overriding loopback tests.
+
 ### [2026-09-27] Chat SSE accepted completion without a terminal finish reason
 
 - **Context / Symptom:** The forced suite showed OpenAI-compatible Chat SSE ending in `[DONE]` without any `finish_reason` could still return a successful, incomplete assistant message. Strict Anthropic envelope checks also exposed provider fixtures and synthetic Command Code/GitLab replay responses that omitted Anthropic's required message type/assistant role.

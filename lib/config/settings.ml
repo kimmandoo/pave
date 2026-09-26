@@ -3,6 +3,7 @@ type values = {
   default_model : string option;
   default_api : string option;
   default_account_id : string option;
+  custom_providers : Custom_provider.t list;
   disable_shell : bool;
   max_turns : int option;
   approval_mode : Approval.mode option;
@@ -14,7 +15,7 @@ type loaded = { values : values; diagnostics : string list }
 
 let empty = {
   default_provider = None; default_model = None; default_api = None;
-  default_account_id = None;
+  default_account_id = None; custom_providers = [];
   disable_shell = false; max_turns = None; approval_mode = None;
   tool_approval = []; command_patterns = [];
 }
@@ -103,15 +104,20 @@ let parse_approval_settings = function
       approval_mode, tool_approval, command_patterns
   | _ -> invalid_arg "tools must be an object"
 
-let parse text =
+let parse ?(allow_custom = false) text =
   let fields = match Yojson.Basic.from_string text with
     | `Assoc fields -> fields
     | _ -> invalid_arg "expected a JSON object" in
   check_unique_fields "setting" fields;
   let allowed = ["default_provider"; "default_model"; "default_api";
-    "default_account_id"; "disable_shell"; "max_turns"; "tools"] in
-  List.iter (fun (name, _) -> if not (List.mem name allowed) then
-    invalid_arg ("unknown setting " ^ name)) fields;
+    "default_account_id"; "disable_shell"; "max_turns"; "tools";
+    "custom_providers"] in
+  List.iter (fun (name, _) ->
+    if not (List.mem name allowed) then
+      invalid_arg ("unknown setting " ^ name);
+    if name = "custom_providers" && not allow_custom then
+      invalid_arg "custom_providers may be configured only in user settings")
+    fields;
   let disable_shell = match member "disable_shell" fields with
     | None -> false
     | Some (`Bool value) -> value
@@ -132,14 +138,22 @@ let parse text =
     match List.assoc_opt "tools" fields with
     | None -> None, [], []
     | Some value -> parse_approval_settings value in
-  { default_provider; default_model; default_api; default_account_id; disable_shell;
+  let custom_providers = match member "custom_providers" fields with
+    | None -> []
+    | Some value when allow_custom -> Custom_provider.parse_list value
+    | Some _ -> invalid_arg
+        "custom_providers may be configured only in user settings" in
+  (match Provider_catalog.create_registry custom_providers with
+   | Ok _ -> ()
+   | Error message -> invalid_arg message);
+  { default_provider; default_model; default_api; default_account_id;
+    custom_providers; disable_shell;
     max_turns = positive_field "max_turns" fields;
     approval_mode; tool_approval; command_patterns }
-
 let same_file a b =
   a.Unix.st_dev = b.Unix.st_dev && a.Unix.st_ino = b.Unix.st_ino
 
-let read path =
+let read ?(allow_custom = false) path =
   let before = Unix.lstat path in
   if before.Unix.st_kind <> Unix.S_REG then
     invalid_arg "settings file must be regular, not a symlink";
@@ -150,7 +164,7 @@ let read path =
     if stats.Unix.st_kind <> Unix.S_REG || stats.Unix.st_size > 65_536 ||
        not (same_file before stats && same_file stats after) then
       invalid_arg "settings file changed or exceeds 64 KiB";
-    parse (really_input_string input stats.Unix.st_size))
+    parse ~allow_custom (really_input_string input stats.Unix.st_size))
 
 let config_home () =
   match Sys.getenv_opt "XDG_CONFIG_HOME" with
@@ -178,13 +192,13 @@ let load ~root =
   let diagnostics = ref diagnostics in
   let user_file = Filename.concat (Filename.concat user_home "pave") "settings.json" in
   let project_file = Filename.concat (Filename.concat root ".pave") "settings.json" in
-  let attempt path =
-    try Some (read path) with
+  let attempt ?(allow_custom = false) path =
+    try Some (read ~allow_custom path) with
     | Unix.Unix_error (Unix.ENOENT, _, _) -> None
     | (Unix.Unix_error _ | Sys_error _ | Invalid_argument _ | Yojson.Json_error _) as exn ->
         diagnostics := (path ^ ": " ^ Printexc.to_string exn) :: !diagnostics;
         None in
-  let user = attempt user_file in
+  let user = attempt ~allow_custom:true user_file in
   let project = try
     let directory = Unix.lstat (Filename.dirname project_file) in
     if directory.Unix.st_kind <> Unix.S_DIR then
@@ -212,13 +226,14 @@ let load ~root =
       max_turns = first_some project.max_turns user.max_turns;
       approval_mode = first_some project.approval_mode user.approval_mode;
       tool_approval = merge_tool_approval user.tool_approval project.tool_approval;
+      custom_providers = user.custom_providers;
       command_patterns = project.command_patterns @ user.command_patterns;
     };
     diagnostics = List.rev !diagnostics }
 
 (* Project edits are explicit. Both scopes use the same locked, atomic
    replacement; a pre-existing settings symlink is never followed. *)
-let update_file ?(require_owner = false) ~directory change =
+let update_file ?(require_owner = false) ?(allow_custom = false) ~directory change =
   (try Unix.mkdir directory 0o700 with
    | Unix.Unix_error (Unix.EEXIST, _, _) -> ());
   let stat = Unix.lstat directory in
@@ -245,7 +260,7 @@ let update_file ?(require_owner = false) ~directory change =
     Unix.lockf lock Unix.F_LOCK 0;
     Fun.protect ~finally:(fun () -> Unix.lockf lock Unix.F_ULOCK 0) (fun () ->
       let path = Filename.concat directory "settings.json" in
-      let current = try read path with
+      let current = try read ~allow_custom path with
         | Unix.Unix_error (Unix.ENOENT, _, _) -> empty in
       let updated = change current in
       let option name = function
@@ -273,9 +288,12 @@ let update_file ?(require_owner = false) ~directory change =
         @ (match updated.max_turns with None -> []
           | Some count -> ["max_turns", `Int count])
         @ (if tools_fields = [] then [] else
-          ["tools", `Assoc tools_fields]) in
+          ["tools", `Assoc tools_fields])
+        @ (if updated.custom_providers = [] then []
+          else ["custom_providers", `List
+            (List.map Custom_provider.to_json updated.custom_providers)]) in
       let text = Yojson.Basic.to_string (`Assoc fields) ^ "\n" in
-      ignore (parse text);
+      ignore (parse ~allow_custom text);
       let temp, output = Filename.open_temp_file ~mode:[Open_binary]
         ~temp_dir:directory "settings-" ".tmp" in
       Fun.protect ~finally:(fun () ->
@@ -320,4 +338,5 @@ let user_directory () =
   directory
 
 let update_user change =
-  update_file ~require_owner:true ~directory:(user_directory ()) change
+  update_file ~require_owner:true ~allow_custom:true
+    ~directory:(user_directory ()) change

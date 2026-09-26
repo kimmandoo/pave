@@ -160,8 +160,21 @@ let () =
         let argument name = match field name call.arguments with
           | `Int n -> n | _ -> fail "non-integer function argument" in
         let result = string_of_int (argument "left" + argument "right") in
-        assert (first.provider_state = Some (`Assoc
-          ["reasoning_content", `String "Add the two numbers."]));
+        let region = if endpoint = Coding.china_chat_url then "china" else "intl" in
+        assert (first.provider_state = Some (`Assoc [
+          "provider", `String "alibaba-coding-plan";
+          "route", `String region;
+          "model", `String model;
+          "reasoning_content", `String "Add the two numbers."]));
+        let other_endpoint = if endpoint = Coding.china_chat_url
+          then Coding.intl_chat_url else Coding.china_chat_url in
+        let crossed = Coding.request ~endpoint:other_endpoint ~model
+          [Protocol.user "What is eight plus thirteen?"; first;
+           Protocol.tool_result call.id result] [tool] in
+        (match field "messages" crossed with
+         | `List [_; assistant; _] ->
+             assert (field "reasoning_content" assistant = `Null)
+         | _ -> fail "cross-region Coding Plan history was malformed");
         let final = Pave.Provider.complete config
           [Protocol.user "What is eight plus thirteen?"; first;
            Protocol.tool_result call.id result] [tool] in

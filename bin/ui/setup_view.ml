@@ -3,12 +3,12 @@ type result =
   | Selected of Pave.Provider_catalog.descriptor * Pave.Model_identity.t *
       Pave.Provider_catalog.route * string option
 
-let provider_choices () =
+let provider_choices registry =
   List.map (fun (entry : Pave.Provider_catalog.descriptor) ->
     entry.id ^ " · " ^ entry.display_name, entry)
-    (Pave.Interaction.selectable_providers ())
+    (Pave.Interaction.selectable_providers ~registry ())
 
-let run screen =
+let run screen ~registry =
   let skip = Skipped in
   let rec welcome () =
     match Tui.choose screen
@@ -20,7 +20,7 @@ let run screen =
     | Some "Start · provider → access → model" -> provider ()
     | _ -> skip
   and provider () =
-    let choices = provider_choices () in
+    let choices = provider_choices registry in
     match Tui.choose screen
       ~intro:["01 / 03  ·  PROVIDER";
         "Choose a service or a local model host.";
@@ -31,6 +31,9 @@ let run screen =
     | Some "Back · welcome" -> welcome ()
     | Some choice -> authentication (List.assoc choice choices)
   and authentication (descriptor : Pave.Provider_catalog.descriptor) =
+    if Pave.Provider_catalog.custom_provider registry descriptor.id <> None then
+      model descriptor None
+    else
     let key = descriptor.api_key_env in
     let oauth = descriptor.oauth <> None in
     let saved_oauth = oauth &&
@@ -119,8 +122,12 @@ let run screen =
     match selected_api with
     | None -> if local_without_key then provider () else authentication descriptor
     | Some route_name ->
-    match Model_picker.choose screen ~descriptor
-      ~route_name ~plain:choices
+    let missing_key = match Pave.Provider_catalog.custom_route registry
+        ~provider:descriptor.id ~route:route_name with
+      | Some { auth = Pave.Custom_provider.Api_key_env env; _ }
+        when Option.value ~default:"" (Sys.getenv_opt env) = "" -> Some env
+      | Some _ | None -> missing_key in
+    match Model_picker.choose ~registry screen ~descriptor ~route_name ~plain:choices
       ~intro:["03 / 03  ·  MODEL";
         "Use arrows and Enter to choose an available model.";
         "Type an ID only if the model you need is not listed."]
@@ -132,9 +139,11 @@ let run screen =
     | Some choice ->
         (try
            let selected, identity, route = Pave.Interaction.resolve_model
-             ~current_route:route_name
-             ?current_account_id:(Model_picker.credential descriptor
-               ~route_name |> Model_picker.credential_account_id)
+             ~registry ~current_route:route_name
+             ?current_account_id:(Model_picker.credential ~registry
+               ~route_name descriptor
+               |> Model_picker.credential_account_id ~registry
+                    ~provider:descriptor.id ~route:route_name)
              ~current_provider:descriptor.id ~input:choice () in
            if selected.id <> descriptor.id then
              invalid_arg "choose a model from the selected provider";

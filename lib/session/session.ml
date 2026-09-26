@@ -74,12 +74,15 @@ let timestamp () =
 let option_json = function None -> `Null | Some text -> `String text
 
 let model_identity_json (identity : Model_identity.t) =
-  `Assoc [
+  `Assoc ([
     "provider", `String identity.provider;
     "accountId", option_json identity.account_id;
     "route", `String identity.route;
     "upstreamId", `String identity.upstream_id;
-  ]
+  ] @
+  (match identity.config_revision with
+   | None -> []
+   | Some revision -> ["configRevision", `String revision]))
 
 let new_header ?parent_session cwd =
   `Assoc [ "type", `String "session"; "version", `Int 1;
@@ -213,7 +216,8 @@ let parse_model_identity json =
     | `Assoc fields -> fields
     | _ -> invalid "invalid model identity" in
   let names = List.map fst fields in
-  let allowed = ["provider"; "accountId"; "route"; "upstreamId"] in
+  let allowed = ["provider"; "accountId"; "route"; "upstreamId";
+    "configRevision"] in
   if List.length names <> List.length (List.sort_uniq String.compare names) then
     invalid "duplicate model identity field";
   List.iter (fun name ->
@@ -231,7 +235,12 @@ let parse_model_identity json =
     | `Null -> None
     | `String value when valid_model_field value -> Some value
     | _ -> invalid "invalid model identity account ID" in
-  try Model_identity.make ~provider ?account_id ~route ~upstream_id ()
+  let config_revision = match List.assoc_opt "configRevision" fields with
+    | None -> None
+    | Some (`String revision) -> Some revision
+    | Some _ -> invalid "invalid model identity configuration revision" in
+  try Model_identity.make ~provider ?account_id ?config_revision
+    ~route ~upstream_id ()
   with Invalid_argument _ -> invalid "invalid model identity"
 
 let legacy_model_identity provider model api =
@@ -744,14 +753,25 @@ let record_exit t ~kind =
     Some (append_entry t (Session_exit { kind; pending_tool_calls })).id
   else None
 
-let set_model t (identity : Model_identity.t) =
+let set_model ?registry t (identity : Model_identity.t) =
+  let registry = Option.value ~default:Provider_catalog.builtin_registry registry in
   let normalized =
     try Model_identity.make ~provider:identity.provider
-      ?account_id:identity.account_id ~route:identity.route
-      ~upstream_id:identity.upstream_id ()
+      ?account_id:identity.account_id ?config_revision:identity.config_revision
+      ~route:identity.route ~upstream_id:identity.upstream_id ()
     with Invalid_argument _ -> invalid "invalid model selection" in
-  (match Provider_catalog.find normalized.provider with
-   | Some descriptor when Provider_catalog.route descriptor normalized.route <> None -> ()
+  (match Provider_catalog.find ~registry normalized.provider with
+   | Some descriptor when Provider_catalog.route descriptor normalized.route <> None ->
+       (match Provider_catalog.custom_route registry
+           ~provider:normalized.provider ~route:normalized.route with
+        | Some custom ->
+            if normalized.account_id <> custom.account_id ||
+               normalized.config_revision <>
+                 Some (Custom_provider.fingerprint custom) then
+              invalid "model selection uses a changed custom provider configuration"
+        | None ->
+            if normalized.config_revision <> None then
+              invalid "model selection uses an unsupported custom configuration")
    | _ -> invalid "model selection uses an unsupported provider route");
   if model t <> Some normalized then (
     let entry = { id = fresh_id (); parent_id = t.leaf;

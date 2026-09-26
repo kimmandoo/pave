@@ -17,6 +17,7 @@ type t = {
   provider : Provider.config;
   authentication : Provider.authentication;
   resolve_credential : (unit -> Provider.credentials) option;
+  thinking : unit -> string option;
   root : string;
   allow_shell : bool;
   tool_available : string -> bool;
@@ -40,14 +41,14 @@ type t = {
     tools:Yojson.Basic.t list -> Protocol.message list option) option;
 }
 let create ~provider ~root ~system ?(authentication = Provider.Api_key)
-    ?resolve_credential ?(allow_shell = false)
+    ?resolve_credential ?(thinking = fun () -> None) ?(allow_shell = false)
     ?(tool_available = fun _ -> true) ?(stream = false)
     ?(approval_mode = Approval.Ask_exec) ?(tool_approval = [])
     ?(command_patterns = []) ?(approve_command = fun _ -> false)
     ?approve_tool ?(history = []) ?before_request
     ?on_usage ?on_phase ?on_tool_event ?(on_change = fun _ -> ())
     ?(on_delta = fun _ -> ()) ~on_event () =
-  { provider; authentication; resolve_credential; root; system; allow_shell;
+  { provider; authentication; resolve_credential; thinking; root; system; allow_shell;
     tool_available; stream; approval_mode; tool_approval; command_patterns;
     approve_command; approve_tool; before_request;
     history_rev = List.rev history; scoped_pending = [];
@@ -135,11 +136,11 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
     let transcript = system :: request_messages in
     let reply =
       if t.stream then Provider.complete ~authentication:t.authentication
-        ?resolve_credential:t.resolve_credential ~on_text:t.on_delta
-        ?on_usage:t.on_usage ?cancel t.provider transcript definitions
+        ?resolve_credential:t.resolve_credential ?thinking:(t.thinking ())
+        ~on_text:t.on_delta ?on_usage:t.on_usage ?cancel t.provider transcript definitions
       else Provider.complete ~authentication:t.authentication
-        ?resolve_credential:t.resolve_credential ?on_usage:t.on_usage
-        ?cancel t.provider transcript definitions in
+        ?resolve_credential:t.resolve_credential ?thinking:(t.thinking ())
+        ?on_usage:t.on_usage ?cancel t.provider transcript definitions in
     Provider.check_cancel cancel;
     t.scoped_pending <- [];
     (match reply.content with

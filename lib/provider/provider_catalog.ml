@@ -8,6 +8,10 @@ type descriptor = {
   api_key_env : string option;
   oauth : string option;
 }
+type registry = {
+  providers : descriptor list;
+  custom_providers : Custom_provider.t list;
+}
 
 (* Adding a compatible provider changes only this list. New wire protocols get
    their own adapter in Provider; an absent route must never be guessed. *)
@@ -200,6 +204,45 @@ let builtins = [
       endpoint = Minimax_code_api.china_chat_url } ];
     default_route = "chat";
     api_key_env = Some "MINIMAX_CODE_CN_API_KEY"; oauth = None };
+  { id = "minimax"; display_name = "MiniMax API (international)";
+    routes = [ { name = "chat"; wire = Provider.Minimax_chat;
+      endpoint = Minimax_api.chat_url } ];
+    default_route = "chat";
+    api_key_env = Some "MINIMAX_API_KEY"; oauth = None };
+  { id = "cline-pass"; display_name = "Cline Pass (manual provider/model ID)";
+    routes = [ { name = "chat"; wire = Provider.Cline_pass_chat;
+      endpoint = Cline_pass_api.chat_url } ];
+    default_route = "chat";
+    api_key_env = Some "CLINE_API_KEY"; oauth = None };
+  { id = "alibaba-token-plan"; display_name = "Alibaba Token Plan (Beijing)";
+    routes = [ { name = "chat"; wire = Provider.Alibaba_token_plan_chat;
+      endpoint = Alibaba_token_plan_api.chat_url } ];
+    default_route = "chat";
+    api_key_env = Some "ALIBABA_TOKEN_PLAN_API_KEY"; oauth = None };
+  { id = "kimi-code"; display_name = "Kimi Code (international)";
+    routes = [
+      { name = "chat"; wire = Provider.Kimi_code_chat;
+        endpoint = Kimi_code_api.intl_openai_chat_url };
+      { name = "messages"; wire = Provider.Kimi_code_messages;
+        endpoint = Kimi_code_api.intl_messages_url } ];
+    default_route = "chat";
+    api_key_env = Some "KIMI_API_KEY"; oauth = None };
+  { id = "kimi-code-cn"; display_name = "Kimi Code (China)";
+    routes = [
+      { name = "chat"; wire = Provider.Kimi_code_cn_chat;
+        endpoint = Kimi_code_api.china_openai_chat_url };
+      { name = "messages"; wire = Provider.Kimi_code_cn_messages;
+        endpoint = Kimi_code_api.china_messages_url } ];
+    default_route = "chat";
+    api_key_env = Some "KIMI_API_KEY"; oauth = None };
+  { id = "umans"; display_name = "Umans Code";
+    routes = [
+      { name = "chat"; wire = Provider.Umans_chat;
+        endpoint = Umans_api.chat_url };
+      { name = "messages"; wire = Provider.Umans_messages;
+        endpoint = Umans_api.messages_url } ];
+    default_route = "messages";
+    api_key_env = Some "UMANS_AI_CODING_PLAN_API_KEY"; oauth = None };
   { id = "meta"; display_name = "Meta Model API (explicit Responses)";
     routes = [ { name = "responses"; wire = Provider.Meta_responses;
       endpoint = Meta_api.responses_url } ];
@@ -246,8 +289,8 @@ let builtins = [
     default_route = "chat";
     api_key_env = Some "MOONSHOT_API_KEY"; oauth = None };
   { id = "deepseek"; display_name = "DeepSeek";
-    routes = [ { name = "chat"; wire = Provider.Openai_completions;
-      endpoint = "https://api.deepseek.com/chat/completions" } ];
+    routes = [ { name = "chat"; wire = Provider.Deepseek_chat;
+      endpoint = Deepseek_api.chat_url } ];
     default_route = "chat";
     api_key_env = Some "DEEPSEEK_API_KEY"; oauth = None };
   { id = "groq"; display_name = "Groq";
@@ -256,13 +299,13 @@ let builtins = [
     default_route = "chat";
     api_key_env = Some "GROQ_API_KEY"; oauth = None };
   { id = "mistral"; display_name = "Mistral";
-    routes = [ { name = "chat"; wire = Provider.Openai_completions;
-      endpoint = "https://api.mistral.ai/v1/chat/completions" } ];
+    routes = [ { name = "chat"; wire = Provider.Mistral_chat;
+      endpoint = Mistral_api.chat_url } ];
     default_route = "chat";
     api_key_env = Some "MISTRAL_API_KEY"; oauth = None };
   { id = "openrouter"; display_name = "OpenRouter";
-    routes = [ { name = "chat"; wire = Provider.Openai_completions;
-      endpoint = "https://openrouter.ai/api/v1/chat/completions" } ];
+    routes = [ { name = "chat"; wire = Provider.Openrouter_chat;
+      endpoint = Openrouter_api.chat_url } ];
     default_route = "chat";
     api_key_env = Some "OPENROUTER_API_KEY"; oauth = Some "openrouter" };
   { id = "together"; display_name = "Together AI";
@@ -286,7 +329,7 @@ let builtins = [
     default_route = "chat";
     api_key_env = Some "DEEPINFRA_API_KEY"; oauth = None };
   { id = "fireworks"; display_name = "Fireworks AI";
-    routes = [ { name = "chat"; wire = Provider.Openai_completions;
+    routes = [ { name = "chat"; wire = Provider.Fireworks_chat;
       endpoint = "https://api.fireworks.ai/inference/v1/chat/completions" } ];
     default_route = "chat";
     api_key_env = Some "FIREWORKS_API_KEY"; oauth = None };
@@ -360,15 +403,64 @@ let builtins = [
     api_key_env = None; oauth = Some "github-copilot" };
 ]
 
-let all () = builtins
-let find id = List.find_opt (fun provider -> provider.id = id) builtins
+let builtin_registry = { providers = builtins; custom_providers = [] }
+
+let create_registry custom_providers =
+  let names = List.map (fun provider -> provider.Custom_provider.id)
+    custom_providers in
+  let builtin_ids = List.map (fun provider -> provider.id) builtins in
+  if List.length names <> List.length (List.sort_uniq String.compare names) then
+    Error "duplicate custom provider ID"
+  else match List.find_opt (fun id -> List.mem id builtin_ids) names with
+    | Some id -> Error ("custom provider ID conflicts with registered provider " ^ id)
+    | None ->
+        let descriptors = List.map (fun (provider : Custom_provider.t) ->
+          let routes = List.map (fun (route : Custom_provider.route) -> {
+            name = route.name;
+            wire = Provider.Openai_completions;
+            endpoint = route.endpoint;
+          }) provider.routes in
+          let api_key_env = match List.find_opt
+              (fun route -> route.Custom_provider.name = provider.default_route)
+              provider.routes with
+            | Some { auth = Custom_provider.Api_key_env name; _ } -> Some name
+            | Some { auth = Custom_provider.No_auth; _ } | None -> None in
+          { id = provider.id; display_name = provider.display_name; routes;
+            default_route = provider.default_route; api_key_env; oauth = None })
+          custom_providers in
+        Ok { providers = builtins @ descriptors; custom_providers }
+
+let all ?(registry = builtin_registry) () = registry.providers
+
+let find ?(registry = builtin_registry) id =
+  List.find_opt (fun provider -> provider.id = id) registry.providers
+
+let custom_provider registry id =
+  List.find_opt (fun (provider : Custom_provider.t) -> provider.id = id)
+    registry.custom_providers
+
+let custom_route registry ~provider ~route =
+  Option.bind (custom_provider registry provider) (fun custom ->
+    let route_name = if route = "" then custom.default_route else route in
+    List.find_opt (fun (entry : Custom_provider.route) ->
+      entry.name = route_name) custom.routes)
+let custom_revision registry ~provider ~route =
+  Option.map Custom_provider.fingerprint
+    (custom_route registry ~provider ~route)
+
+
+let custom_model registry ~provider ~route ~model =
+  Option.bind (custom_route registry ~provider ~route) (fun entry ->
+    List.find_opt (fun (candidate : Custom_provider.model) ->
+      candidate.id = model) entry.models)
 
 (* These listings do not document enough API-route or tool metadata to certify
    that every returned ID works on the registered route. Manual IDs remain allowed. *)
-let unclassified_models id =
+let unclassified_models ?(registry = builtin_registry) id =
+  Option.is_some (custom_provider registry id) ||
   List.mem id [ "stepfun"; "synthetic"; "wafer-serverless"; "zenmux";
     "xiaomi"; "kilo"; "opencode-zen"; "opencode-go"; "charm-hyper";
-    "yolo-auto"; "meta"; "vercel-ai-gateway"; "commandcode" ]
+    "yolo-auto"; "meta"; "vercel-ai-gateway"; "commandcode"; "minimax" ]
 
 let route provider name =
   let name = if name = "" then provider.default_route else name in

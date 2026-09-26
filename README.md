@@ -14,7 +14,7 @@
 <p align="center"><a href="#install">Install</a> · <a href="#use">Use</a> · <a href="#providers">Providers</a> · <a href="#features">Features</a> · <a href="#contribute">Contribute</a></p>
 
 > [!NOTE]
-> Pave is under active development. Its 65 provider routes, seven wire payload formats, account sign-in paths, branching session journal and cancellable terminal have fixture coverage—not blanket live vendor entitlement. LSP/DAP, subagents, plugins and a complete model catalog remain open. See [the feature plan](TASKS.md).
+> Pave is under active development. Its 71 built-in provider IDs include separate Kimi Code regional routes; 13 identities in the 83-provider reference inventory still lack a matching Pave route. Seven wire payload formats, account sign-in paths, branching session journal and cancellable terminal have fixture coverage—not blanket live vendor entitlement. LSP/DAP, subagents, plugins and a complete model catalog remain open. See [the feature plan](TASKS.md).
 
 ## Install
 
@@ -291,7 +291,7 @@ Use `pave --providers` for the live list. This reference separates wire transpor
 | Cerebras | Chat Completions | `CEREBRAS_API_KEY` | `--provider cerebras --model MODEL_ID` |
 | Venice | Chat Completions | `VENICE_API_KEY` | `--provider venice --model MODEL_ID` |
 | DeepInfra | Chat Completions | `DEEPINFRA_API_KEY` | `--provider deepinfra --model MODEL_ID` |
-| Fireworks AI | Chat Completions | `FIREWORKS_API_KEY` | `--provider fireworks --model MODEL_ID` |
+| [Fireworks AI](https://docs.fireworks.ai/guides/reasoning) | Chat Completions; account models filtered for serverless/tool support; IDs do not prove entitlement | `FIREWORKS_API_KEY` | `--provider fireworks --model MODEL_ID`; `/thinking` sends supported effort and preserves reasoning across tool results |
 | Hugging Face Inference | Chat Completions | `HF_TOKEN` | `--provider huggingface --model MODEL_ID` |
 | NanoGPT | Chat Completions | `NANO_GPT_API_KEY` | `--provider nanogpt --model MODEL_ID` |
 | Azure OpenAI (Responses only) | Azure v1 Responses | `AZURE_OPENAI_API_KEY` + `AZURE_OPENAI_ENDPOINT` | `--provider azure --model DEPLOYMENT_ID` |
@@ -324,7 +324,7 @@ Use `pave --providers` for the live list. This reference separates wire transpor
 | Baidu Qianfan V2 | native Chat; only `type=chat` IDs listed | `QIANFAN_API_KEY` | `--provider qianfan --model MODEL_ID` |
 | Xiaomi MiMo pay-as-you-go | native Chat; model IDs unclassified | `XIAOMI_API_KEY` | `--provider xiaomi --model KNOWN_CHAT_ID` |
 | Kilo | native Chat; public model IDs unclassified | `KILO_API_KEY` or `--login kilo` (device approval) | `--provider kilo --model KNOWN_CHAT_ID` |
-| Alibaba Coding Plan | region-pinned subscription Chat | `ALIBABA_CODING_PLAN_API_KEY` (`sk-sp-`) | `--provider alibaba-coding-plan --api china|intl --model KNOWN_CHAT_ID` |
+| [Alibaba Coding Plan](https://help.aliyun.com/en/model-studio/coding-plan-faq) | Region-pinned subscription Chat; no account model listing | `ALIBABA_CODING_PLAN_API_KEY` (`sk-sp-`) | `--provider alibaba-coding-plan --api china or intl --model KNOWN_MODEL_ID` |
 | SingularityAPI universal | native Chat; authenticated model IDs unclassified | `SINGULARITYAPI_DEV_API_KEY` | `--provider singularityapi-dev --model KNOWN_CHAT_ID` |
 | SingularityAPI reserved | pinned Chat; live account entitlement unverified | `SINGULARITYAPI_TECH_API_KEY` | `--provider singularityapi-tech --model KNOWN_CHAT_ID` |
 | OpenCode Zen / Go | distinct pinned Responses / Chat; public model IDs unclassified | `OPENCODE_API_KEY` | `--provider opencode-zen|opencode-go --model KNOWN_MODEL_ID` |
@@ -339,8 +339,48 @@ Use `pave --providers` for the live list. This reference separates wire transpor
 | Command Code Studio Provider API | separate Chat, Messages, Responses; explicit route and model | `COMMAND_CODE_API_KEY` or `COMMANDCODE_API_KEY` (Studio key, not GO-plan credential) | `--provider commandcode --api chat|messages|responses --model KNOWN_ROUTE_MODEL_ID` |
 | GitLab Duo Direct Access | account-bound token exchange then Anthropic, Responses or Chat proxy | `GITLAB_TOKEN` PAT or `--login gitlab-duo` (registered `GITLAB_CLIENT_ID` + `GITLAB_REDIRECT_URI`) | `--provider gitlab-duo --api messages|responses|chat --model KNOWN_UPSTREAM_MODEL_ID` |
 | Devin CLI | pinned protobuf/Connect Chat and account-scoped models | `DEVIN_API_KEY` session token or `--login devin` (PKCE) | `--provider devin --models`, then `--model ACCOUNT_MODEL_ID` |
+| [MiniMax API](https://platform.minimax.io/docs/api-reference/models/openai/list-models) (international) | Chat Completions; `/models` returns unclassified IDs | `MINIMAX_API_KEY` | `--provider minimax --models`, then select a listed ID with `--model MODEL_ID` |
+| [Cline Pass](https://github.com/cline/cline/blob/main/docs/api/chat-completions.mdx) | Chat Completions; exact full model ID required, no API listing | `CLINE_API_KEY` | `--provider cline-pass --model cline-pass/MODEL_ID` |
+| [Alibaba Token Plan](https://help.aliyun.com/en/model-studio/token-plan-personal-quick-start) (Beijing) | Fixed OpenAI-compatible Chat; explicit model ID | `ALIBABA_TOKEN_PLAN_API_KEY` (`sk-sp-`) | `--provider alibaba-token-plan --model KNOWN_MODEL_ID` |
+| [Kimi Code](https://www.kimi.com/code/docs/) (international or China) | Pinned regional Chat or Messages; explicit plan model ID | `KIMI_API_KEY` (Kimi Code key for selected region, not Moonshot API) | `--provider kimi-code` or `kimi-code-cn`, `--api chat` or `messages`, `--model KNOWN_MODEL_ID` |
+| [Umans Code](https://app.umans.ai/offers/code/docs) | Chat or Messages (Messages default); `/v1/models/info` reports model capabilities | `UMANS_AI_CODING_PLAN_API_KEY` | `--provider umans --models`, then `--model MODEL_ID` |
 
 </details>
+
+### User-defined OpenAI-compatible providers
+
+Configure custom providers only in `${XDG_CONFIG_HOME:-~/.config}/pave/settings.json`. Project `.pave/settings.json` deliberately rejects `custom_providers`; configured endpoints, route names, account IDs, model IDs, and environment-variable names are not secrets.
+
+```json
+{
+  "custom_providers": [
+    {
+      "id": "team-gateway",
+      "display_name": "Team Gateway",
+      "default_route": "chat",
+      "routes": [
+        {
+          "name": "chat",
+          "api": "openai-chat",
+          "endpoint": "https://gateway.example/v1/chat/completions",
+          "account_id": "team-7",
+          "api_key_env": "TEAM_GATEWAY_KEY",
+          "models_endpoint": "https://gateway.example/v1/models"
+        }
+      ]
+    }
+  ]
+}
+```
+
+- Only OpenAI Chat Completions is supported. Endpoints must be HTTPS; numeric loopback HTTP (`127.0.0.1` or `[::1]`) is allowed for inference only. The optional model-list endpoint must be HTTPS, same-origin, and end in `/models`.
+- `api_key_env` names the environment variable whose value is sent as a Bearer key to that fixed route. Omit it for a keyless route. Never put the key itself in settings.
+- Configure exactly one of `models_endpoint` or a static `models` array. Static model entries take an exact `id` and optional `display_name` and explicitly declared `tools` boolean; omitted capability data stays unknown. Neither configuration proves account entitlement.
+- Select the default route with `pave --provider team-gateway --model MODEL_ID`; use `--api ROUTE_NAME` for another configured route. A changed route configuration requires reselecting a saved model. Built-in provider counts exclude user-defined providers.
+
+### Provider-specific thinking controls
+
+The TUI `/thinking LEVEL` command stores branch-local metadata; a route sends only a control documented for that provider. Fireworks maps `minimal` to `reasoning_effort: "none"` and replays its returned `reasoning_content` with tool results. Alibaba Coding Plan and Token Plan map `none` to `enable_thinking: false`, other supported levels to `true`, and omit the field by default; model support is not inferred from the model ID. See the linked [Fireworks reasoning](https://docs.fireworks.ai/guides/reasoning) and [Alibaba Qwen Code](https://help.aliyun.com/en/model-studio/qwen-code) guidance.
 
 ### Deployment and catalog caveats
 
@@ -350,12 +390,14 @@ Use `pave --providers` for the live list. This reference separates wire transpor
 - **Azure Responses:** Set `AZURE_OPENAI_ENDPOINT=https://<resource>.openai.azure.com`, `AZURE_OPENAI_API_KEY`, and exact `--model DEPLOYMENT_ID`. `AZURE_OPENAI_API_VERSION=v1` or `preview` is optional; the default is `/openai/v1/responses`. Only that Azure resource path receives the key. Azure Chat, deployment discovery, Entra auth, custom/non-Azure hosts and model-name-to-deployment translation are unsupported.
 - **Google Vertex:** Set `GOOGLE_CLOUD_PROJECT`, `GOOGLE_VERTEX_LOCATION` (or documented aliases) and an explicit publisher model. Authenticate via `gcloud auth application-default login`, workload metadata or `GOOGLE_CLOUD_ACCESS_TOKEN`. Pave derives the regional Google Gemini SSE endpoint and rejects `--endpoint`; no bundled OAuth client or model IDs.
 - **Amazon Bedrock:** Set `AWS_REGION` or `AWS_DEFAULT_REGION`, AWS access/secret keys (optionally a session token) or a static shared profile, and a foundation/inference-profile ID. SigV4 signs only regional `/converse`; answers are buffered and custom endpoints rejected. `--models` lists on-demand text foundations, not inference profiles or Invoke rights. Azure, Vertex and Bedrock never forward credentials to caller-supplied hosts.
+- **Kimi Code:** Use the region-matched Kimi Code subscription key, not a Moonshot Open Platform key. Pave sends the truthful `User-Agent: Pave`; Kimi's [official API guide](https://www.kimi.com/code/docs/) requires the client identity not be impersonated. The route does not establish plan entitlement.
+- **Alibaba Token Plan:** The `sk-sp-` route is distinct from Alibaba Coding Plan and the workspace API. Confirm the current Token Plan terms and supported-tool eligibility; a Pave route is not proof of account access or authorization.
+- **Umans:** `/v1/models/info` reports the provider's current model/capability data. The listing does not validate the configured key or prove account access; prices remain unknown in Pave.
 - **Anthropic prompt cache:** Only the direct `https://api.anthropic.com/v1/messages` API-key route opts into Anthropic's automatic ephemeral prefix cache; OAuth and custom/compatible endpoints do not. The default cache lifetime is five minutes. Cache writes can have different billing, and cache retention terms may differ; check current Anthropic pricing and data-retention terms. Pave records provider-reported cache read/write tokens and does not estimate dollars.
 
 **Coverage and limits**
 
-- The 65 local routes have isolated wire/tool-result fixtures; the first 15 added after v0.1.39 also passed native fake-HTTPS two-turn `read_file` scenarios. The sibling inventory has 83 identities, leaving 18 unimplemented. Fixtures do **not** prove live entitlement.
-- SingularityAPI reserved has no authenticated response proof; Fire Pass needs a full router resource; OpenCode catalogs do not prove plan access. Cloudflare needs an account/gateway with BYOK or Unified Billing and lacks a documented account-specific listing.
+- The built-in CLI lists 71 provider IDs (including two Kimi Code region routes for one sibling identity); 13 identities in the 83-provider reference inventory still have no Pave route. The first 15 routes added after v0.1.39 also passed native fake-HTTPS `read_file` turns. R3 route, discovery, reasoning-replay and CLI tool-result fixtures passed; fixtures do not prove live entitlement.
 - Command Code catalogs describe endpoints but cannot validate a Studio key: choose `--api`. GitLab Duo has no authoritative non-agentic upstream-model roster: supply route and model. Unverified listings stay unclassified in `/model`.
 - Alibaba Coding Plan needs `--api china|intl`; Xiaomi and MiniMax keys are region-bound. Cursor bidirectional Connect and GitLab Duo Agent WebSocket remain unsupported.
 - Google's [Antigravity terms](https://antigravity.google/terms/) prohibit third-party OAuth clients; xAI has no published reusable subscription OAuth registration. Zhipu Coding Plan excludes unofficial clients. Standard API keys are not mislabeled as plan credentials.
@@ -364,7 +406,7 @@ Use `pave --providers` for the live list. This reference separates wire transpor
 
 | Available | Not yet available |
 | --- | --- |
-| Seven wire payload formats with distinct provider routes; bounded buffered and incremental-stream decoders; model-bound Codex/Gemini native state replay | Most provider-specific thinking/usage/multimodal parity and full model catalog |
+| Seven wire payload formats with distinct provider routes; bounded buffered and incremental-stream decoders; model-bound Codex/Gemini state and tested provider reasoning replay | Most provider-specific thinking/usage/multimodal parity and full model catalog |
 | Mobile manifest detection, workspace file read/search/edit/write, bounded agent turns | LSP/DAP, subagents, extensions and full tool catalog |
 | Grapheme-aware CJK input, cancellable streaming with queued follow-ups, searchable model picker, branching sessions, explicit-window byte-proxy budgeting with counted image payload bytes, automatic/manual journal-safe summaries, native OpenAI Responses and capability-gated Anthropic compaction | Tokenizer-exact provider context limits, image token estimates, other provider-native compaction, LSP/DAP, subagents and extensions |
 

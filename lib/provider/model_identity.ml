@@ -3,22 +3,30 @@ type t = {
   account_id : string option;
   route : string;
   upstream_id : string;
+  config_revision : string option;
 }
 
 let valid_component value =
   value <> "" && not (String.exists (fun character ->
     let code = Char.code character in code <= 32 || code = 127) value)
 
-let make ~provider ?account_id ~route ~upstream_id () =
+let valid_revision = function
+  | None -> true
+  | Some value -> String.length value = 64 &&
+      String.for_all (function '0'..'9' | 'a'..'f' -> true | _ -> false) value
+
+let make ~provider ?account_id ?config_revision ~route ~upstream_id () =
   if not (valid_component provider && valid_component route &&
       valid_component upstream_id &&
-      Option.fold ~none:true ~some:valid_component account_id) then
+      Option.fold ~none:true ~some:valid_component account_id &&
+      valid_revision config_revision) then
     invalid_arg "invalid model identity";
-  { provider; account_id; route; upstream_id }
+  { provider; account_id; route; upstream_id; config_revision }
 
 let equal left right =
   left.provider = right.provider && left.account_id = right.account_id &&
-  left.route = right.route && left.upstream_id = right.upstream_id
+  left.route = right.route && left.upstream_id = right.upstream_id &&
+  left.config_revision = right.config_revision
 
 let encode_into output value =
   let hex = "0123456789ABCDEF" in

@@ -89,6 +89,13 @@ let () =
     Arg.parse options (fun arg -> raise (Arg.Bad ("unexpected argument: " ^ arg)))
       "pave [update [--check] | --providers | --provider ID --model ID --prompt TEXT | --root DIRECTORY --session FILE]";
     if !list_providers then (
+      let root = Unix.realpath !root in
+      if not (Sys.is_directory root) then failwith "workspace root must be a directory";
+      let settings = Pave.Settings.load ~root in
+      let registry = match Pave.Provider_catalog.create_registry
+          settings.values.custom_providers with
+        | Ok registry -> registry
+        | Error message -> failwith message in
       List.iter (fun (entry : Pave.Provider_catalog.descriptor) ->
         Printf.printf "%s\t%s\t%s\t%s\n" entry.id entry.display_name
           (String.concat "," (List.map
@@ -105,7 +112,8 @@ let () =
                "Google ADC + project/location required"
            | None, None when entry.id = "amazon-bedrock" ->
                "AWS credentials + region required"
-           | None, None -> "no API key required")) (Pave.Provider_catalog.all ());
+           | None, None -> "no API key required"))
+        (Pave.Provider_catalog.all ~registry ());
       exit 0);
     if Cli_auth.handle_action ~login:!login ~login_manual:!login_manual
          ~logout:!logout then exit 0;
@@ -115,6 +123,10 @@ let () =
       failwith "--models uses a provider's pinned listing endpoint; remove --endpoint";
     let settings = Pave.Settings.load ~root in
     let configured = settings.values in
+    let registry = match Pave.Provider_catalog.create_registry
+        configured.custom_providers with
+      | Ok registry -> registry
+      | Error message -> failwith message in
     let configured_approval_mode = Option.value
       ~default:Pave.Approval.Ask_exec configured.approval_mode in
     let explicit_approval_mode = Option.is_some !approval_mode_override in
@@ -143,10 +155,9 @@ let () =
     let explicit_model_selection = match canonical_model_provider with
       | None -> None
       | Some _ ->
-          let descriptor, identity, route =
-            Pave.Interaction.resolve_model
-              ?current_account_id:configured_account_id
-              ~current_provider:configured_provider_name ~input:!model () in
+          let descriptor, identity, route = Pave.Interaction.resolve_model ~registry
+            ?current_account_id:configured_account_id
+            ~current_provider:configured_provider_name ~input:!model () in
           if !explicit_provider && descriptor.id <> configured_provider_name then
             failwith "--provider conflicts with the canonical --model selector";
           if !api_name <> "" && route.name <> !api_name then
@@ -155,10 +166,11 @@ let () =
     let provider_name = match explicit_model_selection with
       | Some (descriptor, _, _) -> descriptor.id
       | None -> configured_provider_name in
-    let descriptor = match Pave.Provider_catalog.find provider_name with
+    let descriptor = match Pave.Provider_catalog.find ~registry provider_name with
       | Some value -> value
       | None -> failwith ("unsupported provider: " ^ provider_name) in
-    let discovery_credential = Model_picker.credential in
+    let discovery_credential ?route_name descriptor =
+      Model_picker.credential ~registry ?route_name descriptor in
     if !list_models then (
       let listing_route =
         if !api_name <> "" then !api_name
@@ -177,9 +189,8 @@ let () =
             configured.default_account_id
         | None -> None in
       let credential = discovery_credential ~route_name:route.name descriptor in
-      (match Pave.Model_discovery.discover ~provider:descriptor.id
+      (match Pave.Model_discovery.discover ~registry ~provider:descriptor.id
           ~route_name:route.name ?account_id ?credential () with
-       | Error error -> failwith (Pave.Model_discovery.message error)
        | Ok listing ->
            let source_name = match listing.source.id_source with
              | Pave.Model_catalog.Pinned_account_listing ->
@@ -195,20 +206,22 @@ let () =
                    (observed.tm_year + 1900) (observed.tm_mon + 1)
                    observed.tm_mday observed.tm_hour observed.tm_min
                    observed.tm_sec in
-           Printf.printf "Fresh %s from %s · %s\n" source_name
-             (Option.value ~default:"pinned provider endpoint"
-               listing.source.endpoint) retrieved;
+           Printf.printf "%s %s from %s · %s\n"
+             (if listing.source.retrieved_at = None then "Configured" else "Fresh")
+             source_name
+             (Option.value ~default:"user settings" listing.source.endpoint) retrieved;
            List.iter (fun (model : Pave.Model_discovery.model) ->
              let capabilities = model.capabilities in
              let endpoints = match capabilities.supported_endpoints with
                | None -> []
                | Some _ ->
                    List.filter_map (fun (candidate : Pave.Provider_catalog.route) ->
-                     if Pave.Model_discovery.model_supports_endpoint
-                         ~provider:descriptor.id model ~endpoint:candidate.endpoint
-                     then Some candidate.name else None) descriptor.routes in
+                    if Pave.Model_discovery.model_supports_endpoint ~registry
+                        ~provider:descriptor.id model ~endpoint:candidate.endpoint
+                    then Some candidate.name else None) descriptor.routes in
              let status =
-               if Pave.Provider_catalog.unclassified_models descriptor.id then
+               if listing.source.id_source = Pave.Model_catalog.Explicit_user_input ||
+                  Pave.Provider_catalog.unclassified_models ~registry descriptor.id then
                  "listed; inference compatibility unverified"
                else if endpoints <> [] then "listed; per-model APIs reported"
                else if capabilities.supported_endpoints <> None then
@@ -249,7 +262,9 @@ let () =
                   " · " ^ String.concat " · " (List.rev details)))
              listing.models;
            if listing.models = [] then
-             Printf.printf "No models reported by %s.\n" descriptor.id);
+             Printf.printf "No models reported by %s.\n" descriptor.id
+       | Error error ->
+           failwith (Pave.Model_discovery.message error));
       exit 0);
     let project_context = Pave.Project_context.load ~root () in
     let prompt_configuration = Pave.System_prompt.load ~root
@@ -273,10 +288,22 @@ let () =
     let saved_model =
       if explicit_model_override then None
       else Option.bind !journal Pave.Session.model in
+    let validate_identity_binding (identity : Pave.Model_identity.t) =
+      match Pave.Provider_catalog.custom_route registry
+          ~provider:identity.provider ~route:identity.route with
+      | Some custom when identity.account_id = custom.account_id &&
+          identity.config_revision =
+            Some (Pave.Custom_provider.fingerprint custom) -> ()
+      | Some _ ->
+          failwith "saved model uses a changed custom provider route configuration; reselect it"
+      | None when identity.config_revision = None -> ()
+      | None ->
+          failwith "saved model uses an unavailable custom provider configuration" in
+    Option.iter validate_identity_binding saved_model;
     let descriptor = match saved_model with
       | None -> descriptor
       | Some identity ->
-          (match Pave.Provider_catalog.find identity.provider with
+          (match Pave.Provider_catalog.find ~registry identity.provider with
            | Some value -> value
            | None -> failwith ("saved session uses unavailable provider " ^
                identity.provider ^ "; specify --provider and --model to override")) in
@@ -302,14 +329,17 @@ let () =
           descriptor.id ^ "; specify --api to override") in
     let make_model_identity (descriptor : Pave.Provider_catalog.descriptor)
         (route : Pave.Provider_catalog.route) ?account_id upstream_id =
+      let config_revision = Pave.Provider_catalog.custom_revision registry
+        ~provider:descriptor.id ~route:route.name in
       Pave.Model_identity.make ~provider:descriptor.id ?account_id
-        ~route:route.name ~upstream_id () in
+        ?config_revision ~route:route.name ~upstream_id () in
     let configured_account_id =
       if configured.default_provider = Some descriptor.id then
         configured.default_account_id else None in
     let inferred_account_id =
-      Model_picker.credential ~route_name:route.name descriptor
-      |> Model_picker.credential_account_id in
+      Model_picker.credential ~registry ~route_name:route.name descriptor
+      |> Model_picker.credential_account_id ~registry
+           ~provider:descriptor.id ~route:route.name in
     let selected_account_id =
       match explicit_model_selection, saved_model with
       | Some (_, identity, _), _ when identity.account_id <> None ->
@@ -337,7 +367,7 @@ let () =
     let configured_default_selection =
       let default_provider =
         Option.value ~default:"openai" configured.default_provider in
-      match Pave.Provider_catalog.find default_provider with
+      match Pave.Provider_catalog.find ~registry default_provider with
       | None -> None
       | Some default_descriptor ->
           let configured_for_provider =
@@ -358,9 +388,11 @@ let () =
                     configured.default_account_id else None) with
                 | Some _ as account_id -> account_id
                 | None ->
-                    Model_picker.credential ~route_name:default_route.name
-                      default_descriptor
-                    |> Model_picker.credential_account_id in
+                    Model_picker.credential ~registry
+                      ~route_name:default_route.name default_descriptor
+                    |> Model_picker.credential_account_id ~registry
+                         ~provider:default_descriptor.id
+                         ~route:default_route.name in
               make_model_identity default_descriptor default_route
                 ?account_id upstream_id) default_model in
             default_descriptor, identity, default_route) default_route in
@@ -388,7 +420,7 @@ let () =
           ["anthropic"; "commandcode"; "devin"; "google"; "openai-codex"]) then
         failwith "--context-window auto requires provider-reported metadata from Anthropic, Command Code, Devin, Google, or OpenAI Codex";
       let credential = discovery_credential ~route_name:route.name descriptor in
-      let listing = match Pave.Model_discovery.discover
+      let listing = match Pave.Model_discovery.discover ~registry
           ~provider:descriptor.id ~route_name:route.name
           ?account_id:identity.account_id ?credential () with
         | Ok listing -> listing
@@ -405,7 +437,7 @@ let () =
           (identity, initial_endpoint,
             selected_model.capabilities.native_compaction_supported);
       (match selected_model.capabilities.supported_endpoints with
-       | Some _ when Pave.Model_discovery.model_supports_endpoint
+       | Some _ when Pave.Model_discovery.model_supports_endpoint ~registry
            ~provider:descriptor.id selected_model ~endpoint:route.endpoint -> ()
        | Some _ -> failwith
            "--context-window auto: the selected model does not advertise the active API route"
@@ -603,11 +635,19 @@ let () =
       if identity.provider <> descriptor.id || identity.route <> route.name ||
          identity.upstream_id <> !active_model then
         failwith "active model identity is inconsistent with its provider route";
+      let custom_route = Pave.Provider_catalog.custom_route registry
+        ~provider:descriptor.id ~route:route.name in
+      (match custom_route with
+       | Some custom when identity.account_id <> custom.account_id ->
+           failwith "selected account does not match the configured custom route"
+       | Some _ | None -> ());
       let authentication, api_key, resolve_credential =
-        Cli_auth.resolve_authentication ~descriptor ~route
-          ~endpoint:!endpoint_override in
-      let credential_account_id = Option.bind resolve_credential
-        (fun resolve -> (resolve ()).Pave.Provider.account_id) in
+        Cli_auth.resolve_authentication ?custom_route ~descriptor ~route
+          ~endpoint:!endpoint_override () in
+      let credential_account_id = match custom_route with
+        | Some custom -> custom.account_id
+        | None -> Option.bind resolve_credential
+            (fun resolve -> (resolve ()).Pave.Provider.account_id) in
       if identity.account_id <> credential_account_id then
         failwith "selected model account does not match the active credentials; reselect the model for this account";
       let endpoint =
@@ -663,7 +703,7 @@ let () =
            | _ ->
                let credential = discovery_credential
                  ~route_name:!active_route.name !active_descriptor in
-               (match Pave.Model_discovery.discover ?cancel
+               (match Pave.Model_discovery.discover ~registry ?cancel
                    ~provider:"anthropic" ~route_name:!active_route.name
                    ?account_id:identity.account_id ?credential () with
                 | Ok listing
@@ -796,7 +836,8 @@ let () =
                         failwith "native compaction input exceeds the configured prompt allowance; no journal change was made"
                       else
                         Pave.Context_compaction.summarize ~provider
-                          ~authentication ?resolve_credential ?cancel
+                          ~authentication ?resolve_credential
+                          ?thinking:!thinking_level ?cancel
                           ~window_tokens prefix ~on_usage, None in
                     let summary_message = { (Pave.Protocol.user summary) with
                       provider_state } in
@@ -819,7 +860,7 @@ let () =
     let make_agent () =
       let provider, authentication, resolve_credential = resolve_provider () in
       (match !journal, !active_identity with
-       | Some session, Some identity -> Pave.Session.set_model session identity
+       | Some session, Some identity -> Pave.Session.set_model ~registry session identity
        | _ -> ());
       let history = match !journal with
         | Some session -> Pave.Session.context session
@@ -827,15 +868,24 @@ let () =
       let history = Pave.Interaction.history_for_model
         ~provider:!active_descriptor.id ~route:!active_route.name
         ~wire:provider.api ~model:provider.model history in
+      let custom_tools_enabled = match Pave.Provider_catalog.custom_model registry
+          ~provider:!active_descriptor.id ~route:!active_route.name
+          ~model:!active_model with
+        | Some { tools = Some true; _ } -> true
+        | Some _ -> false
+        | None -> true in
+      let tool_available name = custom_tools_enabled &&
+        not (List.mem name !disabled_tools) in
       let on_change (message : Pave.Protocol.message) =
         (match !journal with
         | Some session -> ignore (Pave.Session.append session message)
         | None -> ());
         mark_user_message message in
       Pave.Agent.create ~provider ~authentication ?resolve_credential
+        ~thinking:(fun () -> !thinking_level)
         ~root ~system
         ~allow_shell:!allow_shell
-        ~tool_available:(fun name -> not (List.mem name !disabled_tools))
+        ~tool_available
         ~stream:(!stream || Option.is_some !ui)
         ~approval_mode:!effective_approval_mode
         ~tool_approval:configured.tool_approval
@@ -886,7 +936,8 @@ let () =
     let session_selection saved =
       if explicit_model_override then None
       else Option.map (fun (identity : Pave.Model_identity.t) ->
-        let descriptor = match Pave.Provider_catalog.find identity.provider with
+        validate_identity_binding identity;
+        let descriptor = match Pave.Provider_catalog.find ~registry identity.provider with
           | Some descriptor -> descriptor
           | None -> failwith ("saved session uses unavailable provider " ^
               identity.provider) in
@@ -921,7 +972,7 @@ let () =
       if identity.provider <> descriptor.id || identity.route <> route.name then
         failwith "selected model identity does not match its provider route";
       (match !journal with
-       | Some current -> Pave.Session.set_model current identity
+       | Some current -> Pave.Session.set_model ~registry current identity
        | None -> ());
       (match !journal, !agent with
        | None, Some previous -> retained_history := Pave.Agent.messages previous
@@ -938,7 +989,7 @@ let () =
       let _, identity, _ = match selected with
         | Some choice -> choice
         | None -> !active_descriptor, !active_identity, !active_route in
-      Option.iter (Pave.Session.set_model next) identity;
+      Option.iter (Pave.Session.set_model ~registry next) identity;
       journal := Some next;
       restore_branch_settings next (Pave.Session.leaf_id next);
       (match selected with Some choice -> use_selection choice | None -> agent := None);
@@ -1066,8 +1117,8 @@ let () =
                 match active_context_window () with
                 | Some window_tokens ->
                     Pave.Context_compaction.summarize ~provider ~authentication
-                      ?resolve_credential ~window_tokens prefix
-                      ~on_usage:collect_usage, None
+                      ?resolve_credential ?thinking:!thinking_level
+                      ~window_tokens prefix ~on_usage:collect_usage, None
                 | None ->
                     let instruction : Pave.Protocol.message = {
                       role = "system";
@@ -1081,7 +1132,8 @@ let () =
                     let transcript = Yojson.Basic.to_string (`List
                       (List.map Pave.Protocol.message_to_json source)) in
                     let reply = Pave.Provider.complete ~authentication
-                      ?resolve_credential ~on_usage:collect_usage provider
+                      ?resolve_credential ?thinking:!thinking_level
+                      ~on_usage:collect_usage provider
                       [ instruction; Pave.Protocol.user transcript ] [] in
                     (match reply.content, reply.tool_calls with
                      | Some summary, [] when String.trim summary <> "" ->
@@ -1121,17 +1173,17 @@ let () =
             (match !ui with
              | Some screen ->
                  let picked = match preferred with
-                   | None -> Model_picker.choose_all screen
+                   | None -> Model_picker.choose_all ~registry screen
                        ~active:!active_descriptor ~current_route:!active_route.name ()
                    | Some (descriptor : Pave.Provider_catalog.descriptor) ->
                        let route_name = if descriptor.id = !active_descriptor.id
                          then !active_route.name else descriptor.default_route in
-                       Model_picker.choose screen ~descriptor ~route_name
+                       Model_picker.choose ~registry screen ~descriptor ~route_name
                          ~title:("Model · " ^ descriptor.id ^ " (current conversation)")
                          ~choices:[] () in
                  Option.value ~default:"" picked
              | None ->
-                 let providers = Pave.Interaction.selectable_providers () in
+                 let providers = Pave.Interaction.selectable_providers ~registry () in
                  on_event ("Current model: " ^
                    selection_label !active_descriptor !active_identity !active_route);
                  List.iter (fun (entry : Pave.Provider_catalog.descriptor) ->
@@ -1144,15 +1196,16 @@ let () =
               descriptor.id, descriptor.default_route
           | _ -> !active_descriptor.id, !active_route.name in
         let selected_route =
-          match Pave.Provider_catalog.find current_provider with
+          match Pave.Provider_catalog.find ~registry current_provider with
           | Some descriptor ->
               Pave.Provider_catalog.route descriptor current_route
           | None -> None in
         let inferred_account = Option.bind selected_route (fun route ->
-          Option.bind (Pave.Provider_catalog.find current_provider)
+          Option.bind (Pave.Provider_catalog.find ~registry current_provider)
             (fun descriptor ->
-              Model_picker.credential ~route_name:route.name descriptor
-              |> Model_picker.credential_account_id)) in
+              Model_picker.credential ~registry ~route_name:route.name descriptor
+              |> Model_picker.credential_account_id ~registry
+                   ~provider:descriptor.id ~route:route.name)) in
         let active_account_id = Option.bind !active_identity
           (fun (identity : Pave.Model_identity.t) ->
             if identity.provider = current_provider then identity.account_id
@@ -1161,7 +1214,7 @@ let () =
           | Some _ as account_id -> account_id
           | None -> inferred_account in
         let descriptor, identity, route =
-          try Pave.Interaction.resolve_model ?current_account_id
+          try Pave.Interaction.resolve_model ~registry ?current_account_id
             ~current_provider ~current_route ~input:selector ()
           with exn ->
             (match !ui with Some screen -> Tui.reset_status screen | None -> ());
@@ -1191,7 +1244,7 @@ let () =
       | None -> ()
       | Some choice ->
           let id = List.assoc choice options in
-          let descriptor = match Pave.Provider_catalog.find id with
+          let descriptor = match Pave.Provider_catalog.find ~registry id with
             | Some value when value.oauth <> None -> value
             | _ -> failwith ("account sign-in unavailable for " ^ id) in
           let connected =
@@ -1214,7 +1267,7 @@ let () =
                  choose_model ~preferred:descriptor None
              | _ -> on_event ("Signed in to " ^ id ^ "; active model unchanged.")) in
     let run_setup screen ~first_run =
-      match Setup_view.run screen with
+      match Setup_view.run screen ~registry with
       | Setup_view.Skipped ->
           if first_run then (
             (try
@@ -1331,9 +1384,9 @@ let () =
        | Some current -> Pave.Session.set_thinking current selected
        | None -> ());
       thinking_level := selected;
-      notify ("Thinking metadata: " ^
+      notify ("Thinking level: " ^
         Option.value ~default:"default" selected ^
-        " (provider route/model defaults are unchanged).") in
+        " (compatible provider routes receive their documented reasoning control).") in
     let set_tool_enabled name enabled =
       let names = Pave.Tools.available ~allow_shell:true
         |> List.filter_map (fun json ->
@@ -1496,7 +1549,7 @@ let () =
               | None -> on_event "Setup needs an interactive terminal; use --login PROVIDER or --provider/--model.")
          | Pave.Interaction.Settings ->
           (match !ui with
-           | Some screen -> Settings_view.open_view screen ~root
+           | Some screen -> Settings_view.open_view screen ~root ~registry
            | None ->
                let values = (Pave.Settings.load ~root).values in
                on_event ("Default provider: " ^
@@ -1544,9 +1597,9 @@ let () =
         | Pave.Interaction.Thinking selected ->
             (match selected with
              | None ->
-                 notify ("Thinking metadata: " ^
+                 notify ("Thinking level: " ^
                    Option.value ~default:"default" !thinking_level ^
-                   " (provider route/model defaults are unchanged).")
+                   " (compatible provider routes receive their documented reasoning control).")
              | Some level -> set_thinking (Some level))
         | Pave.Interaction.Tool_toggle { name; enabled } ->
             set_tool_enabled name enabled

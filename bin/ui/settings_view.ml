@@ -12,7 +12,7 @@ let approval_tools = [
   "run_command", "exec (per-command prompt remains mandatory)"
 ]
 
-let open_view screen ~root =
+let open_view screen ~root ~registry =
   let save change =
     ignore (Pave.Settings.update_project ~root change);
     Tui.event screen "Project settings saved for the next launch; active turns are unchanged." in
@@ -28,7 +28,7 @@ let open_view screen ~root =
     let provider = "Default provider: " ^ configured values.default_provider in
     let model = "Default model: " ^ configured values.default_model in
     let api = "Default API: " ^ configured values.default_api in
-    let account = "Default account ID (from sign-in): " ^
+    let account = "Default account scope: " ^
       configured values.default_account_id in
     let shell = "Disable shell tools: " ^ string_of_bool values.disable_shell in
     let turns = "Maximum model turns: " ^
@@ -44,7 +44,7 @@ let open_view screen ~root =
            let options = List.map
              (fun (entry : Pave.Provider_catalog.descriptor) ->
                entry.id ^ "  " ^ entry.display_name, entry.id)
-             (Pave.Provider_catalog.all ()) in
+             (Pave.Provider_catalog.all ~registry ()) in
            match Tui.choose screen ~title:"Default provider"
              ~choices:(List.map fst options) with
            | None -> ()
@@ -56,7 +56,7 @@ let open_view screen ~root =
          else if choice = model then (
            let provider_id = Option.value ~default:"openai"
              values.default_provider in
-           let descriptor = match Pave.Provider_catalog.find provider_id with
+           let descriptor = match Pave.Provider_catalog.find ~registry provider_id with
              | Some descriptor -> descriptor
              | None -> invalid_arg "unknown configured provider" in
            let selected_api = match values.default_api with
@@ -70,13 +70,13 @@ let open_view screen ~root =
            match selected_api with
            | None -> ()
            | Some route_name ->
-           match Model_picker.choose screen ~descriptor ~route_name
-             ~title:"Default model · live IDs (type an ID if unavailable)"
+           match Model_picker.choose ~registry screen ~descriptor ~route_name
+             ~title:"Default model · listed or explicitly entered IDs"
              ~choices:[] () with
            | None -> ()
            | Some selector ->
                let descriptor, identity, route = Pave.Interaction.resolve_model
-                 ~current_route:route_name
+                 ~registry ~current_route:route_name
                  ?current_account_id:values.default_account_id
                  ~current_provider:descriptor.id ~input:selector () in
                save (fun current -> { current with
@@ -88,7 +88,7 @@ let open_view screen ~root =
            match values.default_provider with
            | None -> Tui.alert screen "Choose a default provider first"
            | Some id ->
-               let descriptor = match Pave.Provider_catalog.find id with
+               let descriptor = match Pave.Provider_catalog.find ~registry id with
                  | Some descriptor -> descriptor
                  | None -> invalid_arg "unknown configured provider" in
                (match Tui.choose screen ~title:"Default API route"
@@ -100,7 +100,7 @@ let open_view screen ~root =
                     { current with default_api = Some name;
                       default_model = None; default_account_id = None })))
          else if choice = account then
-          Tui.alert screen "Account ID comes from provider sign-in; use /setup → Connect account only to change accounts."
+          Tui.alert screen "Account scope comes from the user-level custom route or provider sign-in; it cannot be overridden here."
          else if choice = shell then
            save (fun current -> { current with
              disable_shell = not current.disable_shell })

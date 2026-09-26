@@ -33,9 +33,9 @@ type listing = {
 let model_ids listing =
   List.map (fun model -> model.Model_catalog.identity.Model_identity.upstream_id)
     listing.models
-let model_supports_endpoint ~provider (model : model) ~endpoint =
+let model_supports_endpoint ?registry ~provider (model : model) ~endpoint =
   if provider <> model.identity.provider then false else
-  let route = match Provider_catalog.find provider with
+  let route = match Provider_catalog.find ?registry provider with
     | None -> None
     | Some descriptor ->
         descriptor.routes
@@ -84,6 +84,8 @@ let copilot_url = "https://api.githubcopilot.com/models"
 let openrouter_url = "https://openrouter.ai/api/v1/models/user"
 let anthropic_url = "https://api.anthropic.com/v1/models"
 let deepseek_url = "https://api.deepseek.com/models"
+let minimax_url = Minimax_api.models_url
+let umans_url = Umans_api.models_url
 
 let groq_url = "https://api.groq.com/openai/v1/models"
 let mistral_url = "https://api.mistral.ai/v1/models"
@@ -823,6 +825,7 @@ let discover_generic_models ?http ?cancel ~provider ?credential () =
     | "openrouter" -> Some (openrouter_url, "data", "id", include_all)
     | "anthropic" -> Some (anthropic_url, "data", "id", include_all)
     | "deepseek" -> Some (deepseek_url, "data", "id", include_all)
+    | "minimax" -> Some (minimax_url, "data", "id", include_all)
     | "groq" -> Some (groq_url, "data", "id", include_all)
     | "mistral" -> Some (mistral_url, "data", "id", include_all)
     | "together" -> Some (together_url, "", "id", include_together)
@@ -851,7 +854,7 @@ let discover_generic_models ?http ?cancel ~provider ?credential () =
         | "ollama", None -> Ok None
         | "ollama", Some _ -> Error Invalid_credential
         | ("openai" | "google" | "openrouter" | "anthropic" |
-           "deepseek" | "groq" | "mistral" | "together" |
+           "deepseek" | "minimax" | "groq" | "mistral" | "together" |
            "cerebras" | "venice" | "deepinfra" | "fireworks" |
            "baseten" | "huggingface" | "nanogpt" | "abliteration" |
            "gmi-cloud" | "moonshot" | "novita" | "siliconflow" |
@@ -874,7 +877,7 @@ let discover_generic_models ?http ?cancel ~provider ?credential () =
               Some key ->
                 ["Authorization", "Bearer " ^ key;
                  "Accept", "application/json"]
-            | ("deepseek" | "groq" | "mistral" | "together" |
+            | ("deepseek" | "minimax" | "groq" | "mistral" | "together" |
                "cerebras" | "venice" | "deepinfra" | "fireworks" |
                "baseten" | "huggingface" | "nanogpt" | "abliteration" |
                "gmi-cloud" | "moonshot"), Some key ->
@@ -1117,6 +1120,8 @@ let pinned_endpoint ~provider ~(route : Provider_catalog.route) =
     | "openrouter" -> Some openrouter_url
     | "anthropic" -> Some anthropic_url
     | "deepseek" -> Some deepseek_url
+    | "minimax" -> Some minimax_url
+    | "umans" -> Some umans_url
     | "groq" -> Some groq_url
     | "mistral" -> Some mistral_url
     | "together" -> Some together_url
@@ -1161,7 +1166,8 @@ let pinned_endpoint ~provider ~(route : Provider_catalog.route) =
 let credential_policy provider =
   if Local_compat.engine provider <> None then Some Optional_api_key
   else match provider with
-  | "ollama" | "charm-hyper" | "kilo" | "opencode-zen" | "opencode-go" ->
+  | "ollama" | "charm-hyper" | "kilo" | "opencode-zen" | "opencode-go"
+  | "umans" ->
       Some Anonymous
   | "amazon-bedrock" -> Some Ambient_credentials
   | "github-copilot" | "devin" | "openai-codex" ->
@@ -1176,8 +1182,8 @@ let credential_policy provider =
       provider = "vercel-ai-gateway" || provider = "commandcode" ||
       provider = "sakana" || Tool_gateways.find provider <> None ||
       List.mem provider [
-        "openai"; "google"; "anthropic"; "deepseek"; "groq"; "mistral";
-        "together"; "cerebras"; "venice"; "deepinfra"; "fireworks";
+        "openai"; "google"; "anthropic"; "deepseek"; "minimax"; "groq";
+        "mistral"; "together"; "cerebras"; "venice"; "deepinfra"; "fireworks";
         "baseten"; "huggingface"; "nanogpt"; "abliteration"; "gmi-cloud";
         "moonshot"; "novita"; "siliconflow"; "siliconflow-cn"; "coreweave"
       ] -> Some Required_api_key
@@ -1209,8 +1215,31 @@ let check_credential policy credential =
   | OAuth_account _, None -> Error Missing_credential
   | _ -> Error Invalid_credential
 
+let discover_umans ?http ?cancel () =
+  let http = match http with
+    | Some http -> http
+    | None -> fun ~url ~headers -> default_http ?cancel ~url ~headers () in
+  try
+    Provider.check_cancel cancel;
+    match http ~url:umans_url ~headers:[] with
+    | Error _ as failure -> failure
+    | Ok (status, _) when status < 200 || status >= 300 ->
+        Error (Http_error status)
+    | Ok (_, body) ->
+        Provider.check_cancel cancel;
+        (match Umans_api.parse_models body with
+         | Error reason -> Error (Invalid_response reason)
+         | Ok models ->
+             Ok (List.map (fun (model : Umans_api.model) ->
+               { id = model.id; display_name = model.display_name;
+                 capabilities = model.capabilities }) models))
+  with
+  | Provider.Cancelled -> raise Provider.Cancelled
+  | Provider.Provider_error _ | Unix.Unix_error _ | Sys_error _ ->
+      Error (Transport_error "request failed or timed out")
 let discover_raw ?http ?cancel ~provider ?credential () =
-  if provider = "commandcode" then
+  if provider = "umans" then discover_umans ?http ?cancel ()
+  else if provider = "commandcode" then
     Result.map (List.map (fun (model : Commandcode_api.model) ->
       { id = model.id; display_name = Some model.name;
         capabilities = { Model_catalog.empty_capabilities with
@@ -1235,15 +1264,130 @@ let discover_raw ?http ?cancel ~provider ?credential () =
       { id; display_name = None; capabilities = Model_catalog.empty_capabilities }))
       (discover_ids ?http ?cancel ~provider ?credential ())
 
-let discover ?http ?cancel ?route_name ?account_id ~provider ?credential () =
-  match Provider_catalog.find provider with
+let parse_custom_models body =
+  if String.length body > max_response_bytes then
+    invalid "listing exceeds size limit"
+  else
+    let json = try Ok (Yojson.Basic.from_string body)
+      with Yojson.Json_error _ -> invalid "malformed model listing JSON" in
+    match json with
+    | Error _ as error -> error
+    | Ok (`Assoc fields) ->
+        let names = List.map fst fields in
+        if List.length names <> List.length (List.sort_uniq String.compare names) then
+          invalid "duplicate model listing field"
+        else if extract_field "object" (`Assoc fields) <> Some (`String "list") then
+          invalid "missing or malformed model listing object"
+        else
+          (match extract_field "data" (`Assoc fields) with
+           | Some (`List rows) when List.length rows <= 4096 ->
+               let rec collect seen result = function
+                 | [] -> Ok (List.rev result)
+                 | `Assoc row :: rest ->
+                     let fields = List.map fst row in
+                     (match extract_field "id" (`Assoc row) with
+                      | Some (`String id) when checked_id id = Ok id ->
+                          if List.mem "id" fields &&
+                             List.length fields = List.length
+                               (List.sort_uniq String.compare fields) then
+                            if List.mem id seen then invalid "duplicate model ID"
+                            else collect (id :: seen)
+                              ({ id; display_name = None;
+                                 capabilities = Model_catalog.empty_capabilities } :: result)
+                              rest
+                          else invalid "duplicate model row field"
+                      | _ -> invalid "missing or invalid model ID")
+                 | _ :: _ -> invalid "model row must be an object" in
+               collect [] [] rows
+           | Some (`List _) -> invalid "too many model rows"
+           | _ -> invalid "missing or malformed model data array")
+    | Ok _ -> invalid "model listing must be an object"
+
+let discover_custom ?http ?cancel ~provider ~route ~account_id ?credential () =
+  if account_id <> None && account_id <> route.Custom_provider.account_id then
+    Error Invalid_credential
+  else match route.models with
+  | _ :: _ ->
+      let source = {
+        Model_catalog.id_source = Model_catalog.Explicit_user_input;
+        capability_source = None; endpoint = None; retrieved_at = None;
+      } in
+      let models = List.map (fun (entry : Custom_provider.model) ->
+        let capabilities = { Model_catalog.empty_capabilities with tools = entry.tools } in
+        let provenance = { source with capability_source =
+          Option.map (fun _ -> Model_catalog.Explicit_user_input) entry.tools } in
+        { Model_catalog.identity = Model_identity.make ~provider
+            ?account_id:route.account_id
+            ~config_revision:(Custom_provider.fingerprint route)
+            ~route:route.name ~upstream_id:entry.id ();
+          display_name = entry.display_name; capabilities; provenance })
+        route.models in
+      Ok { models; source }
+  | [] ->
+      (match route.models_endpoint with
+       | None -> Error (Unsupported_provider provider)
+       | Some url ->
+           let auth = match route.auth, credential with
+             | Custom_provider.No_auth, None -> Ok None
+             | Custom_provider.No_auth, Some _ -> Error Invalid_credential
+             | Custom_provider.Api_key_env _, None -> Error Missing_credential
+             | Custom_provider.Api_key_env _, Some (Api_key key)
+               when valid_secret key -> Ok (Some key)
+             | Custom_provider.Api_key_env _, _ -> Error Invalid_credential in
+           (match auth with
+            | Error _ as error -> error
+            | Ok key ->
+                let headers = match key with
+                  | None -> []
+                  | Some key -> ["Authorization", "Bearer " ^ key] in
+                let response = match http with
+                  | Some http -> http ~url ~headers
+                  | None -> default_http ?cancel ~url ~headers () in
+                (match response with
+                 | Error _ as error -> error
+                 | Ok (status, _) when status < 200 || status >= 300 ->
+                     Error (Http_error status)
+                 | Ok (_, body) ->
+                     (match parse_custom_models body with
+                      | Error _ as error -> error
+                      | Ok raw_models ->
+                          let retrieved_at = Unix.gettimeofday () in
+                          let source = {
+                            Model_catalog.id_source = (match route.account_id with
+                              | None -> Model_catalog.Provider_listing
+                              | Some _ -> Model_catalog.Pinned_account_listing);
+                            capability_source = None;
+                            endpoint = Some url;
+                            retrieved_at = Some retrieved_at;
+                          } in
+                          let models = List.map (fun raw ->
+                            { Model_catalog.identity = Model_identity.make ~provider
+                                ?account_id:route.account_id
+                                ~config_revision:(Custom_provider.fingerprint route)
+                                ~route:route.name ~upstream_id:raw.id ();
+                              display_name = raw.display_name;
+                              capabilities = raw.capabilities;
+                              provenance = source })
+                            raw_models in
+                          Ok { models; source }))))
+
+let discover ?http ?cancel ?route_name ?account_id ?registry
+    ~provider ?credential () =
+  let registry = Option.value ~default:Provider_catalog.builtin_registry registry in
+  match Provider_catalog.find ~registry provider with
   | None -> Error (Unsupported_provider provider)
   | Some descriptor ->
       let route_name = Option.value ~default:descriptor.default_route route_name in
       (match Provider_catalog.route descriptor route_name with
        | None -> Error (Unsupported_route (provider, route_name))
        | Some route ->
-           (match adapter_for ~provider ~route with
+           (match Provider_catalog.custom_route registry ~provider
+               ~route:route_name with
+            | Some custom_route ->
+                discover_custom ?http ?cancel ~provider ~route:custom_route
+                  ~account_id ?credential ()
+            | None ->
+                (match adapter_for ~provider ~route with
             | None -> Error (Unsupported_provider provider)
             | Some adapter ->
                 (match check_credential adapter.credential_policy credential with
@@ -1292,4 +1436,4 @@ let discover ?http ?cancel ?route_name ?account_id ~provider ?credential () =
                               display_name = raw.display_name;
                               capabilities = raw.capabilities; provenance })
                             raw_models in
-                          Ok { models; source }))))
+                          Ok { models; source })))))

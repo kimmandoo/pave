@@ -544,4 +544,102 @@ let () =
     (discover ~http ~provider:"gmi-cloud"
       ~credential:(Api_key "private-gmi") ());
   assert (!calls = 1);
+  let dynamic_provider = Pave.Custom_provider.parse
+    (Yojson.Basic.from_string
+      {|{"id":"custom-dynamic","display_name":"Custom Dynamic","default_route":"chat","routes":[{"name":"chat","api":"openai-chat","endpoint":"https://api.example.test/v1/chat/completions","account_id":"team-7","api_key_env":"CUSTOM_DISCOVERY_KEY","models_endpoint":"https://api.example.test/v1/models"}]}|}) in
+  let explicit_provider = Pave.Custom_provider.parse
+    (Yojson.Basic.from_string
+      {|{"id":"custom-explicit","display_name":"Custom Explicit","default_route":"chat","routes":[{"name":"chat","api":"openai-chat","endpoint":"https://manual.example.test/v1/chat/completions","models":[{"id":"exact-model","tools":true},{"id":"text-only","tools":false}]}]}|}) in
+  let no_auth_provider = Pave.Custom_provider.parse
+    (Yojson.Basic.from_string
+      {|{"id":"custom-anonymous","display_name":"Custom Anonymous","default_route":"chat","routes":[{"name":"chat","api":"openai-chat","endpoint":"https://public.example.test/v1/chat/completions","models_endpoint":"https://public.example.test/v1/models"}]}|}) in
+  let registry = match Pave.Provider_catalog.create_registry
+      [dynamic_provider; explicit_provider; no_auth_provider] with
+    | Ok registry -> registry
+    | Error message -> failwith message in
+  let dynamic_key = "private-custom-discovery" in
+  let dynamic_route = List.hd dynamic_provider.routes in
+  let dynamic_revision = Pave.Custom_provider.fingerprint dynamic_route in
+  let dynamic_url = Option.get dynamic_route.models_endpoint in
+  let dynamic_headers = ["Authorization", "Bearer " ^ dynamic_key] in
+  let http, calls = fixed_http dynamic_url dynamic_headers (Ok (200,
+    {|{"object":"list","data":[{"id":"model/future"}]}|})) in
+  let custom_listing = match discover ~http ~registry
+      ~provider:"custom-dynamic" ~route_name:"chat"
+      ~credential:(Api_key dynamic_key) () with
+    | Ok listing -> listing
+    | Error error -> failwith (message error) in
+  assert (model_ids custom_listing = ["model/future"]);
+  assert (!calls = 1);
+  assert (custom_listing.source.id_source =
+    Pave.Model_catalog.Pinned_account_listing);
+  assert (custom_listing.source.endpoint = Some dynamic_url);
+  assert (Option.is_some custom_listing.source.retrieved_at);
+  let dynamic_model = List.hd custom_listing.models in
+  assert (dynamic_model.identity.provider = "custom-dynamic");
+  assert (dynamic_model.identity.route = "chat");
+  assert (dynamic_model.identity.account_id = Some "team-7");
+  assert (dynamic_model.identity.config_revision = Some dynamic_revision);
+  assert (model_supports_endpoint ~registry ~provider:"custom-dynamic"
+    dynamic_model ~endpoint:dynamic_route.endpoint);
+  let no_request ~url:_ ~headers:_ = failwith "custom account mismatch made a request" in
+  expect_error wrong_credential
+    (discover ~http:no_request ~registry ~provider:"custom-dynamic"
+      ~route_name:"chat" ~account_id:"other-team"
+      ~credential:(Api_key dynamic_key) ());
+  expect_error no_credential
+    (discover ~http:no_request ~registry ~provider:"custom-dynamic"
+      ~route_name:"chat" ());
+  expect_error wrong_credential
+    (discover ~http:no_request ~registry ~provider:"custom-dynamic"
+      ~route_name:"chat" ~credential:(copilot_oauth dynamic_key) ());
+  let redirect_http, redirect_calls = fixed_http dynamic_url dynamic_headers
+    (Ok (302, {|{"Location":"https://attacker.example/models"}|})) in
+  expect_error unavailable
+    (discover ~http:redirect_http ~registry ~provider:"custom-dynamic"
+      ~route_name:"chat" ~credential:(Api_key dynamic_key) ());
+  assert (!redirect_calls = 1);
+  let malformed_http, _ = fixed_http dynamic_url dynamic_headers
+    (Ok (200, {|{"object":"list","data":[{"id":"same"},{"id":"same"}]}|})) in
+  expect_error is_invalid_response
+    (discover ~http:malformed_http ~registry ~provider:"custom-dynamic"
+      ~route_name:"chat" ~credential:(Api_key dynamic_key) ());
+  let explicit_listing = match discover ~registry
+      ~provider:"custom-explicit" ~route_name:"chat" () with
+    | Ok listing -> listing
+    | Error error -> failwith (message error) in
+  assert (model_ids explicit_listing = ["exact-model"; "text-only"]);
+  assert (explicit_listing.source.id_source =
+    Pave.Model_catalog.Explicit_user_input);
+  assert (List.map (fun (model : Pave.Model_catalog.model) ->
+    model.capabilities.tools) explicit_listing.models =
+      [Some true; Some false]);
+  assert (List.map (fun (model : Pave.Model_catalog.model) ->
+    model.provenance.capability_source) explicit_listing.models =
+      [Some Pave.Model_catalog.Explicit_user_input;
+       Some Pave.Model_catalog.Explicit_user_input]);
+  assert ((List.hd explicit_listing.models).identity.config_revision =
+    Some (Pave.Custom_provider.fingerprint
+      (List.hd explicit_provider.routes)));
+  assert (Pave.Provider_catalog.unclassified_models ~registry
+    "custom-explicit");
+  let anonymous_route = List.hd no_auth_provider.routes in
+  let anonymous_url = Option.get anonymous_route.models_endpoint in
+  let anonymous_http, anonymous_calls = fixed_http anonymous_url [] (Ok (200,
+    {|{"object":"list","data":[{"id":"public-model"}]}|})) in
+  let anonymous = match discover ~http:anonymous_http ~registry
+      ~provider:"custom-anonymous" () with
+    | Ok listing -> listing
+    | Error error -> failwith (message error) in
+  assert (!anonymous_calls = 1);
+  assert (model_ids anonymous = ["public-model"]);
+  expect_error wrong_credential
+    (discover ~http:no_request ~registry ~provider:"custom-anonymous"
+      ~credential:(Api_key "unexpected") ());
+  expect_error (function Unsupported_route _ -> true | _ -> false)
+    (discover ~http:no_request ~registry ~provider:"custom-dynamic"
+      ~route_name:"unknown" ~credential:(Api_key dynamic_key) ());
+  let identity_custom = List.hd explicit_listing.models in
+  assert (not (Pave.Provider_catalog.unclassified_models "openai"));
+  assert (identity_custom.identity.config_revision <> None);
   print_endline "credentialed model discovery: ok"

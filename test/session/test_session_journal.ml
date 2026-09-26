@@ -3,6 +3,14 @@ let message text = Pave.Protocol.user text
 let model_identity ?account_id provider route upstream_id =
   Pave.Model_identity.make ~provider ?account_id ~route ~upstream_id ()
 
+let contains text needle =
+  let rec seek offset =
+    offset + String.length needle <= String.length text &&
+    (String.sub text offset (String.length needle) = needle ||
+     seek (offset + 1)) in
+  seek 0
+
+
 let () =
   let dir = Filename.temp_file "pave-journal-" "" in
   Sys.remove dir; Unix.mkdir dir 0o700;
@@ -500,6 +508,39 @@ let () =
     Pave.Session.set_model legacy account_model;
     assert (Pave.Session.model (Pave.Session.open_file legacy_path) =
       Some account_model);
+    let custom_provider = Pave.Custom_provider.parse
+      (Yojson.Basic.from_string
+        {|{"id":"team-gateway","display_name":"Team Gateway","default_route":"chat","routes":[{"name":"chat","api":"openai-chat","endpoint":"https://team.example.test/v1/chat/completions","account_id":"team-7","api_key_env":"TEAM_GATEWAY_KEY","models":[{"id":"model-a","tools":true}]}]}|}) in
+    let custom_registry = match
+        Pave.Provider_catalog.create_registry [custom_provider] with
+      | Ok registry -> registry
+      | Error message -> failwith message in
+    let custom_route = List.hd custom_provider.routes in
+    let custom_identity = Pave.Model_identity.make
+      ~provider:"team-gateway" ~account_id:"team-7"
+      ~config_revision:(Pave.Custom_provider.fingerprint custom_route)
+      ~route:"chat" ~upstream_id:"model-a" () in
+    Pave.Session.set_model ~registry:custom_registry legacy custom_identity;
+    let reopened_custom = Pave.Session.open_file legacy_path in
+    assert (Pave.Session.model reopened_custom = Some custom_identity);
+    let input = open_in_bin legacy_path in
+    let contents = Fun.protect ~finally:(fun () -> close_in_noerr input)
+      (fun () -> really_input_string input (in_channel_length input)) in
+    assert (contains contents "configRevision");
+    assert (not (contains contents "https://team.example.test"));
+    assert (not (contains contents "TEAM_GATEWAY_KEY"));
+    assert (not (contains contents "never-store-this-key"));
+    let changed_provider = Pave.Custom_provider.parse
+      (Yojson.Basic.from_string
+        {|{"id":"team-gateway","display_name":"Team Gateway","default_route":"chat","routes":[{"name":"chat","api":"openai-chat","endpoint":"https://new.example.test/v1/chat/completions","account_id":"team-7","api_key_env":"TEAM_GATEWAY_KEY","models":[{"id":"model-a","tools":true}]}]}|}) in
+    let changed_registry = match
+        Pave.Provider_catalog.create_registry [changed_provider] with
+      | Ok registry -> registry
+      | Error message -> failwith message in
+    (match Pave.Session.set_model ~registry:changed_registry reopened_custom
+       custom_identity with
+     | exception Pave.Protocol.Invalid_response _ -> ()
+     | _ -> failwith "session accepted an identity from a changed custom route");
     (match Pave.Session.set_model copy
        (model_identity "commandcode" "unknown-route" "future-model") with
      | exception Pave.Protocol.Invalid_response _ -> ()

@@ -123,8 +123,10 @@ let api_key (descriptor : Pave.Provider_catalog.descriptor) =
   | None when descriptor.id = "commandcode" ->
       Pave.Commandcode_api.env_api_key ()
   | None -> None
-let resolve_authentication ~(descriptor : Pave.Provider_catalog.descriptor)
+let resolve_builtin_authentication ~(descriptor : Pave.Provider_catalog.descriptor)
     ~(route : Pave.Provider_catalog.route) ~endpoint =
+    Pave.Provider.validate_endpoint_override ~api:route.wire
+      ~pinned_endpoint:route.endpoint ~requested:endpoint;
     if route.wire = Pave.Provider.Local_chat then (
       if not (List.mem descriptor.id ["lm-studio"; "llama.cpp"; "vllm"]) ||
          descriptor.oauth <> None then
@@ -220,3 +222,25 @@ let resolve_authentication ~(descriptor : Pave.Provider_catalog.descriptor)
           (if service = "openrouter" then Pave.Provider.Api_key
            else Pave.Provider.OAuth), "", Some resolve_credential in
     authentication, api_key, resolve_credential
+let resolve_authentication ?custom_route
+    ~(descriptor : Pave.Provider_catalog.descriptor)
+    ~(route : Pave.Provider_catalog.route) ~endpoint () =
+  match custom_route with
+  | None -> resolve_builtin_authentication ~descriptor ~route ~endpoint
+  | Some custom ->
+      if route.name <> custom.Pave.Custom_provider.name ||
+         route.wire <> Pave.Provider.Openai_completions ||
+         route.endpoint <> custom.endpoint then
+        failwith "custom provider route does not match its validated configuration";
+      Pave.Provider.validate_endpoint_override ~api:route.wire
+        ~pinned_endpoint:custom.endpoint ~requested:endpoint;
+      (match custom.auth with
+       | Pave.Custom_provider.No_auth -> Pave.Provider.Api_key, "", None
+       | Pave.Custom_provider.Api_key_env name ->
+           (match Sys.getenv_opt name with
+            | Some key when key <> "" && String.length key <= 8192 &&
+                String.for_all (fun c -> Char.code c > 32 && Char.code c < 127) key ->
+                Pave.Provider.Api_key, key, None
+            | Some key when key <> "" ->
+                failwith "custom provider API key contains invalid characters"
+            | _ -> failwith ("set " ^ name ^ " to use the configured custom provider")))

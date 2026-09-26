@@ -448,3 +448,7 @@
  (name test_agent_approval)
  (modules test_agent_approval)
  (libraries pave unix yojson))
+(test
+ (name test_r3_routes)
+ (modules test_r3_routes)
+ (libraries pave unix yojson))

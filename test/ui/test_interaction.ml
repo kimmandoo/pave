@@ -249,4 +249,41 @@ let () =
        ~wire:Pave.Provider.Openai_responses ~model:"same-model" compacted)
        <> None then
     fail "OpenAI compaction state crossed provider, API or model boundaries";
+  let custom = Pave.Custom_provider.parse
+    (Yojson.Basic.from_string
+      {|{"id":"team-gateway","display_name":"Team Gateway","default_route":"chat","routes":[{"name":"chat","api":"openai-chat","endpoint":"https://team.example.test/v1/chat/completions","account_id":"team-7","api_key_env":"TEAM_GATEWAY_KEY","models":[{"id":"model-a","tools":true}]}]}|}) in
+  let registry = match Pave.Provider_catalog.create_registry [custom] with
+    | Ok registry -> registry
+    | Error message -> failwith message in
+  let descriptor, identity, route = resolve_model ~registry
+    ~current_provider:"team-gateway" ~input:"model-a" () in
+  if descriptor.id <> "team-gateway" || route.name <> "chat" ||
+     identity.upstream_id <> "model-a" ||
+     identity.account_id <> Some "team-7" ||
+     identity.config_revision <>
+       Some (Pave.Custom_provider.fingerprint (List.hd custom.routes) ) then
+    fail "custom provider identity lost its route/account revision";
+  let _, roundtrip, _ = resolve_model ~registry ~current_provider:"openai"
+    ~input:(Pave.Model_identity.selector identity) () in
+  if not (Pave.Model_identity.equal identity roundtrip) then
+    fail "custom provider canonical identity did not roundtrip";
+  invalid "custom route account override" (fun () ->
+    let other = Pave.Model_identity.make ~provider:"team-gateway"
+      ~account_id:"other-team" ~config_revision:
+        (Pave.Custom_provider.fingerprint (List.hd custom.routes))
+      ~route:"chat" ~upstream_id:"model-a" () in
+    resolve_model ~registry ~current_provider:"openai"
+      ~input:(Pave.Model_identity.selector other) ());
+  let changed = Pave.Custom_provider.parse
+    (Yojson.Basic.from_string
+      {|{"id":"team-gateway","display_name":"Team Gateway","default_route":"chat","routes":[{"name":"chat","api":"openai-chat","endpoint":"https://new.example.test/v1/chat/completions","account_id":"team-7","api_key_env":"TEAM_GATEWAY_KEY","models":[{"id":"model-a","tools":true}]}]}|}) in
+  let changed_registry = match
+      Pave.Provider_catalog.create_registry [changed] with
+    | Ok registry -> registry
+    | Error message -> failwith message in
+  let _, changed_identity, _ = resolve_model ~registry:changed_registry
+    ~current_provider:"team-gateway" ~input:"model-a" () in
+  if Pave.Model_identity.equal identity changed_identity ||
+     changed_identity.config_revision = identity.config_revision then
+    fail "custom endpoint change did not change model identity";
   print_endline "interactive model routing: ok"

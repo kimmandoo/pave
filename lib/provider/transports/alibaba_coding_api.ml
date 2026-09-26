@@ -23,36 +23,63 @@ let chat_headers ~endpoint ~api_key =
     invalid_arg "invalid Coding Plan API key";
   ["Authorization: Bearer " ^ api_key]
 
-(* The documented Chat function loop appends the assistant's native tool call,
-   then role=tool with the original tool_call_id. Replay a reported Qwen
-   reasoning_content intact; never enable/disable thinking based on model ID. *)
-let request ~model messages tools =
-  let message (msg : Protocol.message) =
-    let json = Protocol.message_to_json msg in
-    match json with
+(* The documented Qwen Code config uses enable_thinking as an explicit
+   on/off request setting. It is omitted by default and never inferred from a
+   model ID. *)
+let region = function
+  | endpoint when endpoint = china_chat_url -> "china"
+  | endpoint when endpoint = intl_chat_url -> "intl"
+  | _ -> invalid_arg "invalid Alibaba Coding Plan region endpoint"
+
+let state_tag endpoint model = [
+  "provider", `String "alibaba-coding-plan";
+  "route", `String (region endpoint);
+  "model", `String model;
+]
+
+let matching_state endpoint model = function
+  | Some (`Assoc fields)
+    when List.for_all (fun (key, value) -> List.assoc_opt key fields = Some value)
+      (state_tag endpoint model) -> Some fields
+  | _ -> None
+
+let thinking_enabled = function
+  | None -> None
+  | Some "none" -> Some false
+  | Some ("minimal" | "low" | "medium" | "high" | "xhigh" | "max") ->
+      Some true
+  | Some _ -> invalid_arg
+      "Alibaba Coding Plan thinking level must be none, minimal, low, medium, high, xhigh, or max"
+
+let request ~endpoint ~model ?thinking messages tools =
+  let serialize (msg : Protocol.message) =
+    match Protocol.message_to_json msg with
     | `Assoc fields when msg.role = "assistant" ->
-        let fields = if msg.content = None then
+        let fields = if msg.content = None &&
+            not (List.mem_assoc "content" fields) then
           fields @ ["content", `String ""] else fields in
-        let fields = match msg.provider_state with
-          | Some (`Assoc state) ->
+        let fields = match matching_state endpoint model msg.provider_state with
+          | None -> fields
+          | Some state ->
               (match List.assoc_opt "reasoning_content" state with
-              | Some (`String _ as reasoning) ->
-                  fields @ ["reasoning_content", reasoning]
-              | _ -> fields)
-          | _ -> fields in
+               | Some (`String _ as reasoning) ->
+                   fields @ ["reasoning_content", reasoning]
+               | _ -> fields) in
         `Assoc fields
-    | _ -> json in
+    | json -> json in
   let fields = ["model", `String model;
-    "messages", Protocol.chat_messages_to_json ~serialize:message messages;
+    "messages", Protocol.chat_messages_to_json ~serialize messages;
     "stream", `Bool false] in
+  let fields = match thinking_enabled thinking with
+    | None -> fields
+    | Some enabled -> fields @ ["enable_thinking", `Bool enabled] in
   `Assoc (if tools = [] then fields else fields @ ["tools", `List tools])
 
-let parse_completion json =
+let parse_completion ~endpoint ~model json =
   let choice = match Protocol.member "choices" json with
-    | `List (choice :: _) -> choice
+    | `List (choice :: _) -> Protocol.member "message" choice
     | _ -> raise (Protocol.Invalid_response "missing Coding Plan choices") in
-  let message = Protocol.member "message" choice in
-  (match Protocol.member "tool_calls" message with
+  (match Protocol.member "tool_calls" choice with
   | `List calls -> List.iter (fun call ->
       let fn = Protocol.member "function" call in
       match Protocol.member "type" call,
@@ -67,8 +94,10 @@ let parse_completion json =
           "invalid Coding Plan function call")) calls
   | _ -> ());
   let result = Protocol.parse_completion json in
-  match Protocol.member "reasoning_content" message with
+  match Protocol.member "reasoning_content" choice with
   | `Null -> result
   | `String reasoning ->
-      { result with provider_state = Some (`Assoc ["reasoning_content", `String reasoning]) }
+      { result with provider_state = Some (`Assoc
+          (state_tag endpoint model @
+            ["reasoning_content", `String reasoning])) }
   | _ -> raise (Protocol.Invalid_response "invalid Coding Plan reasoning_content")
