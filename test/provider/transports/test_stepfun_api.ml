@@ -115,11 +115,13 @@ let () =
       assert (url = Stepfun.models_url);
       assert (headers = ["Authorization", "Bearer " ^ key;
         "Accept", "application/json"]);
-      Ok (200, {|{"object":"list","data":[{"id":"example/available-chat-model","object":"model","created":1700000000,"owned_by":"stepai"},{"id":"stepaudio-2.5-tts","object":"model","created":1700000001,"owned_by":"stepai"},{"id":"example/available-chat-model","object":"model","created":1700000000,"owned_by":"stepai"}]}|}) in
+      Ok (200, {|{"object":"list","data":[{"id":"example/available-chat-model","object":"model","created":1700000000,"owned_by":"stepai"},{"id":"stepaudio-2.5-tts","object":"model","created":1700000001,"owned_by":"stepai"},{"id":"example/second-valid-model","object":"model","created":1700000002,"owned_by":"stepai"}]}|}) in
     (* Neither 'created' nor 'owned_by' classifies modality or tools. The
        official listing also contains speech-only IDs. Keep both uncertain. *)
-    expect_models [model; audio_model] (Stepfun.discover ~http ~api_key:key ());
-    assert (!calls = 1);
+    expect_models [model; audio_model; "example/second-valid-model"]
+      (Stepfun.discover ~http ~api_key:key ());
+    expect_error invalid (Stepfun.parse_models
+      {|{"data":[{"id":"duplicate","object":"model"},{"id":"duplicate","object":"model"}]}|});
     expect_error ((=) Stepfun.Invalid_credential)
       (Stepfun.discover ~http ~api_key:"" ());
     expect_error ((=) Stepfun.Invalid_credential)

@@ -124,8 +124,12 @@ let () =
       assert (url = Zenmux.models_url);
       assert (headers = ["Authorization", "Bearer " ^ key;
         "Accept", "application/json"]);
-      Ok (200, {|{"object":"list","data":[{"id":"example/future-chat-model","object":"model"},{"id":"another/model","object":"model"},{"id":"example/future-chat-model","object":"model"}]}|}) in
-    expect_models [model; "another/model"] (Zenmux.discover ~http ~api_key:key ());
+      Ok (200, {|{"object":"list","data":[{"id":"example/future-chat-model","object":"model"},{"id":"another/model","object":"model"},{"id":"third/model","object":"model"}]}|}) in
+    expect_models [model; "another/model"; "third/model"] (Zenmux.discover ~http ~api_key:key ());
+    expect_error invalid (Zenmux.discover
+      ~http:(fun ~url:_ ~headers:_ -> Ok (200,
+        {|{"object":"list","data":[{"id":"same-model","object":"model"},{"id":"same-model","object":"unsupported"}]}|}))
+      ~api_key:key ());
     assert (!calls = 1);
     expect_error ((=) Zenmux.Invalid_credential)
       (Zenmux.discover ~http ~api_key:"" ());

@@ -46,10 +46,11 @@ let parse_models body =
             | `Assoc fields ->
                 (match List.assoc_opt "id" fields with
                 | Some (`String id) when valid_id id ->
-                    if not (Hashtbl.mem seen id) then (
+                    if Hashtbl.mem seen id then false
+                    else (
                       Hashtbl.add seen id ();
-                      models := id :: !models);
-                    true
+                      models := id :: !models;
+                      true)
                 | _ -> false)
             | _ -> false) rows in
           if valid then Ok (List.rev !models)

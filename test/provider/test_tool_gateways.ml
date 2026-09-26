@@ -13,7 +13,7 @@ let invalid provider body =
   | Ok _ -> failwith ("invalid " ^ provider ^ " model listing accepted")
 
 let check_listing () =
-  let aiml = {|{"object":"list","data":[{"id":"tool/a","type":"openai/chat-completions","capabilities":["tools","streaming"]},{"id":"image/a","type":"openai/image-generations","capabilities":[]},{"id":"chat/no-tools","type":"openai/chat-completions","capabilities":["streaming"]},{"id":"tool/a","type":"openai/chat-completions","capabilities":["tools"]},{"id":"tool/b","type":"openai/chat-completions","capabilities":["tools"]}]}|} in
+  let aiml = {|{"object":"list","data":[{"id":"tool/a","type":"openai/chat-completions","capabilities":["tools","streaming"]},{"id":"image/a","type":"openai/image-generations","capabilities":[]},{"id":"chat/no-tools","type":"openai/chat-completions","capabilities":["streaming"]},{"id":"tool/c","type":"openai/chat-completions","capabilities":["tools"]},{"id":"tool/b","type":"openai/chat-completions","capabilities":["tools"]}]}|} in
   let aiand = {|{"object":"list","data":[{"id":"lab/chat-a","object":"model","capabilities":["reasoning","tool_calling"]},{"id":"lab/no-tools","object":"model","capabilities":["reasoning"]},{"id":"lab/chat-b","object":"model","capabilities":["tool_calling"]}]}|} in
   List.iter (fun (provider, response, expected) ->
     let spec = Option.get (Gateway.find provider) in
@@ -42,7 +42,8 @@ let check_listing () =
      | Error Discovery.Missing_credential -> ()
      | _ -> failwith "credentialless listing allowed");
     (match Discovery.discover ~http:unused ~provider
-      ~credential:(Discovery.Copilot_oauth key) () with
+      ~credential:(Discovery.OAuth { service = "github-copilot";
+        access = key; account_id = None }) () with
      | Error Discovery.Invalid_credential -> ()
      | _ -> failwith "foreign OAuth token accepted");
     (match Discovery.discover ~http:unused ~provider
@@ -57,9 +58,10 @@ let check_listing () =
      | Error (Discovery.Http_error 302) -> ()
      | _ -> failwith "followed untrusted listing redirect");
     expect_models expected (Gateway.parse_models ~provider response)) [
-      "aimlapi", aiml, ["tool/a"; "tool/b"];
+      "aimlapi", aiml, ["tool/a"; "tool/c"; "tool/b"];
       "aiand", aiand, ["lab/chat-a"; "lab/chat-b"] ];
   invalid "aimlapi" {|{"object":"list","data":[{"id":"unknown","type":"openai/chat-completions"}]}|};
+  invalid "aimlapi" {|{"object":"list","data":[{"id":"same","type":"openai/chat-completions","capabilities":["tools"]},{"id":"same","type":"openai/chat-completions","capabilities":["tools"]}]}|};
   invalid "aimlapi" {|{"object":"list","data":[{"id":"unknown","type":"openai/chat-completions","capabilities":[true]}]}|};
   invalid "aimlapi" {|{"object":"list","data":[{"id":"unknown","capabilities":["tools"]}]}|};
   invalid "aiand" {|{"object":"list","data":[{"id":"unknown","capabilities":null}]}|};

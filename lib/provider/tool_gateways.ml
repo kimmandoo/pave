@@ -52,32 +52,33 @@ let parse_models ~provider body =
       | Ok json ->
           (match field "object" json, field "data" json with
           | Some (`String "list"), Some (`List rows) ->
-              let seen = Hashtbl.create 32 in
+              let seen = Hashtbl.create (List.length rows) in
               let rec collect result count = function
                 | [] -> Ok (List.rev result)
                 | _ when count >= 4096 -> Error "too many model rows"
                 | row :: rest ->
                     (match field "id" row with
                     | Some (`String id) when valid_id id ->
-                        let inclusion = match provider with
-                          | "aimlapi" ->
-                              (match field "type" row with
-                              | Some (`String "openai/chat-completions") ->
-                                  capability "tools" row
-                              | Some (`String _) ->
-                                  (match capability "tools" row with
-                                  | Ok _ -> Ok false
-                                  | Error _ as error -> error)
-                              | _ -> Error "missing or malformed model type")
-                          | "aiand" -> capability "tool_calling" row
-                          | _ -> Error "unsupported gateway" in
-                        (match inclusion with
-                        | Error _ as error -> error
-                        | Ok include_row ->
-                            if include_row && not (Hashtbl.mem seen id) then (
-                              Hashtbl.add seen id ();
-                              collect (id :: result) (count + 1) rest)
-                            else collect result (count + 1) rest)
+                        if Hashtbl.mem seen id then Error "duplicate model ID"
+                        else (
+                          Hashtbl.add seen id ();
+                          let inclusion = match provider with
+                            | "aimlapi" ->
+                                (match field "type" row with
+                                | Some (`String "openai/chat-completions") ->
+                                    capability "tools" row
+                                | Some (`String _) ->
+                                    (match capability "tools" row with
+                                    | Ok _ -> Ok false
+                                    | Error _ as error -> error)
+                                | _ -> Error "missing or malformed model type")
+                            | "aiand" -> capability "tool_calling" row
+                            | _ -> Error "unsupported gateway" in
+                          (match inclusion with
+                          | Error _ as error -> error
+                          | Ok include_row ->
+                              collect (if include_row then id :: result else result)
+                                (count + 1) rest))
                     | _ -> Error "missing or invalid model ID") in
               collect [] 0 rows
           | _ -> Error "missing or malformed model data array")

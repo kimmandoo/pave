@@ -103,8 +103,8 @@ let () =
       assert (url = Cloud.tags_url);
       assert (headers = ["Authorization", "Bearer " ^ key;
                          "Accept", "application/json"]);
-      Ok (200, {|{"models":[{"name":"local-alias:cloud","model":"actual-cloud-model:9b"},{"name":"standalone-cloud-model"},{"model":"actual-cloud-model:9b"}]}|}) in
-    expect_models ["actual-cloud-model:9b"; "standalone-cloud-model"]
+      Ok (200, {|{"models":[{"name":"local-alias:cloud","model":"actual-cloud-model:9b"},{"name":"standalone-cloud-model"},{"model":"distinct-cloud-model:4b"}]}|}) in
+    expect_models ["actual-cloud-model:9b"; "standalone-cloud-model"; "distinct-cloud-model:4b"]
       (Cloud.discover ~http ~api_key:key ());
     assert (!calls = 1);
     expect_error ((=) Cloud.Invalid_credential)
@@ -115,6 +115,7 @@ let () =
     List.iter (fun payload ->
       expect_error invalid (Cloud.discover
         ~http:(fun ~url:_ ~headers:_ -> Ok (200, payload)) ~api_key:key ())) [
+      {|{"models":[{"model":"duplicate-cloud-model"},{"name":"duplicate-cloud-model"}]}|};
       {|{"models":[{"model":"illegal:cloud"}]}|};
       {|{"models":[{"model":"bad\nname"}]}|};
       {|{"models":[{"model":null,"name":"fallback"}]}|};

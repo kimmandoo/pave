@@ -114,10 +114,11 @@ let () =
       assert (url = Synthetic.models_url);
       assert (headers = ["Authorization", "Bearer " ^ key;
         "Accept", "application/json"]);
-      Ok (200, {|{"object":"list","data":[{"id":"hf:example-org/chat-model","object":"model"},{"id":"hf:example-org/embedding-model","object":"model"},{"id":"hf:example-org/chat-model","object":"model"}]}|}) in
-    (* /models does not document capability fields, so neither the chat-shaped
-       ID nor the embedding ID can be certified as tool-capable from listing. *)
-    expect_models [model; embedding] (Synthetic.discover ~http ~api_key:key ());
+      Ok (200, {|{"object":"list","data":[{"id":"hf:example-org/chat-model","object":"model"},{"id":"hf:example-org/embedding-model","object":"model"},{"id":"hf:example-org/other-model","object":"model"}]}|}) in
+    (* /models does not document capability fields, so listed IDs cannot be
+       certified as tool-capable from the listing. *)
+    expect_models [model; embedding; "hf:example-org/other-model"]
+      (Synthetic.discover ~http ~api_key:key ());
     assert (!calls = 1);
     expect_error ((=) Synthetic.Invalid_credential)
       (Synthetic.discover ~http ~api_key:"" ());
@@ -129,7 +130,9 @@ let () =
          ~api_key:key ())) [
       {|{"data":[{"id":"bad\nmodel"}]}|};
       {|{"data":[{"id":null}]}|};
-      {|{"data":[{}]}|}; {|{"models":[]}|}; "not json"];
+      {|{"data":[{}]}|};
+      {|{"data":[{"id":"same/model"},{"id":"same/model"}]}|};
+      {|{"models":[]}|}; "not json"];
     expect_error invalid (Synthetic.discover
       ~http:(fun ~url:_ ~headers:_ -> Ok (200,
         String.make (Synthetic.max_response_bytes + 1) 'x')) ~api_key:key ());

@@ -8,15 +8,19 @@ let test_listing () =
     incr calls;
     assert (url = sakana_models_url);
     assert (headers = ["Authorization", "Bearer secret-for-sakana"]);
-    Ok (200, {|{"data":[{"id":"account-enabled-model"},{"id":"other-model"},{"id":"account-enabled-model"}]}|}) in
+    Ok (200, {|{"data":[{"id":"account-enabled-model"},{"id":"other-model"},{"id":"chat-model"}]}|}) in
   assert (discover_sakana ~http ~credential:"secret-for-sakana" () =
-    Ok ["account-enabled-model"; "other-model"]);
+    Ok ["account-enabled-model"; "other-model"; "chat-model"]);
   assert (!calls = 1);
   assert (discover_sakana ~http ~credential:"bad\nInjected: value" () =
     Error Invalid_credential);
   assert (!calls = 1);
   assert (discover_sakana ~http:(fun ~url:_ ~headers:_ ->
     Ok (200, {|{"data":[{"id":"account-enabled-model"},{"id":""}]}|}))
+    ~credential:"secret-for-sakana" () =
+    Error (Invalid_response "invalid model ID"));
+  assert (discover_sakana ~http:(fun ~url:_ ~headers:_ ->
+    Ok (200, {|{"data":[{"id":"same-model"},{"id":"same-model"}]}|}))
     ~credential:"secret-for-sakana" () =
     Error (Invalid_response "invalid model ID"));
   assert (discover_sakana ~http:(fun ~url:_ ~headers:_ ->

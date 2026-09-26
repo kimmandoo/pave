@@ -123,8 +123,9 @@ let () =
       assert (url = Novita.models_url);
       assert (headers = ["Authorization", "Bearer " ^ key;
         "Accept", "application/json"]);
-      Ok (200, {|{"data":[{"id":"example/future-chat-model","object":"model"},{"id":"another/model"},{"id":"example/future-chat-model"}]}|}) in
-    expect_models [model; "another/model"] (Novita.discover ~http ~api_key:key ());
+      Ok (200, {|{"data":[{"id":"example/future-chat-model","object":"model"},{"id":"another/model"},{"id":"third/model"}]}|}) in
+    expect_models [model; "another/model"; "third/model"]
+      (Novita.discover ~http ~api_key:key ());
     assert (!calls = 1);
     expect_error ((=) Novita.Invalid_credential)
       (Novita.discover ~http ~api_key:"" ());
@@ -137,6 +138,7 @@ let () =
       {|{"data":[{"id":"bad\nmodel"}]}|};
       {|{"data":[{"id":null}]}|};
       {|{"data":[{}]}|};
+      {|{"data":[{"id":"same/model"},{"id":"same/model"}]}|};
       {|{"models":[]}|}; "not json"];
     expect_error invalid (Novita.discover
       ~http:(fun ~url:_ ~headers:_ -> Ok (200,

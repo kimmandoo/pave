@@ -28,6 +28,8 @@ let open_view screen ~root =
     let provider = "Default provider: " ^ configured values.default_provider in
     let model = "Default model: " ^ configured values.default_model in
     let api = "Default API: " ^ configured values.default_api in
+    let account = "Default account ID (from sign-in): " ^
+      configured values.default_account_id in
     let shell = "Disable shell tools: " ^ string_of_bool values.disable_shell in
     let turns = "Maximum model turns: " ^
       (match values.max_turns with Some count -> string_of_int count
@@ -35,7 +37,7 @@ let open_view screen ~root =
     let approval_mode = "Approval mode: " ^ mode_name values.approval_mode in
     let tool_approval = "Per-tool approval overrides" in
     match Tui.choose screen ~title:"Project settings · Esc closes"
-      ~choices:[provider; model; api; shell; turns; approval_mode; tool_approval] with
+      ~choices:[provider; model; api; account; shell; turns; approval_mode; tool_approval] with
     | None -> ()
     | Some choice ->
         (if choice = provider then (
@@ -50,7 +52,7 @@ let open_view screen ~root =
                let id = List.assoc selected options in
                save (fun current -> { current with
                  default_provider = Some id; default_model = None;
-                 default_api = None }))
+                 default_api = None; default_account_id = None }))
          else if choice = model then (
            let provider_id = Option.value ~default:"openai"
              values.default_provider in
@@ -73,12 +75,15 @@ let open_view screen ~root =
              ~choices:[] () with
            | None -> ()
            | Some selector ->
-               let descriptor, model, route = Pave.Interaction.resolve_model
+               let descriptor, identity, route = Pave.Interaction.resolve_model
                  ~current_route:route_name
+                 ?current_account_id:values.default_account_id
                  ~current_provider:descriptor.id ~input:selector () in
                save (fun current -> { current with
                  default_provider = Some descriptor.id;
-                 default_model = Some model; default_api = Some route.name }))
+                 default_model = Some identity.upstream_id;
+                 default_api = Some route.name;
+                 default_account_id = identity.account_id }))
          else if choice = api then (
            match values.default_provider with
            | None -> Tui.alert screen "Choose a default provider first"
@@ -92,7 +97,10 @@ let open_view screen ~root =
                    descriptor.routes) with
                 | None -> ()
                 | Some name -> save (fun current ->
-                    { current with default_api = Some name })))
+                    { current with default_api = Some name;
+                      default_model = None; default_account_id = None })))
+         else if choice = account then
+          Tui.alert screen "Account ID comes from provider sign-in; use /setup → Connect account only to change accounts."
          else if choice = shell then
            save (fun current -> { current with
              disable_shell = not current.disable_shell })

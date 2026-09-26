@@ -43,6 +43,7 @@ let parse_models body =
       (match List.assoc_opt "data" fields with
       | Some (`List rows) when List.length rows <= max_models ->
           let seen = Hashtbl.create (List.length rows) in
+          let duplicate = ref false in
           let ids = ref [] in
           let valid = List.for_all (function
             | `Assoc model ->
@@ -51,14 +52,15 @@ let parse_models body =
                   List.assoc_opt "type" model with
                 | Some (`String id), Some (`String "model"),
                     (Some (`String _) | None) when valid_id id ->
-                    if List.assoc_opt "type" model = Some (`String "chat") &&
-                       not (Hashtbl.mem seen id) then (
+                    if Hashtbl.mem seen id then duplicate := true
+                    else (
                       Hashtbl.add seen id ();
-                      ids := id :: !ids);
+                      if List.assoc_opt "type" model = Some (`String "chat") then
+                        ids := id :: !ids);
                     true
                 | _ -> false)
             | _ -> false) rows in
-          if valid then Ok (List.rev !ids)
+          if valid && not !duplicate then Ok (List.rev !ids)
           else Error (Invalid_response "invalid Qianfan model object")
       | Some (`List _) -> Error (Invalid_response "too many Qianfan models")
       | _ -> Error (Invalid_response "missing data array"))

@@ -5,6 +5,7 @@ let prompt = "  ❯ "
 
 type candidate = {
   value : string;
+  label : string;
   custom : bool;
   verified : bool;
   listed : bool;
@@ -20,6 +21,8 @@ type chooser = {
   allow_custom : bool;
   dynamic : bool;
   mutable status : string option;
+  mutable status_pages : string array;
+  mutable status_page : int;
   mutable filter : string;
   mutable selected : int;
   mutable offset : int;
@@ -218,16 +221,17 @@ let matches chooser =
   | Some (filter, found) when filter = chooser.filter -> found
   | _ ->
       let query = String.lowercase_ascii chooser.filter in
+      let includes text =
+        let value = String.lowercase_ascii text in
+        let n = String.length value and m = String.length query in
+        let rec find pos =
+          pos + m <= n &&
+          (String.sub value pos m = query || find (pos + 1)) in
+        find 0 in
       let found = ref [] in
       Array.iter (fun item ->
-        let value = item.value in
-        let n = String.length value and m = String.length query in
-        let rec at pos j =
-          j = m || (Char.lowercase_ascii value.[pos + j] = query.[j]
-            && at pos (j + 1)) in
-        let rec find pos =
-          pos + m <= n && (at pos 0 || find (pos + 1)) in
-        if find 0 then found := item :: !found) chooser.choices;
+        if includes item.value || includes item.label then
+          found := item :: !found) chooser.choices;
       let found = List.rev !found in
       let manual =
         chooser.allow_custom &&
@@ -236,8 +240,8 @@ let matches chooser =
         String.contains chooser.filter '/' &&
         not (List.exists (fun item -> item.value = chooser.filter) found) in
       let found = Array.of_list (if manual then
-        { value = chooser.filter; custom = true; verified = false;
-          listed = false; detail = None } :: found
+        { value = chooser.filter; label = chooser.filter; custom = true;
+          verified = false; listed = false; detail = None } :: found
         else found) in
       chooser.filtered <- Some (chooser.filter, found);
       found
@@ -253,7 +257,7 @@ let candidate_label ?(columns = 80) chooser item =
     else if item.verified then "[verified] "
     else if item.listed then "[listed · API unverified] "
     else "[suggested] " in
-  source ^ sanitize item.value
+  source ^ sanitize item.label
 
 let view_height t =
   let _, rows = Notty_unix.Term.size t.term in
@@ -400,8 +404,17 @@ let paint t =
         let found = matches chooser in
         let count = Array.length found in
         chooser.selected <- max 0 (min (count - 1) chooser.selected);
-        let status_prefix = "  ◦  " in
-        let status_lines = match chooser.status with
+        let status_prefix = "  · " in
+        let status_text = match chooser.status_pages with
+          | [||] -> chooser.status
+          | pages ->
+              let summary = Option.value ~default:"" chooser.status in
+              let detail = Printf.sprintf "Provider status %d/%d: %s"
+                (chooser.status_page + 1) (Array.length pages)
+                pages.(chooser.status_page) in
+              Some (if summary = "" then detail
+                else summary ^ " · " ^ detail) in
+        let status_lines = match status_text with
           | Some status when body_height >= 3 ->
               wrap_chooser_text
                 ~columns:(max 1 (cols - measure_text status_prefix))
@@ -495,20 +508,23 @@ let paint t =
         let status = match chooser.status with
           | Some text when body_height < 3 -> " · " ^ single_line text
           | _ -> "" in
+        let status_page = if Array.length chooser.status_pages = 0 then ""
+          else Printf.sprintf " · Tab status %d/%d"
+            (chooser.status_page + 1) (Array.length chooser.status_pages) in
         if body_height < 2 then (
           let label = if Array.length found = 0 then "(no match)"
             else candidate_label ~columns:cols chooser found.(chooser.selected) in
-          Printf.sprintf "  %d/%d %s · %s select · Esc cancel%s"
-            number (Array.length found) label enter_key status)
+          Printf.sprintf "  %d/%d %s · %s select · Esc cancel%s%s"
+            number (Array.length found) label enter_key status status_page)
         else if cols < 55 then
-          Printf.sprintf "  %d/%d · %s select · Esc cancel%s"
-            number (Array.length found) enter_key status
+          Printf.sprintf "  %d/%d · %s select · Esc cancel%s%s"
+            number (Array.length found) enter_key status status_page
         else if cols < 75 then
-          Printf.sprintf "  %d/%d · ↑↓ move · %s select · Esc cancel%s"
-            number (Array.length found) enter_key status
+          Printf.sprintf "  %d/%d · ↑↓ move · %s select · Esc cancel%s%s"
+            number (Array.length found) enter_key status status_page
         else
-          Printf.sprintf "  %d/%d · ↑↓/PgUp/PgDn move · %s select · Esc cancel%s"
-            number (Array.length found) enter_key status
+          Printf.sprintf "  %d/%d · ↑↓/PgUp/PgDn move · %s select · Esc cancel%s%s"
+            number (Array.length found) enter_key status status_page
     | None when hint_height > 0 ->
         let selected = List.nth hints t.hint_selected in
         let label = selected.name ^ " · " ^ selected.summary in
@@ -1125,7 +1141,8 @@ let read ?wake_fd ?on_wake ?on_interrupt ?on_dequeue ?on_completion t =
 
 (* Update live choices only on the UI thread; preserve an explicit selection
    while fresh provider IDs arrive. Listing alone does not verify an API route. *)
-let update_chooser chooser ~verified ~listed ~details ~status =
+let update_chooser ?(status_pages = []) chooser ~verified ~listed ~details
+    ~labels ~status =
   let previous = matches chooser in
   let selected = if chooser.selected < Array.length previous then
       Some previous.(chooser.selected).value else None in
@@ -1136,13 +1153,19 @@ let update_chooser chooser ~verified ~listed ~details ~status =
   let annotations = Hashtbl.create (List.length details) in
   List.iter (fun (value, detail) ->
     Hashtbl.replace annotations value detail) details;
+  let display_labels = Hashtbl.create (List.length labels) in
+  List.iter (fun (value, label) ->
+    Hashtbl.replace display_labels value label) labels;
   let seen = Hashtbl.create
     (Array.length chooser.suggestions + List.length verified + List.length listed) in
   let choices = ref [] in
   let add value =
     if not (Hashtbl.mem seen value) then (
       Hashtbl.add seen value ();
-      choices := { value; custom = false;
+      choices := { value;
+        label = Option.value ~default:value
+          (Hashtbl.find_opt display_labels value);
+        custom = false;
         verified = Hashtbl.mem confirmed value;
         listed = Hashtbl.mem discovered value;
         detail = Hashtbl.find_opt annotations value } :: !choices) in
@@ -1155,6 +1178,9 @@ let update_chooser chooser ~verified ~listed ~details ~status =
   chooser.choices <- Array.of_list (List.rev !choices);
   chooser.filtered <- None;
   chooser.status <- Option.map sanitize status;
+  chooser.status_pages <- Array.of_list (List.map sanitize status_pages);
+  chooser.status_page <- min chooser.status_page
+    (max 0 (Array.length chooser.status_pages - 1));
   let found = matches chooser in
   chooser.selected <- (if (verified <> [] || listed <> []) && chooser.filter = "" &&
     not chooser.touched then 0
@@ -1167,10 +1193,12 @@ let update_chooser chooser ~verified ~listed ~details ~status =
     | None -> 0);
   chooser.offset <- min chooser.offset chooser.selected
 
-let update_choices t ~verified ?(listed = []) ?(details = []) ?status () =
+let update_choices t ~verified ?(listed = []) ?(details = []) ?(labels = [])
+    ?(status_pages = []) ~status () =
   match t.chooser with
   | Some chooser when chooser.dynamic ->
-      update_chooser chooser ~verified ~listed ~details ~status;
+      update_chooser chooser ~verified ~listed ~details ~labels ~status
+        ~status_pages;
       paint t
   | _ -> invalid_arg "Tui.update_choices: no dynamic chooser is open"
 
@@ -1185,10 +1213,11 @@ let choose ?(allow_custom = false) ?(intro = []) ?(plain = [])
   let chooser = { title = sanitize title;
     intro = Array.of_list (List.map sanitize intro); plain; suggestions;
     choices = Array.map (fun value ->
-      { value; custom = false; verified = false; listed = false;
+      { value; label = value; custom = false; verified = false; listed = false;
         detail = None }) suggestions;
     allow_custom; dynamic = Option.value dynamic
       ~default:(Option.is_some wake_fd); status = initial_status;
+    status_pages = [||]; status_page = 0;
     filter = ""; selected = 0; offset = 0; touched = false;
     filtered = None } in
   let old_scroll = t.scroll in
@@ -1220,6 +1249,10 @@ let choose ?(allow_custom = false) ?(intro = []) ?(plain = [])
       | `Paste `Start -> t.paste <- true; loop ()
       | `Paste `End -> t.paste <- false; paint t; loop ()
       | `Key (`Escape, _) when not t.paste -> None
+      | `Key (`Tab, _) when Array.length chooser.status_pages > 1 ->
+          chooser.status_page <- (chooser.status_page + 1) mod
+            Array.length chooser.status_pages;
+          paint t; loop ()
       | `Key (`ASCII 'C', [ `Ctrl ]) when not t.paste -> None
       | `Key (`Enter, _) when not t.paste ->
           (match selected () with Some _ as choice -> choice | None -> loop ())

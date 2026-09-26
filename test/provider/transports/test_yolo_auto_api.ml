@@ -107,10 +107,14 @@ let () =
       incr calls;
       assert (url = Yolo.models_url);
       assert (List.mem ("Authorization", "Bearer " ^ key) headers);
-      Ok (200, {|{"object":"list","data":[{"id":"example/new-chat-model"},{"id":"example/unknown-model"},{"id":"example/new-chat-model"}]}|}) in
+      Ok (200, {|{"object":"list","data":[{"id":"example/new-chat-model"},{"id":"example/unknown-model"},{"id":"example/third-model"}]}|}) in
     (match Yolo.discover ~http ~api_key:key () with
-     | Ok ids when ids = [model; other_model] -> ()
+     | Ok ids when ids = [model; other_model; "example/third-model"] -> ()
      | _ -> fail "authenticated model listing failed");
+    expect_error invalid (Yolo.discover
+      ~http:(fun ~url:_ ~headers:_ -> Ok (200,
+        {|{"object":"list","data":[{"id":"same-model"},{"id":"same-model","object":"unsupported"}]}|}))
+      ~api_key:key ());
     assert (!calls = 1);
     List.iter (fun api_key -> expect_error ((=) Yolo.Invalid_credential)
       (Yolo.discover ~http ~api_key ())) [""; "bad\r\nInjected: true"];

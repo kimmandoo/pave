@@ -113,10 +113,14 @@ let () =
       incr calls;
       assert (url = Xiaomi.models_url);
       assert (headers = ["api-key", key; "Accept", "application/json"]);
-      Ok (200, {|{"object":"list","data":[{"id":"example/new-chat-model","object":"model","owned_by":"xiaomi"},{"id":"example/speech-only-model","object":"model","owned_by":"xiaomi"},{"id":"example/new-chat-model","object":"model","owned_by":"xiaomi"}]}|}) in
+      Ok (200, {|{"object":"list","data":[{"id":"example/new-chat-model","object":"model","owned_by":"xiaomi"},{"id":"example/speech-only-model","object":"model","owned_by":"xiaomi"},{"id":"example/third-model","object":"model","owned_by":"xiaomi"}]}|}) in
     (match Xiaomi.discover ~http ~api_key:key () with
-     | Ok ids when ids = [model; speech_model] -> ()
+     | Ok ids when ids = [model; speech_model; "example/third-model"] -> ()
      | _ -> fail "authenticated model listing failed");
+    expect_error invalid (Xiaomi.discover
+      ~http:(fun ~url:_ ~headers:_ -> Ok (200,
+        {|{"object":"list","data":[{"id":"same-model","object":"model"},{"id":"same-model","object":"unsupported"}]}|}))
+      ~api_key:key ());
     assert (!calls = 1);
     List.iter (fun api_key ->
       expect_error ((=) Xiaomi.Invalid_credential)

@@ -825,14 +825,16 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage 
         (fun (entry : Devin_api.model) -> entry.id = config.model) models with
         | Some model -> model
         | None -> raise (Provider_error "Devin model is not in this account's live roster") in
-      if tools <> [] && not selected.supports_tools then
-        raise (Provider_error "selected Devin model does not support tools");
+      if tools <> [] && selected.supports_tools <> Some true then
+        raise (Provider_error
+          "selected Devin model does not report tool support");
       let cascade_id = try Devin_api.cascade_id messages
         with Devin_api.Bad_wire reason -> raise (Provider_error reason) in
       let reply, usage = try (match Devin_api.complete ?cancel ~api_key
         ~model:selected.id ~cascade_id ~router:selected.router
-        ~max_tokens:selected.max_tokens
-        ~supports_parallel_tool_calls:selected.supports_parallel_tool_calls
+        ~max_tokens:(Option.value ~default:64000 selected.max_tokens)
+        ~supports_parallel_tool_calls:(Option.value ~default:false
+          selected.supports_parallel_tool_calls)
         messages tools with
         | Ok completion -> completion
         | Error Devin_api.Invalid_credential ->

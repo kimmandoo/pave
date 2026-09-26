@@ -37,11 +37,16 @@ let () =
     Unix.rmdir workspace; Unix.rmdir user_dir; Unix.rmdir user_home;
     Unix.rmdir base) (fun () ->
     write (Filename.concat user_dir "settings.json")
-      {|{"default_provider":"openai","default_model":"gpt-6-sol","default_api":"responses","disable_shell":true,"max_turns":12,"tools":{"approvalMode":"yolo","approval":{"write_file":"deny","run_command":"allow"},"commandPatterns":[{"match":"rm -rf *","approval":"deny"}]}}|};
+      {|{"default_provider":"openai","default_model":"gpt-6-sol","default_api":"responses","default_account_id":"account-1","disable_shell":true,"max_turns":12,"tools":{"approvalMode":"yolo","approval":{"write_file":"deny","run_command":"allow"},"commandPatterns":[{"match":"rm -rf *","approval":"deny"}]}}|};
     let inherited = Pave.Settings.load ~root:workspace in
     assert (inherited.values.default_model = Some "gpt-6-sol");
     assert (inherited.values.default_api = Some "responses");
-    assert (inherited.values.disable_shell);
+    assert (inherited.values.default_account_id = Some "account-1");
+    let orphan_account = try
+      ignore (Pave.Settings.parse {|{"default_account_id":"account-1"}|});
+      false
+    with Invalid_argument _ -> true in
+    assert orphan_account;
     assert (inherited.values.max_turns = Some 12);
     assert (inherited.values.approval_mode = Some Pave.Approval.Auto_all);
     assert (List.assoc "write_file" inherited.values.tool_approval =
@@ -55,7 +60,7 @@ let () =
     assert (project.values.default_provider = Some "anthropic");
     assert (project.values.default_model = None);
     assert (project.values.default_api = None);
-    assert (project.values.max_turns = Some 6);
+    assert (project.values.default_account_id = None);
     assert (project.values.disable_shell);
     assert (project.values.approval_mode = Some Pave.Approval.Ask_exec);
     assert (List.assoc "write_file" project.values.tool_approval =
@@ -80,11 +85,14 @@ let () =
     Sys.remove project_file;
     ignore (Pave.Settings.update_user (fun current ->
       { current with default_provider = Some "ollama";
-        default_model = Some "llama3.2"; default_api = Some "chat" }));
+        default_model = Some "llama3.2"; default_api = Some "chat";
+        default_account_id = Some "local-profile" }));
     assert ((Pave.Settings.load ~root:workspace).values.default_provider =
       Some "ollama");
     assert ((Pave.Settings.load ~root:workspace).values.default_api =
       Some "chat");
+    assert ((Pave.Settings.load ~root:workspace).values.default_account_id =
+      Some "local-profile");
     assert ((Pave.Settings.load ~root:workspace).values.disable_shell);
     assert ((Pave.Settings.load ~root:workspace).values.max_turns = Some 12);
     Pave.Setup_state.mark Pave.Setup_state.Complete;

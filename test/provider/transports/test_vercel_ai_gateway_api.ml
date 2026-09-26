@@ -96,8 +96,15 @@ let () =
     let http ~url ~headers =
       assert (url = Gateway.models_url);
       assert (List.mem ("Authorization", "Bearer " ^ key) headers);
-      Ok (200, {|{"data":[{"id":"future-vercel-provider/future-model"},{"id":"future-vercel-provider/future-model"}]}|}) in
-    assert (Gateway.discover ~http ~api_key:key () = Ok [model]);
+      Ok (200, {|{"data":[{"id":"future-vercel-provider/future-model"},{"id":"future-vercel-provider/other-model"}]}|}) in
+    assert (Gateway.discover ~http ~api_key:key () =
+      Ok [model; "future-vercel-provider/other-model"]);
+    (match Gateway.discover
+      ~http:(fun ~url:_ ~headers:_ -> Ok (200,
+        {|{"data":[{"id":"future-vercel-provider/future-model"},{"id":"future-vercel-provider/future-model"}]}|}))
+      ~api_key:key () with
+     | Error (Gateway.Invalid_response _) -> ()
+     | _ -> fail "duplicate Vercel model ID accepted");
     assert (Gateway.discover ~http ~api_key:"invalid\nkey" () = Error Gateway.Invalid_credential);
     assert (Gateway.discover ~http:(fun ~url:_ ~headers:_ -> Ok (302, "redirect"))
       ~api_key:key () = Error (Gateway.Http_error 302));

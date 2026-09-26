@@ -174,9 +174,13 @@ let () =
         supported_endpoints = ["/chat/completions"; "/responses"]};
         {Command.id = "mystery-model"; name = "Messages model";
           context_length = None; supported_endpoints = ["/messages"]}]);
+    (match Command.discover ~api_key:key ~http:(fun ~url:_ ~headers:_ ->
+      Ok (200, {|{"object":"list","data":[{"id":"repeated","name":"First","supported_endpoints":["/chat/completions"]},{"id":"repeated","name":"Second","supported_endpoints":["/messages"]}]}|})) () with
+    | Error (Command.Invalid_response _) -> ()
+    | _ -> fail "duplicate Command Code model IDs accepted");
     let listing_started_at = Unix.gettimeofday () in
     let listing = match Pave.Model_discovery.discover
-        ~provider:"commandcode"
+        ~provider:"commandcode" ~route_name:"chat"
         ~credential:(Pave.Model_discovery.Api_key key)
         ~http:(fun ~url ~headers ->
           assert (url = Command.models_url);
@@ -186,20 +190,21 @@ let () =
       | Ok listing -> listing
       | Error _ -> fail "provider listing capability metadata was lost" in
     let listing_finished_at = Unix.gettimeofday () in
-    assert (listing.models = [
-      { Pave.Model_discovery.id = "claude-impostor";
-        name = Some "Chat model"; context_window_tokens = Some 120000;
-        provider_tokenizer = None; native_compaction_supported = None;
-        supported_endpoints = Some ["/chat/completions"; "/responses"] };
-      { Pave.Model_discovery.id = "mystery-model";
-        name = Some "Messages model"; context_window_tokens = None;
-        provider_tokenizer = None; native_compaction_supported = None;
-        supported_endpoints = Some ["/messages"] }]);
-    assert (listing.source.kind = Pave.Model_discovery.Provider_listing &&
-      listing.source.provider = "commandcode" &&
+    assert (List.map (fun (model : Pave.Model_catalog.model) ->
+      model.identity.provider, model.identity.route, model.identity.account_id,
+      model.identity.upstream_id, model.display_name,
+      model.capabilities.context_window_tokens,
+      model.capabilities.supported_endpoints) listing.models = [
+        "commandcode", "chat", None, "claude-impostor", Some "Chat model",
+          Some 120000, Some ["/chat/completions"; "/responses"];
+        "commandcode", "chat", None, "mystery-model", Some "Messages model",
+          None, Some ["/messages"] ]);
+    let retrieved_at = Option.get listing.source.retrieved_at in
+    assert (listing.source.id_source =
+      Pave.Model_catalog.Pinned_account_listing &&
       listing.source.endpoint = Some Command.models_url &&
-      listing.source.retrieved_at >= listing_started_at &&
-      listing.source.retrieved_at <= listing_finished_at);
+      retrieved_at >= listing_started_at &&
+      retrieved_at <= listing_finished_at);
     let chat_model = List.hd listing.models in
     let messages_model = List.nth listing.models 1 in
     assert (Pave.Model_discovery.model_supports_endpoint

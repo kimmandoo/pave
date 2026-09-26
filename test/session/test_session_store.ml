@@ -1,5 +1,8 @@
 let child = Filename.concat
 
+let model_identity provider route upstream_id =
+  Pave.Model_identity.make ~provider ~route ~upstream_id ()
+
 let rec remove path =
   match Unix.lstat path with
   | { Unix.st_kind = Unix.S_DIR; _ } ->
@@ -48,7 +51,7 @@ let () =
     let first = Store.create ~root in
     let second = Store.create ~root in
     assert (first.Pave.Session.path <> second.Pave.Session.path);
-    Pave.Session.set_model first ~provider:"ollama" ~model:"fixture";
+    Pave.Session.set_model first (model_identity "ollama" "chat" "fixture");
     let prompt = "Fix SwiftUI navigation\027[31m\226\128\174spoof" in
     ignore (Pave.Session.append first (Pave.Protocol.user prompt));
     ignore (Pave.Session.append second (Pave.Protocol.user "Inspect Android lifecycle"));
@@ -64,7 +67,8 @@ let () =
     invalid (fun () -> Store.open_existing ~root:other first.path);
     let reopened = Store.open_existing ~root first.path in
     assert (Pave.Session.history reopened = [Pave.Protocol.user prompt]);
-    assert (Pave.Session.model reopened = Some ("ollama", "fixture"));
+    assert (Pave.Session.model reopened = Some
+      (model_identity "ollama" "chat" "fixture"));
     Store.set_title ~root first "Release review";
     assert ((Store.search ~root "release" |> List.map
       (fun (item : Store.recent) -> item.path)) = [first.path]);

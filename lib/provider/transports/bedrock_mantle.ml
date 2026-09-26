@@ -66,12 +66,13 @@ let parse_models json =
           | `String id when id <> "" && String.length id <= 256 &&
               String.for_all (fun c -> Char.code c > 32 && Char.code c < 127) id -> id
           | _ -> invalid "invalid model ID" in
+        if Hashtbl.mem seen id then invalid "duplicate model ID";
+        Hashtbl.add seen id ();
         let available = match Protocol.member "status" row with
           | `Null | `String "available" -> true
           | `String "unavailable" -> false
           | _ -> invalid "invalid model status" in
-        if available && not (Hashtbl.mem seen id) then (
-          Hashtbl.add seen id ();
-          collect (id :: result) rest)
-        else collect result rest in
+        if available then collect (id :: result) rest
+        else collect result rest
+  in
   collect [] rows

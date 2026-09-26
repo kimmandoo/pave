@@ -28,9 +28,8 @@ let summary (entry : Session.entry) =
   match entry.kind with
   | Session.Branch -> "branch point"
   | Session.Compaction _ -> "compacted context"
-  | Session.Model { provider; model; api } ->
-      "model · " ^ first_line (provider ^
-        (match api with None -> "" | Some api -> "@" ^ api) ^ "/" ^ model)
+  | Session.Model identity ->
+      "model · " ^ first_line (Model_identity.selector identity)
   | Session.Thinking level ->
       "thinking · " ^ Option.value ~default:"default" level
   | Session.Tool_selection disabled ->

@@ -18,7 +18,7 @@ type kind =
       summary : string; first_kept_id : string;
       provider_state : Yojson.Basic.t option
     }
-  | Model of { provider : string; model : string; api : string option }
+  | Model of Model_identity.t
   | Thinking of string option
   | Tool_selection of string list
   | Mode_change of Approval.mode option
@@ -70,6 +70,14 @@ let timestamp () =
 
 let option_json = function None -> `Null | Some text -> `String text
 
+let model_identity_json (identity : Model_identity.t) =
+  `Assoc [
+    "provider", `String identity.provider;
+    "accountId", option_json identity.account_id;
+    "route", `String identity.route;
+    "upstreamId", `String identity.upstream_id;
+  ]
+
 let new_header ?parent_session cwd =
   `Assoc [ "type", `String "session"; "version", `Int 1;
            "id", `String (fresh_id ()); "timestamp", `String (timestamp ());
@@ -101,9 +109,8 @@ let entry_json entry =
                          "firstKeptEntryId", `String first_kept_id ] @
         (match provider_state with
          | None -> [] | Some state -> ["providerState", state]))
-  | Model { provider; model; api } ->
-      `Assoc (fields @ ["provider", `String provider; "model", `String model] @
-        (match api with None -> [] | Some api -> ["api", `String api]))
+  | Model identity ->
+      `Assoc (fields @ ["identity", model_identity_json identity])
   | Thinking level ->
       `Assoc (fields @ ["thinkingLevel", option_json level])
   | Tool_selection disabled ->
@@ -187,6 +194,46 @@ let valid_text_field limit text =
   text <> "" && String.length text <= limit &&
   not (String.exists (fun char ->
     let code = Char.code char in code < 32 || code = 127) text)
+let parse_model_identity json =
+  let fields = match json with
+    | `Assoc fields -> fields
+    | _ -> invalid "invalid model identity" in
+  let names = List.map fst fields in
+  let allowed = ["provider"; "accountId"; "route"; "upstreamId"] in
+  if List.length names <> List.length (List.sort_uniq String.compare names) then
+    invalid "duplicate model identity field";
+  List.iter (fun name ->
+    if not (List.mem name allowed) then invalid "unknown model identity field")
+    names;
+  let field name = match List.assoc_opt name fields with
+    | Some value -> value
+    | None -> invalid "missing model identity field" in
+  let text name = match field name with
+    | `String value when valid_model_field value -> value
+    | _ -> invalid "invalid model identity field" in
+  let provider = text "provider" and route = text "route"
+  and upstream_id = text "upstreamId" in
+  let account_id = match field "accountId" with
+    | `Null -> None
+    | `String value when valid_model_field value -> Some value
+    | _ -> invalid "invalid model identity account ID" in
+  try Model_identity.make ~provider ?account_id ~route ~upstream_id ()
+  with Invalid_argument _ -> invalid "invalid model identity"
+
+let legacy_model_identity provider model api =
+  let route = match api with
+    | `String route when valid_model_field route -> route
+    | `Null ->
+        (match Provider_catalog.find provider with
+         | Some descriptor ->
+             Option.fold ~none:"legacy-unscoped"
+               ~some:(fun route -> route.Provider_catalog.name)
+               (Provider_catalog.route descriptor "")
+         | None -> "legacy-unscoped")
+    | _ -> invalid "invalid legacy model route" in
+  try Model_identity.make ~provider ~route ~upstream_id:model ()
+  with Invalid_argument _ -> invalid "invalid legacy model identity"
+
 
 let parse_optional_text get name limit =
   match get name with
@@ -262,16 +309,15 @@ let parse_entry json =
                  | `Null -> None | value -> Some value) }
          | _ -> invalid "invalid compaction")
     | `String "model" ->
-        (match get "provider", get "model", get "api" with
-         | `String provider, `String model, (`Null | `String _ as api)
-           when valid_model_field provider && valid_model_field model &&
-             (match api with
-              | `Null -> true
-              | `String name -> valid_model_field name
-              | _ -> false) ->
-             Model { provider; model;
-               api = (match api with `String name -> Some name | _ -> None) }
-         | _ -> invalid "invalid model selection")
+        (match get "identity" with
+         | `Assoc _ as identity -> Model (parse_model_identity identity)
+         | `Null ->
+             (match get "provider", get "model", get "api" with
+              | `String provider, `String model, (`Null | `String _ as api)
+                when valid_model_field provider && valid_model_field model ->
+                  Model (legacy_model_identity provider model api)
+              | _ -> invalid "invalid model selection")
+         | _ -> invalid "invalid model identity")
     | `String "thinking_level_change" ->
         Thinking (parse_optional_text get "thinkingLevel" 32)
     | `String "tool_selection" ->
@@ -363,17 +409,10 @@ let latest_value entries select initial =
 
 let model_at t leaf =
   latest_value (branch_entries_at t leaf) (function
-    | Model { provider; model; _ } -> Some (Some (provider, model))
+    | Model identity -> Some (Some identity)
     | _ -> None) None
 
 let model t = model_at t t.leaf
-
-let api_at t leaf =
-  latest_value (branch_entries_at t leaf) (function
-    | Model { api; _ } -> Some api
-    | _ -> None) None
-
-let api t = api_at t t.leaf
 
 let thinking_at t leaf =
   latest_value (branch_entries_at t leaf) (function
@@ -661,14 +700,18 @@ let record_exit t ~kind =
     Some (append_entry t (Session_exit { kind; pending_tool_calls })).id
   else None
 
-let set_model ?api t ~provider ~model:selected =
-  if not (valid_model_field provider && valid_model_field selected) ||
-     not (Option.fold ~none:true ~some:valid_model_field api) then
-    invalid "invalid model selection";
-  let selection = Model { provider; model = selected; api } in
-  if model t <> Some (provider, selected) || api_at t t.leaf <> api then (
+let set_model t (identity : Model_identity.t) =
+  let normalized =
+    try Model_identity.make ~provider:identity.provider
+      ?account_id:identity.account_id ~route:identity.route
+      ~upstream_id:identity.upstream_id ()
+    with Invalid_argument _ -> invalid "invalid model selection" in
+  (match Provider_catalog.find normalized.provider with
+   | Some descriptor when Provider_catalog.route descriptor normalized.route <> None -> ()
+   | _ -> invalid "model selection uses an unsupported provider route");
+  if model t <> Some normalized then (
     let entry = { id = fresh_id (); parent_id = t.leaf;
-      timestamp = timestamp (); kind = selection } in
+      timestamp = timestamp (); kind = Model normalized } in
     append_line t (entry_json entry);
     t.records_rev <- entry :: t.records_rev;
     Hashtbl.add t.by_id entry.id entry;
