@@ -898,9 +898,16 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage 
        | _ -> ());
       reply
   | Anthropic_messages ->
+      let allow_compaction = authentication = Api_key &&
+        config.endpoint = "https://api.anthropic.com/v1/messages" in
+      let compaction_beta = allow_compaction &&
+        Anthropic_wire.requires_compaction_beta ~model:config.model messages in
       let body = parse (fun () ->
-        Anthropic_wire.request ~model:config.model ~max_tokens:4096 messages tools) in
+        Anthropic_wire.request ~allow_compaction
+          ~model:config.model ~max_tokens:4096 messages tools) in
       let headers = [ "anthropic-version: 2023-06-01" ] @
+        (if compaction_beta then
+          ["anthropic-beta: " ^ Anthropic_wire.compaction_beta] else []) @
         (match authentication with
          | Api_key ->
              if api_key = "" then [] else [ "x-api-key: " ^ api_key ]
@@ -1157,6 +1164,40 @@ type native_compaction = {
   summary : string;
   provider_state : Yojson.Basic.t;
 }
+let compact_anthropic_messages ?(authentication = Api_key) ?resolve_credential
+    ?cancel ?on_usage config ~instructions ~messages ~tools =
+  if config.api <> Anthropic_messages || authentication <> Api_key then
+    raise (Provider_error "native compaction requires the Anthropic Messages API-key route");
+  if config.endpoint <> "https://api.anthropic.com/v1/messages" then
+    raise (Provider_error
+      "native compaction requires the official Anthropic Messages endpoint");
+  if config.model = "" then raise (Provider_error "empty Anthropic model");
+  reject_controls "model" config.model;
+  let credential = match resolve_credential with
+    | Some resolve -> resolve ()
+    | None -> { access = config.api_key; account_id = None; residency = None } in
+  let api_key = credential.access in
+  reject_controls "API key" api_key;
+  if api_key = "" then raise (Provider_error "missing Anthropic API key");
+  check_cancel cancel;
+  let body = Anthropic_wire.compaction_request ~model:config.model
+    ~max_tokens:4096 ~instructions messages tools in
+  let headers = [
+    "anthropic-version: 2023-06-01";
+    "anthropic-beta: " ^ Anthropic_wire.compaction_beta;
+    "x-api-key: " ^ api_key ] in
+  let json = post_json ?cancel ~endpoint:config.endpoint ~headers
+    ~secret:api_key body in
+  let content, signature =
+    Anthropic_wire.parse_compaction_response json in
+  check_cancel cancel;
+  (match on_usage, Anthropic_wire.usage json with
+   | Some report, Some usage -> report usage
+   | _ -> ());
+  { summary = content;
+    provider_state = Anthropic_wire.compaction_state ~model:config.model
+      ~content ~signature }
+
 
 let compact_openai_responses ?(authentication = Api_key) ?resolve_credential
     ?cancel ?on_usage config ~instructions messages =

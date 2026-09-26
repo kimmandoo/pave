@@ -14,6 +14,45 @@ type error =
   | Transport_error of string
   | Http_error of int
   | Invalid_response of string
+type model = {
+  id : string;
+  name : string option;
+  (* Provider-reported metadata; never inferred from a model identifier. *)
+  context_window_tokens : int option;
+  (* Descriptive provider metadata only; the local budget remains a byte proxy. *)
+  provider_tokenizer : string option;
+  native_compaction_supported : bool option;
+  supported_endpoints : string list option;
+}
+
+type source_kind = Provider_listing
+
+type source = {
+  kind : source_kind;
+  provider : string;
+  endpoint : string option;
+  retrieved_at : float;
+}
+
+type listing = {
+  models : model list;
+  source : source;
+}
+
+let model_ids listing = List.map (fun model -> model.id) listing.models
+let model_supports_endpoint ~provider (model : model) ~endpoint =
+  let advertised_endpoint = match provider, endpoint with
+    | "commandcode", value when value = Commandcode_api.chat_url ->
+        "/chat/completions"
+    | "commandcode", value when value = Commandcode_api.messages_url ->
+        "/messages"
+    | "commandcode", value when value = Commandcode_api.responses_url ->
+        "/responses"
+    | _ -> endpoint in
+  match model.supported_endpoints with
+  | None -> true
+  | Some endpoints -> List.mem advertised_endpoint endpoints
+ 
 
 type http = url:string -> headers:(string * string) list ->
   (int * string, error) result
@@ -36,6 +75,7 @@ let copilot_url = "https://api.githubcopilot.com/models"
 let openrouter_url = "https://openrouter.ai/api/v1/models/user"
 let anthropic_url = "https://api.anthropic.com/v1/models"
 let deepseek_url = "https://api.deepseek.com/models"
+
 let groq_url = "https://api.groq.com/openai/v1/models"
 let mistral_url = "https://api.mistral.ai/v1/models"
 let together_url = "https://api.together.ai/v1/models"
@@ -118,7 +158,33 @@ let id_field field row = match extract_field field row with
   | Some (`String value) -> checked_id value
   | _ -> invalid ("missing " ^ field ^ " model ID")
 
-let rec collect_rows ~id ~include_row rows = match rows with
+let positive_integer_field field row = match extract_field field row with
+  | Some (`Int value) when value > 0 -> Some value
+  | _ -> None
+
+let capability_supported = function
+  | Some (`Assoc fields) ->
+      (match List.assoc_opt "supported" fields with
+       | Some (`Bool value) -> Some value
+       | _ -> None)
+  | _ -> None
+
+let anthropic_compaction_supported row =
+  match extract_field "capabilities" row with
+  | Some capabilities ->
+      (match capability_supported (extract_field "compaction" capabilities) with
+       | Some false -> Some false
+       | Some true ->
+           (match extract_field "summarize"
+               (Option.value ~default:`Null
+                 (extract_field "compaction" capabilities)) with
+            | Some (`Assoc _ as summarize) ->
+                capability_supported (Some summarize)
+            | _ -> None)
+       | None -> None)
+  | None -> None
+
+let rec collect_rows ~provider ~id ~include_row rows = match rows with
   | [] -> Ok []
   | row :: rest ->
       (match id_field id row with
@@ -127,9 +193,34 @@ let rec collect_rows ~id ~include_row rows = match rows with
           (match include_row row with
           | Error _ as error -> error
           | Ok include_it ->
-              match collect_rows ~id ~include_row rest with
+              match collect_rows ~provider ~id ~include_row rest with
               | Error _ as error -> error
-              | Ok names -> Ok (if include_it then name :: names else names)))
+              | Ok models ->
+                  if not include_it then Ok models
+                  else
+                    let context_window_tokens =
+                      if provider = "google" then
+                        positive_integer_field "inputTokenLimit" row
+                      else if provider = "anthropic" then
+                        positive_integer_field "max_input_tokens" row
+                      else None in
+                    let native_compaction_supported =
+                      if provider = "anthropic" then
+                        anthropic_compaction_supported row
+                      else None in
+                    let display_name = if provider = "anthropic" then
+                      match extract_field "display_name" row with
+                      | Some (`String value) when value <> "" &&
+                          String.length value <= 256 &&
+                          not (String.exists (fun c ->
+                            Char.code c < 32 || Char.code c = 127) value) ->
+                          Some value
+                      | _ -> None
+                    else None in
+                    Ok ({ id = name; name = display_name; context_window_tokens;
+                      provider_tokenizer = None; native_compaction_supported;
+                      supported_endpoints = None }
+                      :: models)))
 
 let include_all _ = Ok true
 
@@ -206,11 +297,11 @@ let include_fireworks row =
       Ok (available &&
         String.starts_with ~prefix:"accounts/fireworks/models/" name)
   | _ -> invalid "missing Fireworks model resource name"
-let add_unique seen result ids =
-  List.iter (fun id -> if not (Hashtbl.mem seen id) then (
-    Hashtbl.add seen id (); result := id :: !result)) ids
+let add_unique seen result models =
+  List.iter (fun (model : model) -> if not (Hashtbl.mem seen model.id) then (
+    Hashtbl.add seen model.id (); result := model :: !result)) models
 
-let discover_codex ?http ?cancel credential =
+let discover_codex_models ?http ?cancel credential =
   let auth = match credential with
     | None -> Error Missing_credential
     | Some (Codex_oauth (access, account)) ->
@@ -277,8 +368,16 @@ let discover_codex ?http ?cancel credential =
                                               ["hide"; "hidden"]
                                         | _ -> false in
                                       if not hidden && not (Hashtbl.mem seen name)
-                                      then (Hashtbl.add seen name ();
-                                        result := name :: !result);
+                                      then (
+                                        Hashtbl.add seen name ();
+                                        let context_window_tokens =
+                                          positive_integer_field "context_window" row in
+                                        result := { id = name; name = None;
+                                          context_window_tokens;
+                                          provider_tokenizer = None;
+                                          native_compaction_supported = None;
+                                          supported_endpoints = None }
+                                          :: !result);
                                       collect tail)
                               | _ -> invalid "missing slug or id model ID") in
                         collect rows) in
@@ -541,7 +640,36 @@ let discover_synthetic ?http ?cancel credential =
   | Some _ -> Error Invalid_credential
 
 (* Vendor adapters own their pinned URL, key policy, response schema and
-   model-kind filter. This bridge only translates shared HTTP/cancel errors. *)
+   model-kind filter. This bridge translates shared HTTP/cancel errors while
+   preserving the adapter's model payload. *)
+let run_native_discovery ?http ?cancel ?(public = false) credential
+    ~discover ~map_http_error ~map_api_error =
+  let api_key = match credential with
+    | None when public -> Ok ""
+    | None -> Error Missing_credential
+    | Some (Api_key key) -> Ok key
+    | Some _ -> Error Invalid_credential in
+  match api_key with
+  | Error _ as failure -> failure
+  | Ok key ->
+      let source = match http with
+        | Some callback -> callback
+        | None -> fun ~url ~headers -> default_http ?cancel ~url ~headers () in
+      let http ~url ~headers = match source ~url ~headers with
+        | Ok response -> Ok response
+        | Error failure -> Error (map_http_error failure) in
+      (try
+         Provider.check_cancel cancel;
+         let result = discover ~http ~api_key:key () in
+         Provider.check_cancel cancel;
+         match result with
+         | Ok models -> Ok models
+         | Error failure -> Error (map_api_error failure)
+       with
+       | Provider.Cancelled -> raise Provider.Cancelled
+       | Provider.Provider_error _ | Unix.Unix_error _ | Sys_error _ ->
+           Error (Transport_error "request failed or timed out"))
+
 module Native_discovery (M : sig
   type error =
     | Invalid_credential
@@ -553,39 +681,22 @@ module Native_discovery (M : sig
       (int * string, error) result) ->
     api_key:string -> unit -> (string list, error) result
 end) = struct
+  let map_http_error = function
+    | Invalid_credential -> M.Invalid_credential
+    | Http_error status -> M.Http_error status
+    | Invalid_response reason -> M.Invalid_response reason
+    | Unsupported_provider _ | Missing_credential | Transport_error _ ->
+        M.Transport_error
+
+  let map_api_error = function
+    | M.Invalid_credential -> Invalid_credential
+    | M.Transport_error -> Transport_error "request failed or timed out"
+    | M.Http_error status -> Http_error status
+    | M.Invalid_response reason -> Invalid_response reason
+
   let discover ?http ?cancel ?(public = false) credential =
-    let api_key = match credential with
-      | None when public -> Ok ""
-      | None -> Error Missing_credential
-      | Some (Api_key key) -> Ok key
-      | Some _ -> Error Invalid_credential in
-    match api_key with
-    | Error _ as failure -> failure
-    | Ok key ->
-        let source = match http with
-          | Some callback -> callback
-          | None -> fun ~url ~headers -> default_http ?cancel ~url ~headers () in
-        let http ~url ~headers = match source ~url ~headers with
-          | Ok response -> Ok response
-          | Error Invalid_credential -> Error M.Invalid_credential
-          | Error (Http_error status) -> Error (M.Http_error status)
-          | Error (Invalid_response reason) -> Error (M.Invalid_response reason)
-          | Error _ -> Error M.Transport_error in
-        (try
-           Provider.check_cancel cancel;
-           let result = M.discover ~http ~api_key:key () in
-           Provider.check_cancel cancel;
-           match result with
-           | Ok ids -> Ok ids
-           | Error M.Invalid_credential -> Error Invalid_credential
-           | Error M.Transport_error ->
-               Error (Transport_error "request failed or timed out")
-           | Error (M.Http_error status) -> Error (Http_error status)
-           | Error (M.Invalid_response reason) -> Error (Invalid_response reason)
-         with
-         | Provider.Cancelled -> raise Provider.Cancelled
-         | Provider.Provider_error _ | Unix.Unix_error _ | Sys_error _ ->
-             Error (Transport_error "request failed or timed out"))
+    run_native_discovery ?http ?cancel ~public credential
+      ~discover:M.discover ~map_http_error ~map_api_error
 end
 
 module Zenmux_discovery = Native_discovery (Zenmux_api)
@@ -599,17 +710,26 @@ module Opencode_go_discovery = Native_discovery (Opencode_go_api)
 module Yolo_auto_discovery = Native_discovery (Yolo_auto_api)
 module Meta_discovery = Native_discovery (Meta_api)
 module Vercel_ai_gateway_discovery = Native_discovery (Vercel_ai_gateway_api)
-module Commandcode_discovery = Native_discovery (struct
-  type error = Commandcode_api.error =
-    | Invalid_credential
-    | Transport_error
-    | Http_error of int
-    | Invalid_response of string
-  let discover ~http ~api_key () =
-    Result.map
-      (List.map (fun (model : Commandcode_api.model) -> model.id))
-      (Commandcode_api.discover ~http ~api_key ())
-end)
+
+module Commandcode_listing_discovery = struct
+  let map_http_error = function
+    | Invalid_credential -> Commandcode_api.Invalid_credential
+    | Http_error status -> Commandcode_api.Http_error status
+    | Invalid_response reason -> Commandcode_api.Invalid_response reason
+    | Unsupported_provider _ | Missing_credential | Transport_error _ ->
+        Commandcode_api.Transport_error
+
+  let map_api_error = function
+    | Commandcode_api.Invalid_credential -> Invalid_credential
+    | Commandcode_api.Transport_error ->
+        Transport_error "request failed or timed out"
+    | Commandcode_api.Http_error status -> Http_error status
+    | Commandcode_api.Invalid_response reason -> Invalid_response reason
+
+  let discover ?http ?cancel credential =
+    run_native_discovery ?http ?cancel credential
+      ~discover:Commandcode_api.discover ~map_http_error ~map_api_error
+end
 
 let discover_charm ?http ?cancel credential =
   match credential with
@@ -640,117 +760,25 @@ let discover_charm ?http ?cancel credential =
        | Provider.Provider_error _ | Unix.Unix_error _ | Sys_error _ ->
            Error (Transport_error "request failed or timed out"))
 
-let discover ?http ?cancel ~provider ?credential () =
-  if Local_compat.engine provider <> None then
-    discover_local ?http ?cancel ~provider credential
-  else if provider = "amazon-bedrock" then
-    discover_bedrock ?http ?cancel credential
-  else if provider = "bedrock-mantle" then
-    discover_mantle ?http ?cancel credential
-  else if provider = "ollama-cloud" then
-    discover_ollama_cloud ?http ?cancel credential
-  else if provider = "xai" then
-    discover_xai ?http ?cancel credential
-  else if provider = "nvidia" then
-    discover_nvidia ?http ?cancel credential
-  else if provider = "stepfun" then
-    discover_stepfun ?http ?cancel credential
-  else if provider = "synthetic" then
-    discover_synthetic ?http ?cancel credential
-  else if provider = "zenmux" then
-    Zenmux_discovery.discover ?http ?cancel credential
-  else if provider = "wafer-serverless" then
-    Wafer_discovery.discover ?http ?cancel credential
-  else if provider = "qianfan" then
-    Qianfan_discovery.discover ?http ?cancel credential
-  else if provider = "xiaomi" then
-    Xiaomi_discovery.discover ?http ?cancel credential
-  else if provider = "kilo" then
-    Kilo_discovery.discover ?http ?cancel ~public:true credential
-  else if provider = "singularityapi-dev" then
-    Singularity_dev_discovery.discover ?http ?cancel credential
-  else if provider = "opencode-zen" then
-    Opencode_zen_discovery.discover ?http ?cancel ~public:true credential
-  else if provider = "opencode-go" then
-    Opencode_go_discovery.discover ?http ?cancel ~public:true credential
-  else if provider = "charm-hyper" then
-    discover_charm ?http ?cancel credential
-  else if provider = "yolo-auto" then
-    Yolo_auto_discovery.discover ?http ?cancel credential
-  else if provider = "meta" then
-    Meta_discovery.discover ?http ?cancel credential
-  else if provider = "vercel-ai-gateway" then
-    Vercel_ai_gateway_discovery.discover ?http ?cancel credential
-  else if provider = "commandcode" then
-    Commandcode_discovery.discover ?http ?cancel credential
-  else if provider = "devin" then (
-    match credential with
-    | None -> Error Missing_credential
-    | Some (Api_key key) ->
-        if http <> None then
-          Error (Invalid_response "Devin model discovery uses its native protobuf transport")
-        else (match (try Devin_api.discover ?cancel ~api_key:key ()
-          with Devin_binary_http.Cancelled -> raise Provider.Cancelled) with
-           | Ok rows -> Ok (List.map (fun (model : Devin_api.model) -> model.id) rows)
-           | Error Devin_api.Invalid_credential -> Error Invalid_credential
-           | Error Devin_api.Transport_error ->
-               Error (Transport_error "Devin Connect request failed")
-           | Error (Devin_api.Http_error status) -> Error (Http_error status)
-           | Error (Devin_api.Invalid_response reason) ->
-               Error (Invalid_response reason))
-    | Some _ -> Error Invalid_credential)
-  else if provider = "openai-codex" then discover_codex ?http ?cancel credential
-  else if provider = "sakana" then (
-    let credential = match credential with
-      | None -> Error Missing_credential
-      | Some (Api_key key) -> Ok key
-      | Some _ -> Error Invalid_credential in
-    match credential with
-    | Error _ as failure -> failure
-    | Ok key ->
-        let http = Option.map (fun http ~url ~headers ->
-          match http ~url ~headers with
-          | Ok value -> Ok value
-          | Error Invalid_credential -> Error Sakana_api.Invalid_credential
-          | Error (Http_error status) -> Error (Sakana_api.Http_error status)
-          | Error (Invalid_response reason) ->
-              Error (Sakana_api.Invalid_response reason)
-          | Error _ -> Error Sakana_api.Transport_error) http in
-        (match Sakana_api.discover_sakana ?http ?cancel ~credential:key () with
-        | Ok ids -> Ok ids
-        | Error Sakana_api.Invalid_credential -> Error Invalid_credential
-        | Error Sakana_api.Transport_error ->
-            Error (Transport_error "request failed or timed out")
-        | Error (Sakana_api.Http_error status) -> Error (Http_error status)
-        | Error (Sakana_api.Invalid_response reason) ->
-            Error (Invalid_response reason)))
-  else if Tool_gateways.find provider <> None then (
-    let spec = Option.get (Tool_gateways.find provider) in
-    match credential with
-    | None -> Error Missing_credential
-    | Some (Api_key key) when valid_secret key ->
-        let headers = ["Authorization", "Bearer " ^ key] in
-        let http = match http with
-          | Some http -> http
-          | None -> fun ~url ~headers -> default_http ?cancel ~url ~headers () in
-        (try
-          Provider.check_cancel cancel;
-          let result = http ~url:spec.models_url ~headers in
-          Provider.check_cancel cancel;
-          match result with
-          | Error failure -> Error failure
-          | Ok (status, _) when status < 200 || status >= 300 ->
-              Error (Http_error status)
-          | Ok (_, body) ->
-              (match Tool_gateways.parse_models ~provider body with
-              | Ok ids -> Ok ids
-              | Error reason -> Error (Invalid_response reason))
-         with
-         | Provider.Cancelled -> raise Provider.Cancelled
-         | Provider.Provider_error _ | Unix.Unix_error _ | Sys_error _ ->
-             Error (Transport_error "request failed or timed out"))
-    | Some _ -> Error Invalid_credential)
-  else
+
+let discover_devin_models ?http ?cancel credential =
+  match credential with
+  | None -> Error Missing_credential
+  | Some (Api_key key) ->
+      if http <> None then
+        Error (Invalid_response "Devin model discovery uses its native protobuf transport")
+      else (match (try Devin_api.discover ?cancel ~api_key:key ()
+        with Devin_binary_http.Cancelled -> raise Provider.Cancelled) with
+       | Ok rows -> Ok rows
+       | Error Devin_api.Invalid_credential -> Error Invalid_credential
+       | Error Devin_api.Transport_error ->
+           Error (Transport_error "Devin Connect request failed")
+       | Error (Devin_api.Http_error status) -> Error (Http_error status)
+       | Error (Devin_api.Invalid_response reason) ->
+           Error (Invalid_response reason))
+  | Some _ -> Error Invalid_credential
+
+let discover_generic_models ?http ?cancel ~provider ?credential () =
   let target = match provider with
     | "openai" -> Some (openai_url, "data", "id", include_all)
     | "google" -> Some (google_url, "models", "name", include_gemini)
@@ -814,7 +842,8 @@ let discover ?http ?cancel ~provider ?credential () =
                "gmi-cloud" | "moonshot"), Some key ->
                 ["Authorization", "Bearer " ^ key]
             | "anthropic", Some key ->
-                ["x-api-key", key; "anthropic-version", "2023-06-01"]
+                ["x-api-key", key; "anthropic-version", "2023-06-01";
+                 "anthropic-beta", "compact-2026-09-04"]
             | "github-copilot", Some key ->
                 ["Authorization", "Bearer " ^ key;
                  "User-Agent", "copilot/1.0.82";
@@ -864,10 +893,12 @@ let discover ?http ?cancel ~provider ?credential () =
                       else listing field json) with
                       | Error _ as failure -> failure
                       | Ok rows ->
-                          match collect_rows ~id ~include_row rows with
+                          match collect_rows ~provider ~id ~include_row rows with
                           | Error _ as failure -> failure
-                          | Ok ids ->
-                              add_unique seen result ids;
+                          | Ok models ->
+                              let ids = List.map
+                                (fun (model : model) -> model.id) models in
+                              add_unique seen result models;
                               if provider = "anthropic" then
                                 (match extract_field "has_more" json with
                                 | Some (`Bool false) -> Ok (List.rev !result)
@@ -908,3 +939,146 @@ let discover ?http ?cancel ~provider ?credential () =
           try pages 0 None with
           | Provider.Provider_error _ | Unix.Unix_error _ | Sys_error _ ->
               Error (Transport_error "request failed or timed out"))
+let discover_ids ?http ?cancel ~provider ?credential () =
+  if Local_compat.engine provider <> None then
+    discover_local ?http ?cancel ~provider credential
+  else if provider = "amazon-bedrock" then
+    discover_bedrock ?http ?cancel credential
+  else if provider = "bedrock-mantle" then
+    discover_mantle ?http ?cancel credential
+  else if provider = "ollama-cloud" then
+    discover_ollama_cloud ?http ?cancel credential
+  else if provider = "xai" then
+    discover_xai ?http ?cancel credential
+  else if provider = "nvidia" then
+    discover_nvidia ?http ?cancel credential
+  else if provider = "stepfun" then
+    discover_stepfun ?http ?cancel credential
+  else if provider = "synthetic" then
+    discover_synthetic ?http ?cancel credential
+  else if provider = "zenmux" then
+    Zenmux_discovery.discover ?http ?cancel credential
+  else if provider = "wafer-serverless" then
+    Wafer_discovery.discover ?http ?cancel credential
+  else if provider = "qianfan" then
+    Qianfan_discovery.discover ?http ?cancel credential
+  else if provider = "xiaomi" then
+    Xiaomi_discovery.discover ?http ?cancel credential
+  else if provider = "kilo" then
+    Kilo_discovery.discover ?http ?cancel ~public:true credential
+  else if provider = "singularityapi-dev" then
+    Singularity_dev_discovery.discover ?http ?cancel credential
+  else if provider = "opencode-zen" then
+    Opencode_zen_discovery.discover ?http ?cancel ~public:true credential
+  else if provider = "opencode-go" then
+    Opencode_go_discovery.discover ?http ?cancel ~public:true credential
+  else if provider = "charm-hyper" then
+    discover_charm ?http ?cancel credential
+  else if provider = "yolo-auto" then
+    Yolo_auto_discovery.discover ?http ?cancel credential
+  else if provider = "meta" then
+    Meta_discovery.discover ?http ?cancel credential
+  else if provider = "vercel-ai-gateway" then
+    Vercel_ai_gateway_discovery.discover ?http ?cancel credential
+  else if provider = "devin" then
+    Result.map (List.map (fun (model : Devin_api.model) -> model.id))
+      (discover_devin_models ?http ?cancel credential)
+  else if provider = "openai-codex" then
+    Result.map (List.map (fun (model : model) -> model.id))
+      (discover_codex_models ?http ?cancel credential)
+  else if provider = "sakana" then (
+    let credential = match credential with
+      | None -> Error Missing_credential
+      | Some (Api_key key) -> Ok key
+      | Some _ -> Error Invalid_credential in
+    match credential with
+    | Error _ as failure -> failure
+    | Ok key ->
+        let http = Option.map (fun http ~url ~headers ->
+          match http ~url ~headers with
+          | Ok value -> Ok value
+          | Error Invalid_credential -> Error Sakana_api.Invalid_credential
+          | Error (Http_error status) -> Error (Sakana_api.Http_error status)
+          | Error (Invalid_response reason) ->
+              Error (Sakana_api.Invalid_response reason)
+          | Error _ -> Error Sakana_api.Transport_error) http in
+        (match Sakana_api.discover_sakana ?http ?cancel ~credential:key () with
+        | Ok ids -> Ok ids
+        | Error Sakana_api.Invalid_credential -> Error Invalid_credential
+        | Error Sakana_api.Transport_error ->
+            Error (Transport_error "request failed or timed out")
+        | Error (Sakana_api.Http_error status) -> Error (Http_error status)
+        | Error (Sakana_api.Invalid_response reason) ->
+            Error (Invalid_response reason)))
+  else if Tool_gateways.find provider <> None then (
+    let spec = Option.get (Tool_gateways.find provider) in
+    match credential with
+    | None -> Error Missing_credential
+    | Some (Api_key key) when valid_secret key ->
+        let headers = ["Authorization", "Bearer " ^ key] in
+        let http = match http with
+          | Some http -> http
+          | None -> fun ~url ~headers -> default_http ?cancel ~url ~headers () in
+        (try
+          Provider.check_cancel cancel;
+          let result = http ~url:spec.models_url ~headers in
+          Provider.check_cancel cancel;
+          match result with
+          | Error failure -> Error failure
+          | Ok (status, _) when status < 200 || status >= 300 ->
+              Error (Http_error status)
+          | Ok (_, body) ->
+              (match Tool_gateways.parse_models ~provider body with
+              | Ok ids -> Ok ids
+              | Error reason -> Error (Invalid_response reason))
+         with
+         | Provider.Cancelled -> raise Provider.Cancelled
+         | Provider.Provider_error _ | Unix.Unix_error _ | Sys_error _ ->
+             Error (Transport_error "request failed or timed out"))
+    | Some _ -> Error Invalid_credential)
+  else
+    Result.map (List.map (fun (model : model) -> model.id))
+      (discover_generic_models ?http ?cancel ~provider ?credential ())
+let discover ?http ?cancel ~provider ?credential () =
+  let models = if provider = "commandcode" then
+      Result.map (List.map (fun (model : Commandcode_api.model) ->
+        { id = model.id;
+          name = Some model.name;
+          context_window_tokens = model.context_length;
+          provider_tokenizer = None;
+          native_compaction_supported = None;
+          supported_endpoints = Some model.supported_endpoints }))
+        (Commandcode_listing_discovery.discover ?http ?cancel credential)
+    else if provider = "devin" then
+      Result.map (List.map (fun (model : Devin_api.model) ->
+        { id = model.id;
+          name = Some model.name;
+          context_window_tokens = model.context_window_tokens;
+          provider_tokenizer = model.tokenizer_type;
+          native_compaction_supported = None;
+          supported_endpoints = None }))
+        (discover_devin_models ?http ?cancel credential)
+  else if provider = "openai-codex" then
+    discover_codex_models ?http ?cancel credential
+  else if provider = "google" || provider = "anthropic" then
+    discover_generic_models ?http ?cancel ~provider ?credential ()
+  else
+    Result.map (List.map (fun id ->
+      { id; name = None; context_window_tokens = None;
+        provider_tokenizer = None; native_compaction_supported = None;
+        supported_endpoints = None }))
+      (discover_ids ?http ?cancel ~provider ?credential ()) in
+  Result.map (fun models ->
+    { models;
+      source = {
+        kind = Provider_listing;
+        provider;
+        endpoint = (match provider with
+          | "commandcode" -> Some Commandcode_api.models_url
+          | "devin" -> Some Devin_api.models_url
+          | "google" -> Some google_url
+          | "anthropic" -> Some anthropic_url
+          | _ -> None);
+        retrieved_at = Unix.gettimeofday ();
+      };
+    }) models

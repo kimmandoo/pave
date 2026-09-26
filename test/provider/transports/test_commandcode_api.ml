@@ -174,6 +174,44 @@ let () =
         supported_endpoints = ["/chat/completions"; "/responses"]};
         {Command.id = "mystery-model"; name = "Messages model";
           context_length = None; supported_endpoints = ["/messages"]}]);
+    let listing_started_at = Unix.gettimeofday () in
+    let listing = match Pave.Model_discovery.discover
+        ~provider:"commandcode"
+        ~credential:(Pave.Model_discovery.Api_key key)
+        ~http:(fun ~url ~headers ->
+          assert (url = Command.models_url);
+          assert (List.mem ("Authorization", "Bearer " ^ key) headers);
+          Ok (200, {|{"object":"list","data":[{"id":"claude-impostor","name":"Chat model","context_length":120000,"supported_endpoints":["/chat/completions","/responses"]},{"id":"mystery-model","name":"Messages model","supported_endpoints":["/messages"]}]}|}))
+        () with
+      | Ok listing -> listing
+      | Error _ -> fail "provider listing capability metadata was lost" in
+    let listing_finished_at = Unix.gettimeofday () in
+    assert (listing.models = [
+      { Pave.Model_discovery.id = "claude-impostor";
+        name = Some "Chat model"; context_window_tokens = Some 120000;
+        provider_tokenizer = None; native_compaction_supported = None;
+        supported_endpoints = Some ["/chat/completions"; "/responses"] };
+      { Pave.Model_discovery.id = "mystery-model";
+        name = Some "Messages model"; context_window_tokens = None;
+        provider_tokenizer = None; native_compaction_supported = None;
+        supported_endpoints = Some ["/messages"] }]);
+    assert (listing.source.kind = Pave.Model_discovery.Provider_listing &&
+      listing.source.provider = "commandcode" &&
+      listing.source.endpoint = Some Command.models_url &&
+      listing.source.retrieved_at >= listing_started_at &&
+      listing.source.retrieved_at <= listing_finished_at);
+    let chat_model = List.hd listing.models in
+    let messages_model = List.nth listing.models 1 in
+    assert (Pave.Model_discovery.model_supports_endpoint
+      ~provider:"commandcode" chat_model ~endpoint:Command.chat_url);
+    assert (Pave.Model_discovery.model_supports_endpoint
+      ~provider:"commandcode" chat_model ~endpoint:Command.responses_url);
+    assert (not (Pave.Model_discovery.model_supports_endpoint
+      ~provider:"commandcode" chat_model ~endpoint:Command.messages_url));
+    assert (Pave.Model_discovery.model_supports_endpoint
+      ~provider:"commandcode" messages_model ~endpoint:Command.messages_url);
+    assert (not (Pave.Model_discovery.model_supports_endpoint
+      ~provider:"commandcode" messages_model ~endpoint:Command.responses_url));
     assert (Command.discover ~api_key:"bad\nheader" ~http:(fun ~url:_ ~headers:_ ->
       fail "invalid key reached discovery executor") () = Error Command.Invalid_credential);
     expect_invalid (fun () -> Command.parse_messages_completion ~model

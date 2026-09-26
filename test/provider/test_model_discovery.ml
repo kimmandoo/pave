@@ -1,8 +1,9 @@
 module Discovery = Pave.Model_discovery
-
 let expect_models expected = function
-  | Ok models when models = expected -> ()
-  | Ok models -> failwith ("unexpected models: " ^ String.concat ", " models)
+  | Ok listing when Discovery.model_ids listing = expected -> ()
+  | Ok listing ->
+      failwith ("unexpected models: " ^
+        String.concat ", " (Discovery.model_ids listing))
   | Error failure -> failwith (Discovery.message failure)
 
 let expect_error check = function
@@ -26,6 +27,7 @@ let fixed_http expected_url expected_headers response =
 
 let () =
   let open Discovery in
+
   let openai_key = "private-openai" and gemini_key = "private-gemini" in
   let github_token = "ghu_private-oauth" in
   let openai_headers = ["Authorization", "Bearer " ^ openai_key] in
@@ -90,13 +92,25 @@ let () =
     assert (headers = gemini_headers);
     if !calls = 1 then (
       assert (url = google_url);
-      Ok (200, {|{"models":[{"name":"models/gemini-2.5-pro","supportedGenerationMethods":["generateContent"]},{"name":"models/text-embedding-004","supportedGenerationMethods":["embedContent"]}],"nextPageToken":"next /?"}|}))
+      Ok (200, {|{"models":[{"name":"models/gemini-2.5-pro","inputTokenLimit":131072,"supportedGenerationMethods":["generateContent"]},{"name":"models/text-embedding-004","supportedGenerationMethods":["embedContent"]}],"nextPageToken":"next /?"}|}))
     else (
       assert (!calls = 2);
       assert (url = google_url ^ "?pageToken=next%20%2F%3F");
-      Ok (200, {|{"models":[{"name":"models/gemini-2.5-pro","supportedGenerationMethods":["generateContent"]},{"name":"models/gemini-2.5-flash","supportedGenerationMethods":["generateContent"]}]}|})) in
-  expect_models ["models/gemini-2.5-pro"; "models/gemini-2.5-flash"]
-    (discover ~http ~provider:"google" ~credential:(Api_key gemini_key) ());
+      Ok (200, {|{"models":[{"name":"models/gemini-2.5-pro","inputTokenLimit":999999,"supportedGenerationMethods":["generateContent"]},{"name":"models/gemini-2.5-flash","inputTokenLimit":65536,"supportedGenerationMethods":["generateContent"]}]}|})) in
+  let google_listing = match
+      discover ~http ~provider:"google" ~credential:(Api_key gemini_key) () with
+    | Ok listing -> listing
+    | Error failure -> failwith (message failure) in
+  assert (model_ids google_listing =
+    ["models/gemini-2.5-pro"; "models/gemini-2.5-flash"]);
+  assert (google_listing.models = [
+    { id = "models/gemini-2.5-pro"; name = None;
+      context_window_tokens = Some 131072; provider_tokenizer = None;
+      native_compaction_supported = None; supported_endpoints = None };
+    { id = "models/gemini-2.5-flash"; name = None;
+      context_window_tokens = Some 65536; provider_tokenizer = None;
+      native_compaction_supported = None; supported_endpoints = None }]);
+  assert (google_listing.source.endpoint = Some google_url);
   assert (!calls = 2);
   let router_key = "sk-or-fixture" in
   let router_headers = ["Authorization", "Bearer " ^ router_key] in
@@ -258,19 +272,35 @@ let () =
       "deepinfra", deepinfra_url;
       "fireworks", fireworks_first;
       "baseten", baseten_url ];
-  let headers = ["x-api-key", key; "anthropic-version", "2023-06-01"] in
+  let headers = ["x-api-key", key; "anthropic-version", "2023-06-01";
+    "anthropic-beta", "compact-2026-09-04"] in
   let calls = ref 0 in
   let http ~url ~headers:actual =
     incr calls;
     assert (actual = headers);
     if !calls = 1 then (
       assert (url = anthropic_url ^ "?limit=100");
-      Ok (200, {|{"data":[{"id":"future-Claude/1"},{"id":"next/?"}],"has_more":true,"last_id":"next/?"}|}))
+      Ok (200, {|{"data":[{"id":"future-Claude/1","display_name":"Claude Future 1","max_input_tokens":200000,"capabilities":{"compaction":{"supported":true,"summarize":{"supported":true}}}},{"id":"next/?"}],"has_more":true,"last_id":"next/?"}|}))
     else (
       assert (url = anthropic_url ^ "?limit=100&after_id=next%2F%3F");
-      Ok (200, {|{"data":[{"id":"future-Claude/2"},{"id":"future-Claude/1"}],"has_more":false,"last_id":"future-Claude/1"}|})) in
-  expect_models ["future-Claude/1"; "next/?"; "future-Claude/2"]
-    (discover ~http ~provider:"anthropic" ~credential:(Api_key key) ());
+      Ok (200, {|{"data":[{"id":"future-Claude/2","display_name":"Claude Future 2","max_input_tokens":196000,"capabilities":{"compaction":{"supported":false}}},{"id":"future-Claude/1","max_input_tokens":999999,"capabilities":{"compaction":{"supported":true,"summarize":{"supported":true}}}}],"has_more":false,"last_id":"future-Claude/1"}|})) in
+  let anthropic_listing = match
+      discover ~http ~provider:"anthropic" ~credential:(Api_key key) () with
+    | Ok listing -> listing
+    | Error failure -> failwith (message failure) in
+  assert (model_ids anthropic_listing =
+    ["future-Claude/1"; "next/?"; "future-Claude/2"]);
+  assert (anthropic_listing.models = [
+    { id = "future-Claude/1"; name = Some "Claude Future 1";
+      context_window_tokens = Some 200000; provider_tokenizer = None;
+      native_compaction_supported = Some true; supported_endpoints = None };
+    { id = "next/?"; name = None; context_window_tokens = None;
+      provider_tokenizer = None; native_compaction_supported = None;
+      supported_endpoints = None };
+    { id = "future-Claude/2"; name = Some "Claude Future 2";
+      context_window_tokens = Some 196000; provider_tokenizer = None;
+      native_compaction_supported = Some false; supported_endpoints = None }]);
+  assert (anthropic_listing.source.endpoint = Some anthropic_url);
   assert (!calls = 2);
   let http, _ = fixed_http (anthropic_url ^ "?limit=100") headers
     (Ok (200, {|{"data":[{"id":"partial"}],"has_more":true,"last_id":"mismatch"}|})) in
@@ -299,10 +329,21 @@ let () =
     "version", "0.155.1";
     "Accept", "application/json" ] in
   let http, calls = fixed_http (List.hd codex_urls) codex_headers
-    (Ok (200, {|{"models":[{"slug":"gpt-6-sol"},{"slug":"internal","visibility":"hide"},{"id":"gpt-5.1-codex"},{"slug":"gpt-6-sol"}]}|})) in
-  expect_models ["gpt-6-sol"; "gpt-5.1-codex"]
-    (discover ~http ~provider:"openai-codex"
-      ~credential:codex_credential ());
+    (Ok (200, {|{"models":[{"slug":"gpt-6-sol","context_window":196608},{"slug":"internal","visibility":"hide","context_window":1000000},{"id":"gpt-5.1-codex"},{"slug":"gpt-6-sol","context_window":999999}]}|})) in
+  let codex_listing = match
+      discover ~http ~provider:"openai-codex"
+        ~credential:codex_credential () with
+    | Ok listing -> listing
+    | Error failure -> failwith (message failure) in
+  assert (model_ids codex_listing = ["gpt-6-sol"; "gpt-5.1-codex"]);
+  assert (codex_listing.models = [
+    { id = "gpt-6-sol"; name = None; context_window_tokens = Some 196608;
+      provider_tokenizer = None; native_compaction_supported = None;
+      supported_endpoints = None };
+    { id = "gpt-5.1-codex"; name = None; context_window_tokens = None;
+      provider_tokenizer = None; native_compaction_supported = None;
+      supported_endpoints = None }]);
+  assert (codex_listing.source.provider = "openai-codex");
   assert (!calls = 1);
   let calls = ref 0 in
   let http ~url ~headers =

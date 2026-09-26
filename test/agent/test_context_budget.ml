@@ -24,6 +24,21 @@ let () =
   assert (with_image.unmeasured_images = 1);
   assert (status ~window_tokens:100_000 ~reserve_tokens:4096 with_image =
     Images_unmeasured);
+  let small_image = { image with attachments = [{
+    Pave.Protocol.name = "fixture.png"; mime_type = "image/png";
+    data = "aGVsbG8=" }] } in
+  let large_image = { small_image with attachments = [{
+    Pave.Protocol.name = "fixture.png"; mime_type = "image/png";
+    data = "a" ^ String.make 4096 'b' }] } in
+  let small_bytes =
+    (request ~system:"system" ~messages:[small_image] ~tools:[]).estimated_bytes in
+  let large_bytes =
+    (request ~system:"system" ~messages:[large_image] ~tools:[]).estimated_bytes in
+  assert (large_bytes - small_bytes =
+    String.length (List.hd large_image.attachments).data -
+    String.length (List.hd small_image.attachments).data);
+  assert ((request ~system:"system" ~messages:[large_image] ~tools:[])
+    .unmeasured_images = 1);
   assert (status ~window_tokens:8192 ~reserve_tokens:4096
     { with_image with estimated_bytes = 4097 } = Over_budget);
   let long_text = String.make 1500 'x' in

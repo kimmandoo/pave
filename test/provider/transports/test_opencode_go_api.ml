@@ -164,8 +164,9 @@ let () =
       Unix.rmdir directory) (fun () ->
       Unix.putenv "PATH" (directory ^ ":" ^ old_path);
       Unix.putenv "PAVE_OPENCODE_GO_FIXTURE_STATE" state;
-      let discovered = match Pave.Model_discovery.discover
-        ~provider:"opencode-go" ~credential:(Pave.Model_discovery.Api_key key) () with
+      let discovered = match Result.map Pave.Model_discovery.model_ids
+        (Pave.Model_discovery.discover
+          ~provider:"opencode-go" ~credential:(Pave.Model_discovery.Api_key key) ()) with
         | Ok ids when ids = [chat_model; non_chat_model] -> chat_model
         | _ -> fail "Go discovery lost unclassified IDs" in
       let config : Pave.Provider.config = {

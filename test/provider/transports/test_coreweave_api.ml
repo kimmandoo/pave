@@ -169,9 +169,11 @@ let () =
       Unix.rmdir directory) (fun () ->
       Unix.putenv "PATH" (directory ^ ":" ^ old_path);
       Unix.putenv "PAVE_COREWEAVE_FIXTURE_STATE" state;
-      let discovered = match Pave.Model_discovery.discover
-        ~provider:"coreweave" ~credential:(Pave.Model_discovery.Api_key key) () with
-        | Ok [id] -> id | _ -> fail "production model discovery failed" in
+      let discovered = match Result.map Pave.Model_discovery.model_ids
+        (Pave.Model_discovery.discover
+          ~provider:"coreweave" ~credential:(Pave.Model_discovery.Api_key key) ()) with
+      | Ok [id] -> id
+      | _ -> fail "production model discovery failed" in
       assert (discovered = model);
       let config : Pave.Provider.config = {
         endpoint = Coreweave.chat_url; api_key = key; model = discovered;

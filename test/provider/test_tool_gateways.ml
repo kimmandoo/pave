@@ -29,8 +29,9 @@ let check_listing () =
       assert (url = spec.models_url);
       assert (headers = ["Authorization", "Bearer " ^ key]);
       Ok (200, response) in
-    let actual = Discovery.discover ~http ~provider
-      ~credential:(Discovery.Api_key key) () in
+    let actual = Result.map Discovery.model_ids
+      (Discovery.discover ~http ~provider
+        ~credential:(Discovery.Api_key key) ()) in
     (match actual with
      | Ok actual when actual = expected -> ()
      | Ok _ -> failwith ("wrong discovered models for " ^ provider)

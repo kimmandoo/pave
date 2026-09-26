@@ -19,7 +19,7 @@ The full planned feature set is still in progress. Tests must establish behavior
 - [x] Added manual model-generated compaction with a durable summary boundary; preserved full journal history and recovered incomplete tool results.
 - [x] Consolidated in-session account connection and saved-default setup under `/setup`, with separate actions; `/model` searches connected providers concurrently and labels unclassified IDs without claiming Chat/tool support. Real browser/device authorization temporarily leaves alternate-screen mode and restores the transcript. First interactive launch offers a versioned user-scoped provider/access/model setup; explicit CLI/headless sessions bypass it. API keys are never typed into the TUI.
 - [x] Reduced active terminal I/O through ASCII input batching, incremental measured transcript-prefix reuse, cached model-picker filtering and unchanged-frame output suppression; native narrow/wide PTYs covered selection, resizing, provider errors and cancellation. Remaining overlay integration and accessibility work stays open.
-- [ ] Complete automatic context budgeting and provider-native compaction. Row114 now delivers durable branch-aware metadata, private recent search/resume and image/lifecycle navigation; row116 now provides explicit exact-route byte-proxy budgeting, bounded generic automatic/manual summaries and direct OpenAI Responses native replay. Provider-reported context/tokenization data, exact image costs and native compaction for other signed routes remain open.
+- [ ] Complete automatic context budgeting and provider-native compaction. Row114 now delivers durable branch-aware metadata, private recent search/resume and image/lifecycle navigation; row116 adds exact-route byte-proxy budgeting, bounded generic automatic/manual summaries, direct OpenAI Responses replay, and fresh exact-model context metadata from Command Code, Google, account-scoped Codex, Devin Connect and Anthropic (`max_input_tokens`). Anthropic signed compaction is limited to the official API-key Messages route and models whose live listing advertises both compaction capabilities. Image payload bytes count in the proxy, but image token costs remain unknown; other provider context/tokenizer sources and native signed routes remain open.
 - [ ] Finish the terminal's component model, transcript, composer, overlay ownership and accessibility behavior. Cancellable owner-tagged turns, queued steering/follow-ups and typed tool lifecycle events are implemented in P3 rows 110–115; shared focus, resize and accessibility work remains. Verify real interactive UX with keyboard and resize flows.
 
 ### Phase 3 — Tools and IDE integrations
@@ -113,7 +113,7 @@ For the account/model/terminal work, complete contracts before new providers: P1
 - [x] Add per-tool/per-argument read/write/exec approval modes with deny precedence, clear impact previews, headless denial and compound-command safety while retaining per-command shell approval in every mode. Implement `always-ask`, `write`, and `yolo`, merged user/project per-tool policies, wildcard shell-command patterns, TUI settings and `--approval-mode`; fail closed when no interactive approval surface exists. Regressions cover mode/scope precedence, compound commands, prompt/deny side-effect gates and headless refusal; a local 70×18 PTY denied `write_file` and `run_command` under yolo without side effects. The forced full suite, install build and opam lint passed. Reference: `packages/coding-agent/src/tools/approval.ts`, `docs/approval-mode.md`.
 - [x] Persisted branch-local provider/model/API, thinking, disabled-tool and approval metadata, entry labels, global titles/pins, top-level image attachments and parent-session lineage. Added bounded private recent search, `/new`, `/resume`, `/clear`, `/fresh`, `/tree`, `/branch`, `/fork` and attachment-preserving retry/cancel flows. Workspace image loading enforces root ownership, extension/magic, MIME and aggregate-size bounds; Chat/Responses/Codex/Anthropic/Bedrock/Gemini/Ollama serialize native images, while unsupported Devin images fail before auth/network. TUI previews show filenames/labels, never image data. Full tests/install/lint and local TUI/headless PTY smokes covered metadata, search, pin/title projections, branch/fork/resume, cancel/retry, clear/fresh and exact slash submission. Reference: `packages/coding-agent/src/session/{session-manager.ts,session-listing.ts,session-entries.ts}`, `docs/session.md`.
 - [x] Record tool start/settle/abort and session exit so restart distinguishes unfinished from completed side effects without rerunning them; preserve provider-valid assistant/tool adjacency and branch isolation. The journal fsyncs starts before execution and terminal states before provider results, stores pending-call state on session exit, and recovers missing results exactly once without replay. Regressions cover unknown, started, settled and aborted recovery, exit diagnostics, provider-valid pairing, idempotent reopen and branch/fork isolation. Reference: `packages/coding-agent/src/session/{turn-persistence.ts,turn-recovery.ts}`, `docs/session.md`.
-- [ ] Budget context by real model token/window constraints; auto/manual/provider-native compaction, branch summaries and bounded trimming must preserve immutable journal history, image artifacts and signed provider replay where valid. Reference: `packages/agent/src/compaction/`, `packages/coding-agent/src/session/compaction-methods.ts`, `docs/compaction.md`. Progress: explicit exact-route windows, bounded generic auto/manual summaries, route/model-bound OpenAI Responses compaction and append-only branch markers are implemented; provider-reported context/tokenizer limits, image token costs and native compaction for other signed routes remain open.
+- [ ] Budget context by real model token/window constraints; auto/manual/provider-native compaction, branch summaries and bounded trimming must preserve immutable journal history, image artifacts and signed provider replay where valid. Reference: `packages/agent/src/compaction/`, `packages/coding-agent/src/session/compaction-methods.ts`, `docs/compaction.md`. Progress: explicit exact-route windows, bounded generic auto/manual summaries, route/model-bound OpenAI Responses replay, capability-gated direct Anthropic Messages signed compaction, append-only branch markers and fresh exact-model metadata from Command Code (`context_length` plus advertised APIs), Google (`inputTokenLimit`), account-scoped Codex (`context_window`), Devin Connect (`maxTokens`; `tokenizerType` is display-only) and Anthropic (`max_input_tokens`; compaction requires explicit support for both compaction and summarize). Anthropic uses the beta compaction API only on the official API-key route, preserves the signed block at the start of exact-model replay and falls back to visible text only off-route. The byte proxy counts encoded image payload bytes while image token costs and tokenizer-exact budgeting remain unknown; other provider metadata and native routes remain open.
 - [ ] Add durable artifacts for large outputs/images and session-owned async jobs with list/read/wait/cancel and exactly-once completion delivery; no cross-session job leakage. Reference: `packages/coding-agent/src/{async/job-manager.ts,session/artifacts.ts,session/async-job-delivery.ts}`, `docs/tools/wait.md`.
 - [ ] Add bounded child-agent delegation, structured results, restricted tools and cancellation; optional isolated worktrees/merge only after parent/child ownership and approval work. Reference: `packages/coding-agent/src/task/`, `docs/tools/task.md`.
 - [ ] Add opt-in plan/proposal, goals, loop, advisor/watchdog, autoresearch and rule-triggered interruption as distinct reviewed workflows after cancellation/approvals; make model usage and side effects visible. Reference: `packages/coding-agent/src/{plan-mode,goals,advisor,autoresearch}/`, `docs/{advisor-watchdog,ttsR-injection-lifecycle,vibe-mode}.md`.
@@ -173,3 +173,77 @@ For the account/model/terminal work, complete contracts before new providers: P1
 - [ ] Add opt-in edit/tool/model evaluation and reproducible fixture benchmarks without making upstream container/VM tooling a user dependency. Reference: `packages/metaharness/README.md`, `packages/typescript-edit-benchmark/`.
 
 Do not mark a phase complete merely because its module compiles. The full product plan has not been achieved.
+
+## Release roadmap
+
+The P0–P6 cards above remain the detailed acceptance criteria; this roadmap is the ship order for the unchecked work. Release labels R1–R16 are planning scopes, not promised dates or tag names. A release closes only when every referenced card and its stated runtime verification pass. R0 is the current v0.1.42 candidate; it is prepared locally, not published.
+
+### R0 — v0.1.42 candidate: exact context budgets and safe compaction
+
+- [x] Complete the local v0.1.42 context milestone: source-backed exact-model limits, bounded journal-safe auto/manual summaries, OpenAI Responses and capability-gated direct Anthropic signed compaction, image-byte accounting without invented image-token estimates, and readable narrow model-picker metadata. The forced full suite, install build, opam lint, fake-provider route/header/signed-replay checks, and actual 30×10, 52×14 and 100×24 PTY paths passed. Four-target release CI and publication remain pending. This closes only the current implementation slice; P3 context task 116 remains open for other provider limits/tokenizers/native routes and actual image-token costs.
+
+### R1 — Model identity and discovery foundation
+
+- [ ] Complete P1 model contracts 1–3 and discovery contracts 1–4, plus P2 auth inventory. Deliver route/account-scoped identity, honest provenance/capabilities, bounded cancellable snapshots with explicit provider states, freshness rules and tests for identical IDs across accounts.
+
+### R2 — Existing text-route reliability
+
+- [ ] Complete P1 existing Chat/Responses/Codex/Anthropic/Gemini/Ollama wire parity and provider error/retry/usage policy. Deliver strict request/response/continuation semantics without replaying partial tool calls or retrying visible side effects.
+
+### R3 — Compatible gateways and API-key provider coverage
+
+- [ ] Complete P1 discovery coverage, custom-provider policy/enforcement, compatible-gateway overlays and remaining documented API-key text-provider increments. Each provider stays pinned to its documented host/auth/route and passes model discovery plus a real tool-result fixture where supported.
+
+### R4 — Credential and account security
+
+- [ ] Complete P2 auth gates 2–5, multi-account storage, opt-in secret masking and the remote broker decision. Deliver provider/account/route-bound credentials, supported refresh/expiry behavior, safe key instructions and fail-closed lifecycle/error handling; do not add a grant without an authorized matching route.
+
+### R5 — Authorized cloud and proprietary routes
+
+- [ ] Complete the documented Google Vertex, Azure, Bedrock, Cursor, Devin, GitLab Duo, Copilot and local-provider route work, together with P2 provider-specific grant decisions. Ship each permitted provider only after its own pinned account/auth/wire/tool-result fixture; keep prohibited or unregistrable OAuth flows explicitly blocked.
+
+### R6 — Multimodal contracts and remaining context support
+
+- [ ] Complete P1 normalized multimodal message/stream contracts and non-chat model consumers, then finish the remaining P3 context-budget work: source-backed provider limits/tokenizers, valid native continuation, image artifacts/token accounting and branch-safe trimming. Unknown values remain unknown.
+
+### R7 — Session-owned jobs and agent workflows
+
+- [ ] Complete P3 durable artifacts/async jobs, child-agent delegation, reviewed plan/goal/advisor workflows and workspace rewind. Prove cancellation, ownership, exactly-once delivery and non-reversible side-effect reporting.
+
+### R8 — Core workspace tools
+
+- [ ] Complete P4 read/search, conflict-aware edit, cancellable shell/job management and safe Git/worktree assistance. Preserve existing atomic edits, per-command approval, workspace boundaries and user changes.
+
+### R9 — IDE and external workspace integrations
+
+- [ ] Complete P4 LSP, DAP, persistent eval, web search/fetch, SSH, native services and security scanning. Keep network, execution, remote-host and write-through actions behind their distinct trust/approval boundaries.
+
+### R10 — Terminal input and overlay foundations
+
+- [ ] Complete P5 terminal event ownership, decoder, editor, overlay stack, terminal capability restoration and keybinding policy. Verify interleaved input/resize/worker events, paste safety, drafts, cancellation and cleanup in real PTYs.
+
+### R11 — TUI discovery, transcript and status
+
+- [ ] Complete P5 model/account chooser, semantic transcript, renderer, status/error and usage-provenance contracts. Preserve route/account identity through reorder, resize, branches and unavailable metadata.
+
+### R12 — Slash commands and headless CLI
+
+- [ ] Complete P5 slash registry/focus/availability, scoped completion, headless input/output and opt-in instruction shortcuts. Every advertised command must have a working handler and safe non-TTY behavior.
+
+### R13 — Skills, plugins and tool protocol extensions
+
+- [ ] Complete P6 skills, custom commands/tools, plugin lifecycle and MCP stdio/HTTP. Enforce source attribution, trust/sandbox policy, bounded resources, cancellation and disposal.
+
+### R14 — Remote clients and collaboration
+
+- [ ] Complete P6 browser/CDP, RPC/ACP, collaboration, consented export and issue/PR automation only after host/guest tool ownership, secret handling, invite/webhook validation and deployable-service boundaries are proven.
+
+### R15 — Local data and media features
+
+- [ ] Complete P6 accurate stats, durable recall memory, vision-backed snapshot compaction, speech features and reproducible evaluation. Make retention/consent explicit and keep media/model consumers separate from chat routes.
+
+### R16 — Product hardening and platform expansion
+
+- [ ] Complete P0 Windows/musl/native-binding evaluation, the final dependency-graph review and product-level idle CPU/memory/subprocess/redraw bounds. Advertise only platforms that pass packaged-binary and update verification.
+
+Order: R1 → R2/R3/R4 → R5/R6 → R7/R8/R9 → R10/R11/R12 → R13/R14/R15 → R16. Provider-specific R5 work may ship as independently verified increments; blocked registrations are not release blockers and must not be bypassed.

@@ -29,13 +29,16 @@ let assert_metadata ~jwt ~discovery fs =
     assert (lookup 1 metadata = "devin-cli");
     assert (lookup 28 metadata = "chisel"))
 let response f = D.buf f
-let model_config ?(router=false) id label = response (fun b ->
-  D.string b 1 label; D.string b 22 id;
-  D.bytes b 23 (response (fun info ->
-    D.number info 13 4096;
-    if router then D.number info 22 3;
-    D.bytes info 6 (response (fun features ->
-      D.boolean features 12 true; D.boolean features 21 true)))))
+let model_config ?(router=false) ?context_window ?tokenizer id label =
+  response (fun b ->
+    D.string b 1 label; D.string b 22 id;
+    D.bytes b 23 (response (fun info ->
+      Option.iter (D.number info 4) context_window;
+      Option.iter (D.string info 5) tokenizer;
+      D.number info 13 4096;
+      if router then D.number info 22 3;
+      D.bytes info 6 (response (fun features ->
+        D.boolean features 12 true; D.boolean features 21 true)))))
 let stream_reply ?(gzip=false) payload =
   let value = if gzip then D.gzip payload else payload in
   D.frame (if gzip then 1 else 0) value ^ D.frame 2 "{}"
@@ -68,8 +71,11 @@ let () =
       if lookup 1 meta = "chisel" then (
         assert_metadata ~jwt:"" ~discovery:true (D.fields body);
         let wire = response (fun b ->
-          D.bytes b 1 (model_config model_uid "Model from account");
+          D.bytes b 1 (model_config ~context_window:131072
+            ~tokenizer:"devin-tokenizer-v1" model_uid "Model from account");
           D.bytes b 1 (model_config ~router:true router_uid "Router from account");
+          D.bytes b 1 (model_config ~tokenizer:"bad\nlabel"
+            "unsafe-tokenizer-model" "Unsafe tokenizer label");
           D.bytes b 1 (model_config model_uid "Duplicate account model")) in
         on_chunk wire)
       else (
@@ -82,11 +88,15 @@ let () =
     | Ok models -> models | Error _ -> fail "catalog request failed" in
   (match models with
   | [{D.id = first; router = false; supports_tools = true;
-      supports_parallel_tool_calls = true; _};
-     {D.id = second; router = true; _}] ->
-       assert (first = model_uid && second = router_uid)
-  | _ -> fail "dynamic catalog or router flag not retained");
-  assert (List.rev !steps = [D.models_url; D.models_url]);
+      supports_parallel_tool_calls = true; max_tokens = 4096;
+      context_window_tokens = Some 131072;
+      tokenizer_type = Some "devin-tokenizer-v1"; _};
+     {D.id = second; router = true; context_window_tokens = None;
+      tokenizer_type = None; _};
+     {D.id = unsafe; tokenizer_type = None; _}] ->
+       assert (first = model_uid && second = router_uid &&
+         unsafe = "unsafe-tokenizer-model")
+  | _ -> fail "dynamic catalog metadata or router flag not retained");
   let messages = [P.user "What is six times seven?"] in
   let independent_cascade = D.cascade_id messages in
   assert (String.length cascade = 36);

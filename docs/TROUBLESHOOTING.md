@@ -1,11 +1,32 @@
 # Troubleshooting
 
+### [2026-09-26] Anthropic compaction integration did not compile
+
+- **Context / Symptom:** `opam exec -- dune build @install` reported a syntax error in `Model_discovery.discover`, `Unbound value parse` in the new Anthropic compaction helper, then an undefined `retrieved_at` field in the listing-source record.
+- **Root Cause:** The provider-specific Command Code and Devin model projections were missing their typed `Result.map` wrappers; the response parser used by `complete` is local to that function; and the newly populated source record omitted its required retrieval timestamp.
+- **Solution:** Restored typed model-row projections, supplied `retrieved_at`, and called `Anthropic_wire.parse_compaction_response` directly from the native compaction helper. `opam exec -- dune build @install` passed.
+- **Prevention / Reference:** Keep discovery projections explicit for each provider row type, include all source-provenance fields, and do not reuse function-local parsing helpers across module-level functions.
+
 ### [2026-09-26] Manual compaction could leave the retained prompt over budget
 
 - **Context / Symptom:** Inspection found that an explicitly bounded manual summary could fit its own summary request while the resulting system prompt, tools, summary and newest turn still exceeded the configured prompt allowance. The automatic path checked this projected context; `/compact` did not.
 - **Root Cause:** Manual compaction appended its journal marker immediately after summarization without estimating the projected post-compaction request.
 - **Solution:** Added provider-facing tool-text trimming and a projected-context check against the active system prompt and tool schemas before `Session.compact`. A local TUI scenario returned an oversized fixed-prompt failure, kept the journal prefix unchanged, wrote no compaction marker and exited cleanly.
 - **Prevention / Reference:** Validate the summary plus retained current turn against the active request contract before committing a branch-local marker; a bounded summary request alone does not prove the next model request fits.
+
+### [2026-09-26] Command Code model route annotations were omitted
+
+- **Context / Symptom:** A fake pinned model listing returned `supported_endpoints` such as `/chat/completions` and `/responses`, but `--models` printed the reported context window without any API-route names.
+- **Root Cause:** The provider advertises relative route identifiers while Pave's registered routes store full HTTPS request URLs; consumers compared the two strings directly.
+- **Solution:** Added an exact Command Code route-identifier mapping and used it for CLI annotations, model-picker route filtering and `--context-window auto` validation. Unknown route values remain unmatched. The Command Code route regression, fake-provider CLI checks and 90×24 TUI picker smoke passed.
+- **Prevention / Reference:** Compare provider route identifiers through a provider-specific exact mapping; never treat a relative API path as equal to a canonical request URL.
+
+### [2026-09-26] Typed model discovery helper was declared after its caller
+
+- **Context / Symptom:** `opam exec -- dune build @install` failed with `Unbound value discover_generic_models` while typed generic listings were added.
+- **Root Cause:** OCaml resolves module-level function names in source order; the ID-only dispatcher called the newly extracted typed helper before its definition.
+- **Solution:** Moved the shared typed HTTP-listing helper before the dispatcher and projected IDs at the legacy boundary. `opam exec -- dune build @install` then passed.
+- **Prevention / Reference:** Keep source helpers before their consumers; preserve one typed row parser and project IDs only at ID-only call sites.
 
 ### [2026-09-25] Minimal explicit context window could not fit fixed prompt
 

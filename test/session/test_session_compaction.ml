@@ -45,6 +45,32 @@ let () =
     Pave.Session.branch reopened marker;
     assert (Pave.Session.context reopened = [compacted; user "recent request"]);
     assert (Pave.Session.history reopened = before);
+    let anthropic_path = Filename.temp_file
+      "pave-anthropic-compaction-" ".jsonl" in
+    Sys.remove anthropic_path;
+    Fun.protect ~finally:(fun () -> Sys.remove anthropic_path) (fun () ->
+      let journal = Pave.Session.open_file anthropic_path in
+      let old_turn = Pave.Session.append journal (user "older Anthropic turn") in
+      let current_turn =
+        Pave.Session.append journal (user "recent Anthropic turn") in
+      let history = Pave.Session.history journal in
+      let content = "signed Anthropic summary" in
+      let signature = "opaque-anthropic-signature" in
+      let state = Pave.Anthropic_wire.compaction_state
+        ~model:"claude-fixture" ~content ~signature in
+      let marker = Pave.Session.compact ~provider_state:state journal
+        ~summary:content ~first_kept_id:current_turn in
+      let expected = [{ (user content) with provider_state = Some state };
+        user "recent Anthropic turn"] in
+      assert (Pave.Session.context journal = expected);
+      assert (Pave.Session.history journal = history);
+      let reopened = Pave.Session.open_file anthropic_path in
+      assert (Pave.Session.context reopened = expected);
+      Pave.Session.branch reopened old_turn;
+      assert (Pave.Session.context reopened = [user "older Anthropic turn"]);
+      Pave.Session.branch reopened marker;
+      assert (Pave.Session.context reopened = expected);
+      assert (Pave.Session.history reopened = history));
     let single_path = Filename.temp_file "pave-compaction-single-" ".jsonl" in
     Sys.remove single_path;
     Fun.protect ~finally:(fun () -> Sys.remove single_path) (fun () ->
