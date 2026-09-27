@@ -196,7 +196,9 @@ let usage json =
   match member "inputTokens" reported, member "outputTokens" reported with
   | `Int input_tokens, `Int output_tokens when input_tokens >= 0 && output_tokens >= 0 ->
       Some { input_tokens; output_tokens; cached_input_tokens = None;
-        cache_creation_input_tokens = None; reasoning_output_tokens = None }
+        cache_creation_input_tokens = None; reasoning_output_tokens = None;
+        input_modality_tokens = None; cached_input_modality_tokens = None;
+        output_modality_tokens = None }
   | _ -> None
 
 (* Control-plane discovery only: this list excludes inference profiles and does

@@ -88,6 +88,9 @@ let () =
       "Context-window tokens, or auto for a live provider-reported exact model/API limit";
   ] in
   try
+    if Array.length Sys.argv > 1 && Sys.argv.(1) = "task" then (
+      Task_cli.run (Array.sub Sys.argv 2 (Array.length Sys.argv - 2));
+      exit 0);
     if Array.length Sys.argv > 1 && Sys.argv.(1) = "update" then (
       (match Array.length Sys.argv with
        | 2 -> Update.run ()
@@ -95,7 +98,7 @@ let () =
        | _ -> failwith "usage: pave update [--check]");
       exit 0);
     Arg.parse options (fun arg -> raise (Arg.Bad ("unexpected argument: " ^ arg)))
-      "pave [update [--check] | --providers | --provider ID --model ID --prompt TEXT | --root DIRECTORY --session FILE]";
+      "pave [task OPERATION [OPTIONS] | update [--check] | --providers | --provider ID --model ID --prompt TEXT | --root DIRECTORY --session FILE]";
     if !list_providers then (
       let root = Unix.realpath !root in
       if not (Sys.is_directory root) then failwith "workspace root must be a directory";
@@ -463,6 +466,10 @@ let () =
       and active_route = ref route and endpoint_override = ref !endpoint in
     let context_window_source = ref None in
     let context_window_tokenizer = ref None in
+    let context_window_max_output_tokens = ref None in
+    let output_reserve window_tokens =
+      Pave.Context_budget.output_reserve
+        ?max_output_tokens:!context_window_max_output_tokens window_tokens in
     let anthropic_compaction_capability :
       (Pave.Model_identity.t * string * bool option) option ref = ref None in
     if !context_window_auto then (
@@ -474,8 +481,9 @@ let () =
         | Some identity -> identity
         | None -> failwith "--context-window auto requires an exact initial model selection" in
       if not (List.mem descriptor.id
-          ["anthropic"; "commandcode"; "devin"; "google"; "openai-codex"]) then
-        failwith "--context-window auto requires provider-reported metadata from Anthropic, Command Code, Devin, Google, or OpenAI Codex";
+          ["anthropic"; "commandcode"; "devin"; "google"; "openai-codex";
+           "openrouter"]) then
+        failwith "--context-window auto requires provider-reported metadata from Anthropic, Command Code, Devin, Google, OpenAI Codex, or OpenRouter";
       let credential = discovery_credential ~route_name:route.name descriptor in
       let listing = match Pave.Model_discovery.discover ~registry
           ~provider:descriptor.id ~route_name:route.name
@@ -499,7 +507,7 @@ let () =
        | Some _ -> failwith
            "--context-window auto: the selected model does not advertise the active API route"
        | None when List.mem descriptor.id
-           ["anthropic"; "devin"; "google"; "openai-codex"] &&
+           ["anthropic"; "devin"; "google"; "openai-codex"; "openrouter"] &&
            List.length descriptor.routes = 1 -> ()
        | None -> failwith
            "--context-window auto: the live listing did not report model API routes");
@@ -512,6 +520,8 @@ let () =
       context_window_tokens := Some tokens;
       context_window_tokenizer :=
         selected_model.capabilities.provider_tokenizer;
+      context_window_max_output_tokens :=
+        selected_model.capabilities.max_output_tokens;
       let timestamp = match listing.source.retrieved_at with
         | None -> "freshness timestamp unavailable"
         | Some time ->
@@ -668,10 +678,21 @@ let () =
       let count label = function
         | None -> None
         | Some value -> Some (Printf.sprintf "%d %s" value label) in
+      let modalities label = function
+        | Some details when details <> [] ->
+            Some (label ^ ": " ^ String.concat ", " (List.map
+              (fun (detail : Pave.Protocol.modality_token_count) ->
+                detail.modality ^ " " ^ string_of_int detail.token_count)
+              details))
+        | _ -> None in
       let details = List.filter_map Fun.id [
         count "cached input tokens" usage.cached_input_tokens;
         count "cache-creation input tokens" usage.cache_creation_input_tokens;
-        count "reasoning output tokens" usage.reasoning_output_tokens ] in
+        count "reasoning output tokens" usage.reasoning_output_tokens;
+        modalities "input modality tokens" usage.input_modality_tokens;
+        modalities "cached input modality tokens"
+          usage.cached_input_modality_tokens;
+        modalities "output modality tokens" usage.output_modality_tokens ] in
       match details with
       | [] -> []
       | details -> "Provider-reported details" ::
@@ -875,7 +896,7 @@ let () =
       match active_context_window () with
       | None -> None
       | Some window_tokens ->
-          let reserve_tokens = Pave.Context_budget.output_reserve window_tokens in
+          let reserve_tokens = output_reserve window_tokens in
           let history = match !journal with
             | Some current -> Pave.Session.context current
             | None -> messages in
@@ -886,14 +907,14 @@ let () =
           (match context_status ~window_tokens ~reserve_tokens
             ~system:system_text ~messages:history ~tools with
            | Pave.Context_budget.Within_budget
-           | Pave.Context_budget.Images_unmeasured -> None
+           | Pave.Context_budget.Media_unmeasured -> None
            | Pave.Context_budget.Over_budget ->
                let history = trim_to_budget ~window_tokens ~reserve_tokens
                  ~system:system_text ~tools history in
                (match context_status ~window_tokens ~reserve_tokens
                  ~system:system_text ~messages:history ~tools with
                 | Pave.Context_budget.Within_budget
-                | Pave.Context_budget.Images_unmeasured -> Some history
+                | Pave.Context_budget.Media_unmeasured -> Some history
                 | Pave.Context_budget.Over_budget ->
                     let prefix, kept = latest_user_split history in
                     if prefix = [] then
@@ -955,6 +976,7 @@ let () =
                         Pave.Context_compaction.summarize ~provider
                           ~authentication ?resolve_credential
                           ?thinking:!thinking_level ?cancel
+                          ?max_output_tokens:!context_window_max_output_tokens
                           ~window_tokens prefix ~on_usage, None in
                     let summary = mask_text secret_mask summary in
                     let summary_message = { (Pave.Protocol.user summary) with
@@ -967,7 +989,7 @@ let () =
                      | Pave.Context_budget.Over_budget ->
                          failwith "compaction did not bring the retained turn within budget; no journal change was made"
                      | Pave.Context_budget.Within_budget
-                     | Pave.Context_budget.Images_unmeasured -> ());
+                     | Pave.Context_budget.Media_unmeasured -> ());
                     (match !journal with
                      | Some current ->
                          ignore (Pave.Session.compact ?provider_state current
@@ -1038,7 +1060,7 @@ let () =
       if not (unsaved_messages ()) && not has_attachments then true
       else
         let attachment_note = if has_attachments then
-          Printf.sprintf " and %d staged image%s"
+          Printf.sprintf " and %d staged media attachment%s"
             (List.length !pending_attachments)
             (if List.length !pending_attachments = 1 then "" else "s")
           else "" in
@@ -1212,8 +1234,7 @@ let () =
             let native_fits = native && match active_context_window () with
               | None -> true
               | Some window_tokens ->
-                  let reserve =
-                    Pave.Context_budget.output_reserve window_tokens in
+                  let reserve = output_reserve window_tokens in
                   Pave.Context_budget.status ~window_tokens
                     ~reserve_tokens:reserve
                     (Pave.Context_budget.request
@@ -1241,6 +1262,7 @@ let () =
                 | Some window_tokens ->
                     Pave.Context_compaction.summarize ~provider ~authentication
                       ?resolve_credential ?thinking:!thinking_level
+                      ?max_output_tokens:!context_window_max_output_tokens
                       ~window_tokens prefix ~on_usage:collect_usage, None
                 | None ->
                     let instruction : Pave.Protocol.message = {
@@ -1274,8 +1296,7 @@ let () =
             (match active_context_window () with
              | None -> ()
              | Some window_tokens ->
-                 let reserve =
-                   Pave.Context_budget.output_reserve window_tokens in
+                 let reserve = output_reserve window_tokens in
                  let projected = trim_to_budget ~window_tokens
                    ~reserve_tokens:reserve ~system ~tools:compaction_tools projected in
                  match context_status ~window_tokens ~reserve_tokens:reserve
@@ -1283,7 +1304,7 @@ let () =
                  | Pave.Context_budget.Over_budget ->
                      failwith "manual compaction did not bring the retained turn within the configured prompt allowance; no journal change was made"
                  | Pave.Context_budget.Within_budget
-                 | Pave.Context_budget.Images_unmeasured -> ());
+                 | Pave.Context_budget.Media_unmeasured -> ());
             ignore (Pave.Session.compact ?provider_state current
               ~summary ~first_kept_id);
             record_compaction_usage (List.rev !usages);
@@ -1568,7 +1589,7 @@ let () =
       let attachments = !pending_attachments @ [item] in
       Pave.Protocol.validate_attachments attachments;
       set_pending_attachments attachments;
-      notify (Printf.sprintf "Attached %s · %d pending image%s."
+      notify (Printf.sprintf "Attached %s · %d pending media item%s."
         item.name (List.length attachments)
         (if List.length attachments = 1 then "" else "s")) in
     let interact () =
@@ -1760,7 +1781,7 @@ let () =
             (match selected with
              | None ->
                  set_pending_attachments [];
-                 notify "Pending image attachments cleared."
+                 notify "Pending media attachments cleared."
              | Some path -> attach_image path)
         | Pave.Interaction.Compact -> compact ()
         | Pave.Interaction.Retry ->
@@ -1926,7 +1947,7 @@ let () =
                      ~default:"source unknown" !context_window_source);
                  "Automatic compaction · disabled after provider/model/API selection changed"]
             | Some window_tokens, Some _ ->
-                let reserve = Pave.Context_budget.output_reserve window_tokens in
+                let reserve = output_reserve window_tokens in
                 let tools = Pave.Tools.available_for ~allow_shell:!allow_shell
                   ~enabled:(fun name -> not (List.mem name !disabled_tools)) in
                 let estimate = Pave.Context_budget.request ~system
@@ -1941,18 +1962,18 @@ let () =
                       "Budget state · over the byte proxy; the next request attempts compaction and fails closed if no safe prefix exists"
                   | Pave.Context_budget.Within_budget ->
                       "Budget state · byte proxy is within the configured prompt allowance"
-                  | Pave.Context_budget.Images_unmeasured ->
-                      "Budget state · byte proxy is within allowance; image token cost is unknown" in
+                  | Pave.Context_budget.Media_unmeasured ->
+                      "Budget state · byte proxy is within allowance; media token cost is unknown" in
                 ["Context window · " ^ string_of_int window_tokens ^
                    " tokens (" ^ Option.value ~default:"source unknown"
                      !context_window_source ^ "; prompt sizing remains a byte proxy)";
                  Printf.sprintf "Budget proxy · %d prompt bytes · %d-token prompt allowance · %d-token output reserve"
-                   estimate.estimated_bytes (window_tokens - reserve) reserve;
-                 (if estimate.unmeasured_images = 0 then
-                    "Images · none in retained context; image token cost is not estimated"
+                   estimate.estimated_bytes (max 0 (window_tokens - reserve)) reserve;
+                 (if estimate.unmeasured_media = 0 then
+                    "Media · none in retained context; media token cost is not estimated"
                   else Printf.sprintf
-                    "Images · %d retained; payload bytes counted, token cost unknown"
-                    estimate.unmeasured_images);
+                    "Media · %d retained; payload bytes counted, token cost unknown"
+                    estimate.unmeasured_media);
                  budget_state;
                  (if signed_prefix && native_openai_route () then
                     "Automatic compaction · OpenAI Responses preserves matching native replay state when bounded input fits"
@@ -1962,6 +1983,12 @@ let () =
                     "Automatic compaction · blocked for signed provider state on this route"
                   else
                     "Automatic compaction · enabled for this exact provider/model/API")] in
+          let budget_lines = budget_lines @
+            (match !context_window_max_output_tokens with
+             | None -> []
+             | Some tokens ->
+                 [Printf.sprintf "Provider output limit · %d tokens; reserve is capped when this limit is lower"
+                   tokens]) in
           let budget_lines = budget_lines @
             (match !context_window_tokenizer with
              | None -> []
@@ -1999,8 +2026,8 @@ let () =
              "Disabled tools · " ^
                (if !disabled_tools = [] then "(none)"
                 else String.concat ", " !disabled_tools);
-             (if !pending_attachments = [] then "Pending images · none"
-              else Printf.sprintf "Pending images · %d"
+             (if !pending_attachments = [] then "Pending media · none"
+              else Printf.sprintf "Pending media · %d"
                 (List.length !pending_attachments))] @
             (match (match !journal with
               | Some current -> Pave.Session.usage current
@@ -2067,7 +2094,7 @@ let () =
                            Option.value ~default:"<tool calls>" message.content in
                      let attachments = match message.attachments with
                        | [] -> ""
-                       | items -> " · images: " ^ String.concat ", "
+                       | items -> " · media: " ^ String.concat ", "
                            (List.map (fun (item : Pave.Protocol.attachment) ->
                              item.name) items) in
                      Some (Printf.sprintf "%s %s %s%s" entry.id message.role

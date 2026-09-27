@@ -24,8 +24,16 @@ let usage json =
       let reasoning_output_tokens = match field "thoughtsTokenCount" reported with
         | `Int count when count >= 0 && count <= output_tokens -> Some count
         | _ -> None in
+      let input_modality_tokens =
+        parse_modality_tokens reported "promptTokensDetails" input_tokens in
+      let cached_input_modality_tokens = Option.bind cached_input_tokens
+        (fun count -> parse_modality_tokens reported "cacheTokensDetails" count) in
+      let output_modality_tokens = parse_modality_tokens reported
+        "candidatesTokensDetails" output_tokens in
       Some { input_tokens; output_tokens; cached_input_tokens;
-        cache_creation_input_tokens = None; reasoning_output_tokens }
+        cache_creation_input_tokens = None; reasoning_output_tokens;
+        input_modality_tokens; cached_input_modality_tokens;
+        output_modality_tokens }
   | _ -> None
 
 let call_sequence = ref 0
@@ -206,9 +214,8 @@ let request ~model messages tools =
                (match msg.content with
                | Some text when text <> "" -> [part text]
                | _ -> []) @ List.map (fun (attachment : attachment) ->
-                 if not (List.mem attachment.mime_type
-                   ["image/png"; "image/jpeg"; "image/webp"]) then
-                   invalid ("unsupported user image MIME type " ^ attachment.mime_type);
+                 if not (valid_attachment_mime attachment.mime_type) then
+                   invalid ("unsupported user media MIME type " ^ attachment.mime_type);
                  `Assoc ["inlineData", `Assoc [
                    "mimeType", `String attachment.mime_type;
                    "data", `String attachment.data]]) msg.attachments in

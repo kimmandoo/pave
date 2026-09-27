@@ -1,6 +1,8 @@
-type estimate = { estimated_bytes : int; unmeasured_images : int }
+type estimate = { estimated_bytes : int; unmeasured_media : int }
 
-type status = Within_budget | Over_budget | Images_unmeasured
+
+type status = Within_budget | Over_budget | Media_unmeasured
+
 
 let add left right =
   if right > max_int - left then max_int else left + right
@@ -10,13 +12,13 @@ let add_text size = function
   | Some text -> add size (String.length text)
 
 let message_estimate (message : Protocol.message) =
-  let size = ref 128 and images = ref 0 in
-  let add_image mime_type data =
-    incr images;
+  let size = ref 128 and media = ref 0 in
+  let add_media mime_type data =
+    incr media;
     size := add !size (add 64
       (add (String.length mime_type) (String.length data))) in
   List.iter (fun (attachment : Protocol.attachment) ->
-    add_image attachment.mime_type attachment.data) message.attachments;
+    add_media attachment.mime_type attachment.data) message.attachments;
   size := add_text !size message.tool_call_id;
   List.iter (fun (call : Protocol.tool_call) ->
     size := add !size (String.length call.id);
@@ -27,39 +29,45 @@ let message_estimate (message : Protocol.message) =
    | None -> size := add_text !size message.content
    | Some blocks -> List.iter (function
        | Protocol.Text text -> size := add !size (String.length text)
-       | Protocol.Image image -> add_image image.mime_type image.data) blocks);
+       | Protocol.Image image -> add_media image.mime_type image.data) blocks);
   Option.iter (fun state ->
     size := add !size (String.length (Yojson.Basic.to_string state)))
     message.provider_state;
-  !size, !images
+  !size, !media
+
 
 let request ~system ~messages ~tools =
   let size = ref (add 256 (String.length system)) in
-  let images = ref 0 in
+  let media = ref 0 in
   List.iter (fun message ->
     let bytes, count = message_estimate message in
     size := add !size bytes;
-    images := add !images count) messages;
+    media := add !media count) messages;
   List.iter (fun schema ->
     size := add !size (add 64 (String.length (Yojson.Basic.to_string schema)))) tools;
-  { estimated_bytes = !size; unmeasured_images = !images }
+  { estimated_bytes = !size; unmeasured_media = !media }
 
 let request_text_bytes ~system ~text_bytes =
   if text_bytes < 0 then invalid_arg "request text size must be nonnegative";
   { estimated_bytes = add 384 (add (String.length system) text_bytes);
-    unmeasured_images = 0 }
+    unmeasured_media = 0 }
 
-let output_reserve window_tokens =
+
+let output_reserve ?max_output_tokens window_tokens =
   if window_tokens < 8192 then
     invalid_arg "automatic compaction requires a context window of at least 8192 tokens";
-  max 4096 (window_tokens / 5)
+  let reserve = max 4096 (window_tokens / 5) in
+  match max_output_tokens with
+  | None -> reserve
+  | Some tokens when tokens > 0 -> min reserve tokens
+  | Some _ -> invalid_arg "provider-reported output limit must be positive"
 
 let status ~window_tokens ~reserve_tokens estimate =
   if window_tokens <= 0 || reserve_tokens < 0 then
     invalid_arg "context window must be positive and reserve must be nonnegative";
   let prompt_budget = max 0 (window_tokens - reserve_tokens) in
   if estimate.estimated_bytes > prompt_budget then Over_budget
-  else if estimate.unmeasured_images > 0 then Images_unmeasured
+  else if estimate.unmeasured_media > 0 then Media_unmeasured
   else Within_budget
 
 let turn_groups messages =

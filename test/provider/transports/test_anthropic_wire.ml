@@ -173,12 +173,15 @@ let () =
   assert (Pave.Anthropic_wire.usage counted =
     Some { input_tokens = 9; output_tokens = 7;
       cached_input_tokens = Some 4; cache_creation_input_tokens = Some 3;
-      reasoning_output_tokens = None });
+      reasoning_output_tokens = None; input_modality_tokens = None;
+      cached_input_modality_tokens = None; output_modality_tokens = None });
+
   assert (Pave.Anthropic_wire.usage (`Assoc [
     "usage", `Assoc ["input_tokens", `Int 2; "output_tokens", `Int 7] ]) =
     Some { input_tokens = 2; output_tokens = 7;
       cached_input_tokens = None; cache_creation_input_tokens = None;
-      reasoning_output_tokens = None });
+      reasoning_output_tokens = None; input_modality_tokens = None;
+      cached_input_modality_tokens = None; output_modality_tokens = None });
   assert (Pave.Anthropic_wire.usage (response "end_turn" [text "Hello"]) = None);
   assert (Pave.Anthropic_wire.usage (`Assoc [
     "usage", `Assoc ["input_tokens", `Int 2; "output_tokens", `Int 7;

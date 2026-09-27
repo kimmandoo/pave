@@ -121,7 +121,9 @@ printf '200'
         `String "signed-by-anthropic");
       assert (!usage = Some { Pave.Protocol.input_tokens = 7;
         output_tokens = 3; cached_input_tokens = None;
-        cache_creation_input_tokens = None; reasoning_output_tokens = None });
+        cache_creation_input_tokens = None; reasoning_output_tokens = None;
+        input_modality_tokens = None; cached_input_modality_tokens = None;
+        output_modality_tokens = None });
       let request, config = captured_request () in
       verify_headers config ~compaction_beta:true;
       assert (member "system" request = `String "stable system prompt");

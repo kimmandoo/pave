@@ -184,6 +184,26 @@ let id_field field row = match extract_field field row with
 let positive_integer_field field row = match extract_field field row with
   | Some (`Int value) when value > 0 -> Some value
   | _ -> None
+let optional_positive_integer_field field row =
+  match extract_field field row with
+  | None | Some `Null -> Ok None
+  | Some (`Int value) when value > 0 -> Ok (Some value)
+  | _ -> invalid ("invalid " ^ field ^ " model metadata")
+
+let openrouter_metadata row =
+  let top_provider = match extract_field "top_provider" row with
+    | None | Some `Null -> Ok `Null
+    | Some (`Assoc _ as value) -> Ok value
+    | Some _ -> invalid "invalid OpenRouter top_provider metadata" in
+  match optional_positive_integer_field "context_length" row,
+    top_provider with
+  | (Error _ as error), _ -> error
+  | _, (Error _ as error) -> error
+  | Ok context_window_tokens, Ok top_provider ->
+      (match optional_positive_integer_field "max_completion_tokens"
+          top_provider with
+       | Error _ as error -> error
+       | Ok max_output_tokens -> Ok (context_window_tokens, max_output_tokens))
 
 let capability_supported = function
   | Some (`Assoc fields) ->
@@ -225,8 +245,15 @@ let collect_rows ~seen ~provider ~id ~include_row rows =
                   | Ok models ->
                       if not include_it then Ok models
                       else
+                        let router_metadata = if provider = "openrouter" then
+                          openrouter_metadata row
+                        else Ok (None, None) in
+                        (match router_metadata with
+                         | Error _ as error -> error
+                         | Ok (router_context, max_output_tokens) ->
                         let context_window_tokens =
-                          if provider = "google" then
+                          if provider = "openrouter" then router_context
+                          else if provider = "google" then
                             positive_integer_field "inputTokenLimit" row
                           else if provider = "anthropic" then
                             positive_integer_field "max_input_tokens" row
@@ -258,8 +285,9 @@ let collect_rows ~seen ~provider ~id ~include_row rows =
                               Some true
                           | _ -> None in
                         let capabilities = { Model_catalog.empty_capabilities with
-                          context_window_tokens; native_compaction_supported; tools } in
-                        Ok ({ id = name; display_name; capabilities } :: models))))
+                          context_window_tokens; max_output_tokens;
+                          native_compaction_supported; tools } in
+                        Ok ({ id = name; display_name; capabilities } :: models)))))
   in
   collect rows
 
@@ -1283,7 +1311,7 @@ let discover_raw ?http ?cancel ~provider ?credential () =
       (discover_devin_models ?http ?cancel credential)
   else if provider = "openai-codex" then
     discover_codex_models ?http ?cancel credential
-  else if provider = "google" || provider = "anthropic" then
+  else if provider = "google" || provider = "anthropic" || provider = "openrouter" then
     discover_generic_models ?http ?cancel ~provider ?credential ()
   else
     Result.map (List.map (fun id ->

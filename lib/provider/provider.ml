@@ -403,7 +403,9 @@ let validate_endpoint_override ~api ~pinned_endpoint ~requested =
     "remote endpoint overrides are disabled; define a custom provider in user settings")
 
 
-let request_body ~local ~endpoint ~headers body_json =
+let gemini_max_request_bytes = 19 * 1024 * 1024
+
+let request_body ?max_request_bytes ~local ~endpoint ~headers body_json =
   if not (String.starts_with ~prefix:"https://" endpoint ||
     (String.starts_with ~prefix:"http://" endpoint &&
       (local || loopback_http endpoint))) then
@@ -411,9 +413,13 @@ let request_body ~local ~endpoint ~headers body_json =
   reject_controls "endpoint" endpoint;
   List.iter (reject_controls "header") headers;
   let body = Yojson.Basic.to_string body_json in
-  if String.length body > 8_388_608 then
-    raise (Provider_error "conversation request exceeds 8 MiB; start a new session");
+  let max_request_bytes = Option.value ~default:8_388_608 max_request_bytes in
+  if String.length body > max_request_bytes then
+    raise (Provider_error (Printf.sprintf
+      "conversation request exceeds %d MiB; start a new session"
+      (max 1 (max_request_bytes / 1_048_576))));
   body
+
 
 let curl_options ~local ~endpoint ~headers ~body_path =
   let option name value = name ^ " = " ^ quote_config value ^ "\n" in
@@ -430,8 +436,10 @@ let curl_options ~local ~endpoint ~headers ~body_path =
   ^ (if local then option "proxy" "" ^ option "noproxy" "*" ^
       option "max-redirs" "0" else "")
 
-let post_json ?(local = false) ?cancel ~endpoint ~headers ~secret body_json =
-  let body = request_body ~local ~endpoint ~headers body_json in
+let post_json ?max_request_bytes ?(local = false) ?cancel
+    ~endpoint ~headers ~secret body_json =
+  let body = request_body ?max_request_bytes ~local ~endpoint ~headers body_json in
+
   with_temp_file (fun body_path body_output ->
     output_string body_output body;
     close_out body_output;
@@ -473,8 +481,9 @@ let status_from_headers headers =
       | _ -> current
     else current) None (String.split_on_char '\n' headers)
 
-let post_stream ?(local = false) ?cancel ~endpoint ~headers ~secret body_json ~on_chunk ~is_done ~is_finished =
-  let body = request_body ~local ~endpoint ~headers body_json in
+let post_stream ?max_request_bytes ?(local = false) ?cancel ~endpoint ~headers
+    ~secret body_json ~on_chunk ~is_done ~is_finished =
+  let body = request_body ?max_request_bytes ~local ~endpoint ~headers body_json in
   with_temp_file (fun body_path body_output ->
     output_string body_output body;
     close_out body_output;
@@ -524,12 +533,13 @@ let post_stream ?(local = false) ?cancel ~endpoint ~headers ~secret body_json ~o
 let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage
     ?thinking ?cancel config messages tools =
   check_cancel cancel;
+
   let has_attachments = ref false in
   List.iter (fun (message : Protocol.message) ->
     if message.attachments <> [] then (
       has_attachments := true;
       if message.role <> "user" then
-        raise (Provider_error "image attachments are supported only on user messages");
+        raise (Provider_error "media attachments are supported only on user messages");
       try Protocol.validate_attachments message.attachments
       with Protocol.Invalid_response reason -> raise (Provider_error reason)
     )) messages;
@@ -553,7 +563,15 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage
        | Kimi_code_cn_chat | Kimi_code_messages | Kimi_code_cn_messages
        | Fireworks_chat -> true
        | Devin_connect -> false) then
-    raise (Provider_error "this provider route does not support user image attachments");
+    raise (Provider_error "this provider route does not support user media attachments");
+  let has_audio_video = List.exists (fun (message : Protocol.message) ->
+    List.exists (fun (attachment : Protocol.attachment) ->
+      Protocol.attachment_kind attachment.mime_type <>
+        Some Protocol.Image_attachment) message.attachments) messages in
+  if has_audio_video &&
+     config.api <> Gemini_direct && config.api <> Vertex_generate then
+    raise (Provider_error
+      "audio/video attachments require a Gemini generateContent route");
   let config = if config.api = Local_chat then
     { config with endpoint = local_endpoint config.endpoint } else config in
   if authentication = Cloud_identity &&
@@ -961,7 +979,9 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage
            check_cancel cancel;
            report { Protocol.input_tokens = input_tokens; output_tokens;
              cached_input_tokens = None; cache_creation_input_tokens = None;
-             reasoning_output_tokens = None }
+             reasoning_output_tokens = None;
+             input_modality_tokens = None; cached_input_modality_tokens = None;
+             output_modality_tokens = None }
        | _ -> ());
       (match on_text, reply.content with
        | Some emit, Some text -> check_cancel cancel; emit text
@@ -1239,7 +1259,9 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage
       (match on_text with
       | None ->
           let endpoint = base ^ "/" ^ model_path ^ ":generateContent" in
-          let json = post_json ?cancel ~endpoint ~headers ~secret:api_key body in
+          let json = post_json ~max_request_bytes:gemini_max_request_bytes
+            ?cancel ~endpoint ~headers ~secret:api_key body in
+
           let reply = parse (fun () -> Gemini_wire.parse_completion ~model:config.model json) in
           (match on_usage with
            | None -> ()
@@ -1251,10 +1273,12 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage
           let stream = Gemini_stream.create ~model:config.model ~on_text:emit in
           let endpoint = base ^ "/" ^ model_path ^ ":streamGenerateContent?alt=sse" in
           parse (fun () ->
-            post_stream ?cancel ~endpoint ~headers ~secret:api_key
-              body ~on_chunk:(Gemini_stream.feed stream)
+            post_stream ~max_request_bytes:gemini_max_request_bytes ?cancel
+              ~endpoint ~headers ~secret:api_key body
+              ~on_chunk:(Gemini_stream.feed stream)
               ~is_done:(fun () -> Gemini_stream.is_done stream)
               ~is_finished:(fun () -> Gemini_stream.is_finished stream);
+
             let reply = Gemini_stream.finish stream in
             (match on_usage with
              | None -> ()
@@ -1279,8 +1303,8 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage
       let emit = Option.value ~default:(fun _ -> ()) on_text in
       let stream = Gemini_stream.create ~model:config.model ~on_text:emit in
       parse (fun () ->
-        post_stream ?cancel ~endpoint
-          ~headers:["Authorization: Bearer " ^ access] ~secret:access
+        post_stream ~max_request_bytes:gemini_max_request_bytes ?cancel
+          ~endpoint ~headers:["Authorization: Bearer " ^ access] ~secret:access
           body ~on_chunk:(Gemini_stream.feed stream)
           ~is_done:(fun () -> Gemini_stream.is_done stream)
           ~is_finished:(fun () -> Gemini_stream.is_finished stream);

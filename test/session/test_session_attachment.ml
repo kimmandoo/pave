@@ -16,7 +16,8 @@ let write path contents =
 let rejected action =
   match action () with
   | exception Invalid_argument _ | exception Pave.Tools.Tool_error _ -> ()
-  | _ -> failwith "unsafe or invalid image attachment was accepted"
+  | _ -> failwith "unsafe or invalid media attachment was accepted"
+
 
 let () =
   let base = Filename.temp_file "pave-attachment-" "" in
@@ -41,6 +42,22 @@ let () =
     write (child root "sample.webp") webp;
     let webp_attachment = Pave.Session_attachment.load ~root "sample.webp" in
     assert (webp_attachment.mime_type = "image/webp");
+    let wav = "RIFF\000\000\000\000WAVE" in
+    write (child root "voice.wav") wav;
+    let audio = Pave.Session_attachment.load ~root "voice.wav" in
+    assert (audio.mime_type = "audio/wav");
+    let mp3 = "ID3\004\000\000" in
+    write (child root "voice.mp3") mp3;
+    let mp3_attachment = Pave.Session_attachment.load ~root "voice.mp3" in
+    assert (mp3_attachment.mime_type = "audio/mp3");
+    let mp4 = "\000\000\000\012ftypisom" in
+    write (child root "clip.mp4") mp4;
+    let video = Pave.Session_attachment.load ~root "clip.mp4" in
+    assert (video.mime_type = "video/mp4");
+    write (child root "clip.webm") ("\026E\223\163" ^ String.make 8 '\000');
+    let webm = Pave.Session_attachment.load ~root "clip.webm" in
+    assert (webm.mime_type = "video/webm");
+
     write (child outside "outside.png") png;
     rejected (fun () -> Pave.Session_attachment.load ~root "../outside.png");
     rejected (fun () -> Pave.Session_attachment.load ~root (child root "sample.PNG"));
@@ -56,4 +73,4 @@ let () =
     write (child root "large.png")
       (png ^ String.make (limit - String.length png + 1) 'x');
     rejected (fun () -> Pave.Session_attachment.load ~root "large.png"));
-  print_endline "workspace image attachments: ok"
+  print_endline "workspace media attachments: ok"

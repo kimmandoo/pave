@@ -52,7 +52,8 @@ let commands = [
   { name = "/approval"; usage = "[always-ask|write|yolo]"; summary = "Show or set this branch's approval mode"; action = A_approval };
   { name = "/thinking"; usage = "[LEVEL|default]"; summary = "Store branch-local thinking level; compatible providers receive the selected reasoning control"; action = A_thinking };
   { name = "/tool"; usage = "enable|disable NAME"; summary = "Set branch-local tool availability"; action = A_tool };
-  { name = "/attach"; usage = "PATH|clear"; summary = "Attach an image to the next prompt"; action = A_attach };
+  { name = "/attach"; usage = "PATH|clear"; summary = "Stage supported image, audio, or video media for the next prompt"; action = A_attach };
+
   { name = "/queue"; usage = "MESSAGE"; summary = "Queue a follow-up without interrupting the active turn"; action = A_queue };
   { name = "/cancel"; usage = ""; summary = "Cancel the active turn"; action = A_cancel };
   { name = "/retry"; usage = ""; summary = "Retry the last turn only if no tools ran"; action = A_retry };
@@ -163,7 +164,7 @@ let parse line =
                   Tool_toggle { name = tool_name; enabled }))
     | Some A_attach ->
         (match argument with
-         | None -> invalid_argument (name ^ " requires an image path or clear")
+         | None -> invalid_argument (name ^ " requires a media path or clear")
          | Some "clear" -> Attach None
          | Some path -> Attach (Some (require_path name path)))
     | Some A_queue ->

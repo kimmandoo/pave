@@ -360,8 +360,9 @@ let paint t =
     | _ -> "" in
   let attached = match t.pending_attachments with
     | [] -> ""
-    | names -> Printf.sprintf " · %d image%s ready"
+    | names -> Printf.sprintf " · %d media attachment%s ready"
         (List.length names) (if List.length names = 1 then "" else "s") in
+
   let header = I.hsnap ~align:`Left cols I.(
     string accent "  ◆  PAVE" <|>
     string (if t.activity = None then muted else warning)
@@ -550,8 +551,9 @@ let paint t =
            else Printf.sprintf "  [%d-%d/%d] " (first + 1) last total) ^ status) ^
         (match t.pending_attachments with
          | [] -> ""
-         | names -> Printf.sprintf " · %d image%s ready"
+         | names -> Printf.sprintf " · %d media attachment%s ready"
              (List.length names) (if List.length names = 1 then "" else "s")) in
+
   let footer = styled_line cols text_attr footer_text in
   let first_line = max 0 (min (editor_row - editor_height + 1)
     (Array.length editor_lines - editor_height)) in
@@ -770,9 +772,10 @@ let show_history t (messages : Pave.Protocol.message list) =
           | [] -> content
           | attachments ->
               content ^ (if content = "" then "" else "\n") ^
-              "[Attached images: " ^ String.concat ", "
+              "[Attached media: " ^ String.concat ", "
                 (List.map (fun (item : Pave.Protocol.attachment) ->
                   single_line item.name) attachments) ^ "]" in
+
         if content <> "" then Transcript_view.sent t.transcript content
     | "assistant" ->
         (match message.content with
@@ -815,7 +818,7 @@ let finish_live t =
 let sent t text =
   let text = match t.pending_attachments with
     | [] -> text
-    | names -> text ^ "\n[Attached images: " ^ String.concat ", " names ^ "]" in
+    | names -> text ^ "\n[Attached media: " ^ String.concat ", " names ^ "]" in
   t.pending_attachments <- [];
   change_transcript t (fun () -> Transcript_view.sent t.transcript text);
   t.scroll <- 0;

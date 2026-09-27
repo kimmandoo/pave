@@ -195,6 +195,12 @@
  (modules test_scoped_rules)
  (libraries pave unix yojson))
 
+(copy_files ../bin/task_cli.ml)
+
+(test
+ (name test_non_chat)
+ (modules test_non_chat task_cli)
+ (libraries pave unix yojson str))
 (copy_files ../bin/ui/tui.ml)
 (copy_files ../bin/ui/terminal_input.ml)
 (copy_files ../bin/ui/transcript_view.ml)

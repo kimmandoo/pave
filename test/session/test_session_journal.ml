@@ -242,11 +242,20 @@ let () =
     let second = Pave.Session.append metadata (message "second") in
     let counted : Pave.Protocol.usage = {
       input_tokens = 18; output_tokens = 7; cached_input_tokens = None;
-      cache_creation_input_tokens = None; reasoning_output_tokens = None } in
+      cache_creation_input_tokens = None; reasoning_output_tokens = None;
+      input_modality_tokens = None; cached_input_modality_tokens = None;
+      output_modality_tokens = None } in
     Pave.Session.append_usage metadata ~provider:"ollama" ~model:"local" counted;
     let detailed : Pave.Protocol.usage = {
       input_tokens = 12; output_tokens = 9; cached_input_tokens = Some 5;
-      cache_creation_input_tokens = Some 2; reasoning_output_tokens = Some 3 } in
+      cache_creation_input_tokens = Some 2; reasoning_output_tokens = Some 3;
+      input_modality_tokens = Some [
+        { Pave.Protocol.modality = "IMAGE"; token_count = 3 };
+        { modality = "TEXT"; token_count = 2 } ];
+      cached_input_modality_tokens = Some [
+        { Pave.Protocol.modality = "IMAGE"; token_count = 2 } ];
+      output_modality_tokens = Some [
+        { Pave.Protocol.modality = "TEXT"; token_count = 5 }] } in
     Pave.Session.append_usage ~account_id:"anthropic-account-1" ~route:"messages"
       metadata ~provider:"anthropic" ~model:"claude-test" detailed;
     let combined = Pave.Protocol.add_usage counted detailed in
@@ -276,35 +285,51 @@ let () =
     assert (Pave.Session.history copy = [message "first"; message "second"]);
     Pave.Session.append_usage copy ~provider:"ollama" ~model:"local"
       { input_tokens = 3; output_tokens = 2; cached_input_tokens = None;
-        cache_creation_input_tokens = None; reasoning_output_tokens = None };
+        cache_creation_input_tokens = None; reasoning_output_tokens = None;
+        input_modality_tokens = None; cached_input_modality_tokens = None;
+        output_modality_tokens = None };
     Pave.Session.append_usage copy ~provider:"ollama" ~model:"other"
       { input_tokens = 1; output_tokens = 1; cached_input_tokens = None;
-        cache_creation_input_tokens = None; reasoning_output_tokens = None };
+        cache_creation_input_tokens = None; reasoning_output_tokens = None;
+        input_modality_tokens = None; cached_input_modality_tokens = None;
+        output_modality_tokens = None };
     Pave.Session.append_usage ~account_id:"anthropic-account-1" ~route:"responses"
       copy ~provider:"anthropic" ~model:"claude-test"
       { input_tokens = 2; output_tokens = 1; cached_input_tokens = None;
-        cache_creation_input_tokens = None; reasoning_output_tokens = None };
+        cache_creation_input_tokens = None; reasoning_output_tokens = None;
+        input_modality_tokens = None; cached_input_modality_tokens = None;
+        output_modality_tokens = None };
     Pave.Session.append_usage ~account_id:"anthropic-account-2" ~route:"messages"
       copy ~provider:"anthropic" ~model:"claude-test"
       { input_tokens = 3; output_tokens = 1; cached_input_tokens = None;
-        cache_creation_input_tokens = None; reasoning_output_tokens = None };
+        cache_creation_input_tokens = None; reasoning_output_tokens = None;
+        input_modality_tokens = None; cached_input_modality_tokens = None;
+        output_modality_tokens = None };
     let by_route = Pave.Session.usage_by_route copy in
     assert (List.assoc ("anthropic", Some "anthropic-account-1",
       Some "messages", "claude-test") by_route = detailed);
     assert (List.assoc ("anthropic", Some "anthropic-account-1",
       Some "responses", "claude-test") by_route = {
         input_tokens = 2; output_tokens = 1; cached_input_tokens = None;
-        cache_creation_input_tokens = None; reasoning_output_tokens = None });
+        cache_creation_input_tokens = None; reasoning_output_tokens = None;
+        input_modality_tokens = None; cached_input_modality_tokens = None;
+        output_modality_tokens = None });
     assert (List.assoc ("anthropic", Some "anthropic-account-2",
       Some "messages", "claude-test") by_route = {
         input_tokens = 3; output_tokens = 1; cached_input_tokens = None;
-        cache_creation_input_tokens = None; reasoning_output_tokens = None });
+        cache_creation_input_tokens = None; reasoning_output_tokens = None;
+        input_modality_tokens = None; cached_input_modality_tokens = None;
+        output_modality_tokens = None });
     assert (List.assoc ("ollama", None, None, "local") by_route = {
       input_tokens = 21; output_tokens = 9; cached_input_tokens = None;
-      cache_creation_input_tokens = None; reasoning_output_tokens = None });
+      cache_creation_input_tokens = None; reasoning_output_tokens = None;
+      input_modality_tokens = None; cached_input_modality_tokens = None;
+      output_modality_tokens = None });
     assert (List.assoc ("ollama", None, None, "other") by_route = {
       input_tokens = 1; output_tokens = 1; cached_input_tokens = None;
-      cache_creation_input_tokens = None; reasoning_output_tokens = None });
+      cache_creation_input_tokens = None; reasoning_output_tokens = None;
+      input_modality_tokens = None; cached_input_modality_tokens = None;
+      output_modality_tokens = None });
     Pave.Session.branch copy first;
     assert (Pave.Session.usage copy = None);
     assert (Pave.Session.usage_by_route copy = []);

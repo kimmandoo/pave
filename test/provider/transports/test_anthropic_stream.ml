@@ -45,7 +45,9 @@ let () =
   assert (Pave.Anthropic_stream.usage measured =
     Some { Pave.Protocol.input_tokens = 9; output_tokens = 7;
       cached_input_tokens = Some 4; cache_creation_input_tokens = Some 3;
-      reasoning_output_tokens = None });
+      reasoning_output_tokens = None; input_modality_tokens = None;
+      cached_input_modality_tokens = None; output_modality_tokens = None });
+
   let unreported_cache = Pave.Anthropic_stream.create ~on_text:(fun _ -> ()) in
   Pave.Anthropic_stream.feed unreported_cache
     (start ^ text_start ^ text_stop ^ finish_metered ^ stop);
@@ -53,7 +55,8 @@ let () =
   assert (Pave.Anthropic_stream.usage unreported_cache =
     Some { Pave.Protocol.input_tokens = 2; output_tokens = 7;
       cached_input_tokens = None; cache_creation_input_tokens = None;
-      reasoning_output_tokens = None });
+      reasoning_output_tokens = None; input_modality_tokens = None;
+      cached_input_modality_tokens = None; output_modality_tokens = None });
   let interrupted = Pave.Anthropic_stream.create ~on_text:(fun _ -> ()) in
   Pave.Anthropic_stream.feed interrupted
     (start_metered ^ text_start ^ text_stop ^ finish_metered);

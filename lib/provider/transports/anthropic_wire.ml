@@ -34,7 +34,9 @@ let usage json =
   | Some (input_tokens, cache_creation_input_tokens, cached_input_tokens),
       Some output_tokens ->
       Some { input_tokens; output_tokens; cached_input_tokens;
-        cache_creation_input_tokens; reasoning_output_tokens = None }
+        cache_creation_input_tokens; reasoning_output_tokens = None;
+        input_modality_tokens = None; cached_input_modality_tokens = None;
+        output_modality_tokens = None }
   | _ -> None
 
 

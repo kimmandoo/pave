@@ -75,6 +75,26 @@ let () =
         "response", `Assoc [ "output", `String "second result" ] ] ] ];
     item "user" [ image_part "image/jpeg" "Zmlyc3Q=";
       image_part "image/png" "c2Vjb25k" ] ]);
+  let voice = { name = "voice.wav"; mime_type = "audio/wav";
+    data = "aGVsbG8=" } in
+  let clip = { name = "clip.mp4"; mime_type = "video/mp4";
+    data = "aGVsbG8=" } in
+  let media_request = Pave.Gemini_wire.request ~model:"gemini-2.5-flash" [
+    signed_turn; tool_result first.id "first result";
+    tool_result second.id "second result";
+    user ~attachments:[voice; clip] "Analyze this recording" ] [] in
+  assert (field "contents" media_request = `List [
+    item "model" signed_parts;
+    item "user" [
+      `Assoc [ "functionResponse", `Assoc [ "name", `String "read_file";
+        "response", `Assoc [ "output", `String "first result" ] ] ];
+      `Assoc [ "functionResponse", `Assoc [ "name", `String "read_file";
+        "response", `Assoc [ "output", `String "second result" ] ] ] ];
+    item "user" [
+      text "Analyze this recording";
+      image_part "audio/wav" "aGVsbG8=";
+      image_part "video/mp4" "aGVsbG8=" ] ]);
+
   expect_invalid (fun () -> Pave.Gemini_wire.request ~model:"gemini-3-pro"
     [ user "Inspect"; assistant None [ first ]; tool_result first.id "ok" ] []);
   assert (field "contents" (Pave.Gemini_wire.request ~model:"gemini-3-pro"
@@ -98,17 +118,44 @@ let () =
   let counts = `Assoc [
     "usageMetadata", `Assoc [
       "promptTokenCount", `Int 12; "cachedContentTokenCount", `Int 7;
-      "candidatesTokenCount", `Int 5; "thoughtsTokenCount", `Int 3 ] ] in
+      "candidatesTokenCount", `Int 5; "thoughtsTokenCount", `Int 3;
+      "promptTokensDetails", `List [
+        `Assoc ["modality", `String "TEXT"; "tokenCount", `Int 2];
+        `Assoc ["modality", `String "IMAGE"; "tokenCount", `Int 10] ];
+      "cacheTokensDetails", `List [
+        `Assoc ["modality", `String "TEXT"; "tokenCount", `Int 1];
+        `Assoc ["modality", `String "IMAGE"; "tokenCount", `Int 6] ];
+      "candidatesTokensDetails", `List [
+        `Assoc ["modality", `String "TEXT"; "tokenCount", `Int 5] ] ] ] in
   assert (Pave.Gemini_wire.usage counts =
     Some { input_tokens = 12; output_tokens = 8;
       cached_input_tokens = Some 7; cache_creation_input_tokens = None;
-      reasoning_output_tokens = Some 3 });
+      reasoning_output_tokens = Some 3;
+      input_modality_tokens = Some [
+        { Pave.Protocol.modality = "TEXT"; token_count = 2 };
+        { modality = "IMAGE"; token_count = 10 } ];
+      cached_input_modality_tokens = Some [
+        { Pave.Protocol.modality = "TEXT"; token_count = 1 };
+        { modality = "IMAGE"; token_count = 6 } ];
+      output_modality_tokens = Some [
+        { Pave.Protocol.modality = "TEXT"; token_count = 5 } ] });
+
   assert (Pave.Gemini_wire.usage (response [text "ok"] "STOP") = None);
   assert (Pave.Gemini_wire.usage (`Assoc [
     "usageMetadata", `Assoc [
       "promptTokenCount", `Int 12; "candidatesTokenCount", `Int (-1)] ]) = None);
   assert (Pave.Gemini_wire.usage (`Assoc [
     "usageMetadata", `Assoc ["promptTokenCount", `Int 12] ]) = None);
+  assert (Pave.Gemini_wire.usage (`Assoc [
+    "usageMetadata", `Assoc [
+      "promptTokenCount", `Int 12; "candidatesTokenCount", `Int 5;
+      "promptTokensDetails", `List [
+        `Assoc ["modality", `String "TEXT"; "tokenCount", `Int 7];
+        `Assoc ["modality", `String "TEXT"; "tokenCount", `Int 5] ] ] ]) =
+    Some { input_tokens = 12; output_tokens = 5; cached_input_tokens = None;
+      cache_creation_input_tokens = None; reasoning_output_tokens = None;
+      input_modality_tokens = None; cached_input_modality_tokens = None;
+      output_modality_tokens = None });
   let generated = Pave.Gemini_wire.parse_completion ~model:"gemini-2.5-flash"
     (response [ `Assoc [ "functionCall", `Assoc [
       "name", `String "read_file"; "args", second.arguments ];

@@ -163,6 +163,44 @@ let () =
     (discover ~http ~provider:"openrouter"
       ~credential:(Api_key router_key) ());
   assert (!calls = 1);
+  let router_metadata_http, _ = fixed_http openrouter_url router_headers
+    (Ok (200, {|{"data":[{"id":"openai/with-metadata","context_length":128000,"top_provider":{"max_completion_tokens":16384}},{"id":"openai/without-metadata","context_length":null,"top_provider":{"max_completion_tokens":null}},{"id":"openai/context-only","context_length":4096}]}|})) in
+  (match discover ~http:router_metadata_http ~provider:"openrouter"
+      ~credential:(Api_key router_key) () with
+   | Error failure -> failwith (message failure)
+   | Ok listing ->
+       assert (model_ids listing = ["openai/with-metadata";
+         "openai/without-metadata"; "openai/context-only"]);
+       assert (List.map (fun (model : Pave.Model_catalog.model) ->
+         model.identity.provider, model.identity.upstream_id,
+         model.capabilities.context_window_tokens,
+         model.capabilities.max_output_tokens) listing.models = [
+           "openrouter", "openai/with-metadata", Some 128000, Some 16384;
+           "openrouter", "openai/without-metadata", None, None;
+           "openrouter", "openai/context-only", Some 4096, None]);
+       assert (listing.source.endpoint = Some openrouter_url);
+       assert (listing.source.id_source =
+         Pave.Model_catalog.Pinned_account_listing));
+  let router_bad_metadata = [
+    {|{"data":[{"id":"bad","context_length":0}]}|};
+    {|{"data":[{"id":"bad","context_length":-1}]}|};
+    {|{"data":[{"id":"bad","context_length":1.5}]}|};
+    {|{"data":[{"id":"bad","context_length":999999999999999999999999999999}]}|};
+    {|{"data":[{"id":"bad","top_provider":{"max_completion_tokens":0}}]}|};
+    {|{"data":[{"id":"bad","top_provider":{"max_completion_tokens":-1}}]}|};
+    {|{"data":[{"id":"bad","top_provider":{"max_completion_tokens":"4096"}}]}|};
+    {|{"data":[{"id":"bad","top_provider":[] }]}|};
+  ] in
+  List.iter (fun body ->
+    let http, _ = fixed_http openrouter_url router_headers (Ok (200, body)) in
+    expect_error is_invalid_response
+      (discover ~http ~provider:"openrouter"
+        ~credential:(Api_key router_key) ())) router_bad_metadata;
+  let router_duplicate_http, _ = fixed_http openrouter_url router_headers
+    (Ok (200, {|{"data":[{"id":"same","context_length":4096},{"id":"same","context_length":8192}]}|})) in
+  expect_error is_invalid_response
+    (discover ~http:router_duplicate_http ~provider:"openrouter"
+      ~credential:(Api_key router_key) ());
   let local_account = "pave-local:0123456789abcdef0123456789abcdef" in
   let http, _ = fixed_http openrouter_url router_headers
     (Ok (200, {|{"data":[{"id":"account-model"}]}|})) in

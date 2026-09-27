@@ -377,8 +377,30 @@ let () =
      | exception Pave.Provider.Provider_error message ->
          assert (not !credential_read);
          assert (String.starts_with ~prefix:
-           "this provider route does not support user image attachments" message)
+           "this provider route does not support user media attachments" message)
      | _ -> failwith "Devin accepted user image attachments");
+    let audio_video = [
+      { Pave.Protocol.name = "voice.wav"; mime_type = "audio/wav";
+        data = "aGVsbG8=" };
+      { Pave.Protocol.name = "clip.mp4"; mime_type = "video/mp4";
+        data = "aGVsbG8=" } ] in
+    List.iter (fun attachment ->
+      credential_read := false;
+      let media_user = { (Pave.Protocol.user "inspect") with
+        attachments = [attachment] } in
+      (match Pave.Provider.complete
+        ~resolve_credential:(fun () ->
+          credential_read := true;
+          { Pave.Provider.access = "sensitive"; account_id = None;
+            residency = None })
+        openai [media_user] [] with
+       | exception Pave.Provider.Provider_error message ->
+           assert (not !credential_read);
+           assert (String.starts_with ~prefix:
+             "audio/video attachments require a Gemini generateContent route"
+             message)
+       | _ -> failwith "OpenAI route accepted audio/video attachments"))
+      audio_video;
     let deltas = ref [] in
     let streamed = Pave.Provider.complete ~on_text:(fun delta -> deltas := delta :: !deltas)
       openai [ image_user ] [] in

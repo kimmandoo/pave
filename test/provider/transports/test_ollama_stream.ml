@@ -44,7 +44,8 @@ let () =
   assert (Pave.Ollama_stream.usage measured =
     Some { Pave.Protocol.input_tokens = 18; output_tokens = 7;
       cached_input_tokens = None; cache_creation_input_tokens = None;
-      reasoning_output_tokens = None });
+      reasoning_output_tokens = None; input_modality_tokens = None;
+      cached_input_modality_tokens = None; output_modality_tokens = None });
   let fragments =
     call_chunk [ tool ~index:0 "search" (`String {|{"query":"東|}) ] ^
     call_chunk [ tool ~index:0 "search" (`String {|京"}|}) ] ^

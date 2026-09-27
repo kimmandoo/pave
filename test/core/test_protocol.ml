@@ -22,7 +22,24 @@ let () =
   assert (completion_usage counted =
     Some { input_tokens = 19; output_tokens = 7;
       cached_input_tokens = Some 5; cache_creation_input_tokens = None;
-      reasoning_output_tokens = Some 2 });
+      reasoning_output_tokens = Some 2; input_modality_tokens = None;
+      cached_input_modality_tokens = None; output_modality_tokens = None });
+  let usage = Option.get (completion_usage counted) in
+  let usage = { usage with
+    input_modality_tokens = Some [
+      { modality = "IMAGE"; token_count = 4 };
+      { modality = "SPATIAL"; token_count = 1 } ];
+    cached_input_modality_tokens = Some [
+      { modality = "IMAGE"; token_count = 5 } ];
+    output_modality_tokens = Some [
+      { modality = "TEXT"; token_count = 2 }] } in
+  let total = add_usage usage usage in
+  assert (total.input_modality_tokens = Some [
+    { modality = "IMAGE"; token_count = 8 };
+    { modality = "SPATIAL"; token_count = 2 } ]);
+  assert (total.cached_input_modality_tokens = Some [
+    { modality = "IMAGE"; token_count = 10 } ]);
+
   assert (completion_usage completed = None);
   assert (completion_usage (`Assoc [ "usage", `Assoc [
     "prompt_tokens", `Int 5; "completion_tokens", `Int (-1) ] ]) = None);
@@ -71,6 +88,13 @@ let () =
     { attachment with data = "a===" }]);
   expect_invalid (fun () -> validate_attachments [
     { attachment with mime_type = "image/gif" }]);
+  let audio = { attachment with name = "voice.wav"; mime_type = "audio/wav" } in
+  let video = { attachment with name = "clip.mp4"; mime_type = "video/mp4" } in
+  let media = user ~attachments:[audio; video] "summarize" in
+  expect_invalid (fun () -> message_to_json media);
+  assert (message_to_json ~stored:true media = `Assoc [
+    "role", `String "user"; "content", `String "summarize"]);
+
   expect_invalid (fun () -> validate_attachments (List.init (max_attachments + 1)
     (fun _ -> attachment)));
   expect_invalid (fun () -> validate_attachments [

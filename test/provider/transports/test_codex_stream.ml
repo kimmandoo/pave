@@ -75,7 +75,8 @@ let () =
   assert (Codex_stream.usage t =
     Some { Protocol.input_tokens = 5; output_tokens = 3;
       cached_input_tokens = None; cache_creation_input_tokens = None;
-      reasoning_output_tokens = None });
+      reasoning_output_tokens = None; input_modality_tokens = None;
+      cached_input_modality_tokens = None; output_modality_tokens = None });
   assert (List.rev !chunks = ["Reading "; "file"]);
   assert (result.content = Some "Reading file");
   assert (result.tool_calls = [{ Protocol.id = "call_1"; name = "read_file";

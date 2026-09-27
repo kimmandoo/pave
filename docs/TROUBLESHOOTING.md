@@ -1,5 +1,19 @@
 # Troubleshooting
 
+### [2026-09-27] OpenRouter model limits were discarded after parsing
+
+- **Context / Symptom:** `/models/user` parsing found `context_length` and `top_provider.max_completion_tokens`, but fresh exact-model rows lost both fields before `--context-window auto` could use them.
+- **Root Cause:** `Model_discovery.discover_raw` routed OpenRouter through the ID-only discovery projection, discarding its typed per-model capability metadata.
+- **Solution:** Kept OpenRouter on the typed model-discovery path through capability registration. Missing/null metadata remains unknown, while invalid present limits reject the listing. Model-discovery regressions and a real auto-context TUI fixture proved the exact window and output cap.
+- **Prevention / Reference:** Preserve typed model rows through provider discovery when limits/capabilities exist; project IDs only at genuinely ID-only boundaries. See the [OpenRouter model-list reference](https://openrouter.ai/docs/api/api-reference/models/list-all-models-and-their-properties).
+
+### [2026-09-27] Basic JSON numeric parsing used Safe-only variants
+
+- **Context / Symptom:** The new non-chat task response parser did not compile when its `Yojson.Basic.t` branches matched `Intlit`; embedding usage parsing also expected fields absent from the actual response shape.
+- **Root Cause:** `Intlit` belongs to the Safe JSON representation, not `Yojson.Basic.t`, and the embedding usage fields were read from the wrong object.
+- **Solution:** Added strict numeric parsers for Basic JSON values and read the documented embedding usage fields at their proper response location. Non-chat parser regressions, the forced suite, install build and opam lint passed.
+- **Prevention / Reference:** Keep JSON constructors aligned with the selected Yojson module and validate provider usage against its documented envelope rather than borrowing a Safe-parser pattern.
+
 ### [2026-09-27] Isolated Codex smoke hid opam state and missed stdin curl config
 
 - **Context / Symptom:** The first isolated CLI smoke set `HOME` to a fresh directory and `opam exec` failed with `Opam has not been initialised, please run opam init`. After retaining the normal home, device login passed but the Codex model-listing smoke reported `request failed or timed out`.

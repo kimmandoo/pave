@@ -85,7 +85,8 @@ let () =
   assert (Openai_responses_wire.usage (`Assoc ["usage", reported]) =
     Some { Protocol.input_tokens = 21; output_tokens = 9;
       cached_input_tokens = Some 6; cache_creation_input_tokens = None;
-      reasoning_output_tokens = Some 4 });
+      reasoning_output_tokens = Some 4; input_modality_tokens = None;
+      cached_input_modality_tokens = None; output_modality_tokens = None });
   assert (Openai_responses_wire.usage response = None);
   assert (Openai_responses_wire.usage (`Assoc [
     "usage", `Assoc ["input_tokens", `Int 21] ]) = None);

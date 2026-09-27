@@ -53,7 +53,8 @@ let () =
   assert (Openai_stream.usage counted =
     Some { Protocol.input_tokens = 19; output_tokens = 7;
       cached_input_tokens = Some 5; cache_creation_input_tokens = None;
-      reasoning_output_tokens = Some 2 });
+      reasoning_output_tokens = Some 2; input_modality_tokens = None;
+      cached_input_modality_tokens = None; output_modality_tokens = None });
   let gated = Openai_stream.create ~on_text:(fun _ -> ()) in
   Openai_stream.feed gated
     (event (chunk (text "metered")) ^
@@ -63,7 +64,8 @@ let () =
   assert (Openai_stream.usage gated =
     Some { Protocol.input_tokens = 19; output_tokens = 7;
       cached_input_tokens = Some 5; cache_creation_input_tokens = None;
-      reasoning_output_tokens = Some 2 });
+      reasoning_output_tokens = Some 2; input_modality_tokens = None;
+      cached_input_modality_tokens = None; output_modality_tokens = None });
   ignore (Openai_stream.finish gated);
   invalid (fun () -> stream
     (event (chunk (text "metered")) ^

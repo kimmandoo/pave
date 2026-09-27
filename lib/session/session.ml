@@ -138,6 +138,11 @@ let entry_json entry =
       let optional_text name = function
         | None -> []
         | Some value -> [name, `String value] in
+      let optional_modality_tokens name = function
+        | None -> []
+        | Some details -> [name, `List (List.map (fun (detail : Protocol.modality_token_count) ->
+            `Assoc ["modality", `String detail.modality;
+              "tokenCount", `Int detail.token_count]) details)] in
       `Assoc (fields @ ["provider", `String provider; "model", `String model] @
         optional_text "accountId" account_id @ optional_text "route" route @
         ["inputTokens", `Int tokens.input_tokens;
@@ -145,7 +150,14 @@ let entry_json entry =
         optional_count "cachedInputTokens" tokens.cached_input_tokens @
         optional_count "cacheCreationInputTokens"
           tokens.cache_creation_input_tokens @
-        optional_count "reasoningOutputTokens" tokens.reasoning_output_tokens)
+        optional_count "reasoningOutputTokens" tokens.reasoning_output_tokens @
+        optional_modality_tokens "inputModalityTokens"
+          tokens.input_modality_tokens @
+        optional_modality_tokens "cachedInputModalityTokens"
+          tokens.cached_input_modality_tokens @
+        optional_modality_tokens "outputModalityTokens"
+          tokens.output_modality_tokens)
+
   | Tool_lifecycle { call_id; name; state } ->
       let state_fields = match state with
         | Tool_started -> ["state", `String "started"]
@@ -207,6 +219,24 @@ let append_line t json =
 let valid_model_field text =
   text <> "" && not (String.exists (fun char ->
     Char.code char <= 32 || Char.code char = 127) text)
+let valid_modality_name name =
+  name <> "" && String.length name <= 64 &&
+  String.for_all (function
+    | 'A'..'Z' | '0'..'9' | '_' -> true
+    | _ -> false) name
+
+let modality_tokens_fit total = function
+  | None -> true
+  | Some details ->
+      let seen = Hashtbl.create 4 in
+      let rec fit sum = function
+        | [] -> true
+        | { Protocol.modality; token_count } :: rest ->
+            valid_modality_name modality && token_count >= 0 &&
+            token_count <= total - sum && not (Hashtbl.mem seen modality) &&
+            (Hashtbl.add seen modality (); fit (sum + token_count) rest) in
+      fit 0 details
+
 let valid_text_field limit text =
   text <> "" && String.length text <= limit &&
   not (String.exists (fun char ->
@@ -372,6 +402,21 @@ let parse_entry json =
           | `Null -> None
           | `Int count when count >= 0 -> Some count
           | _ -> invalid "invalid provider token usage detail" in
+        let parse_modality_tokens name =
+          match get name with
+          | `Null -> None
+          | `List items ->
+              let seen = Hashtbl.create 4 in
+              Some (List.map (fun item ->
+                match Protocol.member "modality" item,
+                  Protocol.member "tokenCount" item with
+                | `String modality, `Int token_count
+                  when valid_modality_name modality && token_count >= 0 &&
+                       not (Hashtbl.mem seen modality) ->
+                    Hashtbl.add seen modality ();
+                    { Protocol.modality; token_count }
+                | _ -> invalid "invalid provider token modality detail") items)
+          | _ -> invalid "invalid provider token modality details" in
         let account_id = match get "accountId" with
           | `Null -> None
           | `String account when valid_model_field account -> Some account
@@ -388,7 +433,13 @@ let parse_entry json =
              let cached_input_tokens = optional_count "cachedInputTokens"
              and cache_creation_input_tokens =
                optional_count "cacheCreationInputTokens"
-             and reasoning_output_tokens = optional_count "reasoningOutputTokens" in
+             and reasoning_output_tokens = optional_count "reasoningOutputTokens"
+             and input_modality_tokens =
+               parse_modality_tokens "inputModalityTokens"
+             and cached_input_modality_tokens =
+               parse_modality_tokens "cachedInputModalityTokens"
+             and output_modality_tokens =
+               parse_modality_tokens "outputModalityTokens" in
              let within total = function
                | None -> true
                | Some detail -> detail <= total in
@@ -398,12 +449,23 @@ let parse_entry json =
                    cached <= input_tokens && created <= input_tokens - cached
                | cached, created ->
                    within input_tokens cached && within input_tokens created in
+             let cached_modalities_fit = match cached_input_tokens,
+               cached_input_modality_tokens with
+               | None, None -> true
+               | Some total, details -> modality_tokens_fit total details
+               | None, Some _ -> false in
              if not cache_details_fit ||
-                not (within output_tokens reasoning_output_tokens) then
+                not (within output_tokens reasoning_output_tokens) ||
+                not (modality_tokens_fit input_tokens input_modality_tokens) ||
+                not cached_modalities_fit ||
+                not (modality_tokens_fit output_tokens output_modality_tokens) then
                invalid "provider usage detail exceeds reported totals";
              Usage { provider; account_id; route; model; tokens = {
                input_tokens; output_tokens; cached_input_tokens;
-               cache_creation_input_tokens; reasoning_output_tokens } }
+               cache_creation_input_tokens; reasoning_output_tokens;
+               input_modality_tokens; cached_input_modality_tokens;
+               output_modality_tokens } }
+
          | _ -> invalid "invalid provider token usage")
     | `String "branch" -> Branch
     | `String "tool" ->
@@ -836,6 +898,11 @@ let append_usage ?account_id ?route t ~provider ~model (tokens : Protocol.usage)
         created <= tokens.input_tokens - cached
     | cached, created ->
         within tokens.input_tokens cached && within tokens.input_tokens created in
+  let cached_modalities_fit = match tokens.cached_input_tokens,
+    tokens.cached_input_modality_tokens with
+    | None, None -> true
+    | Some total, details -> modality_tokens_fit total details
+    | None, Some _ -> false in
   let route_valid = match route with
     | None -> true
     | Some value -> valid_model_field value in
@@ -846,7 +913,10 @@ let append_usage ?account_id ?route t ~provider ~model (tokens : Protocol.usage)
     account_valid && route_valid) ||
     tokens.input_tokens < 0 || tokens.output_tokens < 0 ||
     not cache_details_fit ||
-    not (within tokens.output_tokens tokens.reasoning_output_tokens) then
+    not (within tokens.output_tokens tokens.reasoning_output_tokens) ||
+    not (modality_tokens_fit tokens.input_tokens tokens.input_modality_tokens) ||
+    not cached_modalities_fit ||
+    not (modality_tokens_fit tokens.output_tokens tokens.output_modality_tokens) then
     invalid "invalid provider token usage";
   let entry = { id = fresh_id (); parent_id = t.leaf;
     timestamp = timestamp ();

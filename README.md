@@ -112,11 +112,37 @@ pave --provider github-copilot --model "$COPILOT_MODEL" --prompt 'Inspect this p
 pave --provider ollama --model "$LOCAL_MODEL" --prompt 'Inspect this project'
 # `--context-window auto` reads fresh provider-reported limits for exact listed models; supported sources and route checks are documented below.
 pave --provider commandcode --api chat --model "$MODEL_ID" --context-window auto --session /private/path/pave.jsonl
-# Google, Codex subscription, Devin and direct Anthropic API also expose verified live context metadata.
+# Google, Codex subscription, Devin, OpenRouter and direct Anthropic API also expose source-backed live context metadata; OpenRouter output caps are reported separately.
 pave --provider google --model "$GEMINI_MODEL_ID" --context-window auto
 # Other routes require a manually supplied, independently verified limit.
 pave --provider openai --api responses --model "$MODEL_ID" --context-window "$CONTEXT_WINDOW" --session /private/path/pave.jsonl
 ```
+
+### Non-chat model tasks
+
+`pave task` invokes task-specific APIs directly; it does not use or add a Chat route, does not affect `pave --providers`, and never creates or modifies a conversation, session, or route identity. Each task requires the exact `--model` ID you choose. Credentials are read only from `OPENAI_API_KEY` for OpenAI tasks and `COHERE_API_KEY` for rerank. No default model, custom endpoint, OAuth credential, or fallback is used. Model access and entitlement are controlled by the provider account; Pave does not infer task support from a model name.
+
+```sh
+# OpenAI embeddings: print the validated vector response as JSON.
+pave task embed --model "$EMBEDDING_MODEL" --input 'Text to embed'
+
+# OpenAI image generation: write a new PNG under the workspace.
+pave task image --model "$IMAGE_MODEL" --prompt 'A red bicycle by the sea' --output bicycle.png
+
+# OpenAI text-to-speech: write a new WAV file.
+pave task speak --model "$TTS_MODEL" --input 'Hello from Pave' --voice alloy --output greeting.wav
+
+# OpenAI audio transcription: source paths are workspace-relative.
+pave task transcribe --model "$TRANSCRIPTION_MODEL" --file recordings/meeting.wav
+
+# Cohere v2 rerank: repeat --document for every candidate text.
+pave task rerank --model "$RERANK_MODEL" --query 'Which passage describes the API?' \
+  --document 'First candidate passage' --document 'Second candidate passage' --top-n 1
+```
+
+Task input/output limits are enforced locally: embedding text 256 KiB (OpenAI separately enforces its documented model token limits); image prompts 16 KiB with one 1024×1024 PNG (decoded output at most 16 MiB); speech input at most 4096 UTF-8 characters, using a documented built-in voice and WAV output (at most 20 MiB); transcription files must be nonempty and at most 25,000,000 bytes, with `.wav`, `.mp3`, `.mpga`, `.mpeg`, `.m4a`, `.mp4`, `.webm`, `.flac` or `.ogg`; rerank query at most 16 KiB, up to 1000 documents of at most 32 KiB each and 512 KiB combined, with `--top-n` between 1 and the document count. Output paths must be workspace-relative, use `.png`/`.wav` as appropriate, have existing real directories, and name a file that does not already exist. Writes are atomic; symlinks, traversal, malformed media and oversized responses are rejected. The provider account may enforce lower limits.
+
+The pinned operations and wire formats follow the official references: [OpenAI embeddings](https://platform.openai.com/docs/api-reference/embeddings), [OpenAI image generation](https://platform.openai.com/docs/api-reference/images), [OpenAI text-to-speech](https://platform.openai.com/docs/api-reference/audio/createSpeech), [OpenAI audio transcription](https://platform.openai.com/docs/api-reference/audio/createTranscription), and [Cohere v2 rerank](https://docs.cohere.com/reference/rerank). OpenAI's Videos API and Sora were shut down on 2026-09-24; OpenAI documents no replacement, so Pave does not expose video generation. See the [OpenAI video reference](https://platform.openai.com/docs/api-reference/videos) and [OpenAI deprecation notice](https://developers.openai.com/api/docs/deprecations).
 
 ### Provider-specific notes
 
@@ -244,15 +270,15 @@ Command patterns apply to shell arguments and use `*` for wildcard matching: den
 | `/cancel` · `/settings` | Stop the active request/command; edit typed project defaults for the next launch |
 | `/queue MESSAGE` | Queue a follow-up while a turn is active; when idle, send it immediately. |
 | `/tools [NAME]` | List the tools actually offered to the model, or inspect one tool's description; shell availability follows `--allow-shell` and still requires per-command approval |
-| `/context` | Inspect the actual model/route and selected branch; show provider-reported usage and, only when explicitly configured, the context-window byte proxy. Limits are never inferred from model names; image payload bytes are counted but token cost remains unknown |
-| `/usage` | Inspect recorded provider-reported token counts and cache/reasoning details; private journals group the selected branch by provider/account/model/API route, while ephemeral conversations show only a combined measured total. Prices and subscription value are not estimated |
+| `/context` | Inspect the actual model/route and selected branch; show provider-reported aggregate and modality usage and, only when explicitly configured, the context-window byte proxy. Limits are never inferred from model names; media payload bytes are counted but modality token cost remains unknown |
+| `/usage` | Inspect recorded provider-reported token counts and cache/reasoning/modality details; private journals group the selected branch by provider/account/model/API route, while ephemeral conversations show only a combined measured total. Prices and subscription value are not estimated |
 | `/retry` | Reissue the last user turn only if it made no tool calls; saved sessions retain the prior answer on an abandoned branch, while ephemeral answers are replaced; both requests may incur usage |
 | `/hotkeys` | Display actual interactive keyboard shortcuts (including search, word editing, paste and tool expansion); headless CLI does not claim terminal keys work |
 | `/new` · `/resume [ID|TITLE|PATH]` | Create a private workspace journal; list, search by title/ID, or reopen a same-workspace private journal |
 | `/clear` · `/fresh` | Reset model context while preserving journal history/settings · rebuild the local agent from current context without changing the journal |
 | `/rename TITLE` · `/label [TEXT]` · `/pin` | Save journal title/entry labels · toggle a journal pin in the private recent-session index |
 | `/approval [MODE]` · `/thinking [LEVEL|default]` · `/tool enable|disable NAME` | Persist branch-local approval, thinking metadata and tool availability; thinking metadata does not override provider-specific controls |
-| `/attach PATH|clear` | Stage workspace-relative PNG/JPEG/WebP images for the next prompt (up to 8, 7 MiB per file, 10 MiB combined encoded data) |
+| `/attach PATH|clear` | Stage workspace-relative PNG/JPEG/WebP images or WAV/MP3/AAC/OGG/Opus/FLAC/M4A audio and MP4/WebM video for the next prompt (up to 8, 7 MiB per file, 10 MiB combined encoded data); audio/video require direct Gemini or Vertex GenerateContent |
 | `/help` · `/entries` | Show descriptive commands · list journal entry IDs and metadata |
 | `/tree` · `/branch ID` · `/fork [PATH]` | Search/select parent-linked entries · check out an exact entry ID · fork into a private journal or an explicit new file |
 | `/compact` · `/quit` | Summarize older turns manually · exit |
@@ -263,17 +289,17 @@ On macOS, `/help` labels Meta as `Option` and Enter as `Return`; other supported
 ### Sessions and long-running turns
 
 - **During a turn:** Network and approved commands leave the editor responsive. Later prompts queue until their turn starts; `/cancel` stops the active turn without dropping queued prompts or the draft. Failed/cancelled partial text is removed.
-- **Scrollback:** Memory retains the newest 10,000 logical rows; a saved journal retains its complete durable history. `/resume` restores that history without replacing the editor draft. New startup conversations are ephemeral; `/new` confirms before discarding an unsaved conversation or staged image attachments.
+- **Scrollback:** Memory retains the newest 10,000 logical rows; a saved journal retains its complete durable history. `/resume` restores that history without replacing the editor draft. New startup conversations are ephemeral; `/new` confirms before discarding an unsaved conversation or staged media attachments.
 - **Private journals:** `/new` creates an **unencrypted** append-only JSONL file under `${XDG_STATE_HOME:-~/.local/state}/pave/sessions/<SHA-256 of canonical workspace path>/<random>.jsonl` (0700 directories, 0600 files). `/resume` searches at most 100 recent journals for the current workspace and accepts only private owned regular files, including explicit paths. `/pin` appends a journal metadata event and updates the private recent-list index. `--session PATH` reopens a chosen journal.
 - **Context and metadata:** Model/API, approval mode, tool availability, thinking-level metadata and entry labels are typed journal entries, never provider messages. Model/API, approval, tool, thinking and label state follows the selected branch; titles and pins are session-wide. `/thinking` records metadata only and leaves provider/model defaults unchanged. `/clear` appends a reset boundary, preserves earlier journal history and settings, and refuses while tool calls remain unresolved. `/fresh` rebuilds the local agent on the next prompt without writing to the journal.
-- **Images and privacy:** Attachments are base64 data stored with the user journal entry, separate from its provider-message record; journals are unencrypted and may contain sensitive image data. Pave displays image names/placeholders, never base64. Image-capable routes receive native image fields; unsupported routes reject attached prompts before authentication/network I/O.
+- **Media and privacy:** Attachments are base64 data stored with the user journal entry, separate from its provider-message record; journals are unencrypted and may contain sensitive image/audio/video data. Pave displays media names/placeholders, never base64. Image-capable routes receive native image fields; direct Gemini and Vertex `GenerateContent` send supported audio/video as `inlineData`; every other route rejects audio/video before authentication or network I/O.
 - **Branch metadata:** Provider/model/API changes belong to branches, not provider messages. `/resume`, `--session` and `/branch` restore selected branch settings; explicit `--provider`, `--model`, `--api` or `--endpoint` wins. Credentials and custom endpoints are not stored as model metadata, and a removed route must be overridden on reopen.
 - **Recovery and privacy:** Reopening marks interrupted tool calls failed instead of rerunning them. Keep journals out of version control: Gemini 3 replay can persist model-issued thought text and signatures. `/compact` and automatic compaction append branch-local markers; the complete original journal remains intact. Matching signed provider state is retained only on its exact route/model. OpenAI Responses replays opaque route/model-bound compaction state; Anthropic replays signed content only for explicitly capable models on the official API-key route. Other matching signed prefixes fail closed rather than being generically summarized.
 - **Tree picker:** `/tree` searches at most 1,024 parent-linked entries by their sanitized previews and IDs, highlights the active tip and keeps older ancestry reachable through `/branch ID`. `/branch` and `/fork` use the selected branch's durable messages and metadata; canceled selection leaves the branch and draft unchanged.
 
 ### Context budgeting
 
-Set `--context-window TOKENS` only for the exact initial provider, model, API route and endpoint. Pave never infers limits from model names, and changing provider/model/API/endpoint disables that configured budget. `--context-window auto` fetches fresh pinned model metadata for Command Code (`context_length` plus the exact advertised API route), Google (`inputTokenLimit`), account-scoped OpenAI Codex (`context_window`), Devin (`maxTokens`) or Anthropic (`max_input_tokens` from its direct API listing and sole registered Messages route). Anthropic signed compaction additionally requires both listed compaction capabilities and the official API-key endpoint. Nonregistered endpoint overrides, missing limits and unsupported values fail closed. Devin `tokenizerType` is provider-reported display metadata only, not a local tokenizer. `/models`, `/model` and setup pickers show provider-reported context, tokenizer and compaction metadata where available. `/context` shows the token window, output reserve and conservative UTF-8 request-byte proxy separately; the proxy is not a tokenizer or reported token count. Image payload bytes contribute to the proxy, while image token costs remain unknown.
+Set `--context-window TOKENS` only for the exact initial provider, model, API route and endpoint. Pave never infers limits from model names, and changing provider/model/API/endpoint disables that configured budget. `--context-window auto` fetches fresh pinned model metadata for Command Code (`context_length` plus the exact advertised API route), Google (`inputTokenLimit`), account-scoped OpenAI Codex (`context_window`), Devin (`maxTokens`), OpenRouter's authenticated `/models/user` (`context_length`, with optional `top_provider.max_completion_tokens` kept as output metadata), or Anthropic (`max_input_tokens` from its direct API listing and sole registered Messages route). OpenRouter fields follow its [official model-list reference](https://openrouter.ai/docs/api/api-reference/models/list-all-models-and-their-properties). The reported OpenRouter output maximum caps the heuristic output reserve when it is lower; it is not the context window or a local tokenizer. Anthropic signed compaction additionally requires both listed compaction capabilities and the official API-key endpoint. Nonregistered endpoint overrides, missing limits and unsupported values fail closed. Devin `tokenizerType` is provider-reported display metadata only, not a local tokenizer. `/models`, `/model` and setup pickers show provider-reported context, tokenizer and compaction metadata where available. `/context` shows the token window, output reserve and conservative UTF-8 request-byte proxy separately; the proxy is not a tokenizer or reported token count. Image, audio and video payload bytes contribute to the proxy, while modality token costs remain unknown.
 
 Before each request, Pave trims oversized text tool results only in the provider-facing copy, then summarizes older complete turns in bounded chunks when needed. It keeps the newest user turn and its attachments, preserves tool-call/result adjacency, and appends a branch-local compaction marker only after every summary succeeds; the append-only journal and full tool outputs remain unchanged.
 
@@ -421,7 +447,8 @@ The TUI `/thinking LEVEL` command stores branch-local metadata; a route sends on
 | --- | --- |
 | Seven wire payload formats with distinct provider routes; bounded buffered and incremental-stream decoders; model-bound Codex/Gemini state and tested provider reasoning replay | Most provider-specific thinking/usage/multimodal parity and full model catalog |
 | Mobile manifest detection, workspace file read/search/edit/write, bounded agent turns | LSP/DAP, subagents, extensions and full tool catalog |
-| Grapheme-aware CJK input, cancellable streaming with queued follow-ups, searchable model picker, branching sessions, explicit-window byte-proxy budgeting with counted image payload bytes, automatic/manual journal-safe summaries, native OpenAI Responses and capability-gated Anthropic compaction | Tokenizer-exact provider context limits, image token estimates, other provider-native compaction, LSP/DAP, subagents and extensions |
+| Separate task APIs for OpenAI embeddings, image generation, text-to-speech and transcription plus Cohere v2 reranking; these do not add chat routes | OpenAI video generation (Videos/Sora retired; no replacement documented) |
+| Grapheme-aware CJK input, cancellable streaming with queued follow-ups, searchable model picker, branching sessions, explicit-window byte-proxy budgeting with counted media payload bytes, automatic/manual journal-safe summaries, native OpenAI Responses and capability-gated Anthropic compaction | Tokenizer-exact provider context limits, media token estimates, other provider-native compaction, LSP/DAP, subagents and extensions |
 
 **Shell safety:** model-requested shell execution is off by default. `--allow-shell` advertises shell commands but still asks for **each** command in an interactive terminal, even with `--approval-mode yolo` or a per-tool allow; noninteractive runs deny shell execution. Approved commands are **not sandboxed** and can access files outside the workspace. Check the impact preview and exact command before approving it; Pave does not install mobile SDKs, sign apps or deploy to devices for you.
 

@@ -20,7 +20,9 @@ let usage json =
       let reasoning_output_tokens = optional_token_detail reported
         "output_tokens_details" "reasoning_tokens" output_tokens in
       Some { input_tokens; output_tokens; cached_input_tokens;
-        cache_creation_input_tokens = None; reasoning_output_tokens }
+        cache_creation_input_tokens = None; reasoning_output_tokens;
+        input_modality_tokens = None; cached_input_modality_tokens = None;
+        output_modality_tokens = None }
   | _ -> None
 
 let tool_schema json =

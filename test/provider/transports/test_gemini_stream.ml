@@ -33,7 +33,16 @@ let () =
   assert (Pave.Gemini_stream.usage stream = None);
   let reported = `Assoc [
     "promptTokenCount", `Int 12; "cachedContentTokenCount", `Int 7;
-    "candidatesTokenCount", `Int 5; "thoughtsTokenCount", `Int 3 ] in
+    "candidatesTokenCount", `Int 5; "thoughtsTokenCount", `Int 3;
+    "promptTokensDetails", `List [
+      `Assoc ["modality", `String "TEXT"; "tokenCount", `Int 2];
+      `Assoc ["modality", `String "IMAGE"; "tokenCount", `Int 10] ];
+    "cacheTokensDetails", `List [
+      `Assoc ["modality", `String "TEXT"; "tokenCount", `Int 1];
+      `Assoc ["modality", `String "IMAGE"; "tokenCount", `Int 6] ];
+    "candidatesTokensDetails", `List [
+      `Assoc ["modality", `String "TEXT"; "tokenCount", `Int 5] ] ] in
+
   let final_with_usage = event (Yojson.Basic.to_string (`Assoc [
     "candidates", `List [ `Assoc [
       "finishReason", `String "STOP";
@@ -47,7 +56,17 @@ let () =
   assert (Pave.Gemini_stream.usage measured =
     Some { Pave.Protocol.input_tokens = 12; output_tokens = 8;
       cached_input_tokens = Some 7; cache_creation_input_tokens = None;
-      reasoning_output_tokens = Some 3 });
+      reasoning_output_tokens = Some 3;
+      input_modality_tokens = Some [
+        { Pave.Protocol.modality = "TEXT"; token_count = 2 };
+        { modality = "IMAGE"; token_count = 10 } ];
+      cached_input_modality_tokens = Some [
+        { Pave.Protocol.modality = "TEXT"; token_count = 1 };
+        { modality = "IMAGE"; token_count = 6 } ];
+      output_modality_tokens = Some [
+        { Pave.Protocol.modality = "TEXT"; token_count = 5 } ] });
+
+
   let trailing = Pave.Gemini_stream.create ~model:"gemini-2.5-flash"
     ~on_text:(fun _ -> ()) in
   Pave.Gemini_stream.feed trailing
@@ -58,7 +77,15 @@ let () =
   assert (Pave.Gemini_stream.usage trailing =
     Some { Pave.Protocol.input_tokens = 12; output_tokens = 8;
       cached_input_tokens = Some 7; cache_creation_input_tokens = None;
-      reasoning_output_tokens = Some 3 });
+      reasoning_output_tokens = Some 3;
+      input_modality_tokens = Some [
+        { Pave.Protocol.modality = "TEXT"; token_count = 2 };
+        { modality = "IMAGE"; token_count = 10 } ];
+      cached_input_modality_tokens = Some [
+        { Pave.Protocol.modality = "TEXT"; token_count = 1 };
+        { modality = "IMAGE"; token_count = 6 } ];
+      output_modality_tokens = Some [
+        { Pave.Protocol.modality = "TEXT"; token_count = 5 } ] });
   let result_without_id = Pave.Gemini_stream.create ~model:"gemini-2.5-flash" ~on_text:(fun _ -> ()) in
   Pave.Gemini_stream.feed result_without_id
     (chunk [ `Assoc [ "functionCall", `Assoc [ "name", `String "read_file";

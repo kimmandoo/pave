@@ -1,17 +1,33 @@
 type tool_call = { id : string; name : string; arguments : Yojson.Basic.t }
-
+type modality_token_count = { modality : string; token_count : int }
 type usage = {
   input_tokens : int;
   output_tokens : int;
   cached_input_tokens : int option;
   cache_creation_input_tokens : int option;
   reasoning_output_tokens : int option;
+  input_modality_tokens : modality_token_count list option;
+  cached_input_modality_tokens : modality_token_count list option;
+  output_modality_tokens : modality_token_count list option;
 }
+
+
+
 type content_block =
   | Text of string
   | Image of { mime_type : string; data : string }
 
 type attachment = { name : string; mime_type : string; data : string }
+type attachment_kind = Image_attachment | Audio_attachment | Video_attachment
+
+let attachment_kind = function
+  | "image/png" | "image/jpeg" | "image/webp" -> Some Image_attachment
+  | "audio/wav" | "audio/mp3" | "audio/mpeg" | "audio/aac"
+  | "audio/ogg" | "audio/flac" | "audio/m4a" | "audio/opus" ->
+      Some Audio_attachment
+  | "video/mp4" | "video/webm" -> Some Video_attachment
+  | _ -> None
+
 
 type message = {
   role : string;
@@ -32,9 +48,8 @@ let valid_image_content mime_type data =
 let max_attachment_bytes = 10 * 1024 * 1024
 let max_attachments = 8
 
-let valid_attachment_mime = function
-  | "image/png" | "image/jpeg" | "image/webp" -> true
-  | _ -> false
+let valid_attachment_mime mime_type = Option.is_some (attachment_kind mime_type)
+
 
 let valid_base64 data =
   let length = String.length data in
@@ -53,19 +68,19 @@ let valid_base64 data =
 
 let validate_attachments attachments =
   if List.length attachments > max_attachments then
-    raise (Invalid_response "too many image attachments");
+    raise (Invalid_response "too many media attachments");
   let total = List.fold_left (fun total (attachment : attachment) ->
     let { name; mime_type; data } = attachment in
     if name = "" || String.length name > 255 ||
        String.exists (fun c -> let code = Char.code c in
          code < 32 || code = 127 || c = '/' || c = '\\') name then
-      raise (Invalid_response "invalid image attachment name");
+      raise (Invalid_response "invalid media attachment name");
     if not (valid_attachment_mime mime_type) then
-      raise (Invalid_response "unsupported image attachment type");
+      raise (Invalid_response "unsupported media attachment type");
     if String.length data > max_attachment_bytes || not (valid_base64 data) then
-      raise (Invalid_response "invalid or oversized image attachment data");
+      raise (Invalid_response "invalid or oversized media attachment data");
     if String.length data > max_attachment_bytes - total then
-      raise (Invalid_response "image attachments exceed size limit");
+      raise (Invalid_response "media attachments exceed size limit");
     total + String.length data) 0 attachments in
   ignore total
 
@@ -83,6 +98,21 @@ let add_optional_tokens left right =
   match left, right with
   | Some left, Some right -> Some (checked_token_sum left right)
   | _ -> None
+let add_modality_tokens left right =
+  match left, right with
+  | Some left, Some right ->
+      let add counts { modality; token_count } =
+        match List.find_opt (fun detail -> detail.modality = modality) counts with
+        | None -> counts @ [{ modality; token_count }]
+        | Some previous ->
+            let token_count = checked_token_sum previous.token_count token_count in
+            List.map (fun detail ->
+              if detail.modality = modality then
+                { detail with token_count = token_count }
+              else detail) counts in
+      Some (List.fold_left add left right)
+  | _ -> None
+
 
 let add_usage left right =
   { input_tokens = checked_token_sum left.input_tokens right.input_tokens;
@@ -92,7 +122,14 @@ let add_usage left right =
     cache_creation_input_tokens = add_optional_tokens
       left.cache_creation_input_tokens right.cache_creation_input_tokens;
     reasoning_output_tokens = add_optional_tokens left.reasoning_output_tokens
-      right.reasoning_output_tokens }
+      right.reasoning_output_tokens;
+    input_modality_tokens = add_modality_tokens left.input_modality_tokens
+      right.input_modality_tokens;
+    cached_input_modality_tokens = add_modality_tokens
+      left.cached_input_modality_tokens right.cached_input_modality_tokens;
+    output_modality_tokens = add_modality_tokens left.output_modality_tokens
+      right.output_modality_tokens }
+
 
 let user ?(attachments = []) content =
   validate_attachments attachments;
@@ -176,7 +213,13 @@ let message_to_json ?(stored = false) (msg : message) =
      (msg.role <> "user" || msg.tool_result_content <> None ||
       msg.tool_calls <> [] || msg.tool_call_id <> None ||
       msg.provider_state <> None) then
-    raise (Invalid_response "image attachments require a plain user message");
+    raise (Invalid_response "media attachments require a plain user message");
+  if not stored && List.exists (fun (attachment : attachment) ->
+      attachment_kind attachment.mime_type <> Some Image_attachment)
+      msg.attachments then
+    raise (Invalid_response
+      "audio/video attachments require provider-native media transport");
+
   let fields = [ "role", `String msg.role ] in
   let fields = match msg.content, stored, msg.attachments with
     | None, _, [] | None, true, _ -> fields
@@ -192,6 +235,7 @@ let message_to_json ?(stored = false) (msg : message) =
               ("data:" ^ attachment.mime_type ^ ";base64," ^ attachment.data)]])
           attachments in
         fields @ ["content", `List (text @ images)] in
+
   let fields = match stored, msg.tool_result_content with
     | true, Some blocks ->
         fields @ ["tool_result_content", `List (List.map content_block_to_json blocks)]
@@ -352,6 +396,38 @@ let optional_token_detail json key total =
   match member key json with
   | `Int count when count >= 0 && count <= total -> Some count
   | _ -> None
+let parse_modality_tokens json key total =
+  let valid_name name =
+    name <> "" && String.length name <= 64 &&
+    String.for_all (function
+      | 'A'..'Z' | '0'..'9' | '_' -> true
+      | _ -> false) name in
+  match member key json with
+  | `List values ->
+      let seen = Hashtbl.create 4 in
+      let rec parse = function
+        | [] -> Some []
+        | item :: rest ->
+            (match member "modality" item, member "tokenCount" item with
+             | `String modality, `Int token_count
+               when valid_name modality && token_count >= 0 &&
+                    token_count <= total && not (Hashtbl.mem seen modality) ->
+                 Hashtbl.add seen modality ();
+                 Option.map (fun tail ->
+                   { modality; token_count } :: tail) (parse rest)
+             | _ -> None) in
+      (match parse values with
+       | None -> None
+       | Some parsed ->
+           let rec sum count = function
+             | [] -> Some parsed
+             | item :: rest when item.token_count <= total - count ->
+                 sum (count + item.token_count) rest
+             | _ -> None in
+           sum 0 parsed)
+  | `Null -> None
+  | _ -> None
+
 
 let completion_usage json =
   let reported = member "usage" json in
@@ -363,5 +439,7 @@ let completion_usage json =
       let reasoning_output_tokens = optional_token_detail
         (member "completion_tokens_details" reported) "reasoning_tokens" output_tokens in
       Some { input_tokens; output_tokens; cached_input_tokens;
-        cache_creation_input_tokens = None; reasoning_output_tokens }
+        cache_creation_input_tokens = None; reasoning_output_tokens;
+        input_modality_tokens = None; cached_input_modality_tokens = None;
+        output_modality_tokens = None }
   | _ -> None

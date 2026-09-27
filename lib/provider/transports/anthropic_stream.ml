@@ -161,7 +161,8 @@ let usage t = match t.stopped, t.failed, t.input_tokens, t.output_tokens with
       Some { Protocol.input_tokens; output_tokens;
         cached_input_tokens = t.cached_input_tokens;
         cache_creation_input_tokens = t.cache_creation_input_tokens;
-        reasoning_output_tokens = None }
+        reasoning_output_tokens = None; input_modality_tokens = None;
+        cached_input_modality_tokens = None; output_modality_tokens = None }
   | _ -> None
 let finish t =
   if t.failed then invalid "stream is invalid";

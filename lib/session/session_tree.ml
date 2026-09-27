@@ -51,13 +51,23 @@ let summary (entry : Session.entry) =
       let identity = identity ^
         Option.fold ~none:"" ~some:(fun account -> "#" ^ account) account_id ^
         "/" ^ model in
+      let modalities label = function
+        | None -> None
+        | Some counts ->
+            let values = List.map (fun (detail : Protocol.modality_token_count) ->
+              Printf.sprintf "%s %d" detail.modality detail.token_count) counts in
+            Some (label ^ ": " ^
+              (if values = [] then "none reported" else String.concat ", " values)) in
       let details = List.filter_map Fun.id [
         Option.map (fun value -> Printf.sprintf "%d cached" value)
           tokens.cached_input_tokens;
         Option.map (fun value -> Printf.sprintf "%d cache creation" value)
           tokens.cache_creation_input_tokens;
         Option.map (fun value -> Printf.sprintf "%d reasoning" value)
-          tokens.reasoning_output_tokens ] in
+          tokens.reasoning_output_tokens;
+        modalities "input modalities" tokens.input_modality_tokens;
+        modalities "cached modalities" tokens.cached_input_modality_tokens;
+        modalities "output modalities" tokens.output_modality_tokens ] in
       Printf.sprintf "usage · %s · %d in / %d out%s"
         (first_line identity) tokens.input_tokens tokens.output_tokens
         (if details = [] then "" else " · " ^ String.concat " · " details)

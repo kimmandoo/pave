@@ -141,7 +141,9 @@ let usage json =
   | `Int input_tokens, `Int output_tokens
     when input_tokens >= 0 && output_tokens >= 0 ->
       Some { Protocol.input_tokens; output_tokens; cached_input_tokens = None;
-        cache_creation_input_tokens = None; reasoning_output_tokens = None }
+        cache_creation_input_tokens = None; reasoning_output_tokens = None;
+        input_modality_tokens = None; cached_input_modality_tokens = None;
+        output_modality_tokens = None }
   | _ -> None
 
 let parse_completion json =

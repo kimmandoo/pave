@@ -8,10 +8,17 @@ let () =
   Sys.remove path;
   Fun.protect ~finally:(fun () -> Sys.remove path) (fun () ->
     let session = Pave.Session.open_file path in
-    let original = Pave.Session.append session (user "old request") in
+    let old_attachment : Pave.Protocol.attachment = {
+      name = "old.png"; mime_type = "image/png"; data = "aGVsbG8=" } in
+    let kept_attachment : Pave.Protocol.attachment = {
+      name = "latest.wav"; mime_type = "audio/wav"; data = "aGVsbG8=" } in
+    let old_message = user ~attachments:[old_attachment] "old request" in
+    let latest_message = user ~attachments:[kept_attachment] "recent request" in
+    let original = Pave.Session.append session old_message in
     ignore (Pave.Session.append session (assistant "old answer"));
-    let current = Pave.Session.append session (user "recent request") in
+    let current = Pave.Session.append session latest_message in
     let before = Pave.Session.history session in
+
     (match Pave.Session.compact session ~summary:"not enough" ~first_kept_id:original with
      | exception Pave.Protocol.Invalid_response _ -> ()
      | _ -> failwith "compaction accepted an earlier boundary");
@@ -27,7 +34,8 @@ let () =
     let marker = Pave.Session.compact ~provider_state:native_state session
       ~summary ~first_kept_id:current in
     assert (Pave.Session.history session = before);
-    assert (Pave.Session.context session = [compacted; user "recent request"]);
+    assert (Pave.Session.context session = [compacted; latest_message]);
+
     let call : Pave.Protocol.tool_call = { id = "call-1"; name = "read_file";
       arguments = `Assoc [ "path", `String "App.swift" ] } in
     ignore (Pave.Session.append session { role = "assistant"; content = None;
@@ -41,9 +49,10 @@ let () =
     assert (Pave.Session.context (Pave.Session.open_file path) =
       Pave.Session.context reopened);
     Pave.Session.branch reopened original;
-    assert (Pave.Session.context reopened = [ user "old request" ]);
+    assert (Pave.Session.context reopened = [old_message]);
+
     Pave.Session.branch reopened marker;
-    assert (Pave.Session.context reopened = [compacted; user "recent request"]);
+    assert (Pave.Session.context reopened = [compacted; latest_message]);
     assert (Pave.Session.history reopened = before);
     let anthropic_path = Filename.temp_file
       "pave-anthropic-compaction-" ".jsonl" in
