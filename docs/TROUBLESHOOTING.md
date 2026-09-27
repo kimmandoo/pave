@@ -36,6 +36,13 @@
 - **Solution:** Passed `~cwd:(Some path)` and scalar `~timeout_seconds`, added trailing `()` to affected functions/callsites, and annotated ambiguous records. The full forced suite and install build then passed.
 - **Prevention / Reference:** Treat inferred optional-argument types and erasability as part of the module API; annotate shared record labels and verify integration callsites.
 
+### [2026-09-27] Linux PTY master close terminated its session leader
+
+- **Context / Symptom:** R8 release workflow `36321096728` failed `test_workspace_process` on Linux x86_64 and aarch64; the `/bin/cat` PTY test did not report `Exited 0` after its input and output completed.
+- **Root Cause:** Closing the PTY master sends `SIGHUP` to the controlling terminal's foreground process group on Linux, including the Python launcher/session leader. The launcher died before returning the child status; Darwin did not exhibit this finalization behavior.
+- **Solution:** Ignored `SIGHUP` immediately before the launcher's final master close, then restored its default disposition before re-raising a child `SIGHUP`. The isolated Linux PTY exit path and macOS process suite passed; hosted matrix verification is pending.
+- **Prevention / Reference:** Treat PTY master close as a hangup event for the session's foreground process group; verify process exit and signal propagation on both Linux and Darwin.
+
 ### [2026-09-27] Linux x86_64 release test reported a missing OpenSSL signer
 
 - **Context / Symptom:** The first v0.1.48 Linux x86_64 Actions attempt failed in `test_vertex_auth` with `Pave.Vertex_auth.Authentication_error("OpenSSL is required for Google service-account credentials")`; Linux aarch64 and both macOS jobs passed. Rerunning only the failed matrix job passed tests, native build, archive packaging and smoke without source changes; the complete release workflow then succeeded.

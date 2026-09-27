@@ -6,6 +6,7 @@
 - test(provider): removed the redundant fork from the Vertex ADC fixture after the hosted helper failure.
 - release(distribution): published v0.1.49 after release workflow 36310670104 attempt 2 passed all four native Linux/macOS arm64/x86-64 test, build, package and extracted-smoke jobs plus the release job. The public non-draft release contains all four archives and `SHA256SUMS`; all checksums passed, every archive contained exactly `pave`, `LICENSE` and `THIRD_PARTY_NOTICES`, extracted macOS arm64 passed `--help`, `--providers` and `task --help`, and Intel passed under Rosetta with Apple absent. Workflow: https://github.com/kimmandoo/pave/actions/runs/36310670104; release: https://github.com/kimmandoo/pave/releases/tag/v0.1.49.
 - feat(workspace): added bounded selective readers for workspace files/directories, documents and PDFs, archives, notebooks, SQLite, owner-scoped artifacts and managed worktrees, plus safe public HTTPS fetching; added snapshot-conflict-protected multi-hunk edits, OCaml AST operations, cancellable process/PTY jobs and explicit-approval Git operations that preserved unrelated user changes.
+- fix(workspace): kept Linux PTY launchers alive through master-close SIGHUP so process results preserve the child's exit or signal status.
 
 - fix(tui): wrapped transcript prose at word boundaries when possible and hard-wrapped only unbroken tokens at grapheme boundaries; kept typed Thinking/tool phases and elapsed time visible through progress and resize, cleared activity at turn completion, and never exposed private reasoning.
 

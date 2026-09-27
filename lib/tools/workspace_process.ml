@@ -273,10 +273,11 @@ let launcher_code =
   "                    while view: view = view[os.write(1, view):]\n" ^
   "            except OSError: pass\n" ^
   "            break\n" ^
+  "    signal.signal(signal.SIGHUP, signal.SIG_IGN)\n" ^
   "    os.close(master)\n" ^
   "    code = child.wait()\n" ^
   "    if code < 0:\n" ^
-  "        if -code == signal.SIGTERM: signal.signal(signal.SIGTERM, signal.SIG_DFL)\n" ^
+  "        if -code in (signal.SIGTERM, signal.SIGHUP): signal.signal(-code, signal.SIG_DFL)\n" ^
   "        os.kill(os.getpid(), -code)\n" ^
   "    sys.exit(code)\n" ^
   "except Exception as exc:\n" ^
