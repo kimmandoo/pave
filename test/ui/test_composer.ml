@@ -248,4 +248,61 @@ let () =
   assert (Pave.Composer.text editor = restored);
   assert (Pave.Composer.cursor editor = restored_cursor);
 
+  let editor = Pave.Composer.create () in
+  let measure = function "👩‍💻" -> 2 | _ -> 1 in
+  Pave.Composer.insert editor "á👩‍💻z";
+  Pave.Composer.home editor;
+  Pave.Composer.select_right editor;
+  Pave.Composer.select_right editor;
+  assert (Pave.Composer.selection editor =
+    Some (0, String.length "á👩‍💻"));
+  Pave.Composer.insert editor "X";
+  assert (Pave.Composer.text editor = "Xz");
+  assert (Pave.Composer.selection editor = None);
+  Pave.Composer.undo editor;
+  assert (Pave.Composer.text editor = "á👩‍💻z");
+  assert (Pave.Composer.selection editor =
+    Some (0, String.length "á👩‍💻"));
+  Pave.Composer.redo editor;
+  assert (Pave.Composer.text editor = "Xz");
+  Pave.Composer.clear editor;
+
+  Pave.Composer.insert editor "abc";
+  Pave.Composer.home editor;
+  Pave.Composer.select_right editor;
+  Pave.Composer.select_right editor;
+  Pave.Composer.delete editor;
+  assert (Pave.Composer.text editor = "c");
+  Pave.Composer.undo editor;
+  assert (Pave.Composer.text editor = "abc");
+  assert (Pave.Composer.selection editor = Some (0, 2));
+  Pave.Composer.right editor;
+  assert (Pave.Composer.cursor editor = 2);
+  assert (Pave.Composer.selection editor = None);
+  Pave.Composer.clear editor;
+
+  Pave.Composer.insert editor "ab\ncd";
+  Pave.Composer.home editor;
+  Pave.Composer.select_vertical ~columns:8 ~measure editor 1;
+  assert (Pave.Composer.cursor editor = 3);
+  assert (Pave.Composer.selection editor = Some (0, 3));
+  Pave.Composer.select_end_of_line ~columns:8 ~measure editor;
+  assert (Pave.Composer.cursor editor = 5);
+  assert (Pave.Composer.selection editor = Some (0, 5));
+  Pave.Composer.select_beginning_of_line ~columns:8 ~measure editor;
+  assert (Pave.Composer.cursor editor = 3);
+  assert (Pave.Composer.selection editor = Some (0, 3));
+  Pave.Composer.left editor;
+  assert (Pave.Composer.cursor editor = 0);
+  assert (Pave.Composer.selection editor = None);
+
+  Pave.Composer.home editor;
+  Pave.Composer.select_right editor;
+  Pave.Composer.erase editor;
+  assert (Pave.Composer.text editor = "b\ncd");
+  Pave.Composer.undo editor;
+  assert (Pave.Composer.text editor = "ab\ncd");
+  assert (Pave.Composer.selection editor = Some (0, 1));
+  Pave.Composer.clear editor;
+
   print_endline "terminal composer: ok"

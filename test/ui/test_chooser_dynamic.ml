@@ -96,3 +96,4 @@ let () =
   assert (Tui.transcript_prefix Transcript_view.Code false = "    ");
   assert (Tui.transcript_prefix Transcript_view.List_item true = "    ");
   print_endline "dynamic chooser availability and navigation: ok"
+

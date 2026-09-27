@@ -7,6 +7,8 @@ type change = {
   mutable pending : Buffer.t option;
   before : int;
   mutable after : int;
+  before_selection : int option;
+  mutable after_selection : int option;
 }
 
 type journal = {
@@ -23,27 +25,40 @@ let empty_journal () =
 type t = {
   mutable text : string;
   mutable cursor : int;
+  mutable anchor : int option;
   mutable boundaries : int array;
   mutable boundary_count : int;
   mutable history : string list;
   mutable recall : int option;
   mutable draft : string;
   mutable draft_cursor : int;
+  mutable draft_anchor : int option;
   mutable preferred_column : int option;
   mutable search : (string * int option) option;
   mutable journal : journal;
   mutable draft_journal : journal option;
-  mutable paste : (string * int) option;
+  mutable paste : (string * int * int option) option;
   mutable kill : string;
 }
 
-let create () = { text = ""; cursor = 0; boundaries = [| 0 |];
+let create () = { text = ""; cursor = 0; anchor = None; boundaries = [| 0 |];
   boundary_count = 1; history = []; recall = None; draft = "";
-  draft_cursor = 0; preferred_column = None; search = None;
+  draft_cursor = 0; draft_anchor = None; preferred_column = None; search = None;
   journal = empty_journal (); draft_journal = None; paste = None; kill = "" }
 let text t = t.text
 let cursor t = t.cursor
-
+let selection t = match t.anchor with
+  | Some anchor when anchor <> t.cursor ->
+      Some (min anchor t.cursor, max anchor t.cursor)
+  | _ -> None
+let selection_snapshot t = t.anchor
+let clear_selection t = t.anchor <- None
+let collapse_selection t direction = match selection t with
+  | None -> false
+  | Some (start, stop) ->
+      t.cursor <- (if direction < 0 then start else stop);
+      clear_selection t;
+      true
 let segment text =
   let _, reverse = Uuseg_string.fold_utf_8 `Grapheme_cluster
     (fun (offset, reverse) cluster ->
@@ -73,6 +88,7 @@ let set_at t text pos =
   t.boundaries <- boundaries;
   t.boundary_count <- Array.length boundaries;
   t.cursor <- boundaries.(at_or_after boundaries t.boundary_count pos);
+  clear_selection t;
   t.preferred_column <- None
 
 let set t text =
@@ -84,6 +100,7 @@ let clear t =
   t.recall <- None;
   t.draft <- "";
   t.draft_cursor <- 0;
+  t.draft_anchor <- None;
   t.draft_journal <- None;
   t.paste <- None;
   t.search <- None
@@ -118,14 +135,15 @@ let trim_journal journal =
     journal.count <- List.length journal.undo;
     journal.bytes <- changes_size journal.undo)
 
-let record t ~start ~removed ~inserted ~before =
+let record ?(before_selection = None) t ~start ~removed ~inserted ~before =
   let journal = t.journal in
   journal.bytes <- journal.bytes - changes_size journal.redo;
   journal.redo <- [];
   (match journal.undo with
   | previous :: _ when journal.grouping && removed = ""
       && previous.removed = "" && previous.after = before
-      && previous.start + inserted_length previous = start ->
+      && previous.start + inserted_length previous = start
+      && before_selection = None ->
       (match previous.pending with
       | Some buffer -> Buffer.add_string buffer inserted
       | None ->
@@ -136,15 +154,16 @@ let record t ~start ~removed ~inserted ~before =
           previous.inserted <- "";
           previous.pending <- Some buffer);
       previous.after <- t.cursor;
+      previous.after_selection <- selection_snapshot t;
       journal.bytes <- journal.bytes + String.length inserted
   | _ ->
       journal.undo <- { start; removed; inserted; pending = None;
-        before; after = t.cursor } :: journal.undo;
+        before; after = t.cursor; before_selection;
+        after_selection = selection_snapshot t } :: journal.undo;
       journal.bytes <- journal.bytes + String.length removed + String.length inserted;
       journal.count <- journal.count + 1);
   journal.grouping <- true;
   trim_journal journal
-
 let replace t ~start ~stop ~value ~position =
   set_at t (String.sub t.text 0 start ^ value
     ^ String.sub t.text stop (String.length t.text - stop)) position
@@ -161,6 +180,7 @@ let undo t =
       replace t ~start:change.start
         ~stop:(change.start + String.length inserted)
         ~value:change.removed ~position:change.before;
+      t.anchor <- change.before_selection;
       journal.redo <- change :: journal.redo
 
 let redo t =
@@ -174,6 +194,7 @@ let redo t =
       replace t ~start:change.start
         ~stop:(change.start + String.length change.removed)
         ~value:(inserted_text change) ~position:change.after;
+      t.anchor <- change.after_selection;
       journal.undo <- change :: journal.undo
 
 let safe_input value =
@@ -206,12 +227,12 @@ let safe_input value =
 let begin_paste t =
   if t.paste = None then (
     t.journal.grouping <- false;
-    t.paste <- Some (t.text, t.cursor))
+    t.paste <- Some (t.text, t.cursor, selection_snapshot t))
 
 let end_paste t =
   (match t.paste with
   | None -> ()
-  | Some (before, cursor) ->
+  | Some (before, cursor, before_selection) ->
       t.paste <- None;
       if before <> t.text then (
         let old_length = String.length before
@@ -227,7 +248,7 @@ let end_paste t =
           decr old_stop;
           decr new_stop
         done;
-        record t ~start:!start
+        record ~before_selection t ~start:!start
           ~removed:(String.sub before !start (!old_stop - !start))
           ~inserted:(String.sub t.text !start (!new_stop - !start))
           ~before:cursor));
@@ -235,29 +256,35 @@ let end_paste t =
 
 let insert t value =
   let value = safe_input value in
-  if value <> "" && String.length t.text + String.length value <= 16_384 then (
-    let start = t.cursor in
-    if t.cursor = String.length t.text then (
-      let start = t.boundaries.(max 0 (t.boundary_count - 2)) in
-      let suffix = String.sub t.text start (String.length t.text - start) ^ value in
-      let tail = segment suffix in
-      let prefix_count = max 1 (t.boundary_count - 1) in
-      let count = prefix_count + Array.length tail - 1 in
-      if Array.length t.boundaries < count then (
-        let grown = Array.make (max count (2 * Array.length t.boundaries)) 0 in
-        Array.blit t.boundaries 0 grown 0 t.boundary_count;
-        t.boundaries <- grown);
-      for i = 1 to Array.length tail - 1 do
-        t.boundaries.(prefix_count + i - 1) <- start + tail.(i)
-      done;
-      t.boundary_count <- count;
-      t.text <- t.text ^ value;
-      t.cursor <- String.length t.text)
-    else (
-      let pos = t.cursor + String.length value in
-      replace t ~start:t.cursor ~stop:t.cursor ~value ~position:pos);
-    if t.paste = None then
-      record t ~start ~removed:"" ~inserted:value ~before:start)
+  if value <> "" then
+    let selected = selection t in
+    let start, stop = match selected with
+      | Some range -> range
+      | None -> t.cursor, t.cursor in
+    if String.length t.text - (stop - start) + String.length value <= 16_384 then (
+      let before = t.cursor and before_selection = selection_snapshot t in
+      let removed = String.sub t.text start (stop - start) in
+      if selected = None && t.cursor = String.length t.text then (
+        let suffix_start = t.boundaries.(max 0 (t.boundary_count - 2)) in
+        let suffix = String.sub t.text suffix_start
+          (String.length t.text - suffix_start) ^ value in
+        let tail = segment suffix in
+        let prefix_count = max 1 (t.boundary_count - 1) in
+        let count = prefix_count + Array.length tail - 1 in
+        if Array.length t.boundaries < count then (
+          let grown = Array.make (max count (2 * Array.length t.boundaries)) 0 in
+          Array.blit t.boundaries 0 grown 0 t.boundary_count;
+          t.boundaries <- grown);
+        for i = 1 to Array.length tail - 1 do
+          t.boundaries.(prefix_count + i - 1) <- suffix_start + tail.(i)
+        done;
+        t.boundary_count <- count;
+        t.text <- t.text ^ value;
+        t.cursor <- String.length t.text)
+      else replace t ~start ~stop ~value
+          ~position:(start + String.length value);
+      if t.paste = None then
+        record ~before_selection t ~start ~removed ~inserted:value ~before)
 let prepend t value =
   let value = safe_input value in
   let inserted = String.length value in
@@ -274,38 +301,44 @@ let prepend t value =
     true)
 
 let erase t =
-  let start = previous t in
-  if start <> t.cursor then (
-    let before = t.cursor in
-    let removed = String.sub t.text start (before - start) in
-    replace t ~start ~stop:before ~value:"" ~position:start;
+  let start, stop = match selection t with
+    | Some range -> range
+    | None -> previous t, t.cursor in
+  if start <> stop then (
+    let before = t.cursor and before_selection = selection_snapshot t in
+    let removed = String.sub t.text start (stop - start) in
+    replace t ~start ~stop ~value:"" ~position:start;
     t.journal.grouping <- false;
-    record t ~start ~removed ~inserted:"" ~before;
+    record ~before_selection t ~start ~removed ~inserted:"" ~before;
     t.journal.grouping <- false)
 
 let delete t =
-  let finish = next t in
-  if finish <> t.cursor then (
-    let start = t.cursor in
-    let removed = String.sub t.text start (finish - start) in
-    replace t ~start ~stop:finish ~value:"" ~position:start;
+  let start, stop = match selection t with
+    | Some range -> range
+    | None -> t.cursor, next t in
+  if start <> stop then (
+    let before = t.cursor and before_selection = selection_snapshot t in
+    let removed = String.sub t.text start (stop - start) in
+    replace t ~start ~stop ~value:"" ~position:start;
     t.journal.grouping <- false;
-    record t ~start ~removed ~inserted:"" ~before:start;
+    record ~before_selection t ~start ~removed ~inserted:"" ~before;
     t.journal.grouping <- false)
 
 let left t =
-  t.cursor <- previous t;
+  if not (collapse_selection t (-1)) then t.cursor <- previous t;
   t.preferred_column <- None;
   t.journal.grouping <- false
 let right t =
-  t.cursor <- next t;
+  if not (collapse_selection t 1) then t.cursor <- next t;
   t.preferred_column <- None;
   t.journal.grouping <- false
 let home t =
+  clear_selection t;
   t.cursor <- 0;
   t.preferred_column <- None;
   t.journal.grouping <- false
 let finish t =
+  clear_selection t;
   t.cursor <- String.length t.text;
   t.preferred_column <- None;
   t.journal.grouping <- false
@@ -320,11 +353,13 @@ let line_stop t =
   | None -> String.length t.text
 
 let beginning_of_line t =
+  clear_selection t;
   t.cursor <- line_start t;
   t.preferred_column <- None;
   t.journal.grouping <- false
 
 let end_of_line t =
+  clear_selection t;
   t.cursor <- line_stop t;
   t.preferred_column <- None;
   t.journal.grouping <- false
@@ -396,17 +431,17 @@ let position ~measure t (lines : line array) =
   done;
   !row, min lines.(!row).columns !col
 
-let vertical ~columns ~measure t direction =
+let vertical_target ~columns ~measure t direction =
   let lines = layout ~columns ~measure t in
   let row, col = position ~measure t lines in
   let goal = Option.value t.preferred_column ~default:col in
   let dest = max 0 (min (Array.length lines - 1) (row + direction)) in
-  if dest <> row then (
+  if dest = row then None
+  else (
     let line = lines.(dest) in
     let best = ref line.start and distance = ref max_int and col = ref 0 in
     let consider offset =
-      let wraps_into_next = offset = line.stop
-        && dest + 1 < Array.length lines
+      let wraps_into_next = offset = line.stop && dest + 1 < Array.length lines
         && lines.(dest + 1).start = line.stop in
       if not wraps_into_next then (
         let d = abs (goal - !col) in
@@ -420,10 +455,53 @@ let vertical ~columns ~measure t direction =
       consider last;
       incr index
     done;
-    t.cursor <- !best;
-    t.preferred_column <- Some goal;
-    t.journal.grouping <- false);
-  dest <> row
+    Some (!best, goal))
+
+let vertical ~columns ~measure t direction =
+  match vertical_target ~columns ~measure t direction with
+  | None -> false
+  | Some (target, goal) ->
+      t.cursor <- target;
+      clear_selection t;
+      t.preferred_column <- Some goal;
+      t.journal.grouping <- false;
+      true
+
+let select_left t =
+  if t.anchor = None then t.anchor <- Some t.cursor;
+  t.cursor <- previous t;
+  t.preferred_column <- None;
+  t.journal.grouping <- false
+
+let select_right t =
+  if t.anchor = None then t.anchor <- Some t.cursor;
+  t.cursor <- next t;
+  t.preferred_column <- None;
+  t.journal.grouping <- false
+
+let select_vertical ~columns ~measure t delta =
+  if t.anchor = None then t.anchor <- Some t.cursor;
+  match vertical_target ~columns ~measure t delta with
+  | None -> ()
+  | Some (target, goal) ->
+      t.cursor <- target;
+      t.preferred_column <- Some goal;
+      t.journal.grouping <- false
+
+let select_line_edge ~columns ~measure t edge =
+  let lines = layout ~columns ~measure t in
+  let row, _ = position ~measure t lines in
+  let target = if edge < 0 then lines.(row).start else lines.(row).stop in
+  if t.anchor = None then t.anchor <- Some t.cursor;
+  t.cursor <- target;
+  t.preferred_column <- None;
+  t.journal.grouping <- false
+
+let select_beginning_of_line ~columns ~measure t =
+  select_line_edge ~columns ~measure t (-1)
+
+let select_end_of_line ~columns ~measure t =
+  select_line_edge ~columns ~measure t 1
 
 let word_kind text start =
   let c = text.[start] and length = String.length text in
@@ -449,35 +527,40 @@ let word_kind text start =
   else 2
 
 let word_left t =
-  let i = ref (at_or_after t.boundaries t.boundary_count t.cursor) in
-  while !i > 0 && word_kind t.text t.boundaries.(!i - 1) = 0 do decr i done;
-  if !i > 0 then (
-    let kind = word_kind t.text t.boundaries.(!i - 1) in
-    while !i > 0 && word_kind t.text t.boundaries.(!i - 1) = kind do decr i done);
-  t.cursor <- t.boundaries.(!i);
+  if not (collapse_selection t (-1)) then (
+    let i = ref (at_or_after t.boundaries t.boundary_count t.cursor) in
+    while !i > 0 && word_kind t.text t.boundaries.(!i - 1) = 0 do decr i done;
+    if !i > 0 then (
+      let kind = word_kind t.text t.boundaries.(!i - 1) in
+      while !i > 0 && word_kind t.text t.boundaries.(!i - 1) = kind do decr i done);
+    t.cursor <- t.boundaries.(!i));
   t.preferred_column <- None;
   t.journal.grouping <- false
 
 let word_right t =
-  let i = ref (at_or_after t.boundaries t.boundary_count t.cursor) in
-  let limit = t.boundary_count - 1 in
-  if !i < limit then (
-    let kind = word_kind t.text t.boundaries.(!i) in
-    while !i < limit && word_kind t.text t.boundaries.(!i) = kind do incr i done;
-    while !i < limit && word_kind t.text t.boundaries.(!i) = 0 do incr i done);
-  t.cursor <- t.boundaries.(!i);
+  if not (collapse_selection t 1) then (
+    let i = ref (at_or_after t.boundaries t.boundary_count t.cursor) in
+    let limit = t.boundary_count - 1 in
+    if !i < limit then (
+      let kind = word_kind t.text t.boundaries.(!i) in
+      while !i < limit && word_kind t.text t.boundaries.(!i) = kind do incr i done;
+      while !i < limit && word_kind t.text t.boundaries.(!i) = 0 do incr i done);
+    t.cursor <- t.boundaries.(!i));
   t.preferred_column <- None;
   t.journal.grouping <- false
 
 let erase_word t =
-  let finish = t.cursor in
-  word_left t;
-  if t.cursor <> finish then (
-    let start = t.cursor in
-    let removed = String.sub t.text start (finish - start) in
-    replace t ~start ~stop:finish ~value:"" ~position:start;
-    record t ~start ~removed ~inserted:"" ~before:finish;
-    t.journal.grouping <- false)
+  match selection t with
+  | Some _ -> erase t
+  | None ->
+      let finish = t.cursor in
+      word_left t;
+      if t.cursor <> finish then (
+        let start = t.cursor in
+        let removed = String.sub t.text start (finish - start) in
+        replace t ~start ~stop:finish ~value:"" ~position:start;
+        record t ~start ~removed ~inserted:"" ~before:finish;
+        t.journal.grouping <- false)
 
 let older t =
   let index = match t.recall with None -> 0 | Some i -> i + 1 in
@@ -487,6 +570,7 @@ let older t =
       if t.recall = None then (
         t.draft <- t.text;
         t.draft_cursor <- t.cursor;
+        t.draft_anchor <- selection_snapshot t;
         t.draft_journal <- Some t.journal);
       t.recall <- Some index;
       t.journal <- empty_journal ();
@@ -498,6 +582,7 @@ let newer t =
   | Some 0 ->
       t.recall <- None;
       set_at t t.draft t.draft_cursor;
+      t.anchor <- t.draft_anchor;
       t.journal <- Option.value t.draft_journal ~default:(empty_journal ());
       t.draft_journal <- None;
       t.journal.grouping <- false
@@ -530,7 +615,8 @@ let search_older t = match t.search with
   | None ->
       if t.recall = None then (
         t.draft <- t.text;
-        t.draft_cursor <- t.cursor);
+        t.draft_cursor <- t.cursor;
+        t.draft_anchor <- selection_snapshot t);
       t.search <- Some ("", find_history t "" 0)
   | Some (query, index) ->
       let from = match index with None -> 0 | Some i -> i + 1 in

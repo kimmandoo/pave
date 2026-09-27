@@ -575,6 +575,8 @@ let () =
     let runner : Pave.Turn_runner.t option ref = ref None in
     let ui_thread = Thread.id (Thread.self ()) in
     let on_event message = match !ui with
+      | Some screen when Thread.id (Thread.self ()) <> ui_thread ->
+          Tui.post_message screen message
       | Some screen -> Tui.event screen message
       | None -> print_endline message; flush stdout in
     let job_managers :
@@ -2749,7 +2751,7 @@ let () =
       && Sys.getenv_opt "TERM" <> Some "dumb" then (
       let screen = Tui.create ~root
         ~model:(selection_label !active_descriptor !active_identity !active_route)
-        ~session:(!session <> "") in
+        ~session:(!session <> "") () in
       Fun.protect ~finally:(fun () ->
         (match !runner with
          | Some current -> Pave.Turn_runner.close current
@@ -2780,6 +2782,73 @@ let () =
              ignore (rewind_manager current);
              deliver_job_results ()
          | None -> ());
+        let handle_runner_event = function
+          | Pave.Turn_runner.Turn_started { prompt; _ } ->
+              let staged = !pending_attachments in
+              let attachments, consume_pending = match !retry_attachments with
+                | Some items -> retry_attachments := None; items, false
+                | None -> staged, true in
+              submitted_attachments :=
+                Some (attachments, consume_pending, false);
+              if consume_pending then pending_attachments := [];
+              Tui.set_activity screen (Some "Thinking");
+              if not consume_pending then
+                Tui.set_attachments screen (List.map
+                  (fun (item : Pave.Protocol.attachment) -> item.name)
+                  attachments);
+              Tui.sent screen prompt;
+              if not consume_pending then
+                Tui.set_attachments screen (List.map
+                  (fun (item : Pave.Protocol.attachment) -> item.name) staged)
+          | Pave.Turn_runner.Transcript_message { text; _ } ->
+              Tui.event screen text
+          | Pave.Turn_runner.Text_delta { text; _ } ->
+              Tui.delta screen text
+          | Pave.Turn_runner.Activity_phase { phase; _ } ->
+              (match phase with
+               | Pave.Agent.Model ->
+                   Tui.set_activity screen (Some "Thinking")
+               | Pave.Agent.Tool name ->
+                   Tui.set_activity screen (Some ("Tool: " ^ name)))
+          | Pave.Turn_runner.Tool_event { event; _ } ->
+              render_tool_event screen event
+          | Pave.Turn_runner.Background_notice { message } ->
+              (match !runner with
+               | Some active when Pave.Turn_runner.busy active -> ()
+               | _ -> deliver_job_results ());
+              Tui.event screen message
+          | Pave.Turn_runner.Turn_completed _ ->
+              deliver_job_results ();
+              submitted_attachments := None;
+              retry_attachments := None;
+              refresh_usage screen;
+              Tui.set_activity screen None;
+              Tui.finish_live screen
+          | Pave.Turn_runner.Turn_cancelled _ ->
+              deliver_job_results ();
+              (match !submitted_attachments with
+               | Some (items, true, false) when items <> [] ->
+                   set_pending_attachments items
+               | _ -> ());
+              submitted_attachments := None;
+              retry_attachments := None;
+              refresh_usage screen;
+              Tui.set_activity screen None;
+              Tui.clear_live screen;
+              Tui.event screen "Turn cancelled."
+          | Pave.Turn_runner.Turn_failed { error; _ } ->
+              deliver_job_results ();
+              (match !submitted_attachments with
+               | Some (items, true, false) when items <> [] ->
+                   set_pending_attachments items
+               | _ -> ());
+              submitted_attachments := None;
+              retry_attachments := None;
+              refresh_usage screen;
+              Tui.set_activity screen None;
+              Tui.clear_live screen;
+              Tui.event screen ("Error: " ^ error_message error) in
+        Tui.set_agent_event_handler screen handle_runner_event;
         let active = Pave.Turn_runner.create
           ~run:(fun ~cancel text ->
             let attachments = match !submitted_attachments with
@@ -2787,72 +2856,7 @@ let () =
               | None -> [] in
             ignore (Pave.Agent.run ~cancel ~max_turns ~attachments
               (get_agent ()) text))
-          ~on_event:(function
-            | Pave.Turn_runner.Turn_started { prompt; _ } ->
-                let staged = !pending_attachments in
-                let attachments, consume_pending = match !retry_attachments with
-                  | Some items -> retry_attachments := None; items, false
-                  | None -> staged, true in
-                submitted_attachments :=
-                  Some (attachments, consume_pending, false);
-                if consume_pending then pending_attachments := [];
-                Tui.set_activity screen (Some "Thinking");
-                if not consume_pending then
-                  Tui.set_attachments screen (List.map
-                    (fun (item : Pave.Protocol.attachment) -> item.name)
-                    attachments);
-                Tui.sent screen prompt;
-                if not consume_pending then
-                  Tui.set_attachments screen (List.map
-                    (fun (item : Pave.Protocol.attachment) -> item.name) staged)
-            | Pave.Turn_runner.Transcript_message { text; _ } ->
-                Tui.event screen text
-            | Pave.Turn_runner.Text_delta { text; _ } ->
-                Tui.delta screen text
-            | Pave.Turn_runner.Activity_phase { phase; _ } ->
-                (match phase with
-                 | Pave.Agent.Model ->
-                     Tui.set_activity screen (Some "Thinking")
-                 | Pave.Agent.Tool name ->
-                     Tui.set_activity screen (Some ("Tool: " ^ name)))
-            | Pave.Turn_runner.Tool_event { event; _ } ->
-                render_tool_event screen event
-            | Pave.Turn_runner.Background_notice { message } ->
-                (match !runner with
-                 | Some active when Pave.Turn_runner.busy active -> ()
-                 | _ -> deliver_job_results ());
-                Tui.event screen message
-            | Pave.Turn_runner.Turn_completed _ ->
-                deliver_job_results ();
-                submitted_attachments := None;
-                retry_attachments := None;
-                refresh_usage screen;
-                Tui.set_activity screen None;
-                Tui.finish_live screen
-            | Pave.Turn_runner.Turn_cancelled _ ->
-                deliver_job_results ();
-                (match !submitted_attachments with
-                 | Some (items, true, false) when items <> [] ->
-                     set_pending_attachments items
-                 | _ -> ());
-                submitted_attachments := None;
-                retry_attachments := None;
-                refresh_usage screen;
-                Tui.set_activity screen None;
-                Tui.clear_live screen;
-                Tui.event screen "Turn cancelled."
-            | Pave.Turn_runner.Turn_failed { error; _ } ->
-                deliver_job_results ();
-                (match !submitted_attachments with
-                 | Some (items, true, false) when items <> [] ->
-                     set_pending_attachments items
-                 | _ -> ());
-                submitted_attachments := None;
-                retry_attachments := None;
-                refresh_usage screen;
-                Tui.set_activity screen None;
-                Tui.clear_live screen;
-                Tui.event screen ("Error: " ^ error_message error))
+          ~on_event:(Tui.publish_agent_event screen)
           ~on_approve:(Tui.confirm screen)
           ~on_approve_tool:(Tui.confirm_tool screen)
           ~on_queued:(Tui.set_queue screen) () in
@@ -2864,7 +2868,11 @@ let () =
       List.iter (fun diagnostic -> prerr_endline ("Instructions: " ^ diagnostic))
         instruction_diagnostics;
       interact ())
-  with exn ->
-    exit_kind := Pave.Session.Fatal;
-    prerr_endline ("Error: " ^ error_message exn);
-    exit 1
+  with
+  | Tui.Terminal_signal signal ->
+      exit_kind := Pave.Session.Fatal;
+      exit (128 + signal)
+  | exn ->
+      exit_kind := Pave.Session.Fatal;
+      prerr_endline ("Error: " ^ error_message exn);
+      exit 1

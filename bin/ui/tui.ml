@@ -30,7 +30,43 @@ type chooser = {
   mutable matched_models : int;
 }
 
+type overlay_focus = Chooser_overlay | Approval_overlay
+
 type submission = { text : string; follow_up : bool }
+exception Terminal_signal of int
+type listing_update = {
+  verified : string list;
+  details : (string * string) list;
+  labels : (string * string) list;
+  status : string option;
+  status_pages : string list;
+}
+
+type approval_request = {
+  title : string;
+  label : string;
+  body : string;
+  max_bytes : int;
+  wrap : bool;
+  too_large : string;
+  unsafe_text : string;
+  approved_text : string;
+  denied_text : string;
+  mutable result : bool option;
+}
+
+type terminal_event =
+  [ Notty.Unescape.event | `Resize of int * int | `End | `Wake | `Tick ]
+
+type ui_event =
+  | Terminal_event of terminal_event
+  | Agent_event of Pave.Turn_runner.event
+  | Listing_event of listing_update
+  | Approval_event of approval_request
+  | Background_message of string
+  | Shutdown
+
+
 
 type t = {
   mutable term : Notty_unix.Term.t;
@@ -43,6 +79,7 @@ type t = {
   tool_groups : (string, int) Hashtbl.t;
   mutable scroll : int;
   mutable chooser : chooser option;
+  mutable overlays : overlay_focus list;
   mutable hint_draft : string;
   mutable hint_selected : int;
   mutable hint_offset : int;
@@ -62,7 +99,97 @@ type t = {
   mutable last_paint : float;
   mutable paste : bool;
   paste_buffer : Buffer.t;
+  bindings : Keybindings.binding list;
+  signals : (int * Sys.signal_behavior) list;
+  ui_events : ui_event Queue.t;
+  ui_lock : Mutex.t;
+  ui_read_fd : Unix.file_descr;
+  ui_write_fd : Unix.file_descr;
+  ui_wake_byte : bytes;
+  ui_drain_bytes : bytes;
+  mutable ui_closed : bool;
+  mutable agent_event_handler : (Pave.Turn_runner.event -> unit) option;
+
 }
+let create_ui_pipe () =
+  let read_fd, write_fd = Unix.pipe () in
+  try
+    Unix.set_close_on_exec read_fd;
+    Unix.set_close_on_exec write_fd;
+    Unix.set_nonblock read_fd;
+    Unix.set_nonblock write_fd;
+    read_fd, write_fd
+  with exn ->
+    Unix.close read_fd;
+    Unix.close write_fd;
+    raise exn
+
+let enqueue_ui_event t event =
+  Mutex.lock t.ui_lock;
+  let wake = not t.ui_closed && Queue.is_empty t.ui_events in
+  if not t.ui_closed then Queue.add event t.ui_events;
+  Mutex.unlock t.ui_lock;
+  if wake then (
+    let rec write () =
+      try ignore (Unix.write t.ui_write_fd t.ui_wake_byte 0 1)
+      with
+      | Unix.Unix_error (Unix.EINTR, _, _) -> write ()
+      | Unix.Unix_error ((Unix.EAGAIN | Unix.EPIPE | Unix.EBADF), _, _) -> () in
+    write ())
+
+let drain_ui_pipe t =
+  let rec drain () =
+    try
+      let count = Unix.read t.ui_read_fd t.ui_drain_bytes 0
+        (Bytes.length t.ui_drain_bytes) in
+      if count > 0 then drain ()
+    with
+    | Unix.Unix_error (Unix.EINTR, _, _) -> drain ()
+    | Unix.Unix_error (Unix.EAGAIN, _, _) -> () in
+  drain ()
+
+let pop_ui_event t =
+  drain_ui_pipe t;
+  Mutex.lock t.ui_lock;
+  let event =
+    if Queue.is_empty t.ui_events then None
+    else Some (Queue.take t.ui_events) in
+  Mutex.unlock t.ui_lock;
+  event
+
+let ui_events_pending t =
+  Mutex.lock t.ui_lock;
+  let pending = not (Queue.is_empty t.ui_events) in
+  Mutex.unlock t.ui_lock;
+  pending
+
+let set_agent_event_handler t handler =
+  t.agent_event_handler <- Some handler
+
+let publish_agent_event t event =
+  enqueue_ui_event t (Agent_event event)
+
+let post_message t message =
+  enqueue_ui_event t (Background_message message)
+
+let shutdown t = enqueue_ui_event t Shutdown
+
+let close_ui_pipe t =
+  Mutex.lock t.ui_lock;
+  let close = not t.ui_closed in
+  t.ui_closed <- true;
+  Queue.clear t.ui_events;
+  Mutex.unlock t.ui_lock;
+  if close then (
+    Unix.close t.ui_read_fd;
+    Unix.close t.ui_write_fd)
+
+let listing_handler : (t -> listing_update -> unit) ref =
+  ref (fun _ _ -> ())
+
+let approval_handler : (t -> approval_request -> unit) ref =
+  ref (fun _ request -> request.result <- Some false)
+
 
 let no_color = match Sys.getenv_opt "NO_COLOR" with Some s -> s <> "" | None -> false
 let text_attr = if no_color then A.empty else A.(fg lightwhite)
@@ -82,19 +209,7 @@ let enter_key = if macos then "Return" else "Enter"
 let idle_status =
   enter_key ^ " steer · " ^ meta_key ^ "+" ^ enter_key ^ " follow-up · /queue"
 
-let hotkeys = [
-  "Steer: " ^ enter_key ^ " · follow-up: " ^ meta_key ^ "+" ^ enter_key ^
-    " or /queue MESSAGE";
-  "/ · live commands; ↑/↓ select · Tab/" ^ enter_key ^ " insert · Esc close";
-  "Ctrl+R reverse search · Esc cancel search";
-  meta_key ^ "+↑ restores a queued prompt when available; otherwise prompt history";
-  "Ctrl+P/N or " ^ meta_key ^ "+↓ prompt history · ↑/↓ move in the draft";
-  "Ctrl+A/E line ends · " ^ meta_key ^ "+B/F move by word · Ctrl+W erase word";
-  "Ctrl+Z/Y undo/redo · Ctrl+K/U kill line · " ^ meta_key ^ "+Y yank";
-  meta_key ^ "+O tool details · PgUp/Dn scroll · Ctrl+Home/End transcript";
-  "Ctrl+C closes a picker; in the composer it interrupts without losing the draft; idle clears it";
-  "Bracketed paste inserts atomically; pasted " ^ enter_key ^ " does not send";
-]
+let hotkeys = Keybindings.hotkeys Keybindings.bindings
 
 (* Two ASCII columns per 8px SVG pixel keep the mark square in a terminal. *)
 let startup_logo =
@@ -279,7 +394,7 @@ let hint_matches t =
     t.hint_selected <- 0;
     t.hint_offset <- 0;
     t.hint_suppressed <- None);
-  if t.paste || Option.is_some t.chooser ||
+  if t.paste || t.overlays <> [] ||
     Pave.Composer.search_query t.editor <> None ||
     t.hint_suppressed = Some draft ||
     Pave.Composer.cursor t.editor <> String.length draft ||
@@ -298,6 +413,14 @@ let hint_room t =
   rows - 4 - height >= 2
 
 let hints_visible t = hint_matches t <> [] && hint_room t
+let key_focus t =
+  let overlay = match t.overlays with
+    | Approval_overlay :: _ -> Some Keybindings.Approval
+    | Chooser_overlay :: _ -> Some Keybindings.Chooser
+    | [] -> None in
+  Keybindings.focus ~paste:t.paste ~overlay
+    ~search:(Option.is_some (Pave.Composer.search_query t.editor))
+    ~hints:(hints_visible t)
 
 let selected_hint t =
   let matches = hint_matches t in
@@ -553,7 +676,9 @@ let paint t =
         let status_page = if Array.length chooser.status_pages = 0 then ""
           else Printf.sprintf " · Tab status %d/%d"
             (chooser.status_page + 1) (Array.length chooser.status_pages) in
-        if chooser.dynamic && Array.length found = 0 then
+        if cols < 9 || rows < 2 then
+          "Resize terminal to at least 9×2 · Esc cancel"
+        else if chooser.dynamic && Array.length found = 0 then
           (if cols < 35 then "  No models · Esc cancel"
            else "  No available models · Esc cancel") ^ status ^ status_page
         else
@@ -622,18 +747,32 @@ let paint t =
             hsnap ~align:`Left field_width (hcrop left_crop 0 (string text_attr query))) |],
         0, min (cols - 1) (prefix_width + col - left_crop)
     | None, None ->
+        let selection = Pave.Composer.selection t.editor in
         Array.init editor_height (fun index ->
           let line_index = first_line + index in
           let line = editor_lines.(line_index) in
           let gutter = if line_index = 0 then prompt
             else if prompt = "" then "" else "    " in
-          let content = String.sub (Pave.Composer.text t.editor)
+          let raw = String.sub (Pave.Composer.text t.editor)
             line.start (line.stop - line.start) in
-          let content = sanitize content in
-          let content = if field_width = 1 && measure content > 1 then "?"
+          let content = match selection with
+            | Some (start, stop) when start < line.stop && stop > line.start ->
+                let first = max start line.start
+                and last = min stop line.stop in
+                let before = String.sub raw 0 (first - line.start)
+                and selected = String.sub raw (first - line.start)
+                  (last - first)
+                and after = String.sub raw (last - line.start)
+                  (line.stop - last) in
+                I.(string text_attr (sanitize before) <|>
+                   string selected_attr (sanitize selected) <|>
+                   string text_attr (sanitize after))
+            | _ -> I.string text_attr (sanitize raw) in
+          let content = if field_width = 1 &&
+              measure (sanitize raw) > 1 then I.string text_attr "?"
             else content in
           I.(string accent gutter <|>
-            hsnap ~align:`Left field_width (string text_attr content))),
+            hsnap ~align:`Left field_width content)),
         editor_row - first_line, min (cols - 1) (prefix_width + editor_col) in
   let screen = if rows < 6 then
     let candidates = Array.concat [activity_rows; [| footer |]; prompt_rows] in
@@ -722,25 +861,88 @@ let scroll_by t delta =
   t.revision <- t.revision + 1;
   paint t
 
-let create ~root ~model ~session =
+let install_terminal_signals () =
+  let previous = ref [] in
+  try
+    List.iter (fun (signal, number) ->
+      let old = Sys.signal signal
+        (Sys.Signal_handle (fun _ -> raise (Terminal_signal number))) in
+      previous := (signal, old) :: !previous)
+      [Sys.sigint, 2; Sys.sigterm, 15; Sys.sighup, 1; Sys.sigquit, 3;
+       Sys.sigtstp, (if macos then 18 else 20)];
+    !previous
+  with exn ->
+    List.iter (fun (signal, behavior) -> Sys.set_signal signal behavior)
+      !previous;
+    raise exn
+
+let restore_terminal_signals signals =
+  List.iter (fun (signal, behavior) -> Sys.set_signal signal behavior) signals
+
+(* Preserve CR and LF separately for Terminal_input's Enter and paste decoder. *)
+let create_terminal () =
   let term = Notty_unix.Term.create ~mouse:false ~bpaste:true () in
-  let t = { term; input = Terminal_input.create term;
+  try
+    let input_fd, _ = Notty_unix.Term.fds term in
+    let state = Unix.tcgetattr input_fd in
+    state.Unix.c_icrnl <- false;
+    state.Unix.c_inlcr <- false;
+    state.Unix.c_igncr <- false;
+    Unix.tcsetattr input_fd Unix.TCSANOW state;
+    term
+  with exn ->
+    Notty_unix.Term.release term;
+    raise exn
+
+let close t =
+  Fun.protect (fun () -> close_ui_pipe t)
+    ~finally:(fun () ->
+      Fun.protect (fun () -> Notty_unix.Term.release t.term)
+        ~finally:(fun () -> restore_terminal_signals t.signals))
+let create ?(keybinding_overrides = []) ~root ~model ~session () =
+  let bindings =
+    match Keybindings.apply_overrides Keybindings.bindings
+      keybinding_overrides with
+    | Ok bindings -> bindings
+    | Error message -> invalid_arg message in
+  let ui_read_fd, ui_write_fd = create_ui_pipe () in
+  let term = try create_terminal () with exn ->
+    Unix.close ui_read_fd;
+    Unix.close ui_write_fd;
+    raise exn in
+  let signals = try install_terminal_signals () with exn ->
+    Notty_unix.Term.release term;
+    Unix.close ui_read_fd;
+    Unix.close ui_write_fd;
+    raise exn in
+  let t = try {
+    term; input = Terminal_input.create term;
     root; model; session; editor = Pave.Composer.create ();
     transcript = Transcript_view.create (); tool_groups = Hashtbl.create 8;
-    scroll = 0; chooser = None;
-    hint_draft = ""; hint_selected = 0; hint_offset = 0;
+    scroll = 0; chooser = None; overlays = [];
     hint_suppressed = None;
+    hint_draft = ""; hint_selected = 0; hint_offset = 0;
     revision = 0; body_cache = None; layout_cache = None;
     location_cache = None;
     previous = None; cursor_position = None;
     status = idle_status; activity = None;
     activity_started = None; usage_badge = None;
     pending_attachments = []; queue = 0;
-    last_paint = 0.; paste = false; paste_buffer = Buffer.create 256 } in
-  (try paint t with exn -> Notty_unix.Term.release term; raise exn);
+    last_paint = 0.; paste = false; paste_buffer = Buffer.create 256;
+    bindings; signals;
+    ui_events = Queue.create (); ui_lock = Mutex.create ();
+    ui_read_fd; ui_write_fd; ui_wake_byte = Bytes.of_string "x";
+    ui_drain_bytes = Bytes.create 256; ui_closed = false;
+    agent_event_handler = None;
+  } with exn ->
+    restore_terminal_signals signals;
+    Notty_unix.Term.release term;
+    Unix.close ui_read_fd;
+    Unix.close ui_write_fd;
+    raise exn in
+  (try paint t with exn -> close t; raise exn);
   t
 
-let close t = Notty_unix.Term.release t.term
 
 let suspend t callback =
   let previous_sigint = Sys.signal Sys.sigint
@@ -750,7 +952,7 @@ let suspend t callback =
     callback ()) ~finally:(fun () ->
     Sys.set_signal Sys.sigint Sys.Signal_ignore;
     Fun.protect (fun () ->
-      let term = Notty_unix.Term.create ~mouse:false ~bpaste:true () in
+      let term = create_terminal () in
       let input_fd, _ = Notty_unix.Term.fds term in
       Unix.tcflush input_fd Unix.TCIFLUSH;
       t.term <- term;
@@ -961,15 +1163,77 @@ let repaint_after_key t =
   if (not t.paste && not (Terminal_input.pending t.input))
     || Unix.gettimeofday () -. t.last_paint >= 0.1 then paint t
 
+let process_ui_event t = function
+  | Terminal_event event -> `Return event
+  | Agent_event event ->
+      Option.iter (fun handler -> handler event) t.agent_event_handler;
+      `Continue
+  | Listing_event update ->
+      (!listing_handler) t update;
+      `Continue
+  | Background_message message ->
+      event t message;
+      `Continue
+  | Approval_event request ->
+      (!approval_handler) t request;
+      `Return `Wake
+  | Shutdown -> `Return `End
+
 let rec next_input ?wake_fd t =
-  let timeout = match t.activity_started with
-    | None -> None
-    | Some since ->
-        let elapsed = Unix.gettimeofday () -. since in
-        Some (max 0. (1. -. (elapsed -. floor elapsed))) in
-  match Terminal_input.event ?wake_fd ?timeout t.input with
-  | `Tick -> paint t; next_input ?wake_fd t
-  | event -> event
+  match pop_ui_event t with
+  | Some queued ->
+      (match process_ui_event t queued with
+      | `Continue -> next_input ?wake_fd t
+      | `Return `Tick -> paint t; next_input ?wake_fd t
+      | `Return event -> event)
+  | None ->
+      let timeout = match t.activity_started with
+        | None -> None
+        | Some since ->
+            let elapsed = Unix.gettimeofday () -. since in
+            Some (max 0. (1. -. (elapsed -. floor elapsed))) in
+      let wake_fds = match wake_fd with
+        | None -> [t.ui_read_fd]
+        | Some fd -> [t.ui_read_fd; fd] in
+      (match Terminal_input.event ~wake_fds ?timeout t.input with
+      | `Wake when ui_events_pending t -> next_input ?wake_fd t
+      | event ->
+          enqueue_ui_event t (Terminal_event event);
+          next_input ?wake_fd t)
+
+let toggle_tool_detail t =
+  let cols, rows = Notty_unix.Term.size t.term in
+  let measure = measure_text in
+  let layout = match t.layout_cache with
+    | Some (width, revision, layout)
+      when width = cols && revision = t.transcript.revision -> layout
+    | _ -> Transcript_view.snapshot t.transcript
+        ~columns:(if cols <= 6 then max 1 cols else cols - 5) ~measure in
+  let visible = layout.total in
+  let height = max 1 (rows - 5) in
+  let first = max 0 (visible - height - t.scroll) in
+  let last = min visible (first + height) in
+  let source_first = if first < visible then
+      (Transcript_view.visual_at layout first).source else 0 in
+  let source_last = if last > 0 then
+      (Transcript_view.visual_at layout (last - 1)).source else 0 in
+  let selected = ref None in
+  change_transcript t (fun () ->
+    selected := Transcript_view.toggle t.transcript ~first:source_first
+      ~last:source_last);
+  (match !selected with
+  | None -> ()
+  | Some group ->
+      let expanded = Transcript_view.snapshot t.transcript
+        ~columns:(if cols <= 6 then max 1 cols else cols - 5) ~measure in
+      let target = ref None in
+      Array.iter (fun (entry : Transcript_view.entry) ->
+        if entry.row.group = group &&
+           entry.row.style = Transcript_view.Heading &&
+           !target = None then target := Some entry.start) expanded.entries;
+      Option.iter (fun start ->
+        t.scroll <- max 0 (expanded.total - height - start)) !target);
+  paint t
 
 let read ?wake_fd ?on_wake ?on_interrupt ?on_dequeue ?on_completion t =
   let measure = measure_text in
@@ -1007,6 +1271,7 @@ let read ?wake_fd ?on_wake ?on_interrupt ?on_dequeue ?on_completion t =
     | Some text ->
         paint t;
         Some { text; follow_up } in
+  let key_action event = Keybindings.resolve t.bindings (key_focus t) event in
   let rec loop () =
     match next_input ?wake_fd t with
     | `End -> None
@@ -1015,6 +1280,8 @@ let read ?wake_fd ?on_wake ?on_interrupt ?on_dequeue ?on_completion t =
          | None -> invalid_arg "Tui.read: wake_fd requires on_wake");
         loop ()
     | `Resize _ -> paint_resized t; loop ()
+    | `Tick -> paint t; loop ()
+    | `Mouse _ -> loop ()
     | `Paste `Start ->
         t.paste <- true;
         Buffer.clear paste_buffer;
@@ -1022,51 +1289,88 @@ let read ?wake_fd ?on_wake ?on_interrupt ?on_dequeue ?on_completion t =
     | `Paste `End when t.paste ->
         paste_finish (); loop ()
     | `Paste `End -> loop ()
-    | `Key (`Enter, _) when t.paste ->
-        if Pave.Composer.search_query t.editor = None then paste_append "\n";
+    | `Key _ as event -> handle_key event
+  and handle_key event =
+    let action = key_action event in
+    let submit_result follow_up =
+      match submit follow_up with
+      | None -> loop ()
+      | Some _ as result -> result in
+    let interrupt () =
+      let handled = match on_interrupt with
+        | Some callback -> callback ()
+        | None -> false in
+      if not handled then (
+        if Pave.Composer.text t.editor = "" then
+          Pave.Composer.search_cancel t.editor
+        else Pave.Composer.clear t.editor);
+      changed ();
+      loop () in
+    match action with
+    | Some Keybindings.Ignore
+    | Some Keybindings.Cancel
+    | Some Keybindings.Accept
+    | Some Keybindings.Reject
+    | Some Keybindings.Approve
+    | Some Keybindings.Next_status
+    | Some Keybindings.First
+    | Some Keybindings.Last
+    | None -> loop ()
+    | Some Keybindings.Paste_newline ->
+        if Pave.Composer.search_query t.editor = None then
+          paste_append "\n";
         loop ()
-    | `Key (`Tab, _) when t.paste ->
-        paste_append_char ' '; loop ()
-    | `Key (`ASCII c, []) when t.paste && Char.code c >= 32 ->
-        paste_append_char c; loop ()
-    | `Key (`Uchar uchar, []) when t.paste ->
-        paste_append (utf8 uchar); loop ()
-    | `Key _ when t.paste -> loop ()
-    | `Key (`ASCII 'C', [ `Ctrl ]) ->
-        let handled = match on_interrupt with
-          | Some callback -> callback ()
-          | None -> false in
-        if not handled then (
-          if Pave.Composer.text t.editor = "" then
-            Pave.Composer.search_cancel t.editor
-          else Pave.Composer.clear t.editor);
+    | Some Keybindings.Paste_space ->
+        paste_append_char ' ';
+        loop ()
+    | Some (Keybindings.Paste_ascii char) ->
+        paste_append_char char;
+        loop ()
+    | Some (Keybindings.Paste_uchar uchar) ->
+        paste_append (utf8 uchar);
+        loop ()
+    | Some Keybindings.Interrupt -> interrupt ()
+    | Some Keybindings.Cancel_search ->
+        Pave.Composer.search_cancel t.editor;
         changed (); loop ()
-    | `Key key when Pave.Composer.search_query t.editor <> None ->
-        (match key with
-        | `Escape, _ | `ASCII 'G', [ `Ctrl ] ->
-            Pave.Composer.search_cancel t.editor
-        | `Enter, _ when not t.paste -> Pave.Composer.search_accept t.editor
-        | `ASCII 'R', [ `Ctrl ] -> Pave.Composer.search_older t.editor
-        | `Backspace, _ -> Pave.Composer.search_erase t.editor
-        | `ASCII c, [] when Char.code c >= 32 ->
-            Pave.Composer.search_insert t.editor (String.make 1 c)
-        | `Uchar uchar, [] ->
-            Pave.Composer.search_insert t.editor (utf8 uchar)
-        | _ -> ());
+    | Some Keybindings.Accept_search ->
+        Pave.Composer.search_accept t.editor;
         changed (); loop ()
-    | `Key (`Arrow `Up, []) when hints_visible t ->
+    | Some Keybindings.Search_older ->
+        Pave.Composer.search_older t.editor;
+        changed (); loop ()
+    | Some Keybindings.Search_erase ->
+        Pave.Composer.search_erase t.editor;
+        changed (); loop ()
+    | Some (Keybindings.Search_ascii char) ->
+        Pave.Composer.search_insert t.editor (String.make 1 char);
+        changed (); loop ()
+    | Some (Keybindings.Search_uchar uchar) ->
+        Pave.Composer.search_insert t.editor (utf8 uchar);
+        changed (); loop ()
+    | Some Keybindings.Dismiss_hint ->
+        dismiss_hint t;
+        changed (); loop ()
+    | Some Keybindings.Insert_hint ->
+        Option.iter (insert_hint t) (selected_hint t);
+        changed (); loop ()
+    | Some Keybindings.Accept_hint ->
+        let matches = hint_matches t in
+        let draft = Pave.Composer.text t.editor in
+        if List.exists (fun (item : Pave.Interaction.shortcut) ->
+            item.name = draft) matches then submit_result false
+        else (
+          if t.hint_selected < List.length matches then
+            insert_hint t (List.nth matches t.hint_selected);
+          changed (); loop ())
+    | Some Keybindings.Move_up when key_focus t = Keybindings.Hints ->
         t.hint_selected <- max 0 (t.hint_selected - 1);
         changed (); loop ()
-    | `Key (`Arrow `Down, []) when hints_visible t ->
+    | Some Keybindings.Move_down when key_focus t = Keybindings.Hints ->
         t.hint_selected <- min (List.length (hint_matches t) - 1)
           (t.hint_selected + 1);
         changed (); loop ()
-    | `Key (`Escape, _) when hints_visible t ->
-        dismiss_hint t; changed (); loop ()
-    | `Key (`Tab, _) when hints_visible t ->
-        Option.iter (insert_hint t) (selected_hint t);
-        changed (); loop ()
-    | `Key (`Tab, _) ->
+    | Some Keybindings.Complete ->
         (match on_completion with
         | None -> ()
         | Some complete ->
@@ -1083,130 +1387,142 @@ let read ?wake_fd ?on_wake ?on_interrupt ?on_dequeue ?on_completion t =
                    changed ()
                | _ -> ()));
         loop ()
-    | `Key (`ASCII 'M', mods) when List.mem `Meta mods &&
-        List.mem `Ctrl mods ->
-        (match submit true with None -> loop () | Some _ as result -> result)
-    | `Key (`Enter, mods) when List.mem `Meta mods ->
-        (match submit true with None -> loop () | Some _ as result -> result)
-    | `Key (`Enter, mods) when not (List.mem `Shift mods) &&
-        not (List.mem `Ctrl mods) ->
+    | Some Keybindings.Submit ->
         let matches = hint_matches t in
         if matches <> [] && hint_room t then
           let draft = Pave.Composer.text t.editor in
           if List.exists (fun (item : Pave.Interaction.shortcut) ->
-              item.name = draft) matches then
-            (match submit false with None -> loop () | Some _ as result -> result)
+              item.name = draft) matches then submit_result false
           else (
             if t.hint_selected < List.length matches then
               insert_hint t (List.nth matches t.hint_selected);
             changed (); loop ())
-        else
-          (match submit false with None -> loop () | Some _ as result -> result)
-    | `Key (`Enter, mods) ->
-        if t.paste || List.mem `Shift mods then
-          (Pave.Composer.insert t.editor "\n"; changed (); loop ())
-        else
-          (match submit (List.mem `Ctrl mods) with
-          | None -> loop ()
-          | Some _ as result -> result)
-    | `Key (`Page `Up, _) -> scroll_by t (view_height t); loop ()
-    | `Key (`Page `Down, _) -> scroll_by t (-view_height t); loop ()
-    | `Key (`ASCII 'o', [ `Meta ]) ->
-        let cols, rows = Notty_unix.Term.size t.term in
-        let measure = measure_text in
-        let layout = match t.layout_cache with
-          | Some (width, revision, layout)
-            when width = cols && revision = t.transcript.revision -> layout
-          | _ -> Transcript_view.snapshot t.transcript
-              ~columns:(if cols <= 6 then max 1 cols else cols - 5)
-              ~measure in
-        let visible = layout.total in
-        let height = max 1 (rows - 5) in
-        let first = max 0 (visible - height - t.scroll) in
-        let last = min visible (first + height) in
-        let source_first = if first < visible then
-          (Transcript_view.visual_at layout first).source else 0 in
-        let source_last = if last > 0 then
-          (Transcript_view.visual_at layout (last - 1)).source else 0 in
-        let selected = ref None in
-        change_transcript t (fun () ->
-          selected := Transcript_view.toggle t.transcript ~first:source_first
-            ~last:source_last);
-        (match !selected with
-        | None -> ()
-        | Some group ->
-            let expanded = Transcript_view.snapshot t.transcript
-              ~columns:(if cols <= 6 then max 1 cols else cols - 5)
-              ~measure in
-            let target = ref None in
-            Array.iter (fun (entry : Transcript_view.entry) ->
-              if entry.row.group = group &&
-                entry.row.style = Transcript_view.Heading &&
-                !target = None then target := Some entry.start)
-              expanded.entries;
-            Option.iter (fun start ->
-              t.scroll <- max 0 (expanded.total - height - start))
-              !target);
+        else submit_result false
+    | Some Keybindings.Follow_up -> submit_result true
+    | Some Keybindings.Newline ->
+        Pave.Composer.insert t.editor "\n";
+        changed (); loop ()
+    | Some Keybindings.Scroll_up ->
+        scroll_by t (view_height t); loop ()
+    | Some Keybindings.Scroll_down ->
+        scroll_by t (-view_height t); loop ()
+    | Some Keybindings.Toggle_details ->
+        toggle_tool_detail t;
+        loop ()
+    | Some Keybindings.Scroll_to_start ->
+        t.scroll <- max_int;
+        t.revision <- t.revision + 1;
         paint t; loop ()
-    | `Key (`Home, [ `Ctrl ]) ->
-        t.scroll <- max_int; t.revision <- t.revision + 1; paint t; loop ()
-    | `Key (`End, [ `Ctrl ]) ->
-        t.scroll <- 0; t.revision <- t.revision + 1; paint t; loop ()
-    | `Key (`Arrow `Up, [ `Meta ]) when t.queue > 0 ->
-        Option.iter (fun dequeue -> dequeue ()) on_dequeue;
+    | Some Keybindings.Scroll_to_end ->
+        t.scroll <- 0;
+        t.revision <- t.revision + 1;
+        paint t; loop ()
+    | Some Keybindings.Restore_or_history ->
+        if t.queue > 0 then Option.iter (fun dequeue -> dequeue ()) on_dequeue
+        else Pave.Composer.older t.editor;
         changed (); loop ()
-    | `Key (`Arrow `Up, [ `Meta ]) | `Key (`ASCII 'P', [ `Ctrl ]) ->
-        Pave.Composer.older t.editor; changed (); loop ()
-    | `Key (`Arrow `Down, [ `Meta ]) | `Key (`ASCII 'N', [ `Ctrl ]) ->
-        Pave.Composer.newer t.editor; changed (); loop ()
-    | `Key (`Arrow `Up, _) ->
+    | Some Keybindings.History_older ->
+        Pave.Composer.older t.editor;
+        changed (); loop ()
+    | Some Keybindings.History_newer ->
+        Pave.Composer.newer t.editor;
+        changed (); loop ()
+    | Some Keybindings.Vertical_up ->
         if not (Pave.Composer.vertical ~columns:(field_width ()) ~measure
-          t.editor (-1)) then Pave.Composer.older t.editor;
+            t.editor (-1)) then Pave.Composer.older t.editor;
         changed (); loop ()
-    | `Key (`Arrow `Down, _) ->
+    | Some Keybindings.Vertical_down ->
         if not (Pave.Composer.vertical ~columns:(field_width ()) ~measure
-          t.editor 1) then Pave.Composer.newer t.editor;
+            t.editor 1) then Pave.Composer.newer t.editor;
         changed (); loop ()
-    | `Key (`Arrow `Left, mods) ->
-        (if List.mem `Meta mods || List.mem `Ctrl mods then
-          Pave.Composer.word_left t.editor else Pave.Composer.left t.editor);
+    | Some Keybindings.Select_up ->
+        Pave.Composer.select_vertical ~columns:(field_width ()) ~measure
+          t.editor (-1);
         changed (); loop ()
-    | `Key (`Arrow `Right, mods) ->
-        (if List.mem `Meta mods || List.mem `Ctrl mods then
-          Pave.Composer.word_right t.editor else Pave.Composer.right t.editor);
+    | Some Keybindings.Select_down ->
+        Pave.Composer.select_vertical ~columns:(field_width ()) ~measure
+          t.editor 1;
         changed (); loop ()
-    | `Key (`ASCII 'b', [ `Meta ]) ->
-        Pave.Composer.word_left t.editor; changed (); loop ()
-    | `Key (`ASCII 'f', [ `Meta ]) ->
-        Pave.Composer.word_right t.editor; changed (); loop ()
-    | `Key (`ASCII 'W', [ `Ctrl ]) | `Key (`Backspace, [ `Meta ]) ->
-        Pave.Composer.erase_word t.editor; changed (); loop ()
-    | `Key (`Backspace, _) -> Pave.Composer.erase t.editor; changed (); loop ()
-    | `Key (`Delete, _) -> Pave.Composer.delete t.editor; changed (); loop ()
-    | `Key (`ASCII 'Z', [ `Ctrl ]) ->
-        Pave.Composer.undo t.editor; changed (); loop ()
-    | `Key (`ASCII 'Y', [ `Ctrl ]) ->
-        Pave.Composer.redo t.editor; changed (); loop ()
-    | `Key (`ASCII 'K', [ `Ctrl ]) ->
-        Pave.Composer.kill_to_end t.editor; changed (); loop ()
-    | `Key (`ASCII 'U', [ `Ctrl ]) ->
-        Pave.Composer.kill_before t.editor; changed (); loop ()
-    | `Key (`ASCII 'y', [ `Meta ]) ->
-        Pave.Composer.yank t.editor; changed (); loop ()
-    | `Key (`Home, _) -> Pave.Composer.home t.editor; changed (); loop ()
-    | `Key (`End, _) -> Pave.Composer.finish t.editor; changed (); loop ()
-    | `Key (`ASCII 'A', [ `Ctrl ]) ->
-        Pave.Composer.beginning_of_line t.editor; changed (); loop ()
-    | `Key (`ASCII 'E', [ `Ctrl ]) ->
-        Pave.Composer.end_of_line t.editor; changed (); loop ()
-    | `Key (`ASCII 'R', [ `Ctrl ]) ->
-        Pave.Composer.search_older t.editor; paint t; loop ()
-    | `Key (`ASCII 'D', [ `Ctrl ]) when Pave.Composer.text t.editor = "" -> None
-    | `Key (`ASCII c, []) when Char.code c >= 32 ->
-        Pave.Composer.insert t.editor (String.make 1 c); changed (); loop ()
-    | `Key (`Uchar uchar, []) ->
-        Pave.Composer.insert t.editor (utf8 uchar); changed (); loop ()
-    | _ -> loop () in
+    | Some Keybindings.Move_left ->
+        Pave.Composer.left t.editor;
+        changed (); loop ()
+    | Some Keybindings.Move_right ->
+        Pave.Composer.right t.editor;
+        changed (); loop ()
+    | Some Keybindings.Select_left ->
+        Pave.Composer.select_left t.editor;
+        changed (); loop ()
+    | Some Keybindings.Select_right ->
+        Pave.Composer.select_right t.editor;
+        changed (); loop ()
+    | Some Keybindings.Word_left ->
+        Pave.Composer.word_left t.editor;
+        changed (); loop ()
+    | Some Keybindings.Word_right ->
+        Pave.Composer.word_right t.editor;
+        changed (); loop ()
+    | Some Keybindings.Erase_word ->
+        Pave.Composer.erase_word t.editor;
+        changed (); loop ()
+    | Some Keybindings.Erase ->
+        Pave.Composer.erase t.editor;
+        changed (); loop ()
+    | Some Keybindings.Delete ->
+        Pave.Composer.delete t.editor;
+        changed (); loop ()
+    | Some Keybindings.Undo ->
+        Pave.Composer.undo t.editor;
+        changed (); loop ()
+    | Some Keybindings.Redo ->
+        Pave.Composer.redo t.editor;
+        changed (); loop ()
+    | Some Keybindings.Kill_end ->
+        Pave.Composer.kill_to_end t.editor;
+        changed (); loop ()
+    | Some Keybindings.Kill_before ->
+        Pave.Composer.kill_before t.editor;
+        changed (); loop ()
+    | Some Keybindings.Yank ->
+        Pave.Composer.yank t.editor;
+        changed (); loop ()
+    | Some Keybindings.Home ->
+        Pave.Composer.home t.editor;
+        changed (); loop ()
+    | Some Keybindings.End ->
+        Pave.Composer.finish t.editor;
+        changed (); loop ()
+    | Some Keybindings.Select_home ->
+        Pave.Composer.select_beginning_of_line
+          ~columns:(field_width ()) ~measure t.editor;
+        changed (); loop ()
+    | Some Keybindings.Select_end ->
+        Pave.Composer.select_end_of_line
+          ~columns:(field_width ()) ~measure t.editor;
+        changed (); loop ()
+    | Some Keybindings.Beginning_of_line ->
+        Pave.Composer.beginning_of_line t.editor;
+        changed (); loop ()
+    | Some Keybindings.End_of_line ->
+        Pave.Composer.end_of_line t.editor;
+        changed (); loop ()
+    | Some Keybindings.End_of_input when Pave.Composer.text t.editor = "" ->
+        None
+    | Some Keybindings.End_of_input -> loop ()
+    | Some (Keybindings.Insert_ascii char) ->
+        Pave.Composer.insert t.editor (String.make 1 char);
+        changed (); loop ()
+    | Some (Keybindings.Insert_uchar uchar) ->
+        Pave.Composer.insert t.editor (utf8 uchar);
+        changed (); loop ()
+    | Some (Keybindings.Filter_ascii _)
+    | Some (Keybindings.Filter_uchar _) ->
+        loop ()
+    | Some Keybindings.Page_up
+    | Some Keybindings.Page_down
+    | Some Keybindings.Backspace
+    | Some Keybindings.Move_up
+    | Some Keybindings.Move_down ->
+        loop () in
   Fun.protect ~finally:(fun () ->
     t.paste <- false;
     Buffer.clear paste_buffer) loop
@@ -1256,21 +1572,25 @@ let update_chooser ?(status_pages = []) chooser ~verified
     | None -> 0);
   chooser.offset <- min chooser.offset chooser.selected
 
-let update_choices t ~verified
-    ?(details = []) ?(labels = []) ?(status_pages = []) ~status () =
+let apply_listing_update t update =
   match t.chooser with
   | Some chooser when chooser.dynamic ->
-      update_chooser chooser ~verified ~details ~labels ~status ~status_pages;
+      update_chooser chooser ~verified:update.verified
+        ~details:update.details ~labels:update.labels ~status:update.status
+        ~status_pages:update.status_pages;
       paint t
-  | _ -> invalid_arg "Tui.update_choices: no dynamic chooser is open"
+  | _ -> ()
+
+let () =
+  listing_handler := apply_listing_update
+
+let update_choices t ~verified
+    ?(details = []) ?(labels = []) ?(status_pages = []) ~status () =
+  enqueue_ui_event t (Listing_event {
+    verified; details; labels; status; status_pages })
 
 let choose ?(allow_custom = false) ?(intro = []) ?(plain = [])
     ?initial_status ?wake_fd ?on_wake ?dynamic t ~title ~choices =
-  let cols, rows = Notty_unix.Term.size t.term in
-  if cols < 9 || rows < 2 then (
-    alert t "Resize terminal (at least 9 columns × 2 rows) to select";
-    None)
-  else
   let dynamic = Option.value dynamic ~default:(Option.is_some wake_fd) in
   let initial = if dynamic then Array.of_list plain
     else Array.of_list choices in
@@ -1289,9 +1609,15 @@ let choose ?(allow_custom = false) ?(intro = []) ?(plain = [])
     if chooser.selected >= 0 && chooser.selected < Array.length found then
       Some (found.(chooser.selected).value)
     else None in
+  let can_select () =
+    let cols, rows = Notty_unix.Term.size t.term in
+    cols >= 9 && rows >= 2 in
+  let previous_overlays = t.overlays in
+  t.overlays <- Chooser_overlay :: previous_overlays;
   t.chooser <- Some chooser;
   Fun.protect ~finally:(fun () ->
     t.chooser <- None;
+    t.overlays <- previous_overlays;
     t.scroll <- old_scroll;
     t.previous <- None;
     t.paste <- false;
@@ -1304,65 +1630,69 @@ let choose ?(allow_custom = false) ?(intro = []) ?(plain = [])
           (match on_wake with Some callback -> callback ()
            | None -> invalid_arg "Tui.choose: wake_fd requires on_wake");
           loop ()
-      | `Resize _ ->
-          let cols, rows = Notty_unix.Term.size t.term in
-          if cols < 9 || rows < 2 then (
-            t.status <- "Resize terminal to select"; None)
-          else (paint t; loop ())
+      | `Resize _ -> paint t; loop ()
       | `Paste `Start -> t.paste <- true; loop ()
       | `Paste `End -> t.paste <- false; paint t; loop ()
-      | `Key (`Escape, _) when not t.paste -> None
-      | `Key (`Tab, _) when Array.length chooser.status_pages > 1 ->
-          chooser.status_page <- (chooser.status_page + 1) mod
-            Array.length chooser.status_pages;
-          paint t; loop ()
-      | `Key (`ASCII 'C', [ `Ctrl ]) when not t.paste -> None
-      | `Key (`Enter, _) when not t.paste ->
-          (match selected () with Some _ as choice -> choice | None -> loop ())
-      | `Key (`Arrow `Up, _) ->
-          chooser.touched <- true;
-          chooser.selected <- max 0 (chooser.selected - 1);
-          paint t; loop ()
-      | `Key (`Arrow `Down, _) ->
-          chooser.touched <- true;
-          chooser.selected <- max 0 (min (Array.length (matches chooser) - 1)
-            (chooser.selected + 1));
-          paint t; loop ()
-      | `Key (`Page direction, _) ->
-          chooser.touched <- true;
-          let step = view_height t in
-          chooser.selected <- max 0 (min (Array.length (matches chooser) - 1)
-            (chooser.selected + if direction = `Down then step else -step));
-          paint t; loop ()
-      | `Key (`Home, _) ->
-          chooser.touched <- true;
-          chooser.selected <- 0; paint t; loop ()
-      | `Key (`End, _) ->
-          chooser.touched <- true;
-          chooser.selected <- max 0 (Array.length (matches chooser) - 1);
-          paint t; loop ()
-      | `Key (`Backspace, _) when chooser.filter <> "" ->
-          chooser.touched <- true;
-          let boundaries = Pave.Composer.segment chooser.filter in
-          chooser.filter <- String.sub chooser.filter 0
-            boundaries.(Array.length boundaries - 2);
-          chooser.selected <- 0; chooser.offset <- 0;
-          paint t; loop ()
-      | `Key (`ASCII c, []) when Char.code c >= 32 ->
-          if String.length chooser.filter < 256 then (
-            chooser.touched <- true;
-            chooser.filter <- chooser.filter ^ String.make 1 c;
-            chooser.selected <- 0; chooser.offset <- 0;
-            paint t);
-          loop ()
-      | `Key (`Uchar uchar, []) ->
-          let value = utf8 uchar in
-          if String.length chooser.filter + String.length value <= 256 then (
-            chooser.touched <- true;
-            chooser.filter <- chooser.filter ^ value;
-            chooser.selected <- 0; chooser.offset <- 0;
-            paint t);
-          loop ()
+      | `Key _ as event ->
+          let action = Keybindings.resolve t.bindings (key_focus t) event in
+          (match action with
+          | Some Keybindings.Cancel -> None
+          | Some Keybindings.Next_status when can_select () &&
+              Array.length chooser.status_pages > 1 ->
+              chooser.status_page <- (chooser.status_page + 1) mod
+                Array.length chooser.status_pages;
+              paint t; loop ()
+          | Some Keybindings.Accept when can_select () ->
+              (match selected () with Some _ as choice -> choice | None -> loop ())
+          | Some Keybindings.Move_up when can_select () ->
+              chooser.touched <- true;
+              chooser.selected <- max 0 (chooser.selected - 1);
+              paint t; loop ()
+          | Some Keybindings.Move_down when can_select () ->
+              chooser.touched <- true;
+              chooser.selected <- max 0 (min (Array.length (matches chooser) - 1)
+                (chooser.selected + 1));
+              paint t; loop ()
+          | Some Keybindings.Page_up when can_select () ->
+              chooser.touched <- true;
+              chooser.selected <- max 0 (chooser.selected - view_height t);
+              paint t; loop ()
+          | Some Keybindings.Page_down when can_select () ->
+              chooser.touched <- true;
+              chooser.selected <- max 0 (min (Array.length (matches chooser) - 1)
+                (chooser.selected + view_height t));
+              paint t; loop ()
+          | Some Keybindings.First when can_select () ->
+              chooser.touched <- true;
+              chooser.selected <- 0; paint t; loop ()
+          | Some Keybindings.Last when can_select () ->
+              chooser.touched <- true;
+              chooser.selected <- max 0 (Array.length (matches chooser) - 1);
+              paint t; loop ()
+          | Some Keybindings.Backspace when can_select () &&
+              chooser.filter <> "" ->
+              chooser.touched <- true;
+              let boundaries = Pave.Composer.segment chooser.filter in
+              chooser.filter <- String.sub chooser.filter 0
+                boundaries.(Array.length boundaries - 2);
+              chooser.selected <- 0; chooser.offset <- 0;
+              paint t; loop ()
+          | Some (Keybindings.Filter_ascii char) when can_select () ->
+              if String.length chooser.filter < 256 then (
+                chooser.touched <- true;
+                chooser.filter <- chooser.filter ^ String.make 1 char;
+                chooser.selected <- 0; chooser.offset <- 0;
+                paint t);
+              loop ()
+          | Some (Keybindings.Filter_uchar uchar) when can_select () ->
+              let value = utf8 uchar in
+              if String.length chooser.filter + String.length value <= 256 then (
+                chooser.touched <- true;
+                chooser.filter <- chooser.filter ^ value;
+                chooser.selected <- 0; chooser.offset <- 0;
+                paint t);
+              loop ()
+          | _ -> loop ())
       | _ -> loop () in
     loop ())
 
@@ -1386,7 +1716,7 @@ let approval_body_rows ~columns ~measure body =
   |> List.fold_left (fun total line ->
     total + max 1 (Transcript_view.wrapped_count ~columns ~measure line)) 0
 
-let confirm_review t ~title ~label ~body ~max_bytes ~wrap
+let confirm_review_now t ~title ~label ~body ~max_bytes ~wrap
     ~too_large ~unsafe_text ~approved_text ~denied_text =
   let body_lines = String.split_on_char '\n' body in
   let fits () =
@@ -1420,26 +1750,65 @@ let confirm_review t ~title ~label ~body ~max_bytes ~wrap
   else if not (reviewable_text ~max_bytes body) then (
     alert t unsafe_text;
     false)
-  else if not (fits ()) then (
-    alert t too_large;
-    false)
   else (
     change_transcript t (fun () ->
       Transcript_view.approval ~title t.transcript body);
     t.scroll <- 0;
-    alert t label;
-    let resize_notice = "Resize to review · other=no" in
-    let rec decision () = match next_input t with
-      | `Resize _ ->
-          alert t (if fits () then label else resize_notice);
-          decision ()
-      | `Key (`ASCII ('y' | 'Y'), []) ->
-          if fits () then true
-          else (alert t resize_notice; decision ())
-      | _ -> false in
-    let accepted = decision () in
-    alert t (if accepted then approved_text else denied_text);
-    accepted)
+    let previous_overlays = t.overlays in
+    t.overlays <- Approval_overlay :: previous_overlays;
+    Fun.protect ~finally:(fun () ->
+      t.overlays <- previous_overlays;
+      t.paste <- false) (fun () ->
+      let resize_notice = "Resize to review · other=no" in
+      alert t (if fits () then label else resize_notice);
+      let rec decision () = match next_input t with
+        | `Resize _ ->
+            alert t (if fits () then label else resize_notice);
+            decision ()
+        | `Tick -> paint t; decision ()
+        | `Mouse _ -> decision ()
+        | `Paste `Start -> t.paste <- true; decision ()
+        | `Paste `End ->
+            t.paste <- false;
+            alert t (if fits () then label else resize_notice);
+            decision ()
+        | `Key _ when t.paste -> decision ()
+        | `Key _ as event ->
+            (match Keybindings.resolve t.bindings (key_focus t) event with
+            | Some Keybindings.Approve when fits () -> true
+            | Some Keybindings.Approve ->
+                alert t resize_notice;
+                decision ()
+            | Some Keybindings.Reject -> false
+            | _ -> false)
+        | _ -> false in
+      let accepted = decision () in
+      alert t (if accepted then approved_text else denied_text);
+      accepted))
+let confirm_review t ~title ~label ~body ~max_bytes ~wrap
+    ~too_large ~unsafe_text ~approved_text ~denied_text =
+  let request = {
+    title; label; body; max_bytes; wrap; too_large; unsafe_text;
+    approved_text; denied_text; result = None
+  } in
+  enqueue_ui_event t (Approval_event request);
+  let rec await () = match request.result with
+    | Some result -> result
+    | None ->
+        (match next_input t with
+        | `End -> false
+        | _ -> await ()) in
+  await ()
+
+let () =
+  approval_handler := (fun t request ->
+    let result = confirm_review_now t ~title:request.title
+      ~label:request.label ~body:request.body ~max_bytes:request.max_bytes
+      ~wrap:request.wrap ~too_large:request.too_large
+      ~unsafe_text:request.unsafe_text ~approved_text:request.approved_text
+      ~denied_text:request.denied_text in
+    request.result <- Some result)
+
 
 let confirm t command =
   let title = "SHELL APPROVAL · review before deciding" in

@@ -7,6 +7,22 @@
 - **Solution:** Added the absolute `$NVM_BIN/node` candidate without widening the evaluator's child-process environment. The focused persistent-evaluation test passed.
 - **Prevention / Reference:** Exercise runtime discovery with supported version managers while keeping runtime lookup separate from the evaluator's explicit environment allowlist.
 
+
+### [2026-09-28] Terminal Enter decoded as Ctrl+M
+
+- **Context / Symptom:** A real PTY initially accepted prompt text but never submitted it: `Notty.Unescape` emitted bare carriage return as `ASCII M` with `Ctrl`, while the composer submits only `Enter`. After CR/LF normalization, bracket-pasted CRLF still arrived as two line breaks.
+- **Root Cause:** `Notty.Unescape` preserves CR as a control character, and the terminal's raw-mode `ICRNL` flag translated CR to LF before the decoder, making pasted CRLF indistinguishable from two LF bytes.
+- **Solution:** Normalized physical CR/LF to `Enter`, coalesced LF after CR, preserved ESC+CR as Meta+Ctrl+M, and disabled `ICRNL`, `INLCR` and `IGNCR` while the TUI owns the terminal. Decoder regressions passed; a real 52×14 PTY submitted bracket-pasted CRLF as exactly one draft newline and restored original termios on SIGTERM.
+- **Prevention / Reference:** Test literal input bytes through an actual PTY as well as the decoder; inspect termios flags because the PTY line discipline can transform bytes before the decoder sees them.
+
+
+### [2026-09-28] Darwin signal exit status used OCaml's abstract signal ID
+
+- **Context / Symptom:** A PTY restored terminal attributes on `SIGTERM` but exited with status `117` instead of the conventional `143`; `Sys.sigterm` evaluated to `-11` on the macOS OCaml runtime. Unhandled external `SIGINT` also bypassed cleanup.
+- **Root Cause:** `Sys.sig*` values are OCaml runtime signal identifiers on Darwin, not positive POSIX numbers suitable for exit statuses; external `SIGINT` had no cleanup handler.
+- **Solution:** Mapped handled signals to POSIX numbers before raising the terminal exception (`INT=2`, `HUP=1`, `QUIT=3`, `TERM=15`, and `TSTP=18` on Darwin/`20` on Linux). Real PTYs verified SIGINT status 130, SIGTERM 143 and SIGTSTP 146, each with termios restored.
+- **Prevention / Reference:** Keep `Sys.signal` identifiers separate from the POSIX number added to exit status, and exercise cleanup for external signals through a real PTY.
+
 ### [2026-09-28] Kitty image frames omitted the graphics introducer
 
 - **Context / Symptom:** `test_terminal_image` received `ESC _ a=T,...` while a Kitty graphics APC requires `ESC _ G a=T,...`; image frames and deletion commands were not protocol-compliant.
