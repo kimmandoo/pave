@@ -19,7 +19,7 @@ type api = Openai_completions | Local_chat | Anthropic_messages | Openai_respons
   | Umans_chat | Umans_messages | Cline_pass_chat | Alibaba_token_plan_chat
   | Kimi_code_chat | Kimi_code_cn_chat
   | Kimi_code_messages | Kimi_code_cn_messages
-type authentication = Api_key | OAuth
+type authentication = Api_key | OAuth | Cloud_identity
 type config = { endpoint : string; api_key : string; model : string; api : api }
 type credentials = {
   access : string;
@@ -556,6 +556,10 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage
     raise (Provider_error "this provider route does not support user image attachments");
   let config = if config.api = Local_chat then
     { config with endpoint = local_endpoint config.endpoint } else config in
+  if authentication = Cloud_identity &&
+     config.api <> Vertex_generate && config.api <> Bedrock_converse then
+    raise (Provider_error
+      "cloud identity authentication requires an AWS Bedrock or Google Vertex route");
   if authentication = OAuth &&
      not (match config.api, config.endpoint with
        | Anthropic_messages, "https://api.anthropic.com/v1/messages"
@@ -1078,7 +1082,10 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage
              [ "Authorization: Bearer " ^ api_key;
                "anthropic-beta: oauth-2025-04-20,claude-code-20250219";
                "anthropic-dangerous-direct-browser-access: true";
-               "User-Agent: pave/0.1.1"; "x-app: cli" ]) in
+               "User-Agent: pave/0.1.1"; "x-app: cli" ]
+         | Cloud_identity ->
+             raise (Provider_error
+               "Anthropic Messages does not accept cloud identity credentials")) in
       (match on_text with
       | None ->
           let json = post_json ?cancel ~endpoint:config.endpoint ~headers ~secret:api_key body in
@@ -1151,8 +1158,8 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage
                  Option.iter report (Openai_responses_stream.usage stream));
             reply))
   | Bedrock_converse ->
-      if authentication <> Api_key || api_key <> "" then
-        raise (Provider_error "Bedrock Converse uses AWS credentials, not an API key");
+      if authentication <> Cloud_identity || api_key <> "" then
+        raise (Provider_error "Bedrock Converse requires AWS cloud identity, not an API key");
       let region, keys =
         try Aws_auth.region (), Aws_auth.resolve ()
         with Invalid_argument reason -> raise (Provider_error reason) in
@@ -1256,8 +1263,8 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage
                  Option.iter report (Gemini_stream.usage stream));
             reply))
   | Vertex_generate ->
-      if authentication <> Api_key || config.endpoint <> "" || api_key <> "" then
-        raise (Provider_error "Vertex uses scoped Google ADC and a derived Google endpoint");
+      if authentication <> Cloud_identity || config.endpoint <> "" || api_key <> "" then
+        raise (Provider_error "Vertex requires scoped Google cloud identity and a derived Google endpoint");
       let project, location, access =
         try
           let project, location = Vertex_wire.resolve_environment () in

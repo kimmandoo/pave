@@ -64,8 +64,25 @@ let () =
     Array.iter (fun name -> Sys.remove (Filename.concat root name)) (Sys.readdir root);
     Unix.rmdir root) (fun () ->
       let path = Filename.concat root "oauth.json" in
-      Store.put ~path ~provider:"github-copilot" credential;
-      assert (Store.get ~path ~provider:"github-copilot" = Some credential);
+      let descriptor = Option.get
+        (Pave.Provider_catalog.find "github-copilot") in
+      let binding : Store.binding = {
+        provider = descriptor.id; grant_type = Store.Device_approval;
+        routes = List.map (fun (route : Pave.Provider_catalog.route) ->
+          route.name, route.endpoint) descriptor.routes;
+      } in
+      let selection_id =
+        Store.put_account_with_selection ~path ~provider:"github-copilot"
+          ~binding credential in
+      assert (credential.account_id = None);
+      assert (String.starts_with ~prefix:"pave-local:" selection_id);
+      (match Store.account ~path ~provider:"github-copilot"
+          ~account_id:(Some selection_id) with
+       | Some account ->
+           assert (account.credential = credential);
+           assert (account.binding = Some binding);
+           assert (account.selection_id = selection_id)
+       | None -> failwith "device grant was not stored");
       assert ((Unix.stat path).Unix.st_perm = 0o600));
   let run, _, _, _ = fixture [
     200, {|{"access_token":"ghu_expiring-fixture","expires_in":60}|}] in

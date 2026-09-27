@@ -12,6 +12,8 @@ let approval_tools = [
   "run_command", "exec (per-command prompt remains mandatory)"
 ]
 
+let account_label id = "Account ID: " ^ Printf.sprintf "%S" id
+
 let open_view screen ~root ~registry =
   let save change =
     ignore (Pave.Settings.update_project ~root change);
@@ -71,6 +73,7 @@ let open_view screen ~root ~registry =
            | None -> ()
            | Some route_name ->
            match Model_picker.choose ~registry screen ~descriptor ~route_name
+             ?account_id:values.default_account_id
              ~title:"Default model · listed or explicitly entered IDs"
              ~choices:[] () with
            | None -> ()
@@ -99,8 +102,43 @@ let open_view screen ~root ~registry =
                 | Some name -> save (fun current ->
                     { current with default_api = Some name;
                       default_model = None; default_account_id = None })))
-         else if choice = account then
-          Tui.alert screen "Account scope comes from the user-level custom route or provider sign-in; it cannot be overridden here."
+         else if choice = account then (
+           match values.default_provider with
+           | None -> Tui.alert screen "Choose a default provider first"
+           | Some provider_id ->
+               (match Pave.Provider_catalog.find ~registry provider_id with
+                | None -> Tui.alert screen "The configured provider is unavailable"
+                | Some descriptor when descriptor.oauth = None ->
+                    Tui.alert screen
+                      "This provider has no saved OAuth account; configure its API key in your shell."
+                | Some _ ->
+                    let accounts = try
+                      Pave.Oauth_store.accounts
+                        ~path:(Pave.Oauth_store.default_path ())
+                        ~provider:provider_id
+                    with Pave.Oauth_store.Storage_error message ->
+                      Tui.alert screen ("Saved sign-ins unavailable: " ^ message);
+                      [] in
+                    if accounts = [] then
+                      Tui.alert screen
+                        "No saved OAuth accounts; use /setup to sign in."
+                    else
+                      let options = ("Use automatic selection", None) ::
+                        List.map (fun account ->
+                          let label = match account.Pave.Oauth_store.credential.account_id with
+                            | Some id -> account_label id
+                            | None -> "Local sign-in ID: " ^
+                                Printf.sprintf "%S" account.selection_id in
+                          label, Some account.selection_id) accounts in
+                      (match Tui.choose screen ~title:"Default saved account"
+                        ~choices:(List.map fst options) with
+                       | None -> ()
+                       | Some selected ->
+                           (match List.assoc_opt selected options with
+                            | Some account_id ->
+                                save (fun current -> { current with
+                                  default_account_id = account_id })
+                            | None -> assert false))))
          else if choice = shell then
            save (fun current -> { current with
              disable_shell = not current.disable_shell })

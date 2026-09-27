@@ -22,6 +22,7 @@ let () =
     and list_models = ref false and context_window_tokens = ref None
     and context_window_auto = ref false and context_window_set = ref false in
   let login = ref "" and login_manual = ref "" and logout = ref "" in
+    let account_id = ref None and mask_secrets = ref false in
   let custom_prompt = ref None and prompt_template = ref None
     and append_prompt = ref None in
   let options = [
@@ -42,6 +43,10 @@ let () =
     "--login", Arg.Set_string login, "Log in using the provider's OAuth browser callback";
     "--login-manual", Arg.Set_string login_manual, "Log in by pasting the full redirect URL from another browser";
     "--logout", Arg.Set_string logout, "Remove the locally stored OAuth credential";
+    "--account", Arg.String (fun value -> account_id := Some value),
+      "Saved provider account ID (selects a specific local sign-in)";
+    "--mask-secrets", Arg.Set mask_secrets,
+      "Mask active provider credentials in prompts, tool results, and output";
     "--endpoint", Arg.String (fun value ->
       endpoint := value; explicit_selection := true),
       "Provider's full completion endpoint URL";
@@ -115,8 +120,8 @@ let () =
            | None, None -> "no API key required"))
         (Pave.Provider_catalog.all ~registry ());
       exit 0);
-    if Cli_auth.handle_action ~login:!login ~login_manual:!login_manual
-         ~logout:!logout then exit 0;
+    if Cli_auth.handle_action ?account_id:!account_id
+         ~login:!login ~login_manual:!login_manual ~logout:!logout () then exit 0;
     let root = Unix.realpath !root in
     if not (Sys.is_directory root) then failwith "workspace root must be a directory";
     if !list_models && !endpoint <> "" then
@@ -141,8 +146,11 @@ let () =
     let configured_provider_name = if !provider_name <> "" then !provider_name
       else Option.value ~default:"openai" configured.default_provider in
     let configured_account_id =
-      if configured.default_provider = Some configured_provider_name then
-        configured.default_account_id else None in
+      match !account_id with
+      | Some _ as selected -> selected
+      | None when configured.default_provider = Some configured_provider_name ->
+          configured.default_account_id
+      | None -> None in
     let canonical_model_provider =
       match String.index_opt !model '/' with
       | None -> None
@@ -163,14 +171,19 @@ let () =
           if !api_name <> "" && route.name <> !api_name then
             failwith "--api conflicts with the canonical --model selector";
           Some (descriptor, identity, route) in
+    (match !account_id, explicit_model_selection with
+     | Some requested, Some (_, identity, _)
+       when identity.account_id <> Some requested ->
+         failwith "--account conflicts with the canonical --model selector"
+     | _ -> ());
     let provider_name = match explicit_model_selection with
       | Some (descriptor, _, _) -> descriptor.id
       | None -> configured_provider_name in
     let descriptor = match Pave.Provider_catalog.find ~registry provider_name with
       | Some value -> value
       | None -> failwith ("unsupported provider: " ^ provider_name) in
-    let discovery_credential ?route_name descriptor =
-      Model_picker.credential ~registry ?route_name descriptor in
+    let discovery_credential ?route_name ?account_id descriptor =
+      Model_picker.credential ~registry ?route_name ?account_id descriptor in
     if !list_models then (
       let listing_route =
         if !api_name <> "" then !api_name
@@ -183,12 +196,23 @@ let () =
         | Some route -> route
         | None -> failwith ("unsupported API for " ^ descriptor.id ^
             "; use --api with one of --providers' routes") in
-      let account_id = match explicit_model_selection with
-        | Some (_, identity, _) -> identity.account_id
-        | None when configured.default_provider = Some descriptor.id ->
-            configured.default_account_id
-        | None -> None in
-      let credential = discovery_credential ~route_name:route.name descriptor in
+      let environment_key_override =
+        descriptor.oauth <> None && Cli_auth.api_key descriptor <> None in
+      let selector_account_scope =
+        match explicit_model_selection, String.index_opt !model '/' with
+        | Some _, Some slash ->
+            String.contains (String.sub !model 0 slash) '#'
+        | _ -> false in
+      if environment_key_override &&
+         (!account_id <> None || selector_account_scope) then
+        failwith "account-scoped model listing cannot use an environment API key override";
+      let account_id = if environment_key_override then None
+        else match explicit_model_selection with
+          | Some (_, identity, _) when identity.account_id <> None ->
+              identity.account_id
+          | _ -> configured_account_id in
+      let credential = discovery_credential ~route_name:route.name
+        ?account_id descriptor in
       (match Pave.Model_discovery.discover ~registry ~provider:descriptor.id
           ~route_name:route.name ?account_id ?credential () with
        | Ok listing ->
@@ -307,6 +331,26 @@ let () =
            | Some value -> value
            | None -> failwith ("saved session uses unavailable provider " ^
                identity.provider ^ "; specify --provider and --model to override")) in
+    let environment_key_override =
+      descriptor.oauth <> None && Cli_auth.api_key descriptor <> None in
+    let selector_account_scope =
+      match explicit_model_selection, String.index_opt !model '/' with
+      | Some _, Some slash ->
+          String.contains (String.sub !model 0 slash) '#'
+      | _ -> false in
+    let unscoped_identity (identity : Pave.Model_identity.t) =
+      { identity with account_id = None } in
+    if environment_key_override &&
+       (!account_id <> None || selector_account_scope) then
+      failwith "account-scoped selection cannot be used while an environment API key takes precedence";
+    let saved_model = if environment_key_override then
+      Option.map unscoped_identity saved_model
+      else saved_model in
+    let explicit_model_selection = if environment_key_override then
+      Option.map (fun (descriptor, identity, route) ->
+        descriptor, unscoped_identity identity, route)
+        explicit_model_selection
+      else explicit_model_selection in
     let model = match explicit_model_selection, saved_model with
       | Some (_, identity, _), _ -> identity.upstream_id
       | None, Some identity -> identity.upstream_id
@@ -334,10 +378,15 @@ let () =
       Pave.Model_identity.make ~provider:descriptor.id ?account_id
         ?config_revision ~route:route.name ~upstream_id () in
     let configured_account_id =
-      if configured.default_provider = Some descriptor.id then
-        configured.default_account_id else None in
+      if environment_key_override then None
+      else match !account_id with
+        | Some _ as selected -> selected
+        | None when configured.default_provider = Some descriptor.id ->
+            configured.default_account_id
+        | None -> None in
     let inferred_account_id =
-      Model_picker.credential ~registry ~route_name:route.name descriptor
+      Model_picker.credential ~registry ?account_id:configured_account_id
+        ~route_name:route.name descriptor
       |> Model_picker.credential_account_id ~registry
            ~provider:descriptor.id ~route:route.name in
     let selected_account_id =
@@ -383,16 +432,20 @@ let () =
           Option.map (fun
               (default_route : Pave.Provider_catalog.route) ->
             let identity = Option.map (fun upstream_id ->
-              let account_id = match
-                  (if configured_for_provider then
-                    configured.default_account_id else None) with
-                | Some _ as account_id -> account_id
-                | None ->
-                    Model_picker.credential ~registry
-                      ~route_name:default_route.name default_descriptor
-                    |> Model_picker.credential_account_id ~registry
-                         ~provider:default_descriptor.id
-                         ~route:default_route.name in
+              let account_id =
+                match !account_id with
+                | Some _ as selected -> selected
+                | None when configured_for_provider ->
+                    configured.default_account_id
+                | None -> None in
+              let account_id = (match account_id with
+               | Some _ -> account_id
+               | None ->
+                   Model_picker.credential ~registry ?account_id
+                     ~route_name:default_route.name default_descriptor
+                   |> Model_picker.credential_account_id ~registry
+                        ~provider:default_descriptor.id
+                        ~route:default_route.name) in
               make_model_identity default_descriptor default_route
                 ?account_id upstream_id) default_model in
             default_descriptor, identity, default_route) default_route in
@@ -624,6 +677,42 @@ let () =
         | Some current -> Pave.Session.usage current
         | None -> !ephemeral_usage in
       Tui.set_usage screen tokens in
+    let active_secret_mask = ref None in
+    let current_secret_mask () =
+      Option.map (fun (_, _, mask) -> mask) !active_secret_mask in
+    let mask_text mask text =
+      Option.fold ~none:text ~some:(fun mask ->
+        Pave.Secret_mask.mask mask text) mask in
+    let mask_messages mask messages =
+      match mask with
+      | None -> messages
+      | Some mask -> List.map (fun (message : Pave.Protocol.message) ->
+          let content = Option.map (Pave.Secret_mask.mask mask) message.content in
+          let tool_result_content = Option.map (List.map (function
+            | Pave.Protocol.Text text ->
+                Pave.Protocol.Text (Pave.Secret_mask.mask mask text)
+            | Pave.Protocol.Image _ as image -> image))
+            message.tool_result_content in
+          let tool_calls = List.map (fun (call : Pave.Protocol.tool_call) ->
+            { call with arguments =
+                Pave.Secret_mask.mask_tool_arguments mask call.arguments })
+            message.tool_calls in
+          { message with content; tool_result_content; tool_calls }) messages in
+    let make_secret_mask provider identity credentials =
+      if not !mask_secrets then None else
+      let secrets = (if provider.Pave.Provider.api_key = "" then []
+        else [provider.api_key]) @
+        Option.to_list (Option.map (fun
+          (credential : Pave.Provider.credentials) -> credential.access)
+          credentials) in
+      match !active_secret_mask with
+      | Some (provider_id, account_id, mask)
+        when provider_id = identity.Pave.Model_identity.provider &&
+             account_id = identity.account_id ->
+          Pave.Secret_mask.add mask secrets;
+          Some mask
+      | _ -> Some (Pave.Secret_mask.create secrets) in
+
     let resolve_provider () =
       if !active_model = "" then
         failwith ("Select a model with /model " ^ !active_descriptor.id
@@ -641,13 +730,23 @@ let () =
        | Some custom when identity.account_id <> custom.account_id ->
            failwith "selected account does not match the configured custom route"
        | Some _ | None -> ());
-      let authentication, api_key, resolve_credential =
-        Cli_auth.resolve_authentication ?custom_route ~descriptor ~route
-          ~endpoint:!endpoint_override () in
-      let credential_account_id = match custom_route with
-        | Some custom -> custom.account_id
-        | None -> Option.bind resolve_credential
-            (fun resolve -> (resolve ()).Pave.Provider.account_id) in
+      let authentication, api_key, raw_resolver =
+        Cli_auth.resolve_authentication ?account_id:identity.account_id
+          ?custom_route ~descriptor ~route ~endpoint:!endpoint_override () in
+      let resolved_credential = Option.map (fun resolve -> resolve ()) raw_resolver in
+      let local_oauth_selection = match descriptor.oauth, identity.account_id,
+          raw_resolver, resolved_credential with
+        | Some _, Some _, Some _, Some
+            (credential : Pave.Provider.credentials)
+          when credential.account_id = None -> true
+        | _ -> false in
+      let credential_account_id =
+        if local_oauth_selection then identity.account_id
+        else match custom_route with
+          | Some custom -> custom.account_id
+          | None -> Option.bind resolved_credential
+              (fun (credential : Pave.Provider.credentials) ->
+                credential.account_id) in
       if identity.account_id <> credential_account_id then
         failwith "selected model account does not match the active credentials; reselect the model for this account";
       let endpoint =
@@ -657,6 +756,16 @@ let () =
         else !endpoint_override in
       let provider : Pave.Provider.config = {
         endpoint; model = !active_model; api_key; api = route.wire } in
+      let secret_mask = make_secret_mask provider identity resolved_credential in
+      active_secret_mask := Option.map (fun mask ->
+        descriptor.id, identity.account_id, mask) secret_mask;
+      let resolve_credential = Option.map (fun resolve ->
+        fun () ->
+          let credential = resolve () in
+          Option.iter (fun mask ->
+            Pave.Secret_mask.add mask [credential.Pave.Provider.access])
+            secret_mask;
+          credential) raw_resolver in
       provider, authentication, resolve_credential in
 
     let native_openai_route () =
@@ -756,6 +865,9 @@ let () =
         | _ -> messages in
       trim (max 1024 ((window_tokens - reserve_tokens) / 16)) messages in
     let before_request ~cancel ~system:system_text ~messages ~tools =
+      let secret_mask = current_secret_mask () in
+      let system_text = mask_text secret_mask system_text in
+      let messages = mask_messages secret_mask messages in
       match active_context_window () with
       | None -> None
       | Some window_tokens ->
@@ -766,6 +878,7 @@ let () =
           let history = Pave.Interaction.history_for_model
             ~provider:!active_descriptor.id ~route:!active_route.name
             ~wire:!active_route.wire ~model:!active_model history in
+          let history = mask_messages secret_mask history in
           (match context_status ~window_tokens ~reserve_tokens
             ~system:system_text ~messages:history ~tools with
            | Pave.Context_budget.Within_budget
@@ -839,6 +952,7 @@ let () =
                           ~authentication ?resolve_credential
                           ?thinking:!thinking_level ?cancel
                           ~window_tokens prefix ~on_usage, None in
+                    let summary = mask_text secret_mask summary in
                     let summary_message = { (Pave.Protocol.user summary) with
                       provider_state } in
                     let projected = summary_message :: kept in
@@ -859,6 +973,7 @@ let () =
                     Some projected)) in
     let make_agent () =
       let provider, authentication, resolve_credential = resolve_provider () in
+      let secret_mask = current_secret_mask () in
       (match !journal, !active_identity with
        | Some session, Some identity -> Pave.Session.set_model ~registry session identity
        | _ -> ());
@@ -882,6 +997,7 @@ let () =
         | None -> ());
         mark_user_message message in
       Pave.Agent.create ~provider ~authentication ?resolve_credential
+        ?secret_mask
         ~thinking:(fun () -> !thinking_level)
         ~root ~system
         ~allow_shell:!allow_shell
@@ -1069,6 +1185,9 @@ let () =
             let signed_prefix = List.exists (fun (message : Pave.Protocol.message) ->
               Option.is_some message.provider_state) prefix in
             let provider, authentication, resolve_credential = resolve_provider () in
+            let secret_mask = current_secret_mask () in
+            let prefix = mask_messages secret_mask prefix in
+            let compaction_system = mask_text secret_mask system in
             let native_openai = native_openai_compaction provider in
             (if !active_descriptor.id = "anthropic" then
               on_event "Checking Anthropic model compaction capability…");
@@ -1081,7 +1200,7 @@ let () =
               ~allow_shell:!allow_shell
               ~enabled:(fun name -> not (List.mem name !disabled_tools)) in
             let native_messages =
-              if native_anthropic then with_system_prompt system prefix
+              if native_anthropic then with_system_prompt compaction_system prefix
               else prefix in
             let native_tools = if native_anthropic then compaction_tools else [] in
             let usages = ref [] in
@@ -1139,6 +1258,7 @@ let () =
                      | Some summary, [] when String.trim summary <> "" ->
                          String.trim summary, None
                      | _ -> failwith "model returned no compaction summary") in
+            let summary = mask_text secret_mask summary in
             let summary_message = { (Pave.Protocol.user summary) with
               provider_state } in
             let history = Pave.Interaction.history_for_model
@@ -1178,7 +1298,16 @@ let () =
                    | Some (descriptor : Pave.Provider_catalog.descriptor) ->
                        let route_name = if descriptor.id = !active_descriptor.id
                          then !active_route.name else descriptor.default_route in
+                       let selected_account_id = match !account_id with
+                         | Some _ as selected -> selected
+                         | None when descriptor.id = !active_descriptor.id ->
+                             Option.bind !active_identity
+                               (fun identity -> identity.account_id)
+                         | None when configured.default_provider = Some descriptor.id ->
+                             configured.default_account_id
+                         | None -> None in
                        Model_picker.choose ~registry screen ~descriptor ~route_name
+                         ?account_id:selected_account_id
                          ~title:("Model · " ^ descriptor.id ^ " (current conversation)")
                          ~choices:[] () in
                  Option.value ~default:"" picked
@@ -1200,19 +1329,39 @@ let () =
           | Some descriptor ->
               Pave.Provider_catalog.route descriptor current_route
           | None -> None in
-        let inferred_account = Option.bind selected_route (fun route ->
-          Option.bind (Pave.Provider_catalog.find ~registry current_provider)
-            (fun descriptor ->
-              Model_picker.credential ~registry ~route_name:route.name descriptor
-              |> Model_picker.credential_account_id ~registry
-                   ~provider:descriptor.id ~route:route.name)) in
         let active_account_id = Option.bind !active_identity
           (fun (identity : Pave.Model_identity.t) ->
             if identity.provider = current_provider then identity.account_id
             else None) in
-        let current_account_id = match active_account_id with
-          | Some _ as account_id -> account_id
-          | None -> inferred_account in
+        let explicitly_account_scoped =
+          match String.index_opt selector '/' with
+          | None -> false
+          | Some slash ->
+              let scope = String.sub selector 0 slash in
+              String.contains scope '@' && String.contains scope '#' in
+        let account_hint = match !account_id with
+          | Some _ as selected -> selected
+          | None ->
+              (match active_account_id with
+               | Some _ as selected -> selected
+               | None when configured.default_provider = Some current_provider ->
+                   configured.default_account_id
+               | None -> None) in
+        let inferred_account = if explicitly_account_scoped then None else
+          Option.bind selected_route (fun route ->
+            Option.bind (Pave.Provider_catalog.find ~registry current_provider)
+              (fun descriptor ->
+                Model_picker.credential ~registry ?account_id:account_hint
+                  ~route_name:route.name descriptor
+                |> Model_picker.credential_account_id ~registry
+                     ~provider:descriptor.id ~route:route.name)) in
+        let current_account_id = if explicitly_account_scoped then None else
+          match active_account_id with
+          | Some _ as selected -> selected
+          | None ->
+              (match account_hint with
+               | Some _ as selected -> selected
+               | None -> inferred_account) in
         let descriptor, identity, route =
           try Pave.Interaction.resolve_model ~registry ?current_account_id
             ~current_provider ~current_route ~input:selector ()
@@ -1251,7 +1400,7 @@ let () =
             try
               Tui.suspend screen (fun () ->
                 ignore (Cli_auth.handle_action ~login:descriptor.id
-                  ~login_manual:"" ~logout:""));
+                  ~login_manual:"" ~logout:"" ()));
               true
             with Sys.Break -> false in
           if not connected then

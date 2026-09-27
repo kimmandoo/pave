@@ -14,6 +14,7 @@ type tool_event =
     }
 
 type t = {
+  secret_mask : Secret_mask.t option;
   provider : Provider.config;
   authentication : Provider.authentication;
   resolve_credential : (unit -> Provider.credentials) option;
@@ -45,18 +46,51 @@ let create ~provider ~root ~system ?(authentication = Provider.Api_key)
     ?(tool_available = fun _ -> true) ?(stream = false)
     ?(approval_mode = Approval.Ask_exec) ?(tool_approval = [])
     ?(command_patterns = []) ?(approve_command = fun _ -> false)
-    ?approve_tool ?(history = []) ?before_request
+    ?approve_tool ?(history = []) ?before_request ?secret_mask
     ?on_usage ?on_phase ?on_tool_event ?(on_change = fun _ -> ())
     ?(on_delta = fun _ -> ()) ~on_event () =
-  { provider; authentication; resolve_credential; thinking; root; system; allow_shell;
+  let redact = match secret_mask with
+    | Some mask -> Secret_mask.redact mask
+    | None -> Fun.id in
+  { provider; authentication; resolve_credential; thinking; root; system; secret_mask; allow_shell;
     tool_available; stream; approval_mode; tool_approval; command_patterns;
     approve_command; approve_tool; before_request;
     history_rev = List.rev history; scoped_pending = [];
-    on_change; on_delta; on_event; on_usage; on_phase; on_tool_event }
+    on_change; on_delta = (fun text -> on_delta (redact text));
+    on_event = (fun text -> on_event (redact text));
+    on_usage; on_phase;
+    on_tool_event = Option.map (fun notify event ->
+      let event = match event with
+        | Tool_started { call_id; name } -> Tool_started {
+            call_id = redact call_id; name = redact name }
+        | Tool_updated { call_id; name; received_bytes } -> Tool_updated {
+            call_id = redact call_id; name = redact name; received_bytes }
+        | Tool_settled { call_id; name; result; is_error } -> Tool_settled {
+            call_id = redact call_id; name = redact name;
+            result = redact result; is_error }
+        | Tool_aborted { call_id; name; result; side_effects_may_have_occurred } ->
+            Tool_aborted {
+              call_id = redact call_id; name = redact name;
+              result = redact result; side_effects_may_have_occurred } in
+      notify event) on_tool_event }
 
+
+let mask_tool_calls mask calls =
+  List.map (fun (call : Protocol.tool_call) ->
+    { call with arguments =
+        Secret_mask.mask_tool_arguments mask call.arguments }) calls
 
 let messages t = List.rev t.history_rev
-let append t message =
+let append t (message : Protocol.message) =
+  let message = match t.secret_mask with
+    | Some mask ->
+        let content = Option.map (Secret_mask.mask mask) message.content in
+        let tool_result_content = Option.map (List.map (function
+          | Protocol.Text text -> Protocol.Text (Secret_mask.mask mask text)
+          | Protocol.Image _ as image -> image)) message.tool_result_content in
+        let tool_calls = mask_tool_calls mask message.tool_calls in
+        { message with content; tool_result_content; tool_calls }
+    | None -> message in
   t.on_change message;
   t.history_rev <- message :: t.history_rev
 
@@ -123,25 +157,46 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
         tool_call_id = None; tool_result_content = None; provider_state = None;
         attachments = [] } in
     (match t.on_phase with None -> () | Some notify -> notify Model);
+    let mask = match t.secret_mask with
+      | Some mask -> Secret_mask.mask mask
+      | None -> Fun.id in
+    let mask_message (message : Protocol.message) =
+      let content = Option.map mask message.content in
+      let tool_result_content = Option.map (List.map (function
+        | Protocol.Text text -> Protocol.Text (mask text)
+        | Protocol.Image _ as image -> image)) message.tool_result_content in
+      let tool_calls = Option.fold ~none:message.tool_calls
+        ~some:(fun secret_mask -> mask_tool_calls secret_mask message.tool_calls)
+        t.secret_mask in
+      { message with content; tool_result_content; tool_calls } in
     let request_messages = match t.before_request with
       | None -> messages t
       | Some prepare ->
-          let current = messages t in
-          (match prepare ~cancel ~system:system_text ~messages:current
-            ~tools:definitions with
+          let current = List.map mask_message (messages t) in
+          (match prepare ~cancel ~system:(mask system_text)
+            ~messages:current ~tools:definitions with
            | None -> current
            | Some replacement ->
+               let replacement = List.map mask_message replacement in
                t.history_rev <- List.rev replacement;
                replacement) in
-    let transcript = system :: request_messages in
+    let transcript = { system with content = Option.map mask system.content } ::
+      List.map mask_message request_messages in
+    let streamed_text = Buffer.create 128 in
+    let on_text = match t.secret_mask with
+      | Some _ when t.stream -> fun text -> Buffer.add_string streamed_text text
+      | _ -> t.on_delta in
     let reply =
       if t.stream then Provider.complete ~authentication:t.authentication
         ?resolve_credential:t.resolve_credential ?thinking:(t.thinking ())
-        ~on_text:t.on_delta ?on_usage:t.on_usage ?cancel t.provider transcript definitions
+        ~on_text ?on_usage:t.on_usage ?cancel t.provider transcript definitions
       else Provider.complete ~authentication:t.authentication
         ?resolve_credential:t.resolve_credential ?thinking:(t.thinking ())
         ?on_usage:t.on_usage ?cancel t.provider transcript definitions in
-    Provider.check_cancel cancel;
+    (match t.secret_mask with
+     | Some _ when t.stream && Buffer.length streamed_text > 0 ->
+         t.on_delta (Buffer.contents streamed_text)
+     | _ -> ());
     t.scoped_pending <- [];
     (match reply.content with
      | Some s when s <> "" ->
@@ -151,7 +206,11 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
     match reply.tool_calls with
     | [] ->
         append t reply;
-        (match reply.content with Some s -> s | None -> "")
+        (match reply.content with
+         | Some text -> (match t.secret_mask with
+             | Some mask -> Secret_mask.redact mask text
+             | None -> text)
+         | None -> "")
     | calls ->
         append t reply;
         let cancellation_result =
@@ -171,6 +230,12 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
         let cancellation_requested = ref false and scheduler_failure = ref None in
         let make_task (call : Protocol.tool_call) :
             Protocol.content_block list Tool_scheduler.task =
+          let call = match t.secret_mask with
+            | Some mask -> { call with arguments =
+                call.arguments
+                |> Secret_mask.mask_tool_arguments mask
+                |> Secret_mask.restore_tool_arguments mask }
+            | None -> call in
           let complete result =
             Tool_scheduler.Complete [Protocol.Text result] in
           let prepared = ref None in

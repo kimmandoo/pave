@@ -1,5 +1,12 @@
 # Troubleshooting
 
+### [2026-09-27] R4 credential integration exposed compile and TUI feedback failures
+
+- **Context / Symptom:** The auth-store migration build found `Unbound record field content`, incomplete credential pattern matches for `selection_id` and `Account_api_key`, non-erasable optional CLI arguments, and an untyped binding record label. Later runs found a missing binding in configured model selection, a unit-return mismatch, unused picker/settings bindings, a shadowed `path` in `test_oauth_store`, and a forked masking fixture whose child lacked placeholder allocations (`curl` exit 52). A real one-second Copilot device-grant PTY returned to Connect Provider without visible timeout feedback.
+- **Root Cause:** Account selectors and the new credential variant changed record inference and exhaustiveness; labeled-only optional functions could not erase their optional arguments; the test helper shadowed a standard JSON utility; the masking fixture forked before dynamic placeholders were registered; `Tui.alert` was overwritten by the immediately reopened chooser.
+- **Solution:** Annotated message and binding records, completed match branches and added erasable unit terminators; carried selectors through refresh and added explicit `Cloud_identity` auth for Vertex/Bedrock; fixed the fixture names and seeded child masking state; passed sign-in outcomes via chooser `initial_status`. The forced suite, install build, opam lint and isolated CLI/PTY smokes passed.
+- **Prevention / Reference:** Keep provider identity, local selection ID and grant type distinct; type shared record labels and make optional resolver signatures erasable; use chooser status for failures that must remain visible after a modal returns; initialize forked-fixture state after fork when mutations are process-local.
+
 ### [2026-09-27] Fireworks pinned route exposed a stale loopback fixture
 
 - **Context / Symptom:** The first forced suite run failed in `test_provider_http` with `Pave.Provider_error("Fireworks API key requires its pinned Chat endpoint")`. After excluding Fireworks from that arbitrary loopback route table, the fixture's later request numbering still failed.

@@ -130,12 +130,24 @@ let fixture () =
         endpoint = Printf.sprintf "http://127.0.0.1:%d" port;
         api_key = ""; model = "fixture-model"; api = Pave.Provider.Bedrock_converse } in
       let original = [Pave.Protocol.user "Find alpha"] in
-      let first = Pave.Provider.complete config original [tool] in
+      let incompatible = { config with api = Pave.Provider.Openai_completions } in
+      (match Pave.Provider.complete
+          ~authentication:Pave.Provider.Cloud_identity incompatible original [] with
+       | exception Pave.Provider.Provider_error
+           "cloud identity authentication requires an AWS Bedrock or Google Vertex route" -> ()
+       | _ -> failwith "cloud identity was accepted on an unrelated route");
+      (match Pave.Provider.complete config original [tool] with
+       | exception Pave.Provider.Provider_error
+           "Bedrock Converse requires AWS cloud identity, not an API key" -> ()
+       | _ -> failwith "Bedrock accepted API-key authentication");
+      let first = Pave.Provider.complete
+        ~authentication:Pave.Provider.Cloud_identity config original [tool] in
       assert (first.content = Some "Looking up.");
       assert (first.tool_calls = [call]);
       let continuation = original @ [first; Pave.Protocol.tool_result call.id "value-alpha"] in
       let callbacks = ref [] in
       let second = Pave.Provider.complete
+        ~authentication:Pave.Provider.Cloud_identity
         ~on_text:(fun content -> callbacks := content :: !callbacks)
         config continuation [tool] in
       assert (second.content = Some "Found alpha.");

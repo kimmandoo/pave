@@ -25,13 +25,24 @@ let fixed_http expected_url expected_headers response =
     response in
   http, calls
 let copilot_oauth access =
-  Discovery.OAuth { service = "github-copilot"; access; account_id = None }
+  Discovery.OAuth { service = "github-copilot"; access; account_id = None;
+    selection_id = None }
+let copilot_local_oauth access selection_id =
+  Discovery.OAuth { service = "github-copilot"; access; account_id = None;
+    selection_id = Some selection_id }
 let codex_oauth (access, account_id) =
   Discovery.OAuth { service = "openai-codex"; access;
-    account_id = Some account_id }
+    account_id = Some account_id; selection_id = None }
 
 let () =
   let open Discovery in
+  assert (message Missing_credential =
+    "No credential configured for model listing; sign in or configure an API key");
+  assert (message (Unsupported_provider "fixture") =
+    "Model listing unsupported for fixture");
+  assert (String.starts_with ~prefix:
+    "Model listing connection failed or is offline:"
+    (message (Transport_error "network unavailable")));
 
   let openai_key = "private-openai" and gemini_key = "private-gemini" in
   let github_token = "ghu_private-oauth" in
@@ -151,6 +162,36 @@ let () =
     "deepseek/deepseek-chat"]
     (discover ~http ~provider:"openrouter"
       ~credential:(Api_key router_key) ());
+  assert (!calls = 1);
+  let local_account = "pave-local:0123456789abcdef0123456789abcdef" in
+  let http, _ = fixed_http openrouter_url router_headers
+    (Ok (200, {|{"data":[{"id":"account-model"}]}|})) in
+  (match discover ~http ~provider:"openrouter" ~account_id:local_account
+      ~credential:(Account_api_key {
+        key = router_key; account_id = Some local_account }) () with
+   | Ok listing ->
+       assert ((List.hd listing.models).identity.account_id = Some local_account)
+   | Error failure -> failwith (message failure));
+  let foreign_account = "pave-local:ffffffffffffffffffffffffffffffff" in
+  let mismatch_http, mismatch_calls = fixed_http openrouter_url router_headers
+    (Ok (200, {|{"data":[{"id":"must-not-list"}]}|})) in
+  expect_error wrong_credential
+    (discover ~http:mismatch_http ~provider:"openrouter"
+      ~account_id:foreign_account
+      ~credential:(Account_api_key {
+        key = router_key; account_id = Some local_account }) ());
+  assert (!mismatch_calls = 0);
+  let http, calls = fixed_http copilot_url copilot_headers (Ok (200,
+    {|{"data":[{"id":"copilot-account-model"}]}|})) in
+  let copilot_account =
+    "pave-local:abcdef0123456789abcdef0123456789" in
+  let listing = discover ~http ~provider:"github-copilot"
+    ~account_id:copilot_account
+    ~credential:(copilot_local_oauth github_token copilot_account) () in
+  (match listing with
+   | Ok listing ->
+       assert ((List.hd listing.models).identity.account_id = Some copilot_account)
+   | Error failure -> failwith (message failure));
   assert (!calls = 1);
   let key = "new-provider-private-key" in
   let bearer = ["Authorization", "Bearer " ^ key] in
@@ -492,8 +533,16 @@ let () =
   (match failure with
   | Error reason ->
       assert (Discovery.message reason =
-        "Model discovery access denied; check the account or API key")
+        "Provider rejected the credential (possibly expired or revoked); sign in again or check the API key")
   | _ -> assert false);
+  let http, _ = fixed_http copilot_url copilot_headers
+    (Ok (403, {|{"error":"insufficient_scope"}|})) in
+  (match discover ~http ~provider:"github-copilot"
+      ~credential:(copilot_oauth github_token) () with
+   | Error (Http_error 403 as reason) ->
+       assert (Discovery.message reason =
+         "Provider denied access; check the required scope, account entitlement, or policy")
+   | _ -> failwith "permission denial was not classified");
   (* Redirects from an authenticated endpoint are failures, not follow-up calls
      with credentials attached to a Location: supplied by untrusted JSON/HTTP. *)
   let http, calls = fixed_http copilot_url copilot_headers (Ok (302,

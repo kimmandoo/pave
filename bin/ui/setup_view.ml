@@ -8,6 +8,27 @@ let provider_choices registry =
     entry.id ^ " · " ^ entry.display_name, entry)
     (Pave.Interaction.selectable_providers ~registry ())
 
+let account_label (account : Pave.Oauth_store.account) =
+  match account.credential.account_id with
+  | Some id -> "Account ID: " ^ Printf.sprintf "%S" id
+  | None -> "Local sign-in ID: " ^ Printf.sprintf "%S" account.selection_id
+
+let select_saved_account screen provider accounts =
+  match accounts with
+  | [] -> None
+  | [account] -> Some (Some account.Pave.Oauth_store.selection_id)
+  | accounts ->
+      let options = List.map (fun account ->
+        account_label account, Some account.Pave.Oauth_store.selection_id)
+        accounts in
+      Option.bind
+        (Tui.choose screen
+          ~intro:["Credentials remain private and are selected by provider account ID or Pave-local sign-in ID.";
+            "Escape returns to provider access choices."]
+          ~title:("SETUP · " ^ provider ^ " saved account")
+          ~choices:(List.map fst options))
+        (fun label -> List.assoc_opt label options)
+
 let run screen ~registry =
   let skip = Skipped in
   let rec welcome () =
@@ -30,24 +51,37 @@ let run screen ~registry =
     | None | Some "Skip setup" -> skip
     | Some "Back · welcome" -> welcome ()
     | Some choice -> authentication (List.assoc choice choices)
-  and authentication (descriptor : Pave.Provider_catalog.descriptor) =
+  and authentication ?initial_status
+      (descriptor : Pave.Provider_catalog.descriptor) =
     if Pave.Provider_catalog.custom_provider registry descriptor.id <> None then
       model descriptor None
     else
     let key = descriptor.api_key_env in
     let oauth = descriptor.oauth <> None in
-    let saved_oauth = oauth &&
-      (try Pave.Oauth_store.get ~path:(Pave.Oauth_store.default_path ())
-        ~provider:descriptor.id <> None
-       with Pave.Oauth_store.Storage_error _ -> false) in
+    let saved_accounts, saved_accounts_status = if oauth then
+      (try
+         Pave.Oauth_store.accounts
+           ~path:(Pave.Oauth_store.default_path ()) ~provider:descriptor.id,
+         None
+       with Pave.Oauth_store.Storage_error message ->
+         [], Some ("Saved sign-ins unavailable: " ^ message))
+      else [], None in
+    let chooser_status = match initial_status with
+      | Some _ -> initial_status
+      | None -> saved_accounts_status in
+    let saved_oauth = saved_accounts <> [] in
     let key_is_set = match key with
       | Some env -> (match Sys.getenv_opt env with
           | Some value -> value <> ""
           | None -> false)
       | None -> false in
     let key_label = Option.map (fun env ->
-      env ^ (if key_is_set then " (set)" else " (not set)")) key in
-    let saved_label = "Continue with saved sign-in" in
+      env ^ (if key_is_set then " (set; takes precedence over saved grants)"
+        else " (not set)")) key in
+    let saved_label =
+      if key_is_set then "Continue with environment key (saved grants inactive)"
+      else if List.length saved_accounts > 1 then "Choose saved sign-in account"
+      else "Continue with saved sign-in" in
     let login_label = "Sign in (browser or device code)" in
     let choices =
       (if key_is_set then Option.to_list key_label else []) @
@@ -59,9 +93,10 @@ let run screen ~registry =
       route.wire = Pave.Provider.Local_chat) descriptor.routes in
     if (key = None || (local && not key_is_set)) && not oauth then
       model descriptor None
-    else match Tui.choose screen
-      ~intro:["02 / 03  ·  ACCESS";
+    else match Tui.choose screen ?initial_status:chooser_status
+        ~intro:[
         "A key or saved sign-in lets this provider receive prompts.";
+        "An environment API key takes precedence over every saved grant.";
         "Use /setup for account access and saved defaults."]
       ~title:"SETUP · Connect provider"
       ~choices with
@@ -72,24 +107,55 @@ let run screen ~registry =
         (match Sys.getenv_opt env with
          | Some value when value <> "" -> model descriptor None
          | _ -> key_instruction descriptor env)
-    | Some choice when choice = saved_label -> model descriptor None
+    | Some choice when choice = saved_label ->
+        if key_is_set then model descriptor None
+        else
+          (match select_saved_account screen descriptor.id saved_accounts with
+           | None -> authentication descriptor
+           | Some account_id -> model ~account_id descriptor None)
     | Some choice when choice = login_label ->
         (try
            Tui.suspend screen (fun () ->
              ignore (Cli_auth.handle_action ~login:descriptor.id
-               ~login_manual:"" ~logout:""));
-           model descriptor None
+               ~login_manual:"" ~logout:"" ()));
+           if key_is_set then (
+             Tui.alert screen
+               "The configured environment API key takes precedence over this saved grant.";
+             model descriptor None)
+           else
+             let accounts = Pave.Oauth_store.accounts
+               ~path:(Pave.Oauth_store.default_path ()) ~provider:descriptor.id in
+             (match select_saved_account screen descriptor.id accounts with
+              | None -> authentication
+                  ~initial_status:"Sign-in completed, but no saved account is available."
+                  descriptor
+              | Some account_id -> model ~account_id descriptor None)
          with
          | Sys.Break ->
-             Tui.alert screen "Sign-in cancelled; choose an account action.";
-             authentication descriptor
+             authentication
+               ~initial_status:"Sign-in cancelled; choose an account action."
+               descriptor
+         | Pave.Oauth_device.OAuth_error
+             ("OAuth device authorization timed out"
+             | "OAuth device authorization expired"
+             | "Kilo device authorization expired") ->
+             authentication ~initial_status:
+               "Device authorization expired or timed out; no credential was selected. Retry or choose another method."
+               descriptor
+         | Pave.Oauth_device.OAuth_error
+             ("OAuth device authorization denied"
+             | "Kilo device authorization denied") ->
+             authentication ~initial_status:
+               "Device authorization was denied; no credential was selected."
+               descriptor
          | Pave.Oauth_flow.OAuth_error _
          | Pave.Oauth_device.OAuth_error _
          | Pave.Oauth_store.Storage_error _
          | Unix.Unix_error _
          | Sys_error _ | Failure _ | Invalid_argument _ ->
-             Tui.alert screen "Sign-in failed; retry or choose another method.";
-             authentication descriptor)
+             authentication ~initial_status:
+               "Sign-in failed; no credential was selected. Retry or choose another method."
+               descriptor)
     | Some _ -> authentication descriptor
   and key_instruction descriptor env =
     match Tui.choose screen
@@ -102,7 +168,8 @@ let run screen ~registry =
     | Some "Choose model without key" -> model descriptor (Some env)
     | Some "Back · authentication" -> authentication descriptor
     | _ -> skip
-  and model (descriptor : Pave.Provider_catalog.descriptor) missing_key =
+  and model ?(account_id=None)
+      (descriptor : Pave.Provider_catalog.descriptor) missing_key =
     let local_without_key = List.exists
       (fun (route : Pave.Provider_catalog.route) ->
         route.wire = Pave.Provider.Local_chat) descriptor.routes &&
@@ -127,7 +194,8 @@ let run screen ~registry =
       | Some { auth = Pave.Custom_provider.Api_key_env env; _ }
         when Option.value ~default:"" (Sys.getenv_opt env) = "" -> Some env
       | Some _ | None -> missing_key in
-    match Model_picker.choose ~registry screen ~descriptor ~route_name ~plain:choices
+    match Model_picker.choose ~registry screen ~descriptor ~route_name
+      ?account_id ~plain:choices
       ~intro:["03 / 03  ·  MODEL";
         "Use arrows and Enter to choose an available model.";
         "Type an ID only if the model you need is not listed."]
@@ -140,18 +208,16 @@ let run screen ~registry =
         (try
            let selected, identity, route = Pave.Interaction.resolve_model
              ~registry ~current_route:route_name
-             ?current_account_id:(Model_picker.credential ~registry
-               ~route_name descriptor
-               |> Model_picker.credential_account_id ~registry
-                    ~provider:descriptor.id ~route:route_name)
+             ?current_account_id:account_id
              ~current_provider:descriptor.id ~input:choice () in
            if selected.id <> descriptor.id then
              invalid_arg "choose a model from the selected provider";
-           finish selected identity route missing_key
+           finish selected identity route missing_key account_id
          with (Invalid_argument _ | Failure _) as exn ->
            Tui.alert screen ("Model unavailable: " ^ Printexc.to_string exn);
-           model descriptor missing_key)
-  and finish descriptor identity (route : Pave.Provider_catalog.route) missing_key =
+           model ~account_id descriptor missing_key)
+  and finish descriptor identity (route : Pave.Provider_catalog.route)
+      missing_key account_id =
     let label = Pave.Model_identity.selector identity in
     let title = match missing_key with
       | Some env -> "SETUP · Set " ^ env ^ " before prompts"
@@ -164,6 +230,6 @@ let run screen ~registry =
       ~choices:["Save " ^ label; "Back · models"; "Skip setup"] with
     | Some selected when selected = "Save " ^ label ->
         Selected (descriptor, identity, route, missing_key)
-    | Some "Back · models" -> model descriptor missing_key
+    | Some "Back · models" -> model ~account_id descriptor missing_key
     | _ -> skip in
   welcome ()

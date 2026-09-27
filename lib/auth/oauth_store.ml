@@ -5,6 +5,19 @@ type credential = {
   account_id : string option;
   metadata : (string * string) list;
 }
+type grant_type = Authorization_code | Device_approval | Provider_session
+
+type binding = {
+  provider : string;
+  grant_type : grant_type;
+  routes : (string * string) list;
+}
+
+type account = {
+  credential : credential;
+  binding : binding option;
+  selection_id : string;
+}
 
 exception Storage_error of string
 
@@ -120,6 +133,58 @@ let string = function
 let optional_string = function
   | `Null -> None
   | json -> Some (string json)
+let check_account_id = function
+  | None -> ()
+  | Some id when id <> "" && String.length id <= 256 &&
+      not (String.exists (fun c -> Char.code c < 32 || Char.code c = 127) id) -> ()
+  | Some _ -> fail "Invalid OAuth account identifier"
+let local_selection_prefix = "pave-local:"
+
+let is_local_selection_id value =
+  let prefix_length = String.length local_selection_prefix in
+  String.length value = prefix_length + 32 &&
+  String.sub value 0 prefix_length = local_selection_prefix &&
+  String.for_all (function '0'..'9' | 'a'..'f' -> true | _ -> false)
+    (String.sub value prefix_length 32)
+
+let rec fresh_local_selection_id existing =
+  let bytes = Bytes.create 16 in
+  let fd = Unix.openfile "/dev/urandom" [Unix.O_RDONLY; Unix.O_CLOEXEC] 0 in
+  Fun.protect ~finally:(fun () -> Unix.close fd) (fun () ->
+    let rec read offset =
+      if offset < Bytes.length bytes then
+        let count =
+          try Unix.read fd bytes offset (Bytes.length bytes - offset)
+          with Unix.Unix_error (Unix.EINTR, _, _) -> -1 in
+        if count = 0 then fail "System random source returned no data";
+        if count < 0 then read offset else read (offset + count) in
+    read 0);
+  let hex = "0123456789abcdef" in
+  let encoded = Bytes.create 32 in
+  Bytes.iteri (fun index byte ->
+    let value = Char.code byte in
+    Bytes.set encoded (index * 2) hex.[value lsr 4];
+    Bytes.set encoded ((index * 2) + 1) hex.[value land 15]) bytes;
+  let selection_id = local_selection_prefix ^ Bytes.to_string encoded in
+  if List.exists (fun entry -> entry.selection_id = selection_id) existing then
+    fresh_local_selection_id existing
+  else selection_id
+
+let validate_selection_id selection_id =
+  check_account_id (Some selection_id);
+  if not (is_local_selection_id selection_id) then
+    fail "Invalid local OAuth account selector"
+
+let account_selection_id credential selection_id existing =
+  match credential.account_id, selection_id with
+  | Some account_id, None -> account_id
+  | Some account_id, Some selection_id when account_id = selection_id ->
+      account_id
+  | Some _, Some _ -> fail "OAuth account selector does not match provider identity"
+  | None, Some selection_id ->
+      validate_selection_id selection_id;
+      selection_id
+  | None, None -> fresh_local_selection_id existing
 
 let object_fields = function
   | `Assoc fields ->
@@ -144,13 +209,14 @@ let credential_of_json json =
     | _ -> fail "Invalid OAuth credential data" in
   let metadata = object_fields (field fields "metadata")
     |> List.map (fun (key, value) -> (key, string value)) in
+  let account_id = optional_string (field fields "account_id") in
+  check_account_id account_id;
   { access = string (field fields "access");
     refresh = optional_string (field fields "refresh");
-    expires_at;
-    account_id = optional_string (field fields "account_id");
-    metadata }
+    expires_at; account_id; metadata }
 
 let json_of_credential credential =
+  check_account_id credential.account_id;
   let optional = function None -> `Null | Some text -> `String text in
   let expires_at = match credential.expires_at with
     | None -> `Null
@@ -169,18 +235,77 @@ let json_of_credential credential =
           "account_id", optional credential.account_id;
           "metadata", `Assoc (List.map (fun (key, value) -> key, `String value) metadata)]
 
-let read_store path =
-  match regular_file path with
-  | None -> []
-  | Some _ ->
-      let fd = open_checked path [Unix.O_RDONLY] in
-      let text = Fun.protect ~finally:(fun () -> Unix.close fd)
-        (fun () -> read_all fd) in
-      let json = Yojson.Basic.from_string text in
-      let root = object_fields json in
-      if field root "version" <> `Int 1 then fail "Unsupported OAuth credential version";
-      object_fields (field root "providers")
-      |> List.map (fun (name, value) -> name, credential_of_json value)
+let check_provider provider =
+  if provider = "" || String.length provider > 256 then
+    fail "Invalid OAuth provider name"
+
+let grant_type_name = function
+  | Authorization_code -> "authorization_code"
+  | Device_approval -> "device_approval"
+  | Provider_session -> "provider_session"
+
+let grant_type_of_name = function
+  | "authorization_code" -> Authorization_code
+  | "device_approval" -> Device_approval
+  | "provider_session" -> Provider_session
+  | _ -> fail "Invalid OAuth credential binding"
+
+let json_of_binding = function
+  | None -> `Null
+  | Some binding ->
+      check_provider binding.provider;
+      let routes = List.sort compare binding.routes in
+      let seen = Hashtbl.create (List.length routes) in
+      List.iter (fun (name, endpoint) ->
+        if name = "" || endpoint = "" || Hashtbl.mem seen name then
+          fail "Invalid OAuth credential binding";
+        Hashtbl.add seen name ()) routes;
+      `Assoc ["provider", `String binding.provider;
+        "grant_type", `String (grant_type_name binding.grant_type);
+        "routes", `Assoc (List.map (fun (name, endpoint) ->
+          name, `String endpoint) routes)]
+
+let binding_of_json = function
+  | `Null -> None
+  | json ->
+      let fields = object_fields json in
+      let routes = object_fields (field fields "routes")
+        |> List.map (fun (name, endpoint) -> name, string endpoint) in
+      let binding = { provider = string (field fields "provider");
+        grant_type = grant_type_of_name (string (field fields "grant_type"));
+        routes } in
+      ignore (json_of_binding (Some binding));
+      Some binding
+
+let selection_id_compare left right =
+  String.compare left.selection_id right.selection_id
+
+let validate_account_selection entry =
+  check_account_id (Some entry.selection_id);
+  match entry.credential.account_id with
+  | Some account_id when account_id = entry.selection_id -> ()
+  | Some _ -> fail "OAuth account selector does not match provider identity"
+  | None -> validate_selection_id entry.selection_id
+
+let validate_store store =
+  let seen_providers = Hashtbl.create (List.length store) in
+  List.iter (fun (provider, entries) ->
+    check_provider provider;
+    if Hashtbl.mem seen_providers provider then fail "Duplicate OAuth account identity";
+    Hashtbl.add seen_providers provider ();
+    let seen_accounts = Hashtbl.create (List.length entries) in
+    List.iter (fun entry ->
+      validate_account_selection entry;
+      if Hashtbl.mem seen_accounts entry.selection_id then
+        fail "Duplicate OAuth account identity";
+      Hashtbl.add seen_accounts entry.selection_id ();
+      ignore (json_of_credential entry.credential);
+
+      (match entry.binding with
+       | Some binding when binding.provider <> provider ->
+           fail "Invalid OAuth credential binding"
+       | _ -> ());
+      ignore (json_of_binding entry.binding)) entries) store
 
 let write_all fd data =
   let rec loop offset =
@@ -191,11 +316,18 @@ let write_all fd data =
       if count < 0 then loop offset else loop (offset + count)) in
   loop 0
 
-let write_store path providers =
-  let json = `Assoc ["version", `Int 1;
-    "providers", `Assoc (List.sort (fun (a, _) (b, _) -> String.compare a b)
-      (List.map (fun (name, credential) -> name, json_of_credential credential) providers))] in
-  let text = Yojson.Basic.to_string json ^ "\n" in
+let write_store path store =
+  validate_store store;
+  let store = List.sort (fun (a, _) (b, _) -> String.compare a b) store
+    |> List.map (fun (provider, entries) ->
+      provider, List.sort selection_id_compare entries) in
+  let accounts = List.concat_map (fun (provider, entries) ->
+    List.map (fun entry -> `Assoc ["provider", `String provider;
+      "selection_id", `String entry.selection_id;
+      "credential", json_of_credential entry.credential;
+      "binding", json_of_binding entry.binding]) entries) store in
+  let text = Yojson.Basic.to_string (`Assoc ["version", `Int 3;
+    "accounts", `List accounts]) ^ "\n" in
   if String.length text > max_bytes then fail "OAuth credential data exceeds size limit";
   let dir = Filename.dirname path in
   let temp, fd =
@@ -217,6 +349,50 @@ let write_store path providers =
       let dir_fd = Unix.openfile dir [Unix.O_RDONLY; Unix.O_CLOEXEC] 0 in
       Fun.protect ~finally:(fun () -> Unix.close dir_fd)
         (fun () -> Unix.fsync dir_fd))
+
+let read_store path =
+  match regular_file path with
+  | None -> []
+  | Some _ ->
+      let fd = open_checked path [Unix.O_RDONLY] in
+      let text = Fun.protect ~finally:(fun () -> Unix.close fd)
+        (fun () -> read_all fd) in
+      let root = object_fields (Yojson.Basic.from_string text) in
+      match field root "version" with
+      | `Int 1 ->
+          let store = object_fields (field root "providers")
+            |> List.map (fun (name, value) ->
+              let credential = credential_of_json value in
+              let selection_id = account_selection_id credential None [] in
+              name, [{ credential; binding = None; selection_id }]) in
+          validate_store store;
+          write_store path store;
+          store
+      | `Int version when version = 2 || version = 3 ->
+          let rows = match field root "accounts" with
+            | `List rows -> rows
+            | _ -> fail "Invalid OAuth credential data" in
+          let rows = List.map (fun row ->
+            let fields = object_fields row in
+            let provider = string (field fields "provider") in
+            let credential = credential_of_json (field fields "credential") in
+            let binding = binding_of_json (field fields "binding") in
+            let selection_id = if version = 2 then credential.account_id
+              else Some (string (field fields "selection_id")) in
+            provider, credential, binding, selection_id) rows in
+          let grouped = List.fold_left (fun store
+              (provider, credential, binding, requested_selection_id) ->
+            let entries = Option.value ~default:[]
+              (List.assoc_opt provider store) in
+            let selection_id = account_selection_id credential
+              requested_selection_id entries in
+            let entry = { credential; binding; selection_id } in
+            (provider, entries @ [entry]) :: List.remove_assoc provider store)
+            [] rows in
+          validate_store grouped;
+          if version = 2 then write_store path grouped;
+          grouped
+      | _ -> fail "Unsupported OAuth credential version"
 
 (* The lock file is never renamed; replacing the data inode cannot invalidate
    a lock. Nested calls on this domain reuse it, keeping refresh read/write
@@ -258,23 +434,66 @@ let with_lock ~path f = guard (fun () ->
             active := path :: !active;
             Fun.protect ~finally:(fun () -> active := List.tl !active) f)))))
 
-let check_provider provider =
-  if provider = "" || String.length provider > 256 then
-    fail "Invalid OAuth provider name"
 
-let get ~path ~provider =
-  check_provider provider;
-  with_lock ~path (fun () -> List.assoc_opt provider (read_store path))
-
-let put ~path ~provider credential =
+let accounts ~path ~provider =
   check_provider provider;
   with_lock ~path (fun () ->
-    let providers = read_store path in
-    write_store path ((provider, credential) :: List.remove_assoc provider providers))
+    Option.value ~default:[] (List.assoc_opt provider (read_store path))
+    |> List.sort selection_id_compare)
 
-let remove ~path ~provider =
+let account ~path ~provider ~account_id =
+  let entries = accounts ~path ~provider in
+  match account_id, entries with
+  | None, [entry] when entry.credential.account_id = None -> Some entry
+  | None, _ -> None
+  | Some selection_id, _ ->
+      List.find_opt (fun entry -> entry.selection_id = selection_id) entries
+
+let put_account_with_selection ~path ~provider ~binding ?selection_id credential =
+  if binding.provider <> provider then fail "Invalid OAuth credential binding";
   check_provider provider;
   with_lock ~path (fun () ->
-    let providers = read_store path in
-    if List.mem_assoc provider providers then
-      write_store path (List.remove_assoc provider providers))
+    let store = read_store path in
+    let entries = Option.value ~default:[] (List.assoc_opt provider store) in
+    let selection_id =
+      account_selection_id credential selection_id entries in
+    let other_entries = List.filter (fun entry ->
+      entry.selection_id <> selection_id) entries in
+    let replacement = { credential; binding = Some binding; selection_id } in
+    let entries = replacement :: other_entries in
+    let store = (provider, entries) :: List.remove_assoc provider store in
+    write_store path store;
+    selection_id)
+
+let put_account ~path ~provider ~binding ?selection_id credential =
+  ignore (put_account_with_selection ~path ~provider ~binding
+    ?selection_id credential)
+
+let remove_account ~path ~provider ~account_id =
+  check_provider provider;
+  with_lock ~path (fun () ->
+    let store = read_store path in
+    match List.assoc_opt provider store with
+    | None -> ()
+    | Some entries ->
+        let selection_id = match account_id with
+          | Some selection_id -> Some selection_id
+          | None ->
+              (match List.filter (fun entry ->
+                 entry.credential.account_id = None) entries with
+               | [entry] -> Some entry.selection_id
+               | [] -> None
+               | _ -> fail "OAuth account selector is required for multiple accounts") in
+        let remaining = match selection_id with
+          | None -> entries
+          | Some selection_id -> List.filter (fun entry ->
+              entry.selection_id <> selection_id) entries in
+        if List.length remaining <> List.length entries then
+          write_store path ((provider, remaining) :: List.remove_assoc provider store))
+
+let remove_provider ~path ~provider =
+  check_provider provider;
+  with_lock ~path (fun () ->
+    let store = read_store path in
+    if List.mem_assoc provider store then
+      write_store path (List.remove_assoc provider store))

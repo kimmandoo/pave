@@ -43,7 +43,7 @@ let check_listing () =
      | _ -> failwith "credentialless listing allowed");
     (match Discovery.discover ~http:unused ~provider
       ~credential:(Discovery.OAuth { service = "github-copilot";
-        access = key; account_id = None }) () with
+        access = key; account_id = None; selection_id = None }) () with
      | Error Discovery.Invalid_credential -> ()
      | _ -> failwith "foreign OAuth token accepted");
     (match Discovery.discover ~http:unused ~provider

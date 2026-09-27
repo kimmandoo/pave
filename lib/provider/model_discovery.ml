@@ -4,8 +4,13 @@
    entering the model selector), never on each change to the search query. *)
 type credential =
   | Api_key of string
-  | OAuth of { service : string; access : string; account_id : string option }
-
+  | Account_api_key of { key : string; account_id : string option }
+  | OAuth of {
+      service : string;
+      access : string;
+      account_id : string option;
+      selection_id : string option;
+    }
 type error =
   | Unsupported_provider of string
   | Unsupported_route of string * string
@@ -63,16 +68,23 @@ type http = url:string -> headers:(string * string) list ->
   (int * string, error) result
 
 let message = function
-  | Unsupported_provider id -> "Model discovery is unavailable for " ^ id
+  | Unsupported_provider id ->
+      "Model listing unsupported for " ^ id
   | Unsupported_route (provider, route) ->
-      Printf.sprintf "Choose a registered API route for %s (not %s)" provider route
-  | Missing_credential -> "Sign in or configure an API key to list models"
-  | Invalid_credential -> "Invalid model discovery credential"
+      Printf.sprintf "Model listing unsupported on %s route %s; choose a registered route"
+        provider route
+  | Missing_credential ->
+      "No credential configured for model listing; sign in or configure an API key"
+  | Invalid_credential ->
+      "Credential is invalid for this model listing; check its type and provider account"
   | Credential_error detail ->
       "Model discovery credential error: " ^ detail
-  | Transport_error detail -> "Model discovery connection failed: " ^ detail
-  | Http_error 401 | Http_error 403 ->
-      "Model discovery access denied; check the account or API key"
+  | Transport_error detail ->
+      "Model listing connection failed or is offline: " ^ detail
+  | Http_error 401 ->
+      "Provider rejected the credential (possibly expired or revoked); sign in again or check the API key"
+  | Http_error 403 ->
+      "Provider denied access; check the required scope, account entitlement, or policy"
   | Http_error 429 -> "Model discovery rate limited; try again later"
   | Http_error code -> Printf.sprintf "Model discovery returned HTTP %d" code
   | Invalid_response detail -> "Invalid model listing response: " ^ detail
@@ -338,7 +350,8 @@ let rec add_unique seen result = function
 let discover_codex_models ?http ?cancel credential =
   let auth = match credential with
     | None -> Error Missing_credential
-    | Some (OAuth { service = "openai-codex"; access; account_id = Some account })
+    | Some (OAuth { service = "openai-codex"; access;
+        account_id = Some account; _ })
       when valid_secret access && valid_secret account -> Ok (access, account)
     | Some _ -> Error Invalid_credential in
   match auth with
@@ -771,7 +784,7 @@ end
 
 let discover_charm ?http ?cancel credential =
   match credential with
-  | Some (OAuth _) -> Error Invalid_credential
+  | Some (OAuth _ | Account_api_key _) -> Error Invalid_credential
   | None | Some (Api_key _) ->
       let source = match http with
         | Some callback -> callback
@@ -853,6 +866,8 @@ let discover_generic_models ?http ?cancel ~provider ?credential () =
       let secret = match provider, credential with
         | "ollama", None -> Ok None
         | "ollama", Some _ -> Error Invalid_credential
+        | "openrouter", Some (Account_api_key { key; _ }) ->
+            if valid_secret key then Ok (Some key) else Error Invalid_credential
         | ("openai" | "google" | "openrouter" | "anthropic" |
            "deepseek" | "minimax" | "groq" | "mistral" | "together" |
            "cerebras" | "venice" | "deepinfra" | "fireworks" |
@@ -1206,12 +1221,23 @@ let check_credential policy credential =
   | (Optional_api_key | Required_api_key | Stored_api_key _),
       Some (Api_key key) when valid_secret key ->
       Ok None
-  | Required_api_key, None | Required_api_key, Some (Api_key _)
-  | Stored_api_key _, None -> required ()
-  | OAuth_account service, Some (OAuth { service = actual; access; account_id })
-      when service = actual && valid_secret access &&
+  | Stored_api_key _, Some (Account_api_key { key; account_id })
+      when valid_secret key &&
         Option.fold ~none:true ~some:valid_secret account_id ->
       Ok account_id
+  | Required_api_key, None | Required_api_key, Some (Api_key _)
+  | Stored_api_key _, None -> required ()
+  | OAuth_account service,
+      Some (OAuth { service = actual; access; account_id; selection_id })
+      when service = actual && valid_secret access &&
+        Option.fold ~none:true ~some:valid_secret account_id &&
+        Option.fold ~none:true ~some:valid_secret selection_id ->
+      (match account_id, selection_id with
+       | Some remote, Some selected when remote <> selected ->
+           Error Invalid_credential
+       | Some remote, None -> Ok (Some remote)
+       | _, Some selected -> Ok (Some selected)
+       | None, None -> Ok None)
   | OAuth_account _, None -> Error Missing_credential
   | _ -> Error Invalid_credential
 
