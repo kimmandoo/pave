@@ -208,7 +208,7 @@ The P0–P6 cards above remain the detailed acceptance criteria; this roadmap is
 
 ### R7 — Session-owned jobs and agent workflows
 
-- [ ] Complete P3 durable artifacts/async jobs, child-agent delegation, reviewed plan/goal/advisor workflows and workspace rewind. Prove cancellation, ownership, exactly-once delivery and non-reversible side-effect reporting.
+- [x] Completed R7's private session artifacts/jobs, owner-filtered idempotent delivery, interruption recovery, approved bounded read-only child jobs, review workflows, branch-local goals/rules and guarded workspace rewind with shell effects explicitly non-reversible. The forced suite, install build, opam lint and native local TUI smoke passed. Feature commit `7ba454f`; tag `v0.1.49` points to `f64bd8f1fbce080619b2fc9be109de6aa9c5a89e`. Hosted CI run `36310428334` passed all four jobs; release run `36310670104` attempt 2 passed four native test/build/package/smoke jobs and publication. The public release's four downloaded archives matched `SHA256SUMS`, contained exactly `pave`, `LICENSE` and `THIRD_PARTY_NOTICES`, and extracted macOS arm64/Intel binaries passed their CLI smokes. https://github.com/kimmandoo/pave/releases/tag/v0.1.49.
 
 ### R8 — Core workspace tools
 
