@@ -3,6 +3,7 @@
 ## 2026-09-27
 
 - fix(ci): serialized the hosted forced test suite after intermittent subprocess fixture failures.
+- test(provider): removed the redundant fork from the Vertex ADC fixture after the hosted helper failure.
 
 - feat(session): added private session-owned artifacts and durable async jobs with bounded storage, owner filtering, restart recovery, cancellation billing notices and idempotent terminal delivery. Added approved read-only child jobs, review-only plan/advisor/watchdog/loop/autoresearch workflows, branch-local goals and interruption guidance, and explicitly approved content-and-mode-guarded file rewind; shell effects remained non-reversible.
 - feat(provider): added direct Vertex ADC and Claude Messages, public-cloud Azure Responses/Chat with deployment discovery, and regional Bedrock Converse/ConverseStream with the AWS credential chain and inference-profile listing. Completed Devin and GitLab Duo direct API routes with account-bound tool continuation; retained Cursor and GitLab Duo Agent as explicit agent-runtime blockers. Added Apple Foundation Models as a conditional macOS arm64 on-device text route with one selectable OS-managed `default` ID and no fabricated provider roster, bounded streaming and clear readiness errors; Pave tools remain unavailable.

@@ -222,24 +222,26 @@ let () =
   output_string output
     {|{"type":"authorized_user","client_id":"client","client_secret":"secret","refresh_token":"refresh","service_account_impersonation_url":"https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/sa:generateAccessToken"}|};
   close_out output;
-  let pid = Unix.fork () in
-  if pid = 0 then (
-    Unix.putenv "GOOGLE_CLOUD_ACCESS_TOKEN" "";
-    Unix.putenv "CLOUDSDK_AUTH_ACCESS_TOKEN" "";
-    Unix.putenv "GOOGLE_APPLICATION_CREDENTIALS" credentials;
-    Unix.putenv "PATH" (directory ^ ":" ^ (match Sys.getenv_opt "PATH" with
-      | Some path -> path | None -> "/usr/bin:/bin"));
-    assert (Vertex_auth.access_token () = "fixture-adc-token");
-    Unix.putenv "GOOGLE_CLOUD_ACCESS_TOKEN" "explicit-token";
-    assert (Vertex_auth.access_token () = "explicit-token");
-    Unix.putenv "GOOGLE_CLOUD_ACCESS_TOKEN" "invalid\nheader";
-    (match Vertex_auth.access_token () with
-     | exception Vertex_auth.Authentication_error _ -> ()
-     | _ -> failwith "invalid bearer token accepted");
-    exit 0);
-  let _, status = Unix.waitpid [] pid in
-  Sys.remove cli;
-  Sys.remove credentials;
-  Unix.rmdir directory;
-  assert (status = Unix.WEXITED 0);
+  let environment = List.map (fun name -> name, Sys.getenv_opt name)
+    ["GOOGLE_CLOUD_ACCESS_TOKEN"; "CLOUDSDK_AUTH_ACCESS_TOKEN";
+     "GOOGLE_APPLICATION_CREDENTIALS"; "PATH"] in
+  let original_path = Option.value ~default:"/usr/bin:/bin"
+    (Sys.getenv_opt "PATH") in
+  Fun.protect ~finally:(fun () ->
+    List.iter (fun (name, value) ->
+      Unix.putenv name (Option.value value ~default:"")) environment;
+    Sys.remove cli;
+    Sys.remove credentials;
+    Unix.rmdir directory) (fun () ->
+      Unix.putenv "GOOGLE_CLOUD_ACCESS_TOKEN" "";
+      Unix.putenv "CLOUDSDK_AUTH_ACCESS_TOKEN" "";
+      Unix.putenv "GOOGLE_APPLICATION_CREDENTIALS" credentials;
+      Unix.putenv "PATH" (directory ^ ":" ^ original_path);
+      assert (Vertex_auth.access_token () = "fixture-adc-token");
+      Unix.putenv "GOOGLE_CLOUD_ACCESS_TOKEN" "explicit-token";
+      assert (Vertex_auth.access_token () = "explicit-token");
+      Unix.putenv "GOOGLE_CLOUD_ACCESS_TOKEN" "invalid\nheader";
+      (match Vertex_auth.access_token () with
+       | exception Vertex_auth.Authentication_error _ -> ()
+       | _ -> failwith "invalid bearer token accepted"));
   print_endline "Vertex AI endpoint and signed parallel function roundtrip: ok"
