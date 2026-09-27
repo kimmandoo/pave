@@ -35,7 +35,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ocaml/setup-ocaml@v3
         with:
-          ocaml-compiler: '5.5.1'
+          ocaml-compiler: 'ocaml-variants.5.5.1+options,ocaml-option-no-compression'
       - name: Install dependencies
         run: opam install . --deps-only --with-test -y
       - name: Run tests
@@ -88,6 +88,14 @@ jobs:
           fi
           tar -xzf "$ASSET" -C "$unpacked"
           test -x "$unpacked/pave"
+          if [ "$OS" = "darwin" ]; then
+            dependencies="$(otool -L "$unpacked/pave")"
+          else
+            dependencies="$(ldd "$unpacked/pave")"
+          fi
+          case "$dependencies" in
+            *libzstd*) echo "packaged binary unexpectedly depends on external libzstd" >&2; exit 1 ;;
+          esac
           "$unpacked/pave" --help >/dev/null
           providers="$("$unpacked/pave" --providers)"
           case "$providers" in
