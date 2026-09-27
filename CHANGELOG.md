@@ -2,6 +2,7 @@
 
 ## 2026-09-28
 
+- fix(ci): reaped AWS credential-process children only once while draining remaining output, matching the confirmed Google ADC subprocess lifecycle fix, and covered a descendant-held pipe with a regression after a hosted Bedrock fixture failed.
 - fix(ci): lengthened the Python listener fixture's lifetime and bounded readiness window after a hosted macOS assertion failed, and reported child status/output on any future failure without weakening production readiness checks.
 - fix(ci): stopped waiting twice for the same Google ADC subprocess after a hosted macOS `waitpid: No child processes` failure identified the cause of intermittent signer errors; continued draining output after child exit and covered delayed pipe EOF with a regression.
 - fix(tui): limited setup, settings and `/model` choices to freshly listed IDs matching a registered API route and credential/account; removed suggested, unclassified, manually typed, public-without-key and unverified OS-default candidates from the chooser while keeping setup navigation separate. Checked routes with bounded workers, showed loading/empty/failure status, and refreshed the model chooser and transcript hierarchy without idle repainting.

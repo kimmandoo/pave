@@ -580,6 +580,9 @@ let converse_stream_fixture () =
       assert (status = Unix.WEXITED 0)))
 
 let () =
+  (* Reap the direct helper once, then drain a pipe held by its descendant. *)
+  assert (Aws.run_child ~timeout:3. ~output_limit:128 ~stdin:""
+    "/bin/sh" ["-c"; "printf ready; sleep 0.2 &"] = "ready");
   let keys = Aws.credentials ~access_key_id:"TESTACCESS" ~secret_access_key:"secretTEST"
     ~session_token:(Some "SESSIONTEST") in
   let signed = Aws.sign ~credentials:keys ~region:"eu-west-1" ~amz_date:"20250925T123456Z"

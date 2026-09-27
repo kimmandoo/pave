@@ -178,13 +178,14 @@ let run_child ?cancel ~timeout ~output_limit ~stdin program arguments =
           if Buffer.length output + count > output_limit then
             invalid_arg "AWS credential helper output exceeds size limit";
           Buffer.add_subbytes output chunk 0 count));
-      let waited =
-        try Unix.waitpid [Unix.WNOHANG] pid
-        with Unix.Unix_error (Unix.EINTR, _, _) -> 0, Unix.WEXITED 0 in
-      (match waited with
-       | 0, _ -> ()
-       | _, result -> status := Some result; reaped := true;
-           if !input_open then (close input_write; input_open := false));
+      if !status = None then (
+        let waited =
+          try Unix.waitpid [Unix.WNOHANG] pid
+          with Unix.Unix_error (Unix.EINTR, _, _) -> 0, Unix.WEXITED 0 in
+        match waited with
+        | 0, _ -> ()
+        | _, result -> status := Some result; reaped := true;
+            if !input_open then (close input_write; input_open := false));
     done;
     match !status with
     | Some (Unix.WEXITED 0) -> Buffer.contents output
