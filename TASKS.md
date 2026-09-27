@@ -204,7 +204,7 @@ The P0–P6 cards above remain the detailed acceptance criteria; this roadmap is
 
 ### R6 — Multimodal contracts and remaining context support
 
-- [ ] R6 implementation is complete locally: P1 multimodal contracts and separate non-chat consumers, plus source-backed context limits and branch/media-safe budgeting, passed focused/full tests, install build, lint and actual CLI/TUI fake-provider smokes. Keep open until v0.1.47's hosted Linux/macOS arm64/x86-64 jobs, public assets/checksums and extracted-binary smoke are verified; unknown tokenizers/media costs remain unknown.
+- [x] Completed R6's provider-backed multimodal/message scope, separate non-chat consumers and known-source context limits with append-only, branch-safe media handling; unavailable routes, tokenizers and media token costs remain explicitly unknown. Forced tests, install build, opam lint and actual CLI/TUI fake-provider smokes passed. Tag `v0.1.47` (`d94e99fcb9956fe547d9e6a78d0b247fa4ef78fc`) passed all four hosted Linux/macOS arm64/x86-64 test/build/package/extracted-binary smoke jobs and publication. The public non-draft release contains all four archives plus `SHA256SUMS`; all checksums and the extracted macOS arm64 `--help`, `--providers` and `task --help` passed. Workflow: https://github.com/kimmandoo/pave/actions/runs/36287637606; release: https://github.com/kimmandoo/pave/releases/tag/v0.1.47.
 
 ### R7 — Session-owned jobs and agent workflows
 
