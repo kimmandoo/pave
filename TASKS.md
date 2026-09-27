@@ -200,7 +200,7 @@ The P0–P6 cards above remain the detailed acceptance criteria; this roadmap is
 
 ### R5 — Authorized cloud and proprietary routes
 
-- [ ] Complete the documented Google Vertex, Azure, Bedrock, Cursor, Devin, GitLab Duo, Copilot and local-provider route work, together with P2 provider-specific grant decisions. Ship each permitted provider only after its own pinned account/auth/wire/tool-result fixture; keep prohibited or unregistrable OAuth flows explicitly blocked.
+- [x] Completed the documented Google Vertex ADC/Claude, Azure public-cloud/CLI deployment, Bedrock Converse, Devin, GitLab Duo Direct Access and conditional Apple Foundation Models routes with pinned auth/wire/tool-result fixtures; kept Cursor and GitLab Duo Agent unregistered as agent-runtime-only flows and documented Copilot limitations. Published v0.1.48 (`bf9177d28671305c82f4b5e937fe99b07e555280`). Workflow attempt 2 passed all four native Linux/macOS arm64/x86-64 test/build/package/extracted-smoke jobs; the public release is non-draft, all four downloaded archive checksums passed, and all four extracted archives had the exact expected members. https://github.com/kimmandoo/pave/releases/tag/v0.1.48 (https://github.com/kimmandoo/pave/actions/runs/36302372130).
 
 ### R6 — Multimodal contracts and remaining context support
 

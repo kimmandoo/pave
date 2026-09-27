@@ -1,6 +1,13 @@
 # Troubleshooting
 
 
+### [2026-09-27] Linux x86_64 release test reported a missing OpenSSL signer
+
+- **Context / Symptom:** The first v0.1.48 Linux x86_64 Actions attempt failed in `test_vertex_auth` with `Pave.Vertex_auth.Authentication_error("OpenSSL is required for Google service-account credentials")`; Linux aarch64 and both macOS jobs passed. Rerunning only the failed matrix job passed tests, native build, archive packaging and smoke without source changes; the complete release workflow then succeeded.
+- **Root Cause:** Not isolated. `Vertex_auth.service_account_assertion` maps any `Unix.Unix_error` from its signer subprocess to the generic missing-OpenSSL message, so the failing run did not expose the underlying errno. The identical rerun passed.
+- **Solution:** Reran the failed job using `gh run rerun 36302372130 --failed`; attempt 2 passed and published the release. No code workaround was added.
+- **Prevention / Reference:** If it recurs, preserve the subprocess `Unix_error` rather than attributing every signer failure to an absent OpenSSL executable; inspect the specific job log before retrying.
+
 ### [2026-09-27] Appending the Apple helper hit a read-only release binary
 
 - **Context / Symptom:** Release packaging failed at `cat "$helper" >> bundle/pave` with `Permission denied` after copying Dune's native executable.
