@@ -107,6 +107,10 @@ let run_command program arguments =
 
 
 let () =
+  (* The direct child may exit while a descendant still holds stdout open.
+     Once reaped, drain that pipe without calling waitpid on the same PID. *)
+  assert (Vertex.execute ~timeout:3. "/bin/sh"
+    ["-c"; "printf ready; sleep 0.2 &"] = "ready");
   let arguments, body = Vertex.service_account_request ~assertion:"a.b" in
   assert (arguments = Vertex.authorized_user_curl_arguments);
   assert (body =

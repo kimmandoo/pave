@@ -113,13 +113,14 @@ let execute ?(stdin = "") ?cancel ~timeout program arguments =
           if Buffer.length output + count > 65536 then
             fail "Google ADC token response exceeds 64 KiB";
           Buffer.add_subbytes output chunk 0 count));
-      (match try Unix.waitpid [Unix.WNOHANG] pid
-         with Unix.Unix_error (Unix.EINTR, _, _) -> 0, Unix.WEXITED 0 with
-       | 0, _ -> ()
-       | _, child_status ->
-           status := Some child_status;
-           reaped := true;
-           close_input ())
+      if !status = None then
+        (match try Unix.waitpid [Unix.WNOHANG] pid
+           with Unix.Unix_error (Unix.EINTR, _, _) -> 0, Unix.WEXITED 0 with
+         | 0, _ -> ()
+         | _, child_status ->
+             status := Some child_status;
+             reaped := true;
+             close_input ())
     done;
     match !status with
     | Some (Unix.WEXITED 0) ->
