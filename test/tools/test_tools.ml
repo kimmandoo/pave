@@ -32,6 +32,56 @@ let () =
     List.iter (fun path -> try Unix.rmdir path with Unix.Unix_error _ -> ()) !directories;
     Sys.remove outside; Unix.rmdir root) (fun () ->
     create "App.swift" "one\none\n";
+    create "snapshot.txt" "alpha beta\n";
+    let snapshot = Pave.Workspace_edit.read_snapshot ~root ~path:"snapshot.txt" in
+    let snapshot_page = tool_json root "workspace_snapshot"
+      ["path", `String "snapshot.txt"; "max_bytes", `Int 5] in
+    assert (contains snapshot_page snapshot.sha256 && contains snapshot_page "alpha");
+    let edit_args hunks = `Assoc [
+      "path", `String "snapshot.txt";
+      "expected_sha256", `String snapshot.sha256;
+      "hunks", `List hunks
+    ] in
+    let replacement_hunks = [
+      `Assoc ["old_text", `String "alpha"; "new_text", `String "A"];
+      `Assoc ["old_text", `String "beta"; "new_text", `String "B"]
+    ] in
+    let applied = Pave.Tools.execute ~root ~name:"apply_edits"
+      ~args:(edit_args replacement_hunks) () in
+    assert (not (contains (String.lowercase_ascii applied) "error"));
+    assert (Pave.Workspace_path.read_bounded
+      (Filename.concat root "snapshot.txt") 65_536 = "A B\n");
+    let stale = Pave.Tools.execute ~root ~name:"apply_edits"
+      ~args:(edit_args replacement_hunks) () in
+    assert (contains stale "changed since");
+    assert (Pave.Workspace_path.read_bounded
+      (Filename.concat root "snapshot.txt") 65_536 = "A B\n");
+
+    create "ast_sample.ml" "let old = old + 1\n(* old *)\nlet text = \"old\"\n";
+    let ast_snapshot = Pave.Workspace_edit.read_snapshot ~root ~path:"ast_sample.ml" in
+    let ast_args dry_run language = `Assoc [
+      "path", `String "ast_sample.ml";
+      "language", `String language;
+      "operation", `String "rename_identifier";
+      "expected_sha256", `String ast_snapshot.sha256;
+      "old_name", `String "old";
+      "new_name", `String "fresh";
+      "dry_run", `Bool dry_run
+    ] in
+    let ast_preview = Pave.Tools.execute ~root ~name:"ast_edit"
+      ~args:(ast_args true "ocaml") () in
+    assert (contains ast_preview "AST preview");
+    assert (Pave.Workspace_path.read_bounded
+      (Filename.concat root "ast_sample.ml") 65_536 = ast_snapshot.contents);
+    assert (rejected (fun () -> Pave.Tools.execute ~root ~name:"ast_edit"
+      ~args:(ast_args false "swift") ()));
+    let ast_result = Pave.Tools.execute ~root ~name:"ast_edit"
+      ~args:(ast_args false "ocaml") () in
+    assert (not (contains (String.lowercase_ascii ast_result) "error"));
+    assert (Pave.Workspace_path.read_bounded
+      (Filename.concat root "ast_sample.ml") 65_536 =
+      "let fresh = fresh + 1\n(* old *)\nlet text = \"old\"\n");
+
     assert (contains (tool root "read_file" ["path", "App.swift"]) "one");
     assert (rejected (fun () -> tool root "edit_file"
       ["path", "App.swift"; "old_string", "one"; "new_string", "two"]));
@@ -117,8 +167,29 @@ let () =
     assert (rejected (fun () -> tool root "grep" ["pattern", "["]));
     assert (rejected (fun () -> tool_json root "glob"
       ["pattern", `String "*.swift"; "hidden", `String "yes"]));
-    assert (contains (tool root "search" ["pattern", "needle-123"]) "src/Match.swift");
-    assert (not (contains (tool root "search" ["pattern", "needle-[0-9]"]) "src/Match.swift"));
+    let literal = tool root "search" ["pattern", "needle-123"] in
+    assert (contains literal "src/Match.swift");
+    assert (not (contains literal ".secret.swift"));
+    assert (not (contains literal "src/hidden.log"));
+    assert (not (contains (tool_json root "search"
+      ["pattern", `String "needle-111"]) ".secret.swift"));
+    assert (contains (tool_json root "search"
+      ["pattern", `String "needle-111"; "hidden", `Bool true]) ".secret.swift");
+    assert (not (contains (tool root "search" ["pattern", "NEEDLE-123"])
+      "src/Match.swift"));
+    assert (contains (tool_json root "search"
+      ["pattern", `String "NEEDLE-123"; "case_sensitive", `Bool false])
+      "src/Match.swift");
+    let filtered = tool_json root "search"
+      ["pattern", `String "needle"; "path", `String "src";
+       "glob", `String "**/Keep.swift"] in
+    assert (contains filtered "src/nested/Keep.swift");
+    assert (not (contains filtered "src/Match.swift"));
+    assert (contains (tool_json root "grep"
+      ["pattern", `String "NEEDLE-[0-9]+"; "case_sensitive", `Bool false])
+      "src/Match.swift");
+    assert (rejected (fun () -> tool_json root "search"
+      ["pattern", `String "needle"; "glob", `String "../*.swift"]));
     assert (contains (tool_json root "grep"
       ["pattern", `String "needle"; "limit", `Int 1]) "[truncated;");
     assert (contains (tool_json root "glob"

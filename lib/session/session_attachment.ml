@@ -56,8 +56,8 @@ let load ~root path =
   if not (Filename.is_relative path) || path = "" then
     invalid_arg "media attachment path must be workspace-relative";
   let root = Unix.realpath root in
-  let absolute = Tools.regular_path root path in
-  let bytes = Tools.read_bounded absolute max_file_bytes in
+  let absolute = Workspace_path.regular_path root path in
+  let bytes = Workspace_path.read_bounded absolute max_file_bytes in
   if bytes = "" then invalid_arg "media attachment is empty";
   let attachment = {
     Protocol.name = Filename.basename path;

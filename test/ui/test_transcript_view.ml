@@ -84,6 +84,15 @@ let () =
     |> String.concat "" in
   expect "combining sequence and emoji survive reflow"
     (unicode_body = "e\204\129 👩‍💻");
+
+  let prose = "Please inspect this workspace and summarize the completed command." in
+  let prose_lines = wrap ~columns:26 ~measure prose in
+  expect "narrow prose wraps at word boundaries when possible"
+    (Array.to_list prose_lines = [
+      "Please inspect this "; "workspace and summarize "; "the completed command."]);
+  expect "word wrapping preserves text and viewport row count"
+    (String.concat "" (Array.to_list prose_lines) = prose &&
+     wrapped_count ~columns:26 ~measure prose = Array.length prose_lines);
   let markdown = create () in
   delta markdown "# Heading\n```ocaml\nlet x = 1\n```\n- bullet\n> quote\n";
   finish markdown;

@@ -50,6 +50,13 @@ let bounded_detail text =
   if String.length text <= 4096 then text else String.sub text 0 4096
 
 let fail message = raise (Error message)
+let non_reversible_tool_name = function
+  | "run_command" | "start_process" | "start_shell"
+  | "process_stdin" | "process_close_stdin" | "process_kill"
+  | "worktree_create" | "worktree_commit" | "worktree_remove"
+  | "write_file" | "edit_file" | "apply_edits" | "ast_edit" -> true
+  | _ -> false
+
 let with_lock t action =
   Mutex.lock t.mutex;
   Fun.protect ~finally:(fun () -> Mutex.unlock t.mutex) action
@@ -132,8 +139,8 @@ let parse_effect ~owner ~id text =
     | _ -> fail "invalid persisted workspace rewind timestamp" in
   let valid_option validate = function None -> true | Some value -> validate value in
   let path_valid = match tool_name, path with
-    | "run_command", None -> true
-    | ("write_file" | "edit_file"), Some path ->
+    | name, None when non_reversible_tool_name name -> true
+    | ("write_file" | "edit_file" | "apply_edits" | "ast_edit"), Some path ->
         String.length path > 0 && String.length path <= 4096 &&
         not (String.contains path '\000')
     | _ -> false in
@@ -202,8 +209,8 @@ let snapshot_file ~root ~path =
   let unavailable ?exists ?mode reason =
     Unavailable { exists; mode; reason } in
   try
-    let root = Tools.root_path root in
-    let absolute = Tools.writable_path root path in
+    let root = Workspace_path.root_path root in
+    let absolute = Workspace_path.writable_path root path in
     let before = try Unix.lstat absolute with
       | Unix.Unix_error (Unix.ENOENT, _, _) -> raise Not_found in
     if before.Unix.st_kind <> Unix.S_REG then
@@ -306,11 +313,12 @@ let write_effect t rewind_entry backup =
 
 let record_file_change t ~tool_name ~path ~before ~after =
   with_lock t (fun () ->
-    if not (List.mem tool_name ["write_file"; "edit_file"]) then
+    if not (List.mem tool_name
+        ["write_file"; "edit_file"; "apply_edits"; "ast_edit"]) then
       fail "unsupported workspace rewind tool";
     if String.length path = 0 || String.length path > 4096 ||
        String.contains path '\000' then fail "invalid workspace rewind path";
-    ignore (Tools.writable_path t.root path);
+    ignore (Workspace_path.writable_path t.root path);
     if snapshot_equal before after then None
     else (
       let status, detail, backup = match before, after with
@@ -333,7 +341,8 @@ let record_file_change t ~tool_name ~path ~before ~after =
 
 let record_non_reversible t ~tool_name ~detail =
   with_lock t (fun () ->
-    if tool_name <> "run_command" then fail "unsupported non-reversible workspace effect";
+    if not (non_reversible_tool_name tool_name) then
+      fail "unsupported non-reversible workspace effect";
     if String.length detail > 4096 then fail "workspace effect detail is too long";
     let rewind_entry = create_effect t ~tool_name ~path:None ~before:Missing
       ~after:(Unavailable { exists = None; mode = None; reason = detail })
@@ -453,7 +462,7 @@ let update_status t rewind_entry status detail =
 let restore_file t rewind_entry =
   let path = match rewind_entry.path with
     | Some path -> path | None -> fail "effect has no workspace path" in
-  let absolute = Tools.writable_path t.root path in
+  let absolute = Workspace_path.writable_path t.root path in
   if not (matches_after t rewind_entry) then
     fail "workspace file changed after the rewind preview; no change was made";
   match rewind_entry.before_exists with
@@ -469,7 +478,7 @@ let restore_file t rewind_entry =
         | _ -> fail "private rewind snapshot failed integrity verification" in
       if not (matches_after t rewind_entry) then
         fail "workspace file changed during rewind; no change was made";
-      Tools.atomic_write absolute data
+      Workspace_path.atomic_write absolute data
   | None -> fail "effect has no reversible prior file state"
 
 let rewind t ~id =

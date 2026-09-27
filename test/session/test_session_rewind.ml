@@ -48,7 +48,7 @@ let () =
     let manager = Pave.Session_rewind.create ~root ~session in
 
     let existing_path = child root "existing.txt" in
-    Pave.Tools.atomic_write existing_path "before\n";
+    Pave.Workspace_path.atomic_write existing_path "before\n";
     Unix.chmod existing_path 0o640;
     let before = Pave.Session_rewind.snapshot_file ~root ~path:"existing.txt" in
     write_tool ~root ~path:"existing.txt" "after\n";
@@ -72,7 +72,7 @@ let () =
     assert (not (Sys.file_exists created_path));
 
     let conflict_path = child root "conflict.txt" in
-    Pave.Tools.atomic_write conflict_path "initial\n";
+    Pave.Workspace_path.atomic_write conflict_path "initial\n";
     let before = Pave.Session_rewind.snapshot_file ~root ~path:"conflict.txt" in
     write_tool ~root ~path:"conflict.txt" "tool result\n";
     let after = Pave.Session_rewind.snapshot_file ~root ~path:"conflict.txt" in
@@ -83,7 +83,7 @@ let () =
     assert (read_file conflict_path = "tool result\n" &&
       (Unix.stat conflict_path).Unix.st_perm land 0o7777 = 0o640);
     Unix.chmod conflict_path 0o600;
-    Pave.Tools.atomic_write conflict_path "user update\n";
+    Pave.Workspace_path.atomic_write conflict_path "user update\n";
     expect_error (fun () -> Pave.Session_rewind.rewind manager ~id:conflict.id);
     assert (read_file conflict_path = "user update\n");
 
@@ -92,6 +92,19 @@ let () =
       ~detail:"Shell command may have caused workspace or external effects." in
     assert (irreversible.status = Pave.Session_rewind.Non_reversible);
     expect_error (fun () -> Pave.Session_rewind.rewind manager ~id:irreversible.id);
+    let non_reversible_tools = [
+      "start_process"; "start_shell"; "process_stdin"; "process_close_stdin";
+      "process_kill"; "worktree_create"; "worktree_commit"; "worktree_remove";
+      "write_file"; "edit_file"; "apply_edits"; "ast_edit"
+    ] in
+    List.iter (fun tool_name ->
+      let entry = Pave.Session_rewind.record_non_reversible manager
+        ~tool_name ~detail:(tool_name ^ " effect is not reversible") in
+      assert (entry.status = Pave.Session_rewind.Non_reversible);
+      expect_error (fun () -> Pave.Session_rewind.rewind manager ~id:entry.id))
+      non_reversible_tools;
+    expect_error (fun () -> Pave.Session_rewind.record_non_reversible manager
+      ~tool_name:"process_wait" ~detail:"observation only");
 
     let unchanged_before = Pave.Session_rewind.snapshot_file ~root ~path:"conflict.txt" in
     write_tool ~root ~path:"conflict.txt" "user update\n";

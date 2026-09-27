@@ -574,8 +574,18 @@ let () =
       | None -> print_endline message; flush stdout in
     let job_managers :
         (string * (Pave.Session.t * Pave.Session_jobs.t)) list ref = ref [] in
+    let process_managers :
+        (string * (Pave.Session.t * Pave.Workspace_process.manager)) list ref = ref [] in
     let rewind_managers :
         (string * (Pave.Session.t * Pave.Session_rewind.t)) list ref = ref [] in
+    let process_manager session =
+      let owner = Pave.Session.session_id session in
+      match List.assoc_opt owner !process_managers with
+      | Some (_, manager) -> manager
+      | None ->
+          let manager = Pave.Workspace_process.create_manager () in
+          process_managers := (owner, (session, manager)) :: !process_managers;
+          manager in
     let rewind_manager session =
       let owner = Pave.Session.session_id session in
       match List.assoc_opt owner !rewind_managers with
@@ -609,7 +619,11 @@ let () =
       List.iter (fun (_, (_, manager)) ->
         try Pave.Session_jobs.close manager with exn ->
           prerr_endline ("Error stopping session jobs: " ^
-            Printexc.to_string exn)) !job_managers);
+            Printexc.to_string exn)) !job_managers;
+      List.iter (fun (_, (_, manager)) ->
+        try Pave.Workspace_process.close_manager manager with exn ->
+          prerr_endline ("Error stopping managed processes: " ^
+            Printexc.to_string exn)) !process_managers);
     let on_delta delta = match !ui with
       | Some screen -> Tui.delta screen delta
       | None -> print_string delta; flush stdout in
@@ -1109,7 +1123,10 @@ let () =
       let tool_available name =
         let enabled = custom_tools_enabled &&
           not (List.mem name !disabled_tools) in
-        if name = "task" then enabled && Option.is_some !journal else enabled in
+        if name = "task" then enabled && Option.is_some !journal
+        else if List.mem name Pave.Tools.session_tool_names then
+          enabled && Option.is_some !journal
+        else enabled in
       let delegate_task ~cancel ~label ~task =
         if cancel () then raise Pave.Provider.Cancelled;
         match !journal with
@@ -1157,8 +1174,23 @@ let () =
                   ignore (Pave.Session_rewind.record_non_reversible manager
                     ~tool_name ~detail);
                   worker_event
-                    "Shell command effects may be non-reversible; /rewind will report them but will not undo them.") in
+                    (tool_name ^ " effects are non-reversible; /rewind will report but not undo them.")) in
+      let workspace_context : Pave.Tools.session_context option =
+        Option.map (fun session ->
+          let owner = Pave.Session.session_id session in
+          let read_artifact id =
+            try
+              Pave.Session.list_artifacts session
+              |> List.find_opt (fun (item : Pave.Session_artifact.item) -> item.id = id)
+              |> Option.map (fun (item : Pave.Session_artifact.item) ->
+                Pave.Session.read_artifact session ~owner:item.owner ~id)
+            with _ -> None in
+          { Pave.Tools.owner = owner;
+            process_manager = process_manager session;
+            read_artifact = read_artifact })
+          !journal in
       Pave.Agent.create ~provider ~authentication ?resolve_credential
+        ?workspace_context
         ?secret_mask
         ~thinking:(fun () -> !thinking_level)
         ~root ~system:agent_system
@@ -2691,7 +2723,7 @@ let () =
                 submitted_attachments :=
                   Some (attachments, consume_pending, false);
                 if consume_pending then pending_attachments := [];
-                Tui.set_activity screen (Some "Working");
+                Tui.set_activity screen (Some "Thinking");
                 if not consume_pending then
                   Tui.set_attachments screen (List.map
                     (fun (item : Pave.Protocol.attachment) -> item.name)
@@ -2707,7 +2739,7 @@ let () =
             | Pave.Turn_runner.Activity_phase { phase; _ } ->
                 (match phase with
                  | Pave.Agent.Model ->
-                     Tui.set_activity screen (Some "Working")
+                     Tui.set_activity screen (Some "Thinking")
                  | Pave.Agent.Tool name ->
                      Tui.set_activity screen (Some ("Tool: " ^ name)))
             | Pave.Turn_runner.Tool_event { event; _ } ->

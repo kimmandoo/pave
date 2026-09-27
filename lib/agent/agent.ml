@@ -21,6 +21,7 @@ type t = {
   resolve_credential : (unit -> Provider.credentials) option;
   thinking : unit -> string option;
   root : string;
+  workspace_context : Tools.session_context option;
   allow_shell : bool;
   tool_available : string -> bool;
   delegate_task : (cancel:(unit -> bool) -> label:string -> task:string -> string) option;
@@ -44,7 +45,8 @@ type t = {
     system:string -> messages:Protocol.message list ->
     tools:Yojson.Basic.t list -> Protocol.message list option) option;
 }
-let create ~provider ~root ~system ?(authentication = Provider.Api_key)
+let create ~provider ~root ~system ?workspace_context
+    ?(authentication = Provider.Api_key)
     ?resolve_credential ?secret_mask ?before_request ?(history = [])
     ?(thinking = fun () -> None) ?(allow_shell = false)
     ?(tool_available = fun _ -> true) ?delegate_task ?(stream = false)
@@ -56,7 +58,8 @@ let create ~provider ~root ~system ?(authentication = Provider.Api_key)
   let redact = match secret_mask with
     | Some mask -> Secret_mask.redact mask
     | None -> Fun.id in
-  { provider; authentication; resolve_credential; thinking; root; system; secret_mask;
+  { provider; authentication; resolve_credential; thinking; root; workspace_context;
+    system; secret_mask;
     allow_shell; tool_available; delegate_task; stream; approval_mode;
     tool_approval; command_patterns; approve_command; approve_tool; before_request;
     history_rev = List.rev history; scoped_pending = [];
@@ -126,26 +129,50 @@ let emit_tool_event t event =
 
 let max_scoped_context_bytes = Project_context.max_total_bytes
 
-let file_scope t call =
+let file_mutation (call : Protocol.tool_call) =
+  match call.name with
+  | "write_file" | "edit_file" | "apply_edits" -> true
+  | "ast_edit" -> Protocol.member "dry_run" call.arguments = `Bool false
+  | _ -> false
+
+let file_scope ?cancel t call =
   try
     match Protocol.member "path" call.Protocol.arguments with
-    | `String path when path <> "" && Filename.is_relative path &&
-        not (String.contains path '\000') &&
-        not (List.mem ".." (String.split_on_char '/' path)) ->
-        let path = Project_context.normalize path in
-        if path = "" || path = "." then
-          Error "Error: a workspace-relative file path is required; file operation not executed"
-        else
-          let scope = Project_context.resolve_scoped ~root:t.root ~path () in
-          if scope.safe then Ok (path, scope.text)
-          else
-            let codes = List.map (fun (d : Project_context.diagnostic) -> d.code)
-              scope.diagnostics |> List.sort_uniq String.compare in
-            Error ("Error: scoped instructions could not be resolved (" ^
-              String.concat ", " codes ^ "); file operation not executed")
+    | `String path when String.starts_with ~prefix:"https://" path ||
+        String.starts_with ~prefix:"http://" path ||
+        String.starts_with ~prefix:"artifact://" path -> Ok (path, "", None)
+    | `String path ->
+        (match Tools.resolve_file_location ?cancel
+            ?context:t.workspace_context ~root:t.root path with
+         | None when file_mutation call ->
+             Error "Error: file mutation requires a workspace or owned worktree path"
+         | None -> Ok (path, "", None)
+         | Some location ->
+             let normalized = Project_context.normalize location.path in
+             if (normalized = "" || normalized = ".") && file_mutation call then
+               Error "Error: a workspace-relative file path is required; file operation not executed"
+             else
+               let scope = Project_context.resolve_scoped
+                 ~root:location.root ~path:normalized () in
+               if scope.safe then
+                 let key = match location.worktree_id with
+                   | Some id -> "worktree://" ^ id ^ "/" ^ normalized
+                   | None -> normalized in
+                 Ok (key, scope.text, Some { location with path = normalized })
+               else
+                 let codes = List.map (fun (d : Project_context.diagnostic) -> d.code)
+                   scope.diagnostics |> List.sort_uniq String.compare in
+                 Error ("Error: scoped instructions could not be resolved (" ^
+                   String.concat ", " codes ^ "); file operation not executed"))
     | _ -> Error "Error: a workspace-relative file path is required; file operation not executed"
-  with Unix.Unix_error _ | Sys_error _ | Invalid_argument _ | Failure _ ->
-    Error "Error: scoped instructions unavailable; file operation not executed"
+  with
+  | Tools.Tool_error message -> Error ("Error: " ^ message)
+  | Workspace_git.Error message ->
+      (match cancel with
+       | Some cancelled when cancelled () -> raise Tools.Cancelled
+       | _ -> Error ("Error: " ^ message))
+  | Unix.Unix_error _ | Sys_error _ | Invalid_argument _ | Failure _ ->
+      Error "Error: scoped instructions unavailable; file operation not executed"
 
 let queue_scope t path text =
   if text = "" then true else
@@ -258,7 +285,8 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
                 |> Secret_mask.mask_tool_arguments mask
                 |> Secret_mask.restore_tool_arguments mask }
             | None -> call in
-          let prepared = ref None and tracked_path = ref None in
+          let prepared = ref None in
+          let tracked_path : Tools.file_location option ref = ref None in
           let on_progress = match call.name, t.on_tool_event with
             | "run_command", Some _ ->
                 Some (fun received_bytes ->
@@ -303,7 +331,7 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
                           Char.code c < 32 || Char.code c = 127) label) &&
                         String.trim task <> "" && String.length task <= 8192 &&
                         not (String.contains task (Char.chr 0)) ->
-                        prepared := Some (fun ?cancel ?on_progress:_ () ->
+                        prepared := Some (fun ?cancel ?on_progress:_ ?approved:_ () ->
                           Provider.check_cancel cancel;
                           let job_id = delegate
                             ~cancel:(Option.value ~default:(fun () -> false) cancel)
@@ -314,24 +342,26 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
                     | _ -> complete
                         "Error: task requires a single-line label and a nonempty task of at most 8192 bytes")
               else
-                match Tools.prepare ~root:t.root ~name:call.name
-                  ~args:call.arguments () with
+                match Tools.prepare ?cancel ?context:t.workspace_context
+                  ~root:t.root ~name:call.name ~args:call.arguments () with
                 | Error result -> complete result
                 | Ok execute ->
-                    if call.name = "run_command" && not t.allow_shell then
+                    if Tools.is_shell_tool call.name && not t.allow_shell then
                       complete "Error: shell execution disabled; ask the user to restart with --allow-shell"
                     else if not (t.tool_available call.name) then
                       complete "Error: tool is no longer available"
-                    else if call.name = "write_file" || call.name = "edit_file" ||
-                      call.name = "read_file" then
-                      (match file_scope t call with
+                    else if List.mem call.name
+                      ["write_file"; "edit_file"; "read_file"; "workspace_snapshot";
+                       "apply_edits"; "ast_edit"] then
+                      (match file_scope ?cancel t call with
                        | Error message -> complete message
-                       | Ok (path, scoped) ->
-                           if call.name = "write_file" || call.name = "edit_file" then
-                             tracked_path := Some path;
-                           if scoped <> "" && List.assoc_opt path visible <> Some scoped then
-                             if queue_scope t path scoped then
-                               if call.name = "read_file" then (
+                       | Ok (scope_key, scoped, location) ->
+                           let mutating = file_mutation call in
+                           if mutating then tracked_path := location;
+                           if scoped <> "" &&
+                              List.assoc_opt scope_key visible <> Some scoped then
+                             if queue_scope t scope_key scoped then
+                               if not mutating then (
                                  prepared := Some execute;
                                  Tool_scheduler.Run)
                                else complete
@@ -362,7 +392,7 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
               let resolution = Approval.resolve ~mode:t.approval_mode
                 ~decision
                 ~user_policy:(List.assoc_opt call.name t.tool_approval) in
-              let shell = call.name = "run_command" in
+              let shell = call.name = "run_command" || call.name = "start_shell" in
               match resolution with
               | Approval.Denied reason ->
                   [Protocol.Text ("Error: " ^ reason)]
@@ -372,7 +402,9 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
                     | Approval.Allowed -> decision.reason
                     | Approval.Denied _ -> assert false in
                   let delegate = call.name = "task" in
-                  let prompt_required = delegate || shell ||
+                  let explicit_prompt = Tools.requires_explicit_approval
+                    ~name:call.name ~args:call.arguments in
+                  let prompt_required = delegate || shell || explicit_prompt ||
                     (match resolved with
                      | Approval.Requires_prompt _ -> true
                      | _ -> false) in
@@ -388,8 +420,8 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
                             (match Protocol.member "task" call.arguments with
                              | `String value -> Some value | _ -> None))];
                       reason = Some "Child-agent work requires explicit approval." }
-                  else Tools.approval_request ~root:t.root
-                    ~name:call.name ~args:call.arguments decision in
+                  else Tools.approval_request ?cancel ?context:t.workspace_context
+                    ~root:t.root ~name:call.name ~args:call.arguments decision in
                   let request = { request with
                     Approval.reason = (match reason with
                       | Some _ -> reason
@@ -398,7 +430,7 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
                     if not prompt_required then true
                     else match t.approve_tool with
                       | Some approve -> approve request
-                      | None when shell ->
+                      | None when call.name = "run_command" ->
                           (match Protocol.member "command" call.arguments with
                            | `String command -> t.approve_command command
                            | _ -> false)
@@ -409,37 +441,60 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
                       else "Error: tool approval denied")]
                   else (
                     Provider.check_cancel cancel;
-                    if shell then (
-                      Option.iter (fun notify -> notify
-                        (Session_rewind.Non_reversible_effect {
-                          tool_name = call.name;
-                          detail = "Shell command was attempted; workspace and external side effects may have occurred. /rewind does not reverse shell effects."
-                        })) t.on_workspace_effect;
-                      t.on_event "Shell command effects may be non-reversible; /rewind does not undo shell or external effects.");
+                    if Tools.non_reversible_tool call.name then (
+                      let detail = if call.name = "run_command" then
+                        "Shell command was attempted; workspace and external side effects may have occurred. /rewind does not reverse shell effects."
+                      else
+                        call.name ^ " was attempted; process, Git, workspace, or external side effects may have occurred. /rewind does not reverse this action." in
+                      Option.iter (fun notify ->
+                        try notify (Session_rewind.Non_reversible_effect {
+                          tool_name = call.name; detail })
+                        with exn -> t.on_event
+                          ("Action started, but rewind tracking failed; treat it as non-reversible: " ^
+                           Printexc.to_string exn)) t.on_workspace_effect;
+                      t.on_event (if call.name = "run_command" then
+                        "Shell command effects may be non-reversible; /rewind does not undo shell or external effects."
+                      else
+                        "Process or Git effects may be non-reversible; /rewind does not undo them."));
                     let before = match !tracked_path, t.on_workspace_effect with
-                      | Some path, Some _ ->
-                          Some (path, Session_rewind.snapshot_file
-                            ~root:t.root ~path)
+                      | Some location, Some _ when location.worktree_id = None ->
+                          Some (location, Session_rewind.snapshot_file
+                            ~root:location.root ~path:location.path)
                       | _ -> None in
-                    let content = execute ?cancel ?on_progress () in
+                    let content = execute ?cancel ?on_progress ~approved () in
                     let failed = List.exists (function
                       | Protocol.Text text ->
                           String.starts_with ~prefix:"Error:" text
                       | Protocol.Image _ -> false) content in
                     (match !tracked_path, before with
-                     | Some path, Some (_, before) when not failed ->
-                         let after = Session_rewind.snapshot_file
-                           ~root:t.root ~path in
-                         (match t.on_workspace_effect with
-                          | Some notify ->
-                              (try notify (Session_rewind.File_change {
-                                 tool_name = call.name; path; before; after })
-                               with exn -> t.on_event
-                                 ("Workspace file change completed, but rewind tracking could not be confirmed: " ^
-                                  Printexc.to_string exn))
-                          | None -> ())
-                     | Some _, None when not failed ->
-                         t.on_event "Workspace file changed in an unsaved session; no durable rewind record exists."
+                     | Some location, Some (_, before) when not failed ->
+                         (try
+                            let after = Session_rewind.snapshot_file
+                              ~root:location.root ~path:location.path in
+                            match t.on_workspace_effect with
+                            | Some notify ->
+                                notify (Session_rewind.File_change {
+                                  tool_name = call.name; path = location.path; before; after })
+                            | None -> ()
+                          with exn -> t.on_event
+                            ("Workspace file change completed, but rewind tracking could not be confirmed: " ^
+                             Printexc.to_string exn))
+                     | Some location, None when not failed ->
+                         (match location.worktree_id with
+                          | Some id ->
+                              let detail = Printf.sprintf
+                                "File change in session-owned worktree %s at %s is outside workspace snapshots; /rewind does not restore it."
+                                id (Tools.preview_text location.path) in
+                              (match t.on_workspace_effect with
+                               | Some notify ->
+                                   (try notify (Session_rewind.Non_reversible_effect {
+                                      tool_name = call.name; detail })
+                                    with exn -> t.on_event
+                                      ("Worktree file change completed, but rewind tracking failed: " ^
+                                       Printexc.to_string exn))
+                               | None -> t.on_event detail)
+                          | None ->
+                              t.on_event "Workspace file changed in an unsaved session; no durable rewind record exists.")
                      | _ -> ());
                     content)
             with

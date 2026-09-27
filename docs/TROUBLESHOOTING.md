@@ -15,6 +15,27 @@
 - **Solution:** Renamed binders, restored the task completion helper and `Agent.create` arguments, added explicit record annotations and an erasable unit argument. Reran the TUI smoke through the pinned loopback Ollama endpoint. The full forced suite, install build and `opam lint` passed.
 - **Prevention / Reference:** Annotate shared record labels at artifact/job boundaries. Offline provider smokes must use a supported pinned local route or an explicitly configured custom provider, not override a pinned remote API.
 
+### [2026-09-27] TUI progress callbacks hid elapsed tool status
+
+- **Context / Symptom:** A 30×10 `NO_COLOR` PTY showed `Tool: run_command · 0 B` clipped before the elapsed time after a command progress event.
+- **Root Cause:** `Tui.tool_updated` replaced the active tool label with cumulative received-byte counts; the extra text exceeded the compact activity row.
+- **Solution:** Kept progress counts out of the visible activity row so its typed phase and elapsed timer survive tool updates. A delayed loopback Chat PTY verified `Thinking · 1s`, `Tool: run_command · 2s`, resize, successful completion and an idle screen with no output polling.
+- **Prevention / Reference:** Treat byte counts as event metadata, not activity text; verify active progress in both narrow and wide `NO_COLOR` terminals.
+
+### [2026-09-27] Darwin workspace aliases failed canonical cwd checks
+
+- **Context / Symptom:** The process-tool approval fixture rejected workspace cwd `.` with `Workspace_path.Error("path escapes workspace: .")`; the managed-worktree fixture also compared `/var/folders/...` with Git's `/private/var/folders/...` path.
+- **Root Cause:** macOS resolves `/var` through `/private/var`, while process working-directory checks and a Git fixture retained the noncanonical alias.
+- **Solution:** Canonicalized the resolved workspace root before validating process cwd and canonicalized the Git fixture root with `Unix.realpath`. The isolated Agent-approval and worktree tests and the full forced suite passed.
+- **Prevention / Reference:** Compare and validate workspace paths only after canonicalizing the root on Darwin.
+
+### [2026-09-27] Workspace process wrappers needed explicit OCaml argument contracts
+
+- **Context / Symptom:** Initial R8 integrations failed to compile when process wrappers passed a string cwd or optional timeout value to the inferred API; labeled-only optional functions also triggered argument-erasure warnings, and shared record labels needed type annotations.
+- **Root Cause:** `Workspace_process` represents cwd as `string option`, accepts timeouts as scalar integers, and OCaml optional arguments need a trailing unit when only labeled arguments follow; several new records reused field labels.
+- **Solution:** Passed `~cwd:(Some path)` and scalar `~timeout_seconds`, added trailing `()` to affected functions/callsites, and annotated ambiguous records. The full forced suite and install build then passed.
+- **Prevention / Reference:** Treat inferred optional-argument types and erasability as part of the module API; annotate shared record labels and verify integration callsites.
+
 ### [2026-09-27] Linux x86_64 release test reported a missing OpenSSL signer
 
 - **Context / Symptom:** The first v0.1.48 Linux x86_64 Actions attempt failed in `test_vertex_auth` with `Pave.Vertex_auth.Authentication_error("OpenSSL is required for Google service-account credentials")`; Linux aarch64 and both macOS jobs passed. Rerunning only the failed matrix job passed tests, native build, archive packaging and smoke without source changes; the complete release workflow then succeeded.

@@ -74,7 +74,7 @@ let serve_client client step ~allow_shell ~first_reply =
 
 let with_agent ~root ~name ~arguments ~allow_shell ~approval_mode
     ~tool_approval ~command_patterns ?approve_tool ?delegate_task
-    ?on_workspace_effect () =
+    ?on_workspace_effect ?workspace_context () =
   let socket = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
   Unix.bind socket (Unix.ADDR_INET (Unix.inet_addr_loopback, 0));
   Unix.listen socket 2;
@@ -109,7 +109,7 @@ let with_agent ~root ~name ~arguments ~allow_shell ~approval_mode
       api = Pave.Provider.Openai_completions } in
     let events = ref [] in
     let agent = Pave.Agent.create ~provider ~root ~system:"approval integration"
-      ~allow_shell ~approval_mode ~tool_approval ~command_patterns
+      ?workspace_context ~allow_shell ~approval_mode ~tool_approval ~command_patterns
       ?approve_tool ?delegate_task ?on_workspace_effect
       ~on_event:(fun event -> events := event :: !events) () in
     let result = Pave.Agent.run agent "Exercise approval policy" in
@@ -250,6 +250,63 @@ let () =
     expect "shell non-reversible warning reached the user"
       (List.exists (String.starts_with ~prefix:"Shell command effects may be non-reversible")
         !shell_events);
+    let process_manager = Pave.Workspace_process.create_manager () in
+    let process_context = {
+      Pave.Tools.owner = "approval-session";
+      process_manager;
+      read_artifact = (fun _ -> None);
+    } in
+    let process_prompts = ref 0 and process_request = ref None in
+    let process_effects = ref [] in
+    Fun.protect
+      ~finally:(fun () -> Pave.Workspace_process.close_manager process_manager)
+      (fun () ->
+        let _, process_events = with_agent ~root ~name:"start_process"
+          ~arguments:(`Assoc [
+            "id", `String "approved-process";
+            "program", `String "/usr/bin/printf";
+            "arguments", `List [`String "managed-process"]])
+          ~allow_shell:true ~approval_mode:A.Auto_all ~tool_approval:[]
+          ~command_patterns:[] ~workspace_context:process_context
+          ~approve_tool:(fun request ->
+            incr process_prompts;
+            process_request := Some request;
+            true)
+          ~on_workspace_effect:(fun workspace_effect ->
+            process_effects := workspace_effect :: !process_effects) () in
+    let process_request_text = match !process_request with
+      | None -> "(none)"
+      | Some request -> String.concat " | "
+          (request.tool_name :: request.impact :: request.details) in
+    let process_events_text = String.concat " | " process_events in
+    expect (Printf.sprintf
+      "managed process start requires approval even in yolo (prompts=%d; request=%s; events=%s)"
+      !process_prompts process_request_text process_events_text)
+      (!process_prompts = 1 &&
+       (match !process_request with
+        | Some request -> request.tool_name = "start_process" &&
+            String.starts_with ~prefix:"Starts an unsandboxed background executable"
+              request.impact &&
+            List.exists (String.starts_with ~prefix:"Program and arguments:")
+              request.details
+        | None -> false));
+    expect "managed process attempt was recorded before execution"
+      (match !process_effects with
+       | [Pave.Session_rewind.Non_reversible_effect
+            { tool_name = "start_process"; detail }] ->
+           String.starts_with ~prefix:"start_process was attempted" detail
+       | _ -> false);
+    expect "managed process non-reversible warning reached the user"
+      (List.exists (String.starts_with ~prefix:"Process or Git effects may be non-reversible")
+        process_events);
+    expect "approved managed process exited successfully"
+      (Pave.Workspace_process.wait_job process_manager ~id:"approved-process"
+        ~timeout_seconds:5 () =
+       Pave.Workspace_process.Completed (Pave.Workspace_process.Exited 0));
+    expect "approved managed process executed argv"
+      ((Pave.Workspace_process.read_output process_manager
+          ~id:"approved-process" ()).output = "managed-process")
+      );
     let task_calls = ref 0 and task_approval = ref None in
     let _, task_events = with_agent ~root ~name:"task"
       ~arguments:(`Assoc ["label", `String "review";

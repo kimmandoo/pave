@@ -141,4 +141,11 @@ let () =
       Notty.I.width (Notty.I.string Notty.A.empty text))
     "Tier: WRITE\nPath: ok" in
   assert (approval_rows = 3);
+  assert (Tui.activity_status ~state:"Thinking" ~elapsed:0 =
+    "◐ Thinking · 0s");
+  assert (Tui.activity_status ~state:"Tool: read_file" ~elapsed:65 =
+    "◓ Tool: read_file · 1m05s");
+  assert (Tui.transcript_prefix Transcript_view.Heading false = "  ");
+  assert (Tui.transcript_prefix Transcript_view.Code false = "    ");
+  assert (Tui.transcript_prefix Transcript_view.List_item true = "    ");
   print_endline "dynamic chooser filtering and source labels: ok"

@@ -339,33 +339,60 @@ let toggle t ~first:_ ~last =
       t.revision <- t.revision + 1;
       Some id
 
-let wrap ~columns ~measure text =
+let wrap_lines ~columns ~measure ~on_line text =
   let columns = max 1 columns in
-  let segments = ref [] and buffer = Buffer.create (min max_line_bytes columns) in
-  let used = ref 0 in
-  let push () = segments := Buffer.contents buffer :: !segments; Buffer.clear buffer;
-    used := 0 in
+  let buffer = Buffer.create (min max_line_bytes columns) in
+  let used = ref 0 and break_at = ref None in
+  let push () =
+    on_line buffer;
+    Buffer.clear buffer;
+    used := 0;
+    break_at := None in
+  let add_chunk chunk width =
+    if !used > 0 && !used + width > columns then push ();
+    if width > columns then (
+      Buffer.add_char buffer '?';
+      used := !used + 1)
+    else (
+      Buffer.add_string buffer chunk;
+      used := !used + width) in
+  let split_at byte_count prefix_width =
+    let content = Buffer.contents buffer in
+    let suffix_width = !used - prefix_width in
+    let suffix_length = String.length content - byte_count in
+    Buffer.clear buffer;
+    Buffer.add_substring buffer content 0 byte_count;
+    used := prefix_width;
+    on_line buffer;
+    Buffer.clear buffer;
+    Buffer.add_substring buffer content byte_count suffix_length;
+    used := suffix_width;
+    break_at := None in
   ignore (Uuseg_string.fold_utf_8 `Grapheme_cluster
     (fun () chunk ->
       let width = max 0 (measure chunk) in
-      if !used > 0 && !used + width > columns then push ();
-      if width > columns then (
-        Buffer.add_char buffer '?'; used := !used + 1)
-      else (Buffer.add_string buffer chunk; used := !used + width))
+      if !used > 0 && !used + width > columns then
+        (match !break_at with
+         | Some (byte_count, prefix_width)
+           when byte_count < Buffer.length buffer ->
+             split_at byte_count prefix_width
+         | _ -> push ());
+      add_chunk chunk width;
+      if chunk = " " || chunk = "\t" then
+        break_at := Some (Buffer.length buffer, !used))
     () text);
-  push ();
+  push ()
+
+let wrap ~columns ~measure text =
+  let segments = ref [] in
+  wrap_lines ~columns ~measure ~on_line:(fun buffer ->
+    segments := Buffer.contents buffer :: !segments) text;
   Array.of_list (List.rev !segments)
 
-
 let wrapped_count ~columns ~measure text =
-  let columns = max 1 columns in
-  fst (Uuseg_string.fold_utf_8 `Grapheme_cluster
-    (fun (lines, used) cluster ->
-      let width = max 0 (measure cluster) in
-      let rendered_width = if width > columns then 1 else width in
-      if used > 0 && used + width > columns then
-        lines + 1, rendered_width
-      else lines, used + rendered_width) (1, 0) text)
+  let count = ref 0 in
+  wrap_lines ~columns ~measure ~on_line:(fun _ -> incr count) text;
+  !count
 
 let snapshot t ~columns ~measure =
   let previous = match t.cached with

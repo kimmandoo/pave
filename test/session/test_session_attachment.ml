@@ -15,7 +15,7 @@ let write path contents =
 
 let rejected action =
   match action () with
-  | exception Invalid_argument _ | exception Pave.Tools.Tool_error _ -> ()
+  | exception Invalid_argument _ | exception Pave.Workspace_path.Error _ -> ()
   | _ -> failwith "unsafe or invalid media attachment was accepted"
 
 

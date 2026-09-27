@@ -491,3 +491,28 @@
  (name test_session_rewind)
  (modules test_session_rewind)
  (libraries pave unix yojson threads))
+
+(test
+ (name test_workspace_edit)
+ (modules test_workspace_edit)
+ (libraries pave unix yojson))
+
+(test
+ (name test_workspace_git)
+ (modules test_workspace_git)
+ (libraries pave unix yojson threads))
+
+(test
+ (name test_workspace_process)
+ (modules test_workspace_process)
+ (libraries pave unix yojson threads))
+
+(test
+ (name test_workspace_reader)
+ (modules test_workspace_reader)
+ (libraries pave unix yojson))
+
+(test
+ (name test_workspace_tools)
+ (modules test_workspace_tools)
+ (libraries pave unix yojson threads))

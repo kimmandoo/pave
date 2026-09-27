@@ -119,7 +119,7 @@ let transcript_changed t =
 let change_transcript t action =
   let before, cols = if t.scroll = 0 then 0, 0 else (
     let cols, _ = Notty_unix.Term.size t.term in
-    let content_cols = if cols <= 6 then max 1 cols else cols - 5 in
+    let content_cols = if cols <= 4 then max 1 cols else cols - 4 in
     let measure = measure_text in
     let layout = match t.layout_cache with
       | Some (width, revision, layout)
@@ -146,23 +146,31 @@ let style_attr (row : Transcript_view.row) =
   | _, Transcript_view.Tool_state -> warning
   | _, _ -> text_attr
 
+let transcript_prefix style continuation =
+  match style with
+  | Transcript_view.Heading -> "  "
+  | Transcript_view.Divider -> ""
+  | Transcript_view.Tool_state -> "  · "
+  | Transcript_view.Code -> "    "
+  | Transcript_view.Quote -> if continuation then "    " else "  › "
+  | Transcript_view.List_item -> if continuation then "    " else "  • "
+  | _ -> "  "
+
 let styled_visual cols (visual : Transcript_view.visual) =
   let row = visual.row in
-  let prefix = match row.style with
-    | Transcript_view.Heading -> "  ╭─ "
-    | Transcript_view.Divider -> ""
-    | Transcript_view.Tool_state -> "  ├─ "
-    | Transcript_view.Code -> "  │  "
-    | Transcript_view.Quote -> "  │ › "
-    | Transcript_view.List_item -> "  │ • "
-    | _ -> if visual.continuation then "  │  " else "  │ "
-  in
+  let prefix = transcript_prefix row.style visual.continuation in
   let attr = style_attr row in
   let prefix = if cols <= I.width (I.string attr prefix) then "" else prefix in
   I.hsnap ~align:`Left cols (I.string attr (prefix ^ visual.text))
 
 let styled_line width attr text =
   I.hsnap ~align:`Left width (I.string attr text)
+let activity_status ~state ~elapsed =
+  let elapsed = max 0 elapsed in
+  let duration = if elapsed < 60 then Printf.sprintf "%ds" elapsed
+    else Printf.sprintf "%dm%02ds" (elapsed / 60) (elapsed mod 60) in
+  let spinner = [| "◐"; "◓"; "◑"; "◒" |].(elapsed mod 4) in
+  Printf.sprintf "%s %s · %s" spinner state duration
 
 let shorten_width width text =
   if width < 2 then "" else
@@ -330,10 +338,12 @@ let paint t =
   let editor_lines = Pave.Composer.layout ~columns:field_width ~measure t.editor in
   let editor_row, editor_col =
     Pave.Composer.position ~measure t.editor editor_lines in
+  let activity_height = if Option.is_some t.activity then 1 else 0 in
+  let editor_space = max 1 (rows - 4 - activity_height) in
   let editor_height = match t.chooser, Pave.Composer.search_query t.editor with
     | Some _, _ | None, Some _ -> 1
-    | None, None -> min 4 (max 1 (min (rows - 4) (Array.length editor_lines))) in
-  let body_height = max 0 (rows - 4 - editor_height) in
+    | None, None -> min 4 (max 1 (min editor_space (Array.length editor_lines))) in
+  let body_height = max 0 (rows - 4 - editor_height - activity_height) in
   let hints = hint_matches t in
   let hint_count = List.length hints in
   let hint_height = if body_height < 2 || hint_count = 0 then 0
@@ -344,16 +354,17 @@ let paint t =
   if hint_page > 0 && t.hint_selected >= t.hint_offset + hint_page then
     t.hint_offset <- t.hint_selected - hint_page + 1;
   t.hint_offset <- min t.hint_offset (max 0 (hint_count - hint_page));
-  let activity = match t.activity with
-    | None -> ""
+  let activity_line = match t.activity with
+    | None -> None
     | Some state ->
         let elapsed = match t.activity_started with
           | Some since -> max 0 (int_of_float (Unix.gettimeofday () -. since))
           | None -> 0 in
-        "  ·  " ^ single_line state ^
-        (if elapsed = 0 then "" else if elapsed < 60 then
-          Printf.sprintf " · %ds" elapsed
-        else Printf.sprintf " · %dm%02ds" (elapsed / 60) (elapsed mod 60)) in
+        Some (styled_line cols warning
+          ("  " ^ activity_status ~state:(single_line state) ~elapsed)) in
+  let activity_rows = match activity_line with
+    | None -> [||]
+    | Some line -> [| line |] in
   let queued = if t.queue = 0 then "" else
     Printf.sprintf "  ·  %d queued" t.queue in
   let usage = match t.activity, t.usage_badge with
@@ -367,8 +378,7 @@ let paint t =
 
   let header = I.hsnap ~align:`Left cols I.(
     string accent "  ◆  PAVE" <|>
-    string (if t.activity = None then muted else warning)
-      (activity ^ (if cols >= 48 then queued else "")) <|>
+    string muted (if cols >= 48 then queued else "") <|>
     string muted (usage ^ attached)) in
   let model = single_line t.model in
   let model =
@@ -393,7 +403,7 @@ let paint t =
     | Some (width, revision, layout)
       when width = cols && revision = t.transcript.revision -> layout
     | _ ->
-        let content_cols = if cols <= 6 then cols else cols - 5 in
+        let content_cols = if cols <= 4 then cols else cols - 4 in
         let layout = Transcript_view.snapshot t.transcript ~columns:content_cols
           ~measure in
         t.layout_cache <- Some (cols, t.transcript.revision, layout);
@@ -601,7 +611,7 @@ let paint t =
             hsnap ~align:`Left field_width (string text_attr content))),
         editor_row - first_line, min (cols - 1) (prefix_width + editor_col) in
   let screen = if rows < 6 then
-    let candidates = Array.append [| footer |] prompt_rows in
+    let candidates = Array.concat [activity_rows; [| footer |]; prompt_rows] in
     if Array.length candidates >= rows then
       Array.sub candidates (Array.length candidates - rows) rows
     else Array.append
@@ -620,7 +630,7 @@ let paint t =
         else
           let choice = List.nth hints (t.hint_offset + index - 1) in
           hint_row cols (t.hint_offset + index - 1 = t.hint_selected) choice);
-    [| footer |]; prompt_rows ] in
+    activity_rows; [|footer|]; prompt_rows ] in
   let output = Buffer.create 512 in
   let dirty = ref false in
   for row = 0 to rows - 1 do
@@ -655,19 +665,21 @@ let paint_resized t =
       let cols, rows = Notty_unix.Term.size t.term in
       let cols = max 1 cols and rows = max 1 rows in
       let measure = measure_text in
-      let content_cols = if cols <= 6 then cols else cols - 5 in
+      let content_cols = if cols <= 4 then cols else cols - 4 in
       let next = Transcript_view.snapshot t.transcript
         ~columns:content_cols ~measure in
       let prefix_width = I.width (I.string accent prompt) in
       let field_width = if cols <= prefix_width then cols
         else cols - prefix_width in
+      let activity_height = if Option.is_some t.activity then 1 else 0 in
+      let editor_space = max 1 (rows - 4 - activity_height) in
       let editor_height = match t.chooser, Pave.Composer.search_query t.editor with
         | Some _, _ | None, Some _ -> 1
         | None, None ->
             let editor_lines = Pave.Composer.layout ~columns:field_width
               ~measure t.editor in
-            min 4 (max 1 (min (rows - 4) (Array.length editor_lines))) in
-      let height = max 0 (rows - 4 - editor_height) in
+            min 4 (max 1 (min editor_space (Array.length editor_lines))) in
+      let height = max 0 (rows - 4 - editor_height - activity_height) in
       let anchor = ref None in
       Array.iter (fun (entry : Transcript_view.entry) ->
         if entry.source = old_entry.source then anchor := Some entry.start)
@@ -847,15 +859,7 @@ let tool_started t call_id name =
   let activity = Some ("Tool: " ^ single_line name) in
   if t.activity = activity then paint t else set_activity t activity
 
-let format_received_bytes bytes =
-  if bytes < 1024 then Printf.sprintf "%d B" bytes
-  else if bytes < 1024 * 1024 then Printf.sprintf "%d KiB" (bytes / 1024)
-  else Printf.sprintf "%d MiB" (bytes / (1024 * 1024))
-
-let tool_updated t call_id name received_bytes =
-  if Hashtbl.mem t.tool_groups call_id then
-    set_activity t (Some (Printf.sprintf "Tool: %s · %s"
-      (single_line name) (format_received_bytes received_bytes)))
+let tool_updated _t _call_id _name _received_bytes = ()
 
 let finish_tool ?(aborted = false) ?(is_error = false)
     t call_id name result =

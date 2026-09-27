@@ -2,6 +2,7 @@ let configured = function Some value -> value | None -> "(automatic)"
 
 let approval_tools = [
   "read_file", "read";
+  "workspace_snapshot", "read";
   "list_files", "read";
   "glob", "read";
   "search", "read";
@@ -9,6 +10,8 @@ let approval_tools = [
   "mobile_project", "read";
   "write_file", "write";
   "edit_file", "write";
+  "apply_edits", "write";
+  "ast_edit", "write (dry-run is read)";
   "run_command", "exec (per-command prompt remains mandatory)"
 ]
 

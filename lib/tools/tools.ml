@@ -1,6 +1,6 @@
 
-let max_read_bytes = 65_536
-let max_write_bytes = 1_048_576
+let max_read_bytes = Workspace_path.max_read_bytes
+let max_write_bytes = Workspace_path.max_write_bytes
 let max_command_bytes = 65_536
 let max_walk_entries = 10_000
 let max_search_bytes = 16_777_216
@@ -8,6 +8,59 @@ let max_matches = 100
 let max_regex_line = 4096
 
 exception Tool_error of string
+type session_context = {
+  owner : string;
+  process_manager : Workspace_process.manager;
+  read_artifact : string -> string option;
+}
+
+type file_location = {
+  root : string;
+  path : string;
+  worktree_id : string option;
+}
+
+let starts_with text prefix =
+  String.length text >= String.length prefix &&
+  String.sub text 0 (String.length prefix) = prefix
+
+let resolve_file_location ?cancel ?context ~root path =
+  let lower = String.lowercase_ascii path in
+  if starts_with lower "local://" then
+    let path = String.sub path 8 (String.length path - 8) in
+    if path = "" then raise (Tool_error "local URI requires a workspace-relative path");
+    Some { root; path; worktree_id = None }
+  else if starts_with lower "worktree://" then (
+    let uri = String.sub path 11 (String.length path - 11) in
+    let id, relative = match String.index_opt uri '/' with
+      | None -> uri, "."
+      | Some slash ->
+          String.sub uri 0 slash,
+          String.sub uri (slash + 1) (String.length uri - slash - 1) in
+    let context = match context with
+      | Some context -> context
+      | None -> raise (Tool_error "worktree paths require a private session owner") in
+    if id = "" then raise (Tool_error "worktree URI requires a managed worktree ID");
+    let worktree = Workspace_git.find_worktree ?cancel ~base:root
+      ~owner:context.owner ~id () in
+    Some { root = worktree.path; path = relative; worktree_id = Some id })
+  else if Workspace_reader.is_scheme_uri path then None
+  else Some { root; path; worktree_id = None }
+
+let require_session_context = function
+  | Some context -> context
+  | None -> raise (Tool_error "this tool requires a private saved session")
+
+let bounded_text text limit =
+  if String.length text <= limit then text
+  else
+    let rec boundary index =
+      if index > 0 && index < String.length text &&
+         (Char.code text.[index] land 0xc0) = 0x80 then boundary (index - 1)
+      else index in
+    let length = boundary limit in
+    String.sub text 0 length ^
+      Printf.sprintf "\n[%d bytes omitted]" (String.length text - length)
 exception Cancelled
 
 let fail message = raise (Tool_error message)
@@ -15,6 +68,21 @@ let fail message = raise (Tool_error message)
 let field name = function
   | `Assoc fields -> (match List.assoc_opt name fields with Some value -> value | None -> `Null)
   | _ -> fail "arguments must be a JSON object"
+let replace_string_field name value = function
+  | `Assoc fields ->
+      `Assoc (List.map (fun (key, current) ->
+        if key = name then key, `String value else key, current) fields)
+  | _ -> fail "arguments must be a JSON object"
+
+let resolve_path_arguments ?cancel ?context ~root args =
+  match field "path" args with
+  | `String path ->
+      (match resolve_file_location ?cancel ?context ~root path with
+       | Some location when starts_with (String.lowercase_ascii path) "local://" ||
+                            starts_with (String.lowercase_ascii path) "worktree://" ->
+           location.root, replace_string_field "path" location.path args
+       | _ -> root, args)
+  | _ -> root, args
 
 let required_string name args =
   match field name args with
@@ -39,90 +107,6 @@ let optional_bool name default args =
   | `Null -> default
   | `Bool value -> value
   | _ -> fail (name ^ " must be a boolean")
-
-let within root path =
-  path = root ||
-  (let prefix = if root = "/" then root else root ^ "/" in
-   String.length path >= String.length prefix &&
-   String.sub path 0 (String.length prefix) = prefix)
-
-let root_path root =
-  let root = Unix.realpath root in
-  if (Unix.stat root).Unix.st_kind <> Unix.S_DIR then fail "workspace root is not a directory";
-  root
-
-let checked_path root relative =
-  if relative = "" || String.contains relative '\000' || not (Filename.is_relative relative) ||
-     List.exists (( = ) "..") (String.split_on_char '/' relative) then
-    fail "path must be a nonempty workspace-relative path without '..'";
-  let path = Filename.concat root relative in
-  (* Checking the canonical parent also handles a new file, for which realpath
-     on the final component cannot yet succeed. *)
-  let parent = Unix.realpath (Filename.dirname path) in
-  if not (within root parent) then fail ("path escapes workspace: " ^ relative);
-  let path = Filename.concat parent (Filename.basename path) in
-  (try
-     let canonical = Unix.realpath path in
-     if not (within root canonical) then fail ("path escapes workspace: " ^ relative)
-   with Unix.Unix_error (Unix.ENOENT, _, _) -> ());
-  path
-
-let regular_path root relative =
-  let path = checked_path root relative in
-  if (Unix.stat path).Unix.st_kind <> Unix.S_REG then fail ("not a regular file: " ^ relative);
-  path
-
-let writable_path root relative =
-  if relative = "." || Filename.basename relative = "." then fail "a file path is required";
-  let path = checked_path root relative in
-  (try
-     let stat = Unix.lstat path in
-     if stat.Unix.st_kind <> Unix.S_REG then fail ("not a regular file (or is a symlink): " ^ relative)
-   with Unix.Unix_error (Unix.ENOENT, _, _) -> ());
-  path
-
-let with_fd path flags permissions fn =
-  let fd = Unix.openfile path flags permissions in
-  Fun.protect ~finally:(fun () -> Unix.close fd) (fun () -> fn fd)
-
-let read_bounded path limit =
-  let size = (Unix.stat path).Unix.st_size in
-  if size > limit then fail (Printf.sprintf "file exceeds %d-byte limit: %s" limit path);
-  with_fd path [Unix.O_RDONLY] 0 (fun fd ->
-    let buffer = Bytes.create 8192 in
-    let result = Buffer.create (min size limit) in
-    let rec loop () =
-      let count = Unix.read fd buffer 0 (min 8192 (limit + 1 - Buffer.length result)) in
-      if count <> 0 then (
-        Buffer.add_subbytes result buffer 0 count;
-        if Buffer.length result > limit then fail (Printf.sprintf "file exceeds %d-byte limit: %s" limit path);
-        loop ())
-    in
-    loop ();
-    Buffer.contents result)
-
-let write_all fd text =
-  let bytes = Bytes.unsafe_of_string text in
-  let rec loop offset =
-    if offset < Bytes.length bytes then (
-      let written = Unix.write fd bytes offset (Bytes.length bytes - offset) in
-      if written = 0 then fail "could not write file";
-      loop (offset + written))
-  in
-  loop 0
-
-let atomic_write path text =
-  if String.length text > max_write_bytes then
-    fail (Printf.sprintf "content exceeds %d-byte write limit" max_write_bytes);
-  let mode = try (Unix.stat path).Unix.st_perm with Unix.Unix_error (Unix.ENOENT, _, _) -> 0o600 in
-  let temp = Filename.temp_file ~temp_dir:(Filename.dirname path) ".pave-" ".tmp" in
-  Fun.protect ~finally:(fun () -> try Unix.unlink temp with Unix.Unix_error (Unix.ENOENT, _, _) -> ())
-    (fun () ->
-       with_fd temp [Unix.O_WRONLY] 0 (fun fd ->
-         Unix.fchmod fd mode;
-         write_all fd text;
-         Unix.fsync fd);
-       Unix.rename temp path)
 
 let find_from text needle start =
   let text_len = String.length text and needle_len = String.length needle in
@@ -212,7 +196,7 @@ let ignore_rules absolute base =
   try
     if (Unix.lstat path).Unix.st_kind <> Unix.S_REG then []
     else
-      let text = read_bounded path max_read_bytes in
+      let text = Workspace_path.read_bounded path max_read_bytes in
       String.split_on_char '\n' text |> List.filter_map (fun line ->
         let line =
           if String.ends_with ~suffix:"\r" line then
@@ -271,7 +255,7 @@ let skip_directory = function
   | _ -> false
 
 let walk ?(hidden = true) root relative visit =
-  let starting = checked_path root relative in
+  let starting = Workspace_path.checked_path root relative in
   let relative =
     match List.filter (fun part -> part <> "" && part <> ".")
             (String.split_on_char '/' relative) with
@@ -385,64 +369,69 @@ let glob root args =
 let search_matches root args ~regex =
   let query = required_string "pattern" args in
   if query = "" || String.length query > 4096 then fail "pattern must contain 1 to 4096 bytes";
+  let case_sensitive = optional_bool "case_sensitive" true args in
+  let match_query = if case_sensitive then query else String.lowercase_ascii query in
   let compiled = if regex then (
-    validate_regex query;
-    Some (try Str.regexp query with Failure reason -> fail ("invalid regex: " ^ reason)))
+    validate_regex match_query;
+    Some (try Str.regexp match_query with Failure reason -> fail ("invalid regex: " ^ reason)))
     else None in
   let relative = optional_string "path" "." args in
+  let file_glob = optional_string "glob" "" args in
+  if file_glob <> "" then valid_glob file_glob;
   let limit = optional_int "limit" max_matches ~minimum:1 ~maximum:max_matches args in
-  let hidden = optional_bool "hidden" (not regex) args in
+  let hidden = optional_bool "hidden" false args in
   let output = Buffer.create 4096 in
   let matches = ref 0 and scanned = ref 0 and truncated = ref false in
   let walk_limit = walk ~hidden root relative (fun name path ->
-    let size = (Unix.stat path).Unix.st_size in
-    if size > max_write_bytes then ()
-    else if !scanned + size > (if regex then 262_144 else max_search_bytes) then truncated := true
-    else if not !truncated then (
-      scanned := !scanned + size;
-      let contents = read_bounded path max_write_bytes in
-      if not (String.contains contents '\000') then (
-        let length = String.length contents in
-        let rec lines start number =
-          if start < length && not !truncated then (
-            let finish = try String.index_from contents start '\n' with Not_found -> length in
-            if regex && finish - start > max_regex_line then truncated := true
-            else (
-              let line = String.sub contents start (finish - start) in
-              let matched = match compiled with
-                | None -> find_from line query 0 <> None
-                | Some expression ->
-                    (try ignore (Str.search_forward expression line 0); true
-                     with Not_found -> false) in
-              if matched then (
-                if !matches >= limit then truncated := true
-                else (
-                  let preview = if String.length line > 240 then String.sub line 0 240 ^ "..." else line in
-                  if append_bounded output (Printf.sprintf "%s:%d:%s\n" name number preview)
-                      (max_read_bytes - 128) then incr matches
-                  else truncated := true)));
-            lines (finish + 1) (number + 1))
-        in lines 0 1))) in
-  if walk_limit || !truncated then Buffer.add_string output "[truncated; narrow the path or query]\n";
+    if file_glob <> "" && not (matching_glob file_glob name) then ()
+    else
+      let size = (Unix.stat path).Unix.st_size in
+      if size > max_write_bytes then ()
+      else if !scanned + size > (if regex then 262_144 else max_search_bytes) then truncated := true
+      else if not !truncated then (
+        scanned := !scanned + size;
+        let contents = Workspace_path.read_bounded path max_write_bytes in
+        if not (String.contains contents '\000') then (
+          let length = String.length contents in
+          let rec lines start number =
+            if start < length && not !truncated then (
+              let finish = try String.index_from contents start '\n' with Not_found -> length in
+              if regex && finish - start > max_regex_line then truncated := true
+              else (
+                let line = String.sub contents start (finish - start) in
+                let match_line = if case_sensitive then line else String.lowercase_ascii line in
+                let matched = match compiled with
+                  | None -> find_from match_line match_query 0 <> None
+                  | Some expression ->
+                      (try ignore (Str.search_forward expression match_line 0); true
+                       with Not_found -> false) in
+                if matched then (
+                  if !matches >= limit then truncated := true
+                  else (
+                    let preview = if String.length line > 240 then String.sub line 0 240 ^ "..." else line in
+                    if append_bounded output (Printf.sprintf "%s:%d:%s\n" name number preview)
+                        (max_read_bytes - 128) then incr matches
+                    else truncated := true)));
+              lines (finish + 1) (number + 1))
+          in lines 0 1))) in
+  if walk_limit || !truncated then Buffer.add_string output "[truncated; narrow the path, glob or query]\n";
   if !matches = 0 && not (walk_limit || !truncated) then "No matches found" else Buffer.contents output
 
 let search root args = search_matches root args ~regex:false
 let grep root args = search_matches root args ~regex:true
-let read_file root args =
-  let relative = required_string "path" args in
-  let path = regular_path root relative in
+let read_text_page root relative args =
+  let path = Workspace_path.regular_path root relative in
   let requested_offset = optional_int "offset" 0 ~minimum:0 ~maximum:max_int args in
   let line = optional_int "line" 0 ~minimum:1 ~maximum:max_int args in
   if line > 0 && field "offset" args <> `Null then fail "use either line or offset, not both";
   let count = optional_int "max_bytes" 16_384 ~minimum:1 ~maximum:max_read_bytes args in
   let max_lines = optional_int "max_lines" 1000 ~minimum:1 ~maximum:1000 args in
-  with_fd path [Unix.O_RDONLY] 0 (fun fd ->
+  Workspace_path.with_fd path [Unix.O_RDONLY] 0 (fun fd ->
     let size = (Unix.fstat fd).Unix.st_size in
     if requested_offset > size then
       fail (Printf.sprintf "offset %d exceeds file size %d" requested_offset size);
     let buffer = Bytes.create 8192 in
     let position = ref 0 and current_line = ref 1 in
-    (* Count preceding newlines or locate a line without loading the file. *)
     while !position < size &&
           (if line > 0 then !current_line < line else !position < requested_offset) do
       let available = if line > 0 then size - !position
@@ -486,11 +475,63 @@ let read_file root args =
       text offset !selected !current_line end_line end_offset
       (!current_line + !newlines) size (if end_offset < size then "truncated" else "end of file"))
 
+let reader_extensions =
+  Workspace_reader.archive_extensions @
+  [".sqlite"; ".sqlite3"; ".db"; ".pdf"; ".docx"; ".odt"; ".rtf";
+   ".doc"; ".ppt"; ".pptx"; ".xls"; ".xlsx"; ".ods"; ".ipynb"]
+
+let limit_lines text count =
+  let rec scan index seen =
+    if index >= String.length text then text
+    else if text.[index] = '\n' then
+      let seen = seen + 1 in
+      if seen >= count && index + 1 < String.length text then
+        String.sub text 0 (index + 1) ^ "\n[more lines omitted]"
+      else scan (index + 1) seen
+    else scan (index + 1) seen
+  in
+  scan 0 0
+
+let read_file ?cancel ?context root args =
+  let input = required_string "path" args in
+  if String.length input > 4096 then fail "workspace read path exceeds the 4096-byte limit";
+  let location = resolve_file_location ?cancel ?context ~root input in
+  let reader_root, reader_path = match location with
+    | Some location -> location.root, location.path
+    | None -> root, input in
+  let input_is_uri = Workspace_reader.is_scheme_uri input in
+  let special =
+    input_is_uri ||
+    Workspace_reader.archive_spec reader_path <> None ||
+    Workspace_reader.selector_suffix reader_path <> None ||
+    Workspace_reader.sqlite_spec reader_path <> None ||
+    Workspace_reader.suffix_extension reader_path reader_extensions <> None ||
+    (match location with
+     | Some location ->
+         (try (Unix.stat (Workspace_path.checked_path location.root location.path)).Unix.st_kind = Unix.S_DIR
+          with Unix.Unix_error _ | Workspace_path.Error _ -> false)
+     | None -> false) in
+  if not special then (
+    match location with
+    | Some location -> read_text_page location.root location.path args
+    | None -> fail "unsupported workspace URI"
+  ) else (
+    let offset = field "offset" args and line = field "line" args in
+    if offset <> `Null || line <> `Null then
+      fail "offset and line pagination apply to local text paths; use a :line-range selector for structured reads";
+    let limit = optional_int "max_bytes" 16_384 ~minimum:1
+      ~maximum:max_read_bytes args in
+    let max_lines = optional_int "max_lines" 1000 ~minimum:1 ~maximum:1000 args in
+    let reader_path = if input_is_uri && location = None then input else reader_path in
+    let text = Workspace_reader.read ?cancel
+      ?read_artifact:(Option.map (fun context -> context.read_artifact) context)
+      ~root:reader_root ~path:reader_path () in
+    bounded_text (limit_lines text max_lines) (min limit (max_read_bytes - 128)))
 let write_file root args =
   let relative = required_string "path" args in
   let content = required_string "content" args in
-  let path = writable_path root relative in
-  atomic_write path content;
+  let path = Workspace_path.writable_path root relative in
+  Workspace_path.atomic_write path content;
   Printf.sprintf "Wrote %d bytes to %s" (String.length content) relative
 
 let edit_file root args =
@@ -498,8 +539,8 @@ let edit_file root args =
   let old_text = required_string "old_string" args in
   let new_text = required_string "new_string" args in
   if old_text = "" then fail "old_string must not be empty";
-  let path = writable_path root relative in
-  let contents = read_bounded path max_write_bytes in
+  let path = Workspace_path.writable_path root relative in
+  let contents = Workspace_path.read_bounded path max_write_bytes in
   let index = match find_from contents old_text 0 with
     | Some index -> index
     | None -> fail "old_string was not found; read_file to check the exact text" in
@@ -509,7 +550,7 @@ let edit_file root args =
   let result = String.sub contents 0 index ^ new_text ^
     String.sub contents (index + String.length old_text)
       (String.length contents - index - String.length old_text) in
-  atomic_write path result;
+  Workspace_path.atomic_write path result;
   Printf.sprintf "Edited %s" relative
 
 let shell_quote text =
@@ -579,9 +620,9 @@ let mobile_project root =
   if manifest "pubspec.yaml" then (
     let flutter =
       try
-        let pubspec = read_bounded (Filename.concat root "pubspec.yaml") max_write_bytes in
+        let pubspec = Workspace_path.read_bounded (Filename.concat root "pubspec.yaml") max_write_bytes in
         Some (find_from pubspec "flutter:" 0 <> None)
-      with Tool_error _ -> None
+      with Workspace_path.Error _ -> None
     in
     match flutter with
     | Some true ->
@@ -591,8 +632,9 @@ let mobile_project root =
         ["inspect pubspec.yaml to identify the SDK"]);
   if manifest "package.json" then (
     let package =
-      try Some (Yojson.Basic.from_string (read_bounded (Filename.concat root "package.json") max_write_bytes))
-      with Tool_error _ | Yojson.Json_error _ -> None
+      try Some (Yojson.Basic.from_string (Workspace_path.read_bounded
+        (Filename.concat root "package.json") max_write_bytes))
+      with Workspace_path.Error _ | Yojson.Json_error _ -> None
     in
     match package with
     | None -> Buffer.add_string output "package.json could not be parsed (or exceeds 1 MiB).\n"
@@ -624,101 +666,253 @@ let mobile_project root =
   else "Detected mobile project stacks and suggested commands (not executed):\n" ^ Buffer.contents output
 
 let run_command ?cancel ?on_progress root args =
-  let cancelled () = match cancel with Some check -> check () | None -> false in
-  if cancelled () then raise Cancelled;
   let command = required_string "command" args in
   if command = "" then fail "command must not be empty";
   let timeout = optional_int "timeout_seconds" 60 ~minimum:1 ~maximum:300 args in
-  let reader, writer = Unix.pipe () in
-  let child =
-    try Unix.fork ()
-    with exn -> Unix.close reader; Unix.close writer; raise exn
-  in
-  if child = 0 then (
-    try
-      Unix.close reader;
-      ignore (Unix.setsid ());
-      Unix.chdir root;
-      let input = Unix.openfile "/dev/null" [Unix.O_RDONLY] 0 in
-      Unix.dup2 input Unix.stdin; Unix.close input;
-      Unix.dup2 writer Unix.stdout;
-      Unix.dup2 writer Unix.stderr;
-      Unix.close writer;
-      Unix.execv "/bin/sh" [| "/bin/sh"; "-c"; command |]
-    with _ -> Unix._exit 127);
-  Unix.close writer;
-  let captured = Bytes.create max_command_bytes in
-  let used = ref 0 and truncated = ref false and timed_out = ref false in
-  let received = ref 0 and reported = ref 0 and last_reported_at = ref 0. in
-  let report_progress force = match on_progress with
-    | None -> ()
-    | Some callback ->
-        let count = !received in
-        let now = Unix.gettimeofday () in
-        if count > !reported &&
-          (force || !reported = 0 || count - !reported >= 65_536 ||
-            now -. !last_reported_at >= 0.25) then (
-          callback count;
-          reported := count;
-          last_reported_at := now) in
-  let deadline = Unix.gettimeofday () +. float_of_int timeout in
-  let chunk = Bytes.create 8192 in
-  let status = ref None and eof = ref false and completed = ref false in
-  let reap () =
-    if !status = None then
-      match Unix.waitpid [Unix.WNOHANG] child with
-      | 0, _ -> ()
-      | _, result -> status := Some result
-  in
-  let terminate () =
-    (try Unix.kill (-child) Sys.sigkill with Unix.Unix_error (Unix.ESRCH, _, _) -> ());
-    (try Unix.kill child Sys.sigkill with Unix.Unix_error (Unix.ESRCH, _, _) -> ());
-    if !status = None then status := Some (snd (Unix.waitpid [] child))
-  in
-  Fun.protect ~finally:(fun () ->
-    Unix.close reader;
-    if not !completed || !status = None then terminate ()) (fun () ->
-    while not !eof && not !timed_out do
-      if cancelled () then raise Cancelled;
-      reap ();
-      let remaining = deadline -. Unix.gettimeofday () in
-      if remaining <= 0. then timed_out := true
-      else (
-        let readable, _, _ = Unix.select [reader] [] [] (min remaining 0.2) in
-        if readable <> [] then (
-          let n = Unix.read reader chunk 0 (Bytes.length chunk) in
-          if n = 0 then eof := true
-          else (
-            received := if !received > max_int - n then max_int else !received + n;
-            report_progress false;
-            if !used + n > max_command_bytes then truncated := true;
-            let retained = min n max_command_bytes in
-            let overflow = max 0 (!used + retained - max_command_bytes) in
-            if overflow > 0 then Bytes.blit captured overflow captured 0 (!used - overflow);
-            Bytes.blit chunk (n - retained) captured (!used - overflow) retained;
-            used := !used - overflow + retained)))
-    done;
-    if !timed_out then terminate ()
-    else while !status = None && not !timed_out do
-      if cancelled () then raise Cancelled;
-      reap ();
-      if !status = None then
-        if Unix.gettimeofday () >= deadline then (timed_out := true; terminate ())
-        else ignore (Unix.select [] [] [] 0.05)
-    done;
-    report_progress true;
-    let result =
-      if !timed_out then "timed out"
-      else match !status with
-        | Some (Unix.WEXITED code) -> Printf.sprintf "exit %d" code
-        | Some (Unix.WSIGNALED signal) -> Printf.sprintf "signal %d" signal
-        | Some (Unix.WSTOPPED signal) -> Printf.sprintf "stopped %d" signal
-        | None -> "unknown status"
-    in
-    completed := true;
-    Printf.sprintf "Status: %s%s\n%s" result
-      (if !truncated then " (output truncated to last 65536 bytes)" else "")
-      (Bytes.sub_string captured 0 !used))
+  let result = Workspace_process.run_shell ?cancel ?on_progress
+    ~timeout_seconds:timeout ~output_limit:max_command_bytes
+    ~cwd:(Some root) ~command () in
+  let status = match result.termination with
+    | Workspace_process.Exited code -> Printf.sprintf "exit %d" code
+    | Workspace_process.Signaled signal -> Printf.sprintf "signal %d" signal
+    | Workspace_process.Timed_out -> "timed out"
+    | Workspace_process.Cancelled -> raise Cancelled in
+  Printf.sprintf "Status: %s%s\n%s" status
+    (if result.truncated then " (output truncated to last 65536 bytes)" else "")
+    result.output
+let string_list name args =
+  match field name args with
+  | `List values ->
+      List.map (function `String value -> value | _ -> fail (name ^ " must contain only strings")) values
+  | `Null -> []
+  | _ -> fail (name ^ " must be an array")
+
+let environment_overrides args =
+  match field "environment" args with
+  | `Null -> []
+  | `Assoc fields ->
+      let names = List.map fst fields in
+      if List.length names <> List.length (List.sort_uniq String.compare names) then
+        fail "duplicate environment override";
+      List.map (function
+        | name, `String value -> name, value
+        | name, _ -> fail (name ^ " environment value must be a string")) fields
+  | _ -> fail "environment must be an object of string values"
+
+let optional_timeout name maximum args =
+  match field name args with
+  | `Null -> None
+  | `Int seconds when seconds >= 1 && seconds <= maximum -> Some seconds
+  | _ -> fail (Printf.sprintf "%s must be between 1 and %d seconds" name maximum)
+
+let process_cwd ?cancel ?context ~root args =
+  let requested = optional_string "cwd" "." args in
+  let location = match resolve_file_location ?cancel ?context ~root requested with
+    | Some location -> location
+    | None -> fail "process working directory must be workspace-relative or an owned worktree URI" in
+  let workspace_root = Workspace_path.root_path location.root in
+  Workspace_path.root_path
+    (Workspace_path.checked_path workspace_root location.path)
+
+let process_manager context = context.process_manager
+let require_explicit_approval approved =
+  if not approved then fail "this process or Git mutation requires explicit interactive approval"
+
+
+let start_process ~approved ?cancel ?context root args =
+  require_explicit_approval approved;
+  let context = require_session_context context in
+  let id = required_string "id" args in
+  let program = required_string "program" args in
+  let arguments = string_list "arguments" args in
+  let cwd = process_cwd ?cancel ~context ~root args in
+  let environment = environment_overrides args in
+  ignore (Workspace_process.environment_with_overrides environment);
+  let timeout_seconds = optional_timeout "timeout_seconds" 86_400 args in
+  let output_limit = optional_int "output_limit" 65_536 ~minimum:1
+    ~maximum:Workspace_process.max_output_limit args in
+  let pty = optional_bool "pty" false args in
+  Workspace_process.start (process_manager context) ~id ~cwd:(Some cwd) ~environment
+    ?timeout_seconds ~output_limit ~pty ~program ~arguments ();
+  Printf.sprintf "Started process job %S: %s"
+    id (Filename.quote_command program arguments)
+
+let start_shell ~approved ?cancel ?context root args =
+  require_explicit_approval approved;
+  let context = require_session_context context in
+  let id = required_string "id" args in
+  let command = required_string "command" args in
+  let cwd = process_cwd ?cancel ~context ~root args in
+  let environment = environment_overrides args in
+  ignore (Workspace_process.environment_with_overrides environment);
+  let timeout_seconds = optional_timeout "timeout_seconds" 86_400 args in
+  let output_limit = optional_int "output_limit" 65_536 ~minimum:1
+    ~maximum:Workspace_process.max_output_limit args in
+  let pty = optional_bool "pty" false args in
+  Workspace_process.start_shell (process_manager context) ~id ~cwd:(Some cwd)
+    ~environment ?timeout_seconds ~output_limit ~pty ~command ();
+  Printf.sprintf "Started shell job %S." id
+
+let process_termination = function
+  | Workspace_process.Exited code -> Printf.sprintf "exit %d" code
+  | Workspace_process.Signaled signal -> Printf.sprintf "signal %d" signal
+  | Workspace_process.Timed_out -> "timed out"
+  | Workspace_process.Cancelled -> "cancelled"
+
+let process_status = function
+  | Workspace_process.Running -> "running"
+  | Workspace_process.Completed termination -> process_termination termination
+
+let process_list ?context _root _args =
+  let manager = process_manager (require_session_context context) in
+  match Workspace_process.jobs manager with
+  | [] -> "No managed process jobs."
+  | jobs ->
+      bounded_text
+        (String.concat "\n" (List.map (fun (job : Workspace_process.job_summary) ->
+          Printf.sprintf "%s · %s · %d bytes%s%s\n%s"
+            job.id (process_status job.status) job.bytes_received
+            (if job.truncated then " · output truncated" else "")
+            (if job.ready then " · ready" else "")
+            job.command) jobs))
+        (max_read_bytes - 128)
+
+let process_output ?context _root args =
+  let manager = process_manager (require_session_context context) in
+  let id = required_string "id" args in
+  let offset = optional_int "offset" 0 ~minimum:0 ~maximum:max_int args in
+  let max_bytes = optional_int "max_bytes" 16_384 ~minimum:1
+    ~maximum:(max_read_bytes - 256) args in
+  let page = Workspace_process.read_output manager ~id ~offset ~max_bytes () in
+  Printf.sprintf
+    "[output page offset %d; earliest retained %d; next %d%s]\n%s"
+    page.offset page.first_offset page.next_offset
+    (if page.truncated then "; earlier output was truncated" else "")
+    page.output
+
+let process_wait ?cancel ?context _root args =
+  let manager = process_manager (require_session_context context) in
+  let id = required_string "id" args in
+  let timeout = optional_int "timeout_seconds" 10 ~minimum:1 ~maximum:300 args in
+  let status = Workspace_process.wait_job manager ~id
+    ~timeout_seconds:timeout ?cancel () in
+  "Process job " ^ id ^ ": " ^ process_status status
+
+let process_ready ?cancel ?context _root args =
+  let manager = process_manager (require_session_context context) in
+  let id = required_string "id" args in
+  let regex = optional_string "log_regex" "" args in
+  let regex = if regex = "" then None else Some regex in
+  Option.iter validate_regex regex;
+  let port = optional_int "port" 0 ~minimum:1 ~maximum:65_535 args in
+  let port = if port = 0 then None else Some port in
+  if regex = None && port = None then fail "readiness requires log_regex or port";
+  let timeout_seconds = optional_int "timeout_seconds" 10 ~minimum:1 ~maximum:300 args in
+  let ready = Workspace_process.wait_ready manager ~id ~timeout_seconds
+    ?cancel ?log_regex:regex ?port () in
+  if ready then Printf.sprintf "Process job %s is ready." id
+  else Printf.sprintf "Process job %s is not ready." id
+
+let process_stdin ~approved ?context _root args =
+  require_explicit_approval approved;
+  let manager = process_manager (require_session_context context) in
+  let id = required_string "id" args in
+  let data = required_string "data" args in
+  Workspace_process.write_stdin manager ~id ~data;
+  Printf.sprintf "Wrote %d bytes to process job %s." (String.length data) id
+
+let process_close_stdin ~approved ?context _root args =
+  require_explicit_approval approved;
+  let manager = process_manager (require_session_context context) in
+  let id = required_string "id" args in
+  Workspace_process.close_stdin manager ~id;
+  Printf.sprintf "Closed stdin for process job %s." id
+
+let process_kill ~approved ?context _root args =
+  require_explicit_approval approved;
+  let manager = process_manager (require_session_context context) in
+  let id = required_string "id" args in
+  Workspace_process.kill_job manager ~id;
+  Printf.sprintf "Process job %s: %s"
+    id (process_status (Workspace_process.job_status manager ~id))
+
+let git_result_text label (result : Workspace_git.process_result) =
+  if result.Workspace_process.termination = Workspace_process.Cancelled then
+    raise Cancelled;
+  let status = match result.Workspace_process.termination with
+    | Workspace_process.Exited code -> Printf.sprintf "exit %d" code
+    | Workspace_process.Signaled signal -> Printf.sprintf "signal %d" signal
+    | Workspace_process.Timed_out -> "timed out"
+    | Workspace_process.Cancelled -> assert false in
+  Printf.sprintf "%s · %s%s\n%s" label status
+    (if result.truncated then " · output truncated" else "")
+    result.output
+
+let owned_worktrees ?cancel ?context ~root () =
+  let context = require_session_context context in
+  Workspace_git.list_worktrees ?cancel ~base:root ~owner:context.owner ()
+
+let worktree_list ?cancel ?context root _args =
+  match owned_worktrees ?cancel ?context ~root () with
+  | [] -> "No managed worktrees belong to this session."
+  | worktrees ->
+      String.concat "\n" (List.map (fun (item : Workspace_git.managed_worktree) ->
+        Printf.sprintf "%s · %s · %s" item.id item.branch item.path) worktrees)
+
+let worktree_status ?cancel ?context root args =
+  let context = require_session_context context in
+  let id = required_string "id" args in
+  git_result_text ("Worktree " ^ id ^ " status")
+    (Workspace_git.status ?cancel ~base:root ~owner:context.owner ~id ())
+
+let worktree_diff ?cancel ?context root args =
+  let context = require_session_context context in
+  let id = required_string "id" args in
+  git_result_text ("Worktree " ^ id ^ " diff")
+    (Workspace_git.diff ?cancel ~base:root ~owner:context.owner ~id ())
+
+let worktree_history ?cancel ?context root args =
+  let context = require_session_context context in
+  let id = required_string "id" args in
+  let count = optional_int "count" 20 ~minimum:1 ~maximum:100 args in
+  let result = Workspace_git.history ?cancel ~base:root ~owner:context.owner ~id ~count () in
+  if result.truncated then fail "Git history exceeded the output limit";
+  match result.Workspace_process.termination with
+  | Workspace_process.Exited 0 when String.trim result.output = "" ->
+      "No commits in this worktree."
+  | Workspace_process.Exited 0 ->
+      Printf.sprintf "Worktree %s recent commits:\n%s" id result.output
+  | _ -> git_result_text ("Worktree " ^ id ^ " history") result
+
+let worktree_create ~approved ?cancel ?context root args =
+  let context = require_session_context context in
+  let id = required_string "id" args in
+  let path = required_string "path" args in
+  let branch = required_string "branch" args in
+  let result = Workspace_git.create_worktree ?cancel ~base:root ~path
+    ~branch ~id ~owner:context.owner ~approved () in
+  git_result_text (Printf.sprintf "Worktree %s at %s on branch %s" id path branch) result
+
+let worktree_commit ~approved ?cancel ?context root args =
+  let context = require_session_context context in
+  let id = required_string "id" args in
+  let paths = string_list "paths" args in
+  let message = required_string "message" args in
+  let result = Workspace_git.commit ?cancel ~base:root ~owner:context.owner
+    ~id ~approved ~paths ~message () in
+  let commit_id = Option.fold ~none:"" ~some:(fun hash -> "\nCommit: " ^ hash)
+    result.commit_id in
+  let files = if result.files = [] then "" else
+    "\nCommitted paths:\n" ^ String.concat "\n" result.files in
+  git_result_text ("Worktree " ^ id ^ " commit") result.process ^ commit_id ^ files
+
+let worktree_remove ~approved ?cancel ?context root args =
+  require_explicit_approval approved;
+  let context = require_session_context context in
+  let id = required_string "id" args in
+  git_result_text ("Worktree " ^ id ^ " removal")
+    (Workspace_git.remove_worktree ?cancel ~base:root
+      ~owner:context.owner ~id ())
 
 let schema name description properties required =
   `Assoc ["type", `String "function";
@@ -733,50 +927,177 @@ let integer_field description minimum maximum =
   `Assoc ["type", `String "integer"; "description", `String description;
           "minimum", `Int minimum; "maximum", `Int maximum]
 let boolean_field description = `Assoc ["type", `String "boolean"; "description", `String description]
+let enum_string_field description values =
+  `Assoc ["type", `String "string"; "description", `String description;
+          "enum", `List (List.map (fun value -> `String value) values)]
 
+let replacement_hunk_field =
+  `Assoc ["type", `String "object";
+          "properties", `Assoc [
+            "old_text", string_field "Exact original text; must occur once";
+            "new_text", string_field "Replacement text";
+          ];
+          "required", `List [`String "old_text"; `String "new_text"];
+          "additionalProperties", `Bool false]
+
+let replacement_hunks_field =
+  `Assoc ["type", `String "array";
+          "description", `String "Non-overlapping exact-text replacements against one source snapshot";
+          "items", replacement_hunk_field]
+
+let string_array_field description =
+  `Assoc ["type", `String "array"; "description", `String description;
+          "items", `Assoc ["type", `String "string"]]
+
+let environment_field =
+  `Assoc ["type", `String "object";
+          "description", `String "Child-only environment overrides";
+          "additionalProperties", string_field "Environment variable value"]
+
+let is_shell_tool = function
+  | "run_command" | "start_process" | "start_shell" -> true
+  | _ -> false
+
+let requires_explicit_approval ~name ~args =
+  match name with
+  | "run_command" | "start_process" | "start_shell"
+  | "process_stdin" | "process_close_stdin" | "process_kill"
+  | "worktree_create" | "worktree_commit" | "worktree_remove" -> true
+  | "read_file" ->
+      (match field "path" args with
+       | `String path -> starts_with (String.lowercase_ascii path) "https://"
+       | _ -> false)
+  | _ -> false
+
+let non_reversible_tool = function
+  | "run_command" | "start_process" | "start_shell"
+  | "process_stdin" | "process_close_stdin" | "process_kill"
+  | "worktree_create" | "worktree_commit" | "worktree_remove" -> true
+  | _ -> false
 
 let definitions = [
   schema "mobile_project" "Detect root mobile project manifests and suggest relevant build/test commands without executing anything."
     [] [];
-  schema "read_file" "Read a bounded text page, including byte and line metadata; use offset or line to continue large files."
-    ["path", string_field "Workspace-relative file path";
-     "offset", integer_field "Byte offset (default 0; exclusive with line)" 0 max_int;
-     "line", integer_field "One-based starting line (exclusive with offset)" 1 max_int;
+  schema "read_file" "Read bounded workspace files, directories, documents, archives, notebooks, SQLite, owned artifacts, managed worktrees, or public HTTPS URLs. HTTPS fetches send no credentials and require approval."
+    ["path", string_field "Workspace-relative path or supported local://, artifact://, worktree://, or HTTPS source";
+     "offset", integer_field "Byte offset for ordinary local text files (default 0; exclusive with line)" 0 max_int;
+     "line", integer_field "One-based line for ordinary local text files (exclusive with offset)" 1 max_int;
      "max_lines", integer_field "Maximum lines returned (default 1000)" 1 1000;
-     "max_bytes", integer_field "Maximum page bytes (default 16384, capped to leave room for metadata)" 1 max_read_bytes] ["path"];
+     "max_bytes", integer_field "Maximum output bytes (default 16384)" 1 max_read_bytes] ["path"];
+  schema "workspace_snapshot" "Read a bounded page and SHA-256 for one text file snapshot (maximum 1 MiB); pass the hash to conflict-aware edit tools."
+    ["path", string_field "Workspace-relative file path or owned worktree URI";
+     "max_bytes", integer_field "Snapshot page bytes (default 16384)" 1 (max_read_bytes - 512)] ["path"];
   schema "list_files" "Recursively list workspace files; respects .gitignore and excludes build/dependency/Git directories. Bounded output."
-    ["path", string_field "Workspace-relative directory (default .)"] [];
+    ["path", string_field "Workspace-relative or owned worktree directory (default .)"] [];
   schema "glob" "Discover files with *, ?, character classes and ** directory segments; respects nested .gitignore. Bounded output."
     ["pattern", string_field "Workspace-relative glob, for example **/*.swift";
-     "path", string_field "Workspace-relative directory (default .)";
+     "path", string_field "Workspace-relative or owned worktree directory (default .)";
      "hidden", boolean_field "Include dotfiles and hidden directories (default false)";
      "limit", integer_field "Maximum matching paths (default 100)" 1 500] ["pattern"];
-  schema "search" "Find literal case-sensitive text in workspace files, respecting .gitignore. Skips binary and files above 1 MiB; bounded output."
+  schema "search" "Find bounded text matches in non-binary workspace files, respecting nested .gitignore; hidden paths are excluded by default."
     ["pattern", string_field "Literal text to search for";
-     "path", string_field "Workspace-relative directory (default .)";
-     "limit", integer_field "Maximum matching lines (default 100)" 1 max_matches] ["pattern"];
-  schema "grep" "Find bounded case-sensitive OCaml Str regex matches per line, respecting nested .gitignore. One repetition operator maximum; skips binary and files above 1 MiB."
-    ["pattern", string_field "Regex (up to 512 bytes; at most one repetition; no backreferences)";
-     "path", string_field "Workspace-relative directory (default .)";
+     "path", string_field "Workspace-relative or owned worktree directory (default .)";
+     "glob", string_field "Optional file glob relative to the search directory";
      "hidden", boolean_field "Include dotfiles and hidden directories (default false)";
+     "case_sensitive", boolean_field "Use ASCII-only case matching (default true)";
      "limit", integer_field "Maximum matching lines (default 100)" 1 max_matches] ["pattern"];
-  schema "write_file" "Atomically create or replace a workspace file (maximum 1 MiB); parent directory must exist."
-    ["path", string_field "Workspace-relative file path";
+  schema "grep" "Find bounded OCaml Str regex matches per line, respecting nested .gitignore; hidden paths are excluded by default. One repetition operator maximum; no backreferences."
+    ["pattern", string_field "Regex (up to 512 bytes; at most one repetition; no backreferences)";
+     "path", string_field "Workspace-relative or owned worktree directory (default .)";
+     "glob", string_field "Optional file glob relative to the search directory";
+     "hidden", boolean_field "Include dotfiles and hidden directories (default false)";
+     "case_sensitive", boolean_field "Use ASCII-only case matching (default true)";
+     "limit", integer_field "Maximum matching lines (default 100)" 1 max_matches] ["pattern"];
+  schema "write_file" "Atomically create or replace a workspace or owned worktree file (maximum 1 MiB); parent directory must exist."
+    ["path", string_field "Workspace-relative or owned worktree file path";
      "content", string_field "Complete replacement file contents"] ["path"; "content"];
-  schema "edit_file" "Atomically replace exactly one occurrence of old_string in a workspace file (maximum 1 MiB)."
-    ["path", string_field "Workspace-relative file path";
+  schema "edit_file" "Atomically replace exactly one occurrence of old_string in a workspace or owned worktree file (maximum 1 MiB)."
+    ["path", string_field "Workspace-relative or owned worktree file path";
      "old_string", string_field "Exact, unique original text";
      "new_string", string_field "Replacement text"] ["path"; "old_string"; "new_string"];
-  schema "run_command" "Run a shell command with workspace as cwd, returning exit status and bounded output/time. NOT SANDBOXED: the shell can access or modify files outside the workspace."
+  schema "apply_edits" "Atomically apply exact, unique non-overlapping hunks only if the workspace file still matches the supplied SHA-256 snapshot."
+    ["path", string_field "Workspace-relative or owned worktree file path";
+     "expected_sha256", string_field "SHA-256 returned by workspace_snapshot";
+     "hunks", replacement_hunks_field] ["path"; "expected_sha256"; "hunks"];
+  schema "ast_edit" "Preview or apply one OCaml implementation AST edit. Supports syntactic unqualified value rename or unique structural expression replacement; no text fallback."
+    ["path", string_field "Workspace-relative or owned worktree .ml implementation file";
+     "language", enum_string_field "Supported AST language" ["ocaml"];
+     "operation", enum_string_field "AST operation" ["rename_identifier"; "replace_expression"];
+     "expected_sha256", string_field "SHA-256 returned by workspace_snapshot";
+     "old_name", string_field "Old unqualified OCaml value identifier";
+     "new_name", string_field "New unqualified OCaml value identifier";
+     "target", string_field "OCaml expression shape to match uniquely";
+     "replacement", string_field "Replacement OCaml expression";
+     "dry_run", boolean_field "Preview only; defaults to true"] ["path"; "language"; "operation"; "expected_sha256"];
+  schema "run_command" "Run a shell command with workspace as cwd, returning exit status and bounded output/time. NOT SANDBOXED; every command requires interactive approval."
     ["command", string_field "Shell command to execute (not sandboxed)";
-     "timeout_seconds", integer_field "Deadline in seconds (default 60, maximum 300)" 1 300] ["command"]
+     "timeout_seconds", integer_field "Deadline in seconds (default 60, maximum 300)" 1 300] ["command"];
+  schema "start_process" "Start an owned background process from an executable and argv. Bounded jobs/output; NOT SANDBOXED and requires explicit approval."
+    ["id", string_field "Session-local job ID";
+     "program", string_field "Executable path or command name";
+     "arguments", string_array_field "Argument vector; no shell parsing";
+     "cwd", string_field "Workspace-relative or owned worktree working directory (default workspace root)";
+     "environment", environment_field;
+     "timeout_seconds", integer_field "Optional process deadline (maximum 86400)" 1 86_400;
+     "output_limit", integer_field "Retained output bytes (default 65536)" 1 Workspace_process.max_output_limit;
+     "pty", boolean_field "Attach a PTY where the supported runtime is available"] ["id"; "program"];
+  schema "start_shell" "Start a managed background shell job with bounded output/time. NOT SANDBOXED; each shell command requires explicit approval."
+    ["id", string_field "Session-local job ID";
+     "command", string_field "Shell command (not sandboxed)";
+     "cwd", string_field "Workspace-relative or owned worktree working directory";
+     "environment", environment_field;
+     "timeout_seconds", integer_field "Optional process deadline (maximum 86400)" 1 86_400;
+     "output_limit", integer_field "Retained output bytes (default 65536)" 1 Workspace_process.max_output_limit;
+     "pty", boolean_field "Attach a PTY where the supported runtime is available"] ["id"; "command"];
+  schema "process_list" "List bounded managed processes owned by the current private session."
+    [] [];
+  schema "process_output" "Read a bounded page of merged stdout/stderr by absolute byte offset."
+    ["id", string_field "Session-local process job ID";
+     "offset", integer_field "Absolute output byte offset (default 0)" 0 max_int;
+     "max_bytes", integer_field "Maximum output bytes (default 16384)" 1 (max_read_bytes - 256)] ["id"];
+  schema "process_wait" "Wait up to 300 seconds for a managed process to exit."
+    ["id", string_field "Session-local process job ID";
+     "timeout_seconds", integer_field "Wait duration (default 10, maximum 300)" 1 300] ["id"];
+  schema "process_ready" "Wait for a managed process log regex and/or loopback port to become ready."
+    ["id", string_field "Session-local process job ID";
+     "log_regex", string_field "Bounded safe regex matched against retained output";
+     "port", integer_field "Loopback TCP port to probe" 1 65_535;
+     "timeout_seconds", integer_field "Readiness deadline (default 10, maximum 300)" 1 300] ["id"];
+  schema "process_stdin" "Write bounded input bytes to a running managed process; requires explicit approval."
+    ["id", string_field "Session-local process job ID";
+     "data", string_field "Input bytes to write"] ["id"; "data"];
+  schema "process_close_stdin" "Close stdin for a running managed process; requires explicit approval."
+    ["id", string_field "Session-local process job ID"] ["id"];
+  schema "process_kill" "Cancel a managed process and its process group; requires explicit approval."
+    ["id", string_field "Session-local process job ID"] ["id"];
+  schema "worktree_list" "List only Pave-managed worktrees owned by the current private session."
+    [] [];
+  schema "worktree_status" "Inspect status in a worktree managed by the current private session."
+    ["id", string_field "Managed worktree ID"] ["id"];
+  schema "worktree_diff" "Read a bounded no-color diff in a worktree managed by the current private session."
+    ["id", string_field "Managed worktree ID"] ["id"];
+  schema "worktree_history" "Read bounded recent commit metadata from a session-owned managed worktree."
+    ["id", string_field "Managed worktree ID";
+     "count", integer_field "Number of commits (default 20, maximum 100)" 1 100] ["id"];
+  schema "worktree_create" "Create an isolated Git worktree outside the base repository. Always requires explicit approval."
+    ["id", string_field "Session-local worktree ID";
+     "path", string_field "Absolute new worktree path outside the base repository";
+     "branch", string_field "New branch name"] ["id"; "path"; "branch"];
+  schema "worktree_commit" "Commit only the explicitly listed paths in an owned worktree; unrelated staged changes are preserved. Always requires explicit approval."
+    ["id", string_field "Managed worktree ID";
+     "paths", string_array_field "Exact relative paths to stage and commit";
+     "message", string_field "Single-line commit message"] ["id"; "paths"; "message"];
+  schema "worktree_remove" "Remove only a clean managed worktree owned by the current private session. Always requires explicit approval."
+    ["id", string_field "Managed worktree ID"] ["id"]
 ]
 
 let function_name json =
   Protocol.member "name" (Protocol.member "function" json)
 
 let definitions_without_shell = List.filter (fun json ->
-  function_name json <> `String "run_command") definitions
+  match function_name json with
+  | `String name -> not (is_shell_tool name)
+  | _ -> true) definitions
 
 let available ~allow_shell =
   if allow_shell then definitions else definitions_without_shell
@@ -784,11 +1105,13 @@ let available ~allow_shell =
 let available_for ~allow_shell ~enabled =
   List.filter (fun json ->
     match function_name json with
-    | `String "run_command" when not allow_shell -> false
+    | `String name when is_shell_tool name && not allow_shell -> false
     | `String name -> enabled name
     | _ -> false) definitions
+
 let execution_mode = function
-  | "mobile_project" | "read_file" | "list_files" | "glob" | "search" | "grep" ->
+  | "mobile_project" | "read_file" | "workspace_snapshot"
+  | "list_files" | "glob" | "search" | "grep" ->
       Tool_scheduler.Shared
   | _ -> Tool_scheduler.Exclusive
 
@@ -797,10 +1120,16 @@ let approval_decision ~command_patterns ~name ~args =
     Approval.tier = value; policy = None; override = false; reason = None
   } in
   match name with
-  | "mobile_project" | "read_file" | "list_files" | "glob" | "search" | "grep" ->
+  | "mobile_project" | "read_file" | "workspace_snapshot"
+  | "list_files" | "glob" | "search" | "grep" | "process_list"
+  | "process_output" | "process_wait" | "process_ready"
+  | "worktree_list" | "worktree_status" | "worktree_diff" | "worktree_history" ->
       tier Approval.Read
-  | "write_file" | "edit_file" -> tier Approval.Write
-  | "run_command" ->
+  | "ast_edit" when optional_bool "dry_run" true args -> tier Approval.Read
+  | "write_file" | "edit_file" | "apply_edits" | "ast_edit"
+  | "worktree_create" | "worktree_remove" ->
+      tier Approval.Write
+  | "run_command" | "start_shell" ->
       (match Protocol.member "command" args with
        | `String command -> Approval.command_decision command_patterns command
        | _ -> tier Approval.Exec)
@@ -817,46 +1146,242 @@ let preview_text text =
     let length = boundary limit in
     String.sub text 0 length ^
       Printf.sprintf "\n[%d bytes omitted]" (String.length text - length)
+let bounded_tool_text text limit =
+  if String.length text <= limit then text
+  else
+    let rec boundary index =
+      if index > 0 && index < String.length text &&
+         (Char.code text.[index] land 0xc0) = 0x80 then boundary (index - 1)
+      else index in
+    let length = boundary limit in
+    String.sub text 0 length ^
+      Printf.sprintf "\n[%d bytes omitted]" (String.length text - length)
 
-let approval_request ~root ~name ~args (decision : Approval.decision) =
-  let value name fallback = match Protocol.member name args with
+let workspace_snapshot ?cancel ?context root args =
+  let root, args = resolve_path_arguments ?cancel ?context ~root args in
+  let path = required_string "path" args in
+  let limit = optional_int "max_bytes" 16_384 ~minimum:1
+    ~maximum:(max_read_bytes - 512) args in
+  let snapshot = Workspace_edit.read_snapshot ~root ~path in
+  let size = String.length snapshot.contents in
+  let length = min limit size in
+  let content = String.sub snapshot.contents 0 length in
+  if String.contains content '\000' then fail "binary file; workspace snapshots support text only";
+  Printf.sprintf
+    "SHA-256: %s\n%s\n[page: offset 0; bytes: %d; file size: %d; next offset: %d; %s]"
+    snapshot.sha256 content length size length
+    (if length < size then
+       "truncated; continue with read_file offset/line, and apply this hash only if unchanged"
+     else "end of file")
+
+let parse_hunks args =
+  match field "hunks" args with
+  | `List values ->
+      List.map (function
+        | `Assoc fields ->
+            let names = List.map fst fields in
+            if List.length names <> 2 ||
+               List.sort String.compare names <> ["new_text"; "old_text"] then
+              fail "each hunk must contain exactly old_text and new_text";
+            let text name = match List.assoc_opt name fields with
+              | Some (`String value) -> value
+              | _ -> fail ("hunk " ^ name ^ " must be a string") in
+            { Workspace_edit.old_text = text "old_text";
+              new_text = text "new_text" }
+        | _ -> fail "each hunk must be an object") values
+  | _ -> fail "hunks must be an array"
+
+let apply_edits ?cancel ?context root args =
+  let root, args = resolve_path_arguments ?cancel ?context ~root args in
+  let path = required_string "path" args in
+  let expected_sha256 = required_string "expected_sha256" args in
+  let hunks = parse_hunks args in
+  let preview = Workspace_edit.apply_hunks ~root ~path ~expected_sha256 ~hunks in
+  Printf.sprintf "%s %s; SHA-256: %s"
+    (if preview.changed then "Applied" else "No changes to")
+    path preview.result_sha256
+
+let ast_operation args =
+  let operation = required_string "operation" args in
+  let present name = field name args <> `Null in
+  match operation with
+  | "rename_identifier" ->
+      if present "target" || present "replacement" then
+        fail "rename_identifier does not accept target or replacement";
+      Workspace_edit.Rename_identifier {
+        old_name = required_string "old_name" args;
+        new_name = required_string "new_name" args }
+  | "replace_expression" ->
+      if present "old_name" || present "new_name" then
+        fail "replace_expression does not accept old_name or new_name";
+      Workspace_edit.Replace_expression {
+        target = required_string "target" args;
+        replacement = required_string "replacement" args }
+  | _ -> fail "operation must be rename_identifier or replace_expression"
+
+let ast_operation_text = function
+  | Workspace_edit.Rename_identifier { old_name; new_name } ->
+      Printf.sprintf "rename unqualified value identifier %S to %S" old_name new_name
+  | Workspace_edit.Replace_expression { target; replacement } ->
+      Printf.sprintf "replace unique expression %S with %S" target replacement
+
+let ast_edit ?cancel ?context root args =
+  let root, args = resolve_path_arguments ?cancel ?context ~root args in
+  let path = required_string "path" args in
+  let language = required_string "language" args in
+  let edit = {
+    Workspace_edit.path = path;
+    expected_sha256 = required_string "expected_sha256" args;
+    operation = ast_operation args;
+  } in
+  let dry_run = optional_bool "dry_run" true args in
+  if dry_run then
+    match Workspace_edit.preview_ast ~root ~language ~edits:[edit] with
+    | [preview] ->
+        Printf.sprintf
+          "AST preview for %s (%s)\nOriginal SHA-256: %s\nResult SHA-256: %s\nChanged: %b\n%s\n%s"
+          path language preview.original_sha256 preview.result_sha256 preview.changed
+          (ast_operation_text edit.operation)
+          (bounded_tool_text preview.content (max_read_bytes - 512))
+    | _ -> assert false
+  else
+    let preview = Workspace_edit.apply_ast ~root ~language ~edit in
+    Printf.sprintf "Applied AST edit to %s; SHA-256: %s; changed: %b"
+      path preview.result_sha256 preview.changed
+
+
+let approval_request ?cancel ?context ~root ~name ~args (decision : Approval.decision) =
+  let base_root = root in
+  let preview_root, preview_args =
+    if List.mem name ["workspace_snapshot"; "write_file"; "edit_file";
+        "apply_edits"; "ast_edit"] then
+      resolve_path_arguments ?cancel ?context ~root args
+    else root, args in
+  let value name fallback args = match Protocol.member name args with
     | `String text -> text | _ -> fallback in
-  let quoted name fallback = Printf.sprintf "%S" (value name fallback) in
+  let quoted name fallback args = Printf.sprintf "%S" (value name fallback args) in
+  let cwd_detail () =
+    let cwd = process_cwd ?cancel ?context ~root:base_root args in
+    ["Working directory: " ^ Printf.sprintf "%S" cwd] in
+  let environment_details () =
+    let overrides = environment_overrides args in
+    if overrides = [] then ["Environment overrides: none"]
+    else ["Environment overrides (other inherited variables remain):"] @
+      List.map (fun (key, value) ->
+        key ^ "=" ^ Printf.sprintf "%S" value) overrides in
   let impact, details = match name with
     | "mobile_project" ->
         "Reads project manifests and suggests commands; it executes nothing.",
         []
     | "read_file" ->
-        "Reads a bounded workspace file; it makes no changes.",
-        ["Path: " ^ quoted "path" "(missing)"]
+        (match value "path" "" args with
+         | path when starts_with (String.lowercase_ascii path) "https://" ->
+             "Fetches this public HTTPS URL without credentials or redirects; returned content is untrusted.",
+             ["URL: " ^ Printf.sprintf "%S" path;
+              "The pinned fetcher rejects private/local addresses and sends no authentication."]
+         | _ ->
+             "Reads a bounded workspace source; it makes no changes.",
+             ["Path: " ^ quoted "path" "(missing)" args])
+    | "workspace_snapshot" ->
+        "Reads a bounded text page and the file's SHA-256 snapshot; it makes no changes.",
+        ["Path: " ^ quoted "path" "(missing)" args]
     | "list_files" ->
         "Lists workspace paths; it makes no changes.",
-        ["Directory: " ^ quoted "path" "."]
+        ["Directory: " ^ quoted "path" "." args]
     | "glob" ->
         "Searches workspace paths; it makes no changes.",
-        ["Pattern: " ^ quoted "pattern" "(missing)";
-         "Directory: " ^ quoted "path" "."]
+        ["Pattern: " ^ quoted "pattern" "(missing)" args;
+         "Directory: " ^ quoted "path" "." args]
     | "search" | "grep" ->
         "Searches workspace file contents; it makes no changes.",
-        ["Pattern: " ^ quoted "pattern" "(missing)";
-         "Directory: " ^ quoted "path" "."]
+        ["Pattern: " ^ quoted "pattern" "(missing)" args;
+         "Directory: " ^ quoted "path" "." args]
     | "write_file" ->
-        let content = value "content" "" in
-        "Creates or replaces a workspace file.",
-        ["Path: " ^ quoted "path" "(missing)";
+        let content = value "content" "" args in
+        "Creates or replaces a workspace or session-owned worktree file.",
+        ["Path: " ^ quoted "path" "(missing)" args;
          Printf.sprintf "Content (%d bytes):" (String.length content);
          Printf.sprintf "%S" (preview_text content)]
     | "edit_file" ->
-        "Replaces one exact, unique text range in a workspace file.",
-        ["Path: " ^ quoted "path" "(missing)";
-         "Find: " ^ Printf.sprintf "%S"
-           (preview_text (value "old_string" "(missing)"));
-         "Replace with: " ^ Printf.sprintf "%S"
-           (preview_text (value "new_string" "(missing)"))]
+        "Replaces one exact, unique text range in a workspace or session-owned worktree file.",
+        ["Path: " ^ quoted "path" "(missing)" args;
+         "Find: " ^ Printf.sprintf "%S" (preview_text (value "old_string" "(missing)" args));
+         "Replace with: " ^ Printf.sprintf "%S" (preview_text (value "new_string" "(missing)" args))]
+    | "apply_edits" ->
+        let path = value "path" "(missing)" preview_args in
+        let expected = value "expected_sha256" "(missing)" preview_args in
+        let hunks = parse_hunks preview_args in
+        let preview = Workspace_edit.preview_hunks ~root:preview_root ~path
+          ~expected_sha256:expected ~hunks in
+        "Applies a conflict-checked atomic multi-hunk edit.",
+        ["Path: " ^ quoted "path" "(missing)" args;
+         "Original SHA-256: " ^ preview.original_sha256;
+         "Result SHA-256: " ^ preview.result_sha256;
+         Printf.sprintf "Hunks: %d" (List.length hunks)] @
+        List.concat_map (fun (index, hunk) ->
+          [Printf.sprintf "Hunk %d find: %S" index (preview_text hunk.Workspace_edit.old_text);
+           Printf.sprintf "Hunk %d replace: %S" index (preview_text hunk.Workspace_edit.new_text)])
+          (List.mapi (fun index hunk -> index + 1, hunk) hunks)
+    | "ast_edit" ->
+        let path = value "path" "(missing)" preview_args in
+        let language = value "language" "(missing)" preview_args in
+        let operation = ast_operation args in
+        let edit = { Workspace_edit.path = path;
+          expected_sha256 = value "expected_sha256" "(missing)" preview_args;
+          operation } in
+        let preview = match Workspace_edit.preview_ast ~root:preview_root
+            ~language ~edits:[edit] with
+          | [preview] -> preview | _ -> assert false in
+        let dry_run = optional_bool "dry_run" true args in
+        (if dry_run then "Previews a syntax-aware AST edit without writing."
+         else "Applies one syntax-aware AST edit after approval."),
+        ["Path: " ^ quoted "path" "(missing)" args;
+         "Language: " ^ language;
+         "Original SHA-256: " ^ preview.original_sha256;
+         "Result SHA-256: " ^ preview.result_sha256;
+         "Operation: " ^ ast_operation_text operation;
+         "Proposed content: " ^ Printf.sprintf "%S" (preview_text preview.content)]
     | "run_command" ->
         "Runs /bin/sh as your user from the workspace root. It is not sandboxed and may access or modify files outside the workspace or use the network.",
-        ["Working directory: " ^ Printf.sprintf "%S" root;
-         "Command: " ^ value "command" "(missing)"]
+        ["Working directory: " ^ Printf.sprintf "%S" base_root;
+         "Command: " ^ value "command" "(missing)" args]
+    | "start_process" ->
+        let program = value "program" "(missing)" args in
+        let arguments = string_list "arguments" args in
+        "Starts an unsandboxed background executable under your account; it may access files and the network.",
+        (["Job ID: " ^ quoted "id" "(missing)" args;
+          "Program and arguments: " ^ Filename.quote_command program arguments] @
+         cwd_detail () @ environment_details ())
+    | "start_shell" ->
+        "Starts an unsandboxed background shell under your account; it may access files and the network.",
+        (["Job ID: " ^ quoted "id" "(missing)" args;
+          "Command: " ^ value "command" "(missing)" args] @
+         cwd_detail () @ environment_details ())
+    | "process_stdin" ->
+        let data = value "data" "" args in
+        "Writes input to an existing session-owned process; the process may perform side effects.",
+        ["Job ID: " ^ quoted "id" "(missing)" args;
+         Printf.sprintf "Input (%d bytes): %S" (String.length data) data]
+    | "process_close_stdin" ->
+        "Closes stdin for an existing session-owned process.",
+        ["Job ID: " ^ quoted "id" "(missing)" args]
+    | "process_kill" ->
+        "Terminates an existing session-owned process and its process group.",
+        ["Job ID: " ^ quoted "id" "(missing)" args]
+    | "worktree_create" ->
+        "Creates a new Git branch and worktree outside the selected repository.",
+        ["Worktree ID: " ^ quoted "id" "(missing)" args;
+         "Path: " ^ quoted "path" "(missing)" args;
+         "Branch: " ^ quoted "branch" "(missing)" args]
+    | "worktree_commit" ->
+        let paths = string_list "paths" args in
+        "Stages and commits only these exact paths in a session-owned worktree; unrelated staged changes are preserved.",
+        ["Worktree ID: " ^ quoted "id" "(missing)" args;
+         "Paths: " ^ String.concat ", " (List.map (Printf.sprintf "%S") paths);
+         "Commit message: " ^ quoted "message" "(missing)" args]
+    | "worktree_remove" ->
+        "Removes a clean session-owned worktree; dirty or ignored content makes removal fail.",
+        ["Worktree ID: " ^ quoted "id" "(missing)" args]
     | _ ->
         "Performs a tool action that has no safe preview.",
         ["No argument preview is available."] in
@@ -864,95 +1389,195 @@ let approval_request ~root ~name ~args (decision : Approval.decision) =
     reason = decision.reason }
 
 let validate_arguments ~name ~args =
-  let parameters =
+  let schema =
     match List.find_opt (fun json -> function_name json = `String name) definitions with
     | Some json -> Protocol.member "parameters" (Protocol.member "function" json)
     | None -> fail ("unknown tool: " ^ name) in
-  let properties = match Protocol.member "properties" parameters with
+  let schema_fields key schema =
+    match Protocol.member key schema with
     | `Assoc fields -> fields
+    | `Null -> []
     | _ -> fail "invalid tool parameter schema" in
-  let fields = match args with
-    | `Assoc fields -> fields
-    | _ -> fail "arguments must be a JSON object" in
-  let names = List.map fst fields in
-  if List.length names <> List.length (List.sort_uniq String.compare names) then
-    fail "duplicate argument field";
-  let required = match Protocol.member "required" parameters with
+  let names key schema =
+    match Protocol.member key schema with
     | `List values -> List.map (function
         | `String value -> value
         | _ -> fail "invalid tool parameter schema") values
+    | `Null -> []
     | _ -> fail "invalid tool parameter schema" in
-  List.iter (fun name ->
-    if not (List.mem_assoc name fields) then
-      fail ("missing required argument: " ^ name)) required;
-  let additional = Protocol.member "additionalProperties" parameters in
-  List.iter (fun (name, value) ->
-    match List.assoc_opt name properties with
-    | None ->
-        if additional = `Bool false then fail ("unexpected argument: " ^ name)
-    | Some property ->
-        let type_name = match Protocol.member "type" property with
-          | `String value -> value
-          | _ -> fail "invalid tool parameter schema" in
-        let valid = match type_name, value with
-          | "string", `String _ | "integer", `Int _ | "boolean", `Bool _
-          | "object", `Assoc _ | "array", `List _ | "null", `Null
-          | "number", (`Int _ | `Float _) -> true
-          | _ -> false in
-        if not valid then fail (name ^ " must have JSON type " ^ type_name);
-        if type_name = "integer" then
-          match value with
-          | `Int number ->
-              let bound key = match Protocol.member key property with
-                | `Int number -> Some number
-                | `Null -> None
-                | _ -> fail "invalid tool parameter schema" in
-              let minimum = bound "minimum" in
-              let maximum = bound "maximum" in
-              if (match minimum with Some limit -> number < limit | None -> false) ||
-                (match maximum with Some limit -> number > limit | None -> false)
-              then fail (name ^ " is outside its allowed range")
-          | _ -> assert false) fields
+  let bound key schema =
+    match Protocol.member key schema with
+    | `Int number -> Some number
+    | `Null -> None
+    | _ -> fail "invalid tool parameter schema" in
+  let rec validate_value label schema value =
+    let type_name = match Protocol.member "type" schema with
+      | `String value -> value
+      | _ -> fail "invalid tool parameter schema" in
+    let valid = match type_name, value with
+      | "string", `String _ | "integer", `Int _ | "boolean", `Bool _
+      | "object", `Assoc _ | "array", `List _ | "null", `Null
+      | "number", (`Int _ | `Float _) -> true
+      | _ -> false in
+    if not valid then fail (label ^ " must have JSON type " ^ type_name);
+    (match Protocol.member "enum" schema with
+     | `List allowed when not (List.mem value allowed) ->
+         fail (label ^ " must be one of the advertised values")
+     | `List _ | `Null -> ()
+     | _ -> fail "invalid tool parameter schema");
+    (match value with
+     | `String text ->
+         (match bound "maxLength" schema with
+          | Some maximum when String.length text > maximum ->
+              fail (label ^ " exceeds its maximum length")
+          | Some _ | None -> ())
+     | `Int number ->
+         let minimum = bound "minimum" schema in
+         let maximum = bound "maximum" schema in
+         if (match minimum with Some limit -> number < limit | None -> false) ||
+            (match maximum with Some limit -> number > limit | None -> false)
+         then fail (label ^ " is outside its allowed range")
+     | `Assoc fields ->
+         let field_names = List.map fst fields in
+         if List.length field_names <> List.length (List.sort_uniq String.compare field_names) then
+           fail (label ^ " contains a duplicate field");
+         let properties = schema_fields "properties" schema in
+         List.iter (fun required ->
+           if not (List.mem_assoc required fields) then
+             fail (label ^ " is missing required field " ^ required))
+           (names "required" schema);
+         let additional = Protocol.member "additionalProperties" schema in
+         List.iter (fun (field, field_value) ->
+           match List.assoc_opt field properties with
+           | Some field_schema -> validate_value (label ^ "." ^ field) field_schema field_value
+           | None ->
+               (match additional with
+                | `Bool false ->
+                    fail (Printf.sprintf "unexpected argument: %s.%s" label field)
+                | `Assoc _ as field_schema ->
+                    validate_value (label ^ "." ^ field) field_schema field_value
+                | `Bool true | `Null -> ()
+                | _ -> fail "invalid tool parameter schema")) fields
+     | `List values ->
+         let item_schema = Protocol.member "items" schema in
+         if item_schema = `Null then fail "invalid tool parameter schema";
+         List.iteri (fun index item -> validate_value
+           (Printf.sprintf "%s[%d]" label index) item_schema item) values
+     | _ -> ())
+  in
+  validate_value "arguments" schema args
 
 type prepared_execution =
-  ?cancel:(unit -> bool) -> ?on_progress:(int -> unit) -> unit ->
+  ?cancel:(unit -> bool) -> ?on_progress:(int -> unit) -> ?approved:bool -> unit ->
   Protocol.content_block list
 
-let prepare ~root ~name ~args () =
+let session_tool_names = [
+  "start_process"; "start_shell"; "process_list"; "process_output";
+  "process_wait"; "process_ready"; "process_stdin"; "process_close_stdin";
+  "process_kill"; "worktree_list"; "worktree_status"; "worktree_diff";
+  "worktree_history"; "worktree_create"; "worktree_commit"; "worktree_remove"
+]
+
+let path_tool_names = [
+  "workspace_snapshot"; "list_files"; "search"; "glob"; "grep";
+  "write_file"; "edit_file"; "apply_edits"; "ast_edit"
+]
+
+let error_message = function
+  | Tool_error message | Workspace_edit.Error message | Workspace_path.Error message
+  | Workspace_process.Error message | Workspace_git.Error message
+  | Workspace_reader.Error message -> "Error: " ^ message
+  | Unix.Unix_error (code, operation, path) ->
+      Printf.sprintf "Error: %s %s: %s" operation path (Unix.error_message code)
+  | Sys_error message -> "Error: " ^ message
+  | exn -> "Error: " ^ Printexc.to_string exn
+
+let prepare ?cancel ?context ~root ~name ~args () =
   try
-    let root = root_path root in
+    let root = Workspace_path.root_path root in
     validate_arguments ~name ~args;
-    let execute ?cancel ?on_progress () =
+    if List.mem name session_tool_names then
+      ignore (require_session_context context);
+    let tool_root, tool_args =
+      if List.mem name path_tool_names then
+        resolve_path_arguments ?cancel ?context ~root args
+      else root, args in
+    if name = "start_process" then (
+      Workspace_process.validate_id (required_string "id" args);
+      Workspace_process.validate_program
+        (required_string "program" args) (string_list "arguments" args);
+      ignore (process_cwd ?cancel ?context ~root args);
+      ignore (Workspace_process.environment_with_overrides (environment_overrides args));
+      ignore (optional_timeout "timeout_seconds" 86_400 args);
+      ignore (optional_int "output_limit" 65_536 ~minimum:1
+        ~maximum:Workspace_process.max_output_limit args);
+      ignore (optional_bool "pty" false args))
+    else if name = "start_shell" then (
+      Workspace_process.validate_id (required_string "id" args);
+      Workspace_process.validate_text "shell command" 65_536
+        (required_string "command" args);
+      ignore (process_cwd ?cancel ?context ~root args);
+      ignore (Workspace_process.environment_with_overrides (environment_overrides args));
+      ignore (optional_timeout "timeout_seconds" 86_400 args);
+      ignore (optional_int "output_limit" 65_536 ~minimum:1
+        ~maximum:Workspace_process.max_output_limit args);
+      ignore (optional_bool "pty" false args));
+    let execute ?cancel ?on_progress ?(approved = false) () =
       try
         let result = match name with
-          | "read_file" -> read_file root args
-          | "list_files" -> list_files root args
-          | "search" -> search root args
-          | "glob" -> glob root args
-          | "grep" -> grep root args
-          | "write_file" -> write_file root args
-          | "edit_file" -> edit_file root args
+          | "read_file" -> read_file ?cancel ?context root args
+          | "workspace_snapshot" -> workspace_snapshot ?cancel ?context tool_root tool_args
+          | "list_files" -> list_files tool_root tool_args
+          | "search" -> search tool_root tool_args
+          | "glob" -> glob tool_root tool_args
+          | "grep" -> grep tool_root tool_args
+          | "write_file" -> write_file tool_root tool_args
+          | "edit_file" -> edit_file tool_root tool_args
+          | "apply_edits" -> apply_edits ?cancel ?context tool_root tool_args
+          | "ast_edit" -> ast_edit ?cancel ?context tool_root tool_args
           | "run_command" -> run_command ?cancel ?on_progress root args
+          | "start_process" -> start_process ~approved ?cancel ?context root args
+          | "start_shell" -> start_shell ~approved ?cancel ?context root args
+          | "process_list" -> process_list ?context root args
+          | "process_output" -> process_output ?context root args
+          | "process_wait" -> process_wait ?cancel ?context root args
+          | "process_ready" -> process_ready ?cancel ?context root args
+          | "process_stdin" -> process_stdin ~approved ?context root args
+          | "process_close_stdin" -> process_close_stdin ~approved ?context root args
+          | "process_kill" -> process_kill ~approved ?context root args
+          | "worktree_list" -> worktree_list ?cancel ?context root args
+          | "worktree_status" -> worktree_status ?cancel ?context root args
+          | "worktree_diff" -> worktree_diff ?cancel ?context root args
+          | "worktree_history" -> worktree_history ?cancel ?context root args
+          | "worktree_create" -> worktree_create ~approved ?cancel ?context root args
+          | "worktree_commit" -> worktree_commit ~approved ?cancel ?context root args
+          | "worktree_remove" -> worktree_remove ~approved ?cancel ?context root args
           | "mobile_project" -> mobile_project root
           | _ -> assert false in
         [Protocol.Text result]
       with
-      | Tool_error message -> [Protocol.Text ("Error: " ^ message)]
-      | Unix.Unix_error (code, operation, path) ->
-          [Protocol.Text (Printf.sprintf "Error: %s %s: %s" operation path
-            (Unix.error_message code))]
-      | Sys_error message -> [Protocol.Text ("Error: " ^ message)] in
+      | Cancelled -> raise Cancelled
+      | (Workspace_process.Error _ | Workspace_git.Error _ |
+         Workspace_reader.Error _) as exn ->
+          (match cancel with
+           | Some cancelled when cancelled () -> raise Cancelled
+           | _ -> [Protocol.Text (error_message exn)])
+      | exn -> [Protocol.Text (error_message exn)] in
     Ok execute
   with
-  | Tool_error message -> Error ("Error: " ^ message)
-  | Unix.Unix_error (code, operation, path) ->
-      Error (Printf.sprintf "Error: %s %s: %s" operation path (Unix.error_message code))
-  | Sys_error message -> Error ("Error: " ^ message)
+  | Cancelled -> raise Cancelled
+  | (Workspace_process.Error _ | Workspace_git.Error _ |
+     Workspace_reader.Error _) as exn ->
+      (match cancel with
+       | Some cancelled when cancelled () -> raise Cancelled
+       | _ -> Error (error_message exn))
+  | exn -> Error (error_message exn)
 
-let execute ?cancel ?on_progress ?preflight ~root ~name ~args () =
+let execute ?cancel ?on_progress ?preflight ?context ?(approved = false)
+    ~root ~name ~args () =
   let display execute = Protocol.display_content_blocks
-    (execute ?cancel ?on_progress ()) in
-  match prepare ~root ~name ~args () with
+    (execute ?cancel ?on_progress ?approved:(Some approved) ()) in
+  match prepare ?cancel ?context ~root ~name ~args () with
   | Error result -> result
   | Ok execute ->
       try
@@ -963,7 +1588,6 @@ let execute ?cancel ?on_progress ?preflight ~root ~name ~args () =
              | None -> display execute)
         | None -> display execute
       with
-      | Tool_error message -> "Error: " ^ message
-      | Unix.Unix_error (code, operation, path) ->
-          Printf.sprintf "Error: %s %s: %s" operation path (Unix.error_message code)
-      | Sys_error message -> "Error: " ^ message
+      | Cancelled -> raise Cancelled
+      | exn -> error_message exn
+
