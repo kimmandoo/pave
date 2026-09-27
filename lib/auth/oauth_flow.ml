@@ -298,8 +298,28 @@ let read_bounded path =
     if size > 1_048_576 then fail "OAuth token response too large";
     really_input_string ic size)
 
+let curl_path = "/usr/bin/curl"
+let curl_environment = [|"LANG=C"; "LC_ALL=C"|]
+
+(* Explicit fixture injection for tests; production requests use curl_path. *)
+
+module Test = struct
+  let curl_helper = ref None
+
+  let use_curl_helper executable =
+    curl_helper := Some (Unix.realpath executable)
+end
+
 let default_http ~url ~headers ~body =
   ignore (validate_url url);
+  let executable, environment = match !Test.curl_helper with
+    | Some executable -> executable, Unix.environment ()
+    | None ->
+        if not (Sys.file_exists curl_path &&
+            (try Unix.access curl_path [Unix.X_OK]; true
+             with Unix.Unix_error _ -> false)) then
+          fail "trusted OAuth curl executable is unavailable";
+        curl_path, curl_environment in
   with_private_file (fun body_path body_file ->
     output_string body_file body; close_out body_file;
     with_private_file (fun output_path output_file ->
@@ -321,7 +341,8 @@ let default_http ~url ~headers ~body =
         let input = Unix.openfile "/dev/null" [Unix.O_RDONLY] 0 in
         let errors = Unix.openfile "/dev/null" [Unix.O_WRONLY] 0 in
         let output_read, output_write = Unix.pipe () in
-        let pid = try Unix.create_process "curl" [|"curl"; "--disable"; "--config"; config_path|]
+        let pid = try Unix.create_process_env executable
+            [|"curl"; "--disable"; "--config"; config_path|] environment
             input output_write errors
           with _ ->
             List.iter Unix.close [input; errors; output_read; output_write];

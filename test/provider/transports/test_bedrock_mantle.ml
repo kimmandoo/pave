@@ -113,8 +113,12 @@ let test_http_fixture () =
       assert (second.content = Some "alpha.txt contains: contents-alpha");
       assert (second.tool_calls = [])))
 
+let () = Pave.Provider.Test.use_curl_helper Sys.executable_name
+
 let () =
-  if Sys.getenv_opt "PAVE_MANTLE_FAKE_CURL" = Some "1" then fake_curl ()
+  if Array.length Sys.argv >= 3 &&
+     Sys.argv.(1) = "--disable" && Sys.argv.(2) = "--config" then
+    fake_curl ()
   else (
     assert (target.host = "bedrock-mantle.us-east-2.api.aws");
     assert (target.path = "/openai/v1/responses");

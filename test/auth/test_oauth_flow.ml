@@ -40,6 +40,8 @@ let port_available () =
   port
 
 let () =
+  assert (Flow.curl_path = "/usr/bin/curl");
+  assert (Array.to_list Flow.curl_environment = ["LANG=C"; "LC_ALL=C"]);
   assert (Flow.pkce_challenge "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk" =
     "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM");
   let auth = Flow.start ~now:1000. policy in

@@ -31,6 +31,18 @@ let check_deadline ~cancel ~deadline ~program =
     fail ("Google ADC " ^ Filename.basename program ^ " command timed out")
 
 let close_fd fd = try Unix.close fd with Unix.Unix_error _ -> ()
+(* Explicit fixture injection for tests; production requests use curl_path. *)
+
+module Test = struct
+  let curl_helper = ref None
+
+  let use_curl_helper executable =
+    curl_helper := Some (Unix.realpath executable)
+end
+
+let curl_path = "/usr/bin/curl"
+let curl_environment = [|"LANG=C"; "LC_ALL=C"|]
+
 let subprocess_unix_error name (error, operation, _) =
   fail (Printf.sprintf "Google ADC %s subprocess failed (%s: %s)"
     name operation (Unix.error_message error))
@@ -40,6 +52,11 @@ let execute ?(stdin = "") ?cancel ~timeout program arguments =
   if timeout <= 0. then fail "invalid Google ADC subprocess deadline";
   let deadline = Unix.gettimeofday () +. timeout in
   check_deadline ~cancel ~deadline ~program;
+  if program = "curl" && !Test.curl_helper = None &&
+     not (Sys.file_exists curl_path &&
+       (try Unix.access curl_path [Unix.X_OK]; true
+        with Unix.Unix_error _ -> false)) then
+    fail "trusted Google ADC curl executable is unavailable";
   let input_read, input_write = Unix.pipe () in
   let output_read, output_write = Unix.pipe () in
   let errors =
@@ -59,7 +76,13 @@ let execute ?(stdin = "") ?cancel ~timeout program arguments =
        Unix.dup2 output_write Unix.stdout;
        Unix.dup2 errors Unix.stderr;
        List.iter close_fd [input_read; input_write; output_read; output_write; errors];
-       Unix.execvp program (Array.of_list (program :: arguments))
+       let argv = Array.of_list (program :: arguments) in
+       if program = "curl" then (
+         let path, environment = match !Test.curl_helper with
+           | Some path -> path, Unix.environment ()
+           | None -> curl_path, curl_environment in
+         Unix.execve path argv environment)
+       else Unix.execvp program argv
      with _ -> Unix._exit 127));
   close_fd input_read;
   close_fd output_write;

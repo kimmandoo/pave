@@ -500,6 +500,8 @@ let test_discovery () =
    | Ok [_] -> ()
    | _ -> fail "valid minimal Umans capability entry was rejected")
 
+let () = Pave.Provider.Test.use_curl_helper Sys.executable_name
+
 let () =
   if Array.length Sys.argv >= 3 && Sys.argv.(1) = "--disable" &&
       Sys.argv.(2) = "--config" then

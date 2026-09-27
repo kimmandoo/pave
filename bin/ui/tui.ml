@@ -763,6 +763,31 @@ let suspend t callback =
       paint t) ~finally:(fun () ->
         Sys.set_signal Sys.sigint previous_sigint))
 
+let show_terminal_image t ~enabled (image : Pave.Terminal_image.image) =
+  let env name = Option.value ~default:"" (Sys.getenv_opt name) in
+  let ssh = List.exists (fun name -> env name <> "")
+    ["SSH_CONNECTION"; "SSH_CLIENT"; "SSH_TTY"] in
+  let capability = Pave.Terminal_image.detect ~term:(env "TERM")
+    ~term_program:(env "TERM_PROGRAM") ~ssh in
+  match capability with
+  | Pave.Terminal_image.Unsupported -> false
+  | Pave.Terminal_image.Supported _ ->
+      let commands = Pave.Terminal_image.encode_image
+        ~capability ~enabled image in
+      if commands = [] then false
+      else (
+        suspend t (fun () ->
+          print_string "\027[2J\027[H";
+          List.iter print_string commands;
+          print_string "\r\nPress Return to return to Pave.";
+          flush stdout;
+          (try ignore (input_line stdin) with End_of_file -> ());
+          List.iter print_string
+            (Pave.Terminal_image.clear ~capability ~enabled);
+          print_string "\027[0m\r\n";
+          flush stdout);
+        true)
+
 let reset_status t =
   t.status <- idle_status;
   paint t

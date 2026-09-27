@@ -523,3 +523,48 @@
  (name test_workspace_tools)
  (modules test_workspace_tools)
  (libraries pave unix yojson threads))
+
+(test
+ (name test_repository_security)
+ (modules test_repository_security)
+ (libraries pave unix yojson))
+
+(test
+ (name test_native_services)
+ (modules test_native_services)
+ (libraries pave unix yojson threads))
+
+(test
+ (name test_native_tokenizer)
+ (modules test_native_tokenizer)
+ (libraries pave unix))
+
+(test
+ (name test_terminal_image)
+ (modules test_terminal_image)
+ (libraries pave unix))
+
+(test
+ (name test_web_search)
+ (modules test_web_search)
+ (libraries pave unix yojson threads))
+
+(test
+ (name test_workspace_ssh)
+ (modules test_workspace_ssh)
+ (libraries pave unix yojson threads))
+
+(test
+ (name test_workspace_lsp)
+ (modules test_workspace_lsp)
+ (libraries pave unix yojson threads))
+
+(test
+ (name test_workspace_dap)
+ (modules test_workspace_dap)
+ (libraries pave unix yojson threads))
+
+(test
+ (name test_workspace_eval)
+ (modules test_workspace_eval)
+ (libraries pave unix yojson threads))

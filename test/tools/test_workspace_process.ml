@@ -146,7 +146,46 @@ let () =
   assert (not (contains (List.hd (Process.jobs env_manager)).Process.command "child-only-secret"));
   expect_error (fun () -> Process.start env_manager ~id:"invalid-env"
     ~environment:["bad=key", "value"] ~program:"/usr/bin/true" ~arguments:[] ());
-  Process.close_manager env_manager;
+  let auth_name = "OPENAI_API_KEY" in
+  let search_name = "TAVILY_API_KEY" in
+  let custom_name = "PAVE_CUSTOM_PROVIDER_TOKEN" in
+  let previous = List.map (fun name -> name, Sys.getenv_opt name)
+    [auth_name; search_name; custom_name] in
+  let sentinel = "pave-child-environment-secret" in
+  List.iter (fun (name, _) -> Unix.putenv name sentinel) previous;
+  Fun.protect
+    ~finally:(fun () ->
+      List.iter (fun (name, value) ->
+        Unix.putenv name (Option.value ~default:"" value)) previous)
+    (fun () ->
+      let inherited = Process.run ~program:"/usr/bin/env" ~arguments:[] () in
+      assert (inherited.termination = Process.Exited 0);
+      assert (contains inherited.output "PATH=");
+      assert (List.for_all (fun name -> not (contains inherited.output name))
+        [auth_name; search_name; custom_name; sentinel]);
+      Option.iter (fun home ->
+        assert (contains inherited.output ("HOME=" ^ home)))
+        (Sys.getenv_opt "HOME");
+      let isolated = Process.run ~inherit_environment:false
+        ~environment:["PATH", "/usr/bin:/bin"]
+        ~program:"/usr/bin/env" ~arguments:[] () in
+      assert (isolated.termination = Process.Exited 0);
+      assert (isolated.output = "PATH=/usr/bin:/bin\n");
+      assert (not (contains isolated.output sentinel)));
+
+  let auth_name = "OPENAI_API_KEY" in
+  let inherited_auth = Sys.getenv_opt auth_name in
+  let auth_sentinel = "pave-child-environment-secret" in
+  Unix.putenv auth_name auth_sentinel;
+  Fun.protect ~finally:(fun () ->
+    Unix.putenv auth_name (Option.value ~default:"" inherited_auth))
+    (fun () ->
+      let isolated = Process.run ~inherit_environment:false
+        ~environment:["PATH", "/usr/bin:/bin"]
+        ~program:"/usr/bin/env" ~arguments:[] () in
+      assert (isolated.termination = Process.Exited 0);
+      assert (isolated.output = "PATH=/usr/bin:/bin\n");
+      assert (not (contains isolated.output auth_sentinel)));
 
   let records = Process.create_manager ~max_jobs:1 () in
   for index = 0 to 64 do

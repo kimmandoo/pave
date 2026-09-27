@@ -63,6 +63,10 @@ let make_reply product = stream_reply (response (fun b ->
   D.bytes b 7 (response (fun usage ->
     D.number usage 2 76; D.number usage 3 12))))
 let () =
+  assert (Pave.Devin_binary_http.curl_path = "/usr/bin/curl");
+  assert (Array.to_list Pave.Devin_binary_http.curl_environment =
+    ["LANG=C"; "LC_ALL=C"]);
+
   let steps = ref [] in
   let seen url = steps := url :: !steps in
   let http ~url ~headers ~body ~on_chunk =

@@ -80,6 +80,7 @@ printf '200'
       Unix.putenv "PAVE_ANTHROPIC_CONFIG" captured_config;
       Unix.putenv "PAVE_ANTHROPIC_BODY" captured_body;
       Unix.putenv "PAVE_ANTHROPIC_CALLS" calls;
+      Pave.Provider.Test.use_curl_helper curl;
       let set_response json =
         Unix.putenv "PAVE_ANTHROPIC_RESPONSE" (Yojson.Basic.to_string json) in
       let captured_request () =

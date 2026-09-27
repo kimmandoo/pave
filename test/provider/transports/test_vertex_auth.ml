@@ -112,6 +112,9 @@ let () =
   assert (Vertex.execute ~timeout:3. "/bin/sh"
     ["-c"; "printf ready; sleep 0.2 &"] = "ready");
   let arguments, body = Vertex.service_account_request ~assertion:"a.b" in
+  assert (Vertex.curl_path = "/usr/bin/curl");
+  assert (Array.to_list Vertex.curl_environment = ["LANG=C"; "LC_ALL=C"]);
+
   assert (arguments = Vertex.authorized_user_curl_arguments);
   assert (body =
     "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=a.b");
@@ -148,7 +151,9 @@ let () =
         "PAVE_VERTEX_SIGNING_INPUT", signed_input;
         "PAVE_VERTEX_TOKEN_BODY", token_body ] in
       let rec with_environment = function
-        | [] -> assert (Vertex.access_token () = "fixture-service-token")
+        | [] ->
+            Vertex.Test.use_curl_helper (Filename.concat directory "curl");
+            assert (Vertex.access_token () = "fixture-service-token")
         | (name, value) :: rest -> with_env name value (fun () -> with_environment rest) in
       with_environment environment;
       assert (not (contains (read_file token_body) "fixture-private-key"));

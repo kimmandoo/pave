@@ -1,5 +1,26 @@
 # Troubleshooting
 
+### [2026-09-28] NVM-installed JavaScript runtime was not found
+
+- **Context / Symptom:** The persistent-evaluation regression reported that Node.js was unavailable even though Node 24 was installed in the active `NVM_BIN` directory.
+- **Root Cause:** Runtime discovery covered fixed system and Homebrew candidates but omitted the active NVM installation.
+- **Solution:** Added the absolute `$NVM_BIN/node` candidate without widening the evaluator's child-process environment. The focused persistent-evaluation test passed.
+- **Prevention / Reference:** Exercise runtime discovery with supported version managers while keeping runtime lookup separate from the evaluator's explicit environment allowlist.
+
+### [2026-09-28] Kitty image frames omitted the graphics introducer
+
+- **Context / Symptom:** `test_terminal_image` received `ESC _ a=T,...` while a Kitty graphics APC requires `ESC _ G a=T,...`; image frames and deletion commands were not protocol-compliant.
+- **Root Cause:** The shared APC wrapper emitted the generic `ESC _` prefix but omitted Kitty's required `G` introducer.
+- **Solution:** Changed the Kitty APC wrapper to emit `ESC _ G` for image chunks and clear operations. Exact framing, chunk-boundary and deletion tests passed.
+- **Prevention / Reference:** Verify terminal image protocols with byte-exact fixtures for opening introducers, payload chunks and closing delimiters.
+
+### [2026-09-28] DAP fixture assigned message sequences during list construction
+
+- **Context / Symptom:** The DAP regression failed with `DAP adapter sequence is duplicate or out of order` while its fake adapter emitted `initialized`, responses and stopped events.
+- **Root Cause:** The fixture incremented the adapter sequence counter from calls embedded in list construction and append expressions, leaving sequence assignment dependent on expression evaluation order rather than explicit wire order.
+- **Solution:** Constructed each event/response frame in sequential `let` bindings before assembling the outgoing list. The fragmented DAP lifecycle test passed.
+- **Prevention / Reference:** Keep stateful message-ID allocation separate from list/tuple construction and verify IDs in actual transport order.
+
 ### [2026-09-28] Hosted process-listener readiness fixture timed out
 
 - **Context / Symptom:** Main CI `36333579512` passed three OCaml jobs, including macOS 5.3.0 after the ADC reaping fix, but macOS 5.5.1 failed the bare assertion at `test/tools/test_workspace_process.ml:183` while waiting for a Python listener's log and loopback port.
@@ -51,9 +72,9 @@
 
 ### [2026-09-27] Darwin workspace aliases failed canonical cwd checks
 
-- **Context / Symptom:** The process-tool approval fixture rejected workspace cwd `.` with `Workspace_path.Error("path escapes workspace: .")`; the managed-worktree fixture also compared `/var/folders/...` with Git's `/private/var/folders/...` path.
-- **Root Cause:** macOS resolves `/var` through `/private/var`, while process working-directory checks and a Git fixture retained the noncanonical alias.
-- **Solution:** Canonicalized the resolved workspace root before validating process cwd and canonicalized the Git fixture root with `Unix.realpath`. The isolated Agent-approval and worktree tests and the full forced suite passed.
+- **Context / Symptom:** The process-tool fixture rejected workspace cwd `.` with `Workspace_path.Error("path escapes workspace: .")`; the managed-worktree fixture compared `/var/folders/...` with Git's `/private/var/folders/...` path. R9 LSP fixture responses also referenced an unopened document when its URI used the noncanonical alias, and the DAP child-cwd comparison expected that alias.
+- **Root Cause:** macOS resolves `/var` through `/private/var`, while process checks, test URIs and a DAP cwd assertion retained the noncanonical temporary-root spelling.
+- **Solution:** Canonicalized workspace roots and test fixture roots with `Unix.realpath` before constructing process, Git, LSP and DAP path expectations. The affected focused tests and the forced suite passed.
 - **Prevention / Reference:** Compare and validate workspace paths only after canonicalizing the root on Darwin.
 
 ### [2026-09-27] Workspace process wrappers needed explicit OCaml argument contracts

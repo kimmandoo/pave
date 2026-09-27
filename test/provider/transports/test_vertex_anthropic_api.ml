@@ -1,4 +1,5 @@
 open Pave
+module Vertex = Pave.Vertex_auth
 
 let model = "claude-sonnet-4-5"
 let token = "vertex-fixture-token"
@@ -152,6 +153,8 @@ let with_env name value f =
   Fun.protect ~finally:(fun () ->
     Unix.putenv name (Option.value previous ~default:"")) f
 
+let () = Pave.Provider.Test.use_curl_helper Sys.executable_name
+
 let () =
   if Array.length Sys.argv >= 2 && Sys.argv.(1) = "--disable" then fake_curl ()
   else (
@@ -166,9 +169,9 @@ let () =
       List.iter (fun path -> try Sys.remove path with Sys_error _ -> ())
         [credentials; curl; state; response];
       Unix.rmdir directory) (fun () ->
-        let executable = Filename.quote Sys.executable_name in
-        write_file curl ("#!/bin/sh\nexec " ^ executable ^ " \"$@\"\n");
+        write_file curl ("#!/bin/sh\nexec " ^ Sys.executable_name ^ " \"$@\"\n");
         Unix.chmod curl 0o700;
+        Vertex.Test.use_curl_helper curl;
         write_file credentials
           {|{"type":"authorized_user","client_id":"fixture-client","client_secret":"fixture-client-secret","refresh_token":"fixture-refresh-token"}|};
         let original_path = Option.value ~default:"/usr/bin:/bin" (Sys.getenv_opt "PATH") in

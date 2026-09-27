@@ -86,6 +86,16 @@ let () =
     Pave.Workspace_path.atomic_write conflict_path "user update\n";
     expect_error (fun () -> Pave.Session_rewind.rewind manager ~id:conflict.id);
     assert (read_file conflict_path = "user update\n");
+    let lsp_path = child root "lsp-edited.txt" in
+    Pave.Workspace_path.atomic_write lsp_path "before LSP\n";
+    let lsp_before = Pave.Session_rewind.snapshot_file ~root ~path:"lsp-edited.txt" in
+    Pave.Workspace_path.atomic_write lsp_path "after LSP\n";
+    let lsp_after = Pave.Session_rewind.snapshot_file ~root ~path:"lsp-edited.txt" in
+    let lsp_entry = Option.get (Pave.Session_rewind.record_file_change manager
+      ~tool_name:"lsp" ~path:"lsp-edited.txt"
+      ~before:lsp_before ~after:lsp_after) in
+    ignore (Pave.Session_rewind.rewind manager ~id:lsp_entry.id);
+    assert (read_file lsp_path = "before LSP\n");
 
     let irreversible = Pave.Session_rewind.record_non_reversible manager
       ~tool_name:"run_command"
@@ -95,6 +105,9 @@ let () =
     let non_reversible_tools = [
       "start_process"; "start_shell"; "process_stdin"; "process_close_stdin";
       "process_kill"; "worktree_create"; "worktree_commit"; "worktree_remove";
+      "workspace_eval"; "lsp_start"; "dap_start"; "dap";
+      "ssh_open"; "ssh_read"; "ssh_write"; "ssh_command";
+      "web_search"; "web_fetch"; "clipboard_write";
       "write_file"; "edit_file"; "apply_edits"; "ast_edit"
     ] in
     List.iter (fun tool_name ->
@@ -118,6 +131,9 @@ let () =
     let recovered = Pave.Session_rewind.list reopened_manager in
     assert (List.exists (fun (rewind_entry : Pave.Session_rewind.rewind_effect) ->
       rewind_entry.id = existing.id &&
+      rewind_entry.status = Pave.Session_rewind.Reverted) recovered);
+    assert (List.exists (fun (rewind_entry : Pave.Session_rewind.rewind_effect) ->
+      rewind_entry.id = lsp_entry.id &&
       rewind_entry.status = Pave.Session_rewind.Reverted) recovered);
     assert (List.exists (fun (rewind_entry : Pave.Session_rewind.rewind_effect) ->
       rewind_entry.id = conflict.id &&

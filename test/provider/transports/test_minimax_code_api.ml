@@ -99,6 +99,8 @@ let expect_rejected f = match f () with
   | exception Invalid_argument _ -> ()
   | _ -> fail "unsafe key/endpoint accepted"
 
+let () = Pave.Provider.Test.use_curl_helper Sys.executable_name
+
 let () =
   if Array.length Sys.argv >= 3 && Sys.argv.(1) = "--disable" && Sys.argv.(2) = "--config" then
     (try fake_curl () with exn ->

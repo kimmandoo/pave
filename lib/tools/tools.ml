@@ -12,6 +12,16 @@ type session_context = {
   owner : string;
   process_manager : Workspace_process.manager;
   read_artifact : string -> string option;
+  lsp_manager : Workspace_lsp.manager;
+  dap_manager : Workspace_dap.manager;
+  dap_granted_effect : Workspace_dap.authorization_effect option ref;
+  eval_lock : Mutex.t;
+  mutable python_kernel : Workspace_eval.t option;
+  mutable javascript_kernel : Workspace_eval.t option;
+  ssh_lock : Mutex.t;
+  ssh_sessions : (string, Workspace_ssh.session) Hashtbl.t;
+  record_file_change : path:string -> before:string -> after:string -> unit;
+  mutable closed : bool;
 }
 
 type file_location = {
@@ -48,8 +58,60 @@ let resolve_file_location ?cancel ?context ~root path =
   else Some { root; path; worktree_id = None }
 
 let require_session_context = function
-  | Some context -> context
+  | Some context when not context.closed -> context
+  | Some _ -> raise (Tool_error "session tools are closed")
   | None -> raise (Tool_error "this tool requires a private saved session")
+
+let create_session_context ?lsp_manager ~owner ~root ~process_manager ~read_artifact
+    ~record_file_change () =
+  let lsp_manager = match lsp_manager with
+    | Some manager -> manager
+    | None -> Workspace_lsp.create_manager () in
+  let dap_granted_effect = ref None in
+  let dap_manager = Workspace_dap.create_manager ~owner ~workspace_root:root
+    ~authorize:(fun authorization ->
+      if !dap_granted_effect <> Some authorization then
+        raise (Workspace_dap.Not_approved
+          "effect-specific interactive DAP approval is required")) in
+  { owner; process_manager; read_artifact;
+    lsp_manager;
+    dap_manager; dap_granted_effect;
+    eval_lock = Mutex.create (); python_kernel = None; javascript_kernel = None;
+    ssh_lock = Mutex.create (); ssh_sessions = Hashtbl.create 8;
+    record_file_change; closed = false }
+
+let close_session_context context =
+  if not context.closed then (
+    context.closed <- true;
+    context.dap_granted_effect := None;
+    let ignore_failure action = try action () with _ -> () in
+    ignore_failure (fun () -> Workspace_lsp.close_manager context.lsp_manager);
+    ignore_failure (fun () -> Workspace_dap.close_manager context.dap_manager);
+    let python_kernel, javascript_kernel =
+      Mutex.lock context.eval_lock;
+      let kernels = context.python_kernel, context.javascript_kernel in
+      context.python_kernel <- None;
+      context.javascript_kernel <- None;
+      Mutex.unlock context.eval_lock;
+      kernels in
+    Option.iter (fun kernel -> ignore_failure (fun () -> Workspace_eval.close kernel))
+      python_kernel;
+    Option.iter (fun kernel -> ignore_failure (fun () -> Workspace_eval.close kernel))
+      javascript_kernel;
+    let ssh_sessions =
+      Mutex.lock context.ssh_lock;
+      let sessions = Hashtbl.fold (fun _ session rows -> session :: rows)
+        context.ssh_sessions [] in
+      Hashtbl.clear context.ssh_sessions;
+      Mutex.unlock context.ssh_lock;
+      sessions in
+    List.iter (fun session ->
+      ignore_failure (fun () ->
+        Workspace_ssh.close_session ~owner:context.owner session))
+      ssh_sessions)
+
+let check_session_context context =
+  if context.closed then raise (Tool_error "session tools are closed")
 
 let bounded_text text limit =
   if String.length text <= limit then text
@@ -249,12 +311,65 @@ let matching_glob pattern relative =
   if String.contains pattern '/' then glob_parts pattern relative
   else glob_segment pattern (Filename.basename relative)
 
+let fuzzy_separator character =
+  match Uchar.to_int character with
+  | 0x2f | 0x5c | 0x2d | 0x5f | 0x2e | 0x20 -> true
+  | _ -> false
+
+let fuzzy_query text =
+  if String.length text > 256 then fail "query exceeds 256-byte limit";
+  let malformed = ref false in
+  let reversed = Uutf.String.fold_utf_8 (fun acc _ -> function
+    | `Malformed _ -> malformed := true; acc
+    | `Uchar character ->
+        (match Uucp.Case.Fold.fold character with
+         | `Self -> character :: acc
+         | `Uchars characters -> List.rev_append characters acc))
+      [] text in
+  if !malformed then fail "query must be valid UTF-8";
+  let query = Array.of_list (List.rev reversed) in
+  if Array.length query = 0 then fail "query must not be empty";
+  query
+
+let fuzzy_score query path =
+  let query_index = ref 0 and path_index = ref 0 in
+  let previous_match = ref (-1) and first_match = ref 0 in
+  let previous_separator = ref true and score = ref 0 in
+  let feed character =
+    let position = !path_index in
+    if !query_index < Array.length query &&
+       Uchar.equal character query.(!query_index) then (
+      let gap = if !previous_match < 0 then 0 else position - !previous_match in
+      if !query_index = 0 then first_match := position;
+      score := !score + 10 +
+        (if !previous_separator then 12 else 0) +
+        (if !query_index > 0 && gap = 1 then 8 else 0) -
+        (if !query_index > 0 then min 20 (max 0 (gap - 1)) else 0);
+      previous_match := position;
+      incr query_index);
+    previous_separator := fuzzy_separator character;
+    incr path_index in
+  let malformed = ref false in
+  ignore (Uutf.String.fold_utf_8 (fun () _ -> function
+    | `Malformed _ -> malformed := true
+    | `Uchar character ->
+        (match Uucp.Case.Fold.fold character with
+         | `Self -> feed character
+         | `Uchars characters -> List.iter feed characters))
+    () path);
+  if not !malformed && !query_index = Array.length query then
+    Some (!score - !first_match)
+  else None
+
 let skip_directory = function
   | ".git" | ".hg" | ".svn" | "_build" | "build" | ".build" | "dist"
   | "node_modules" | "DerivedData" | ".gradle" | ".dart_tool" | "Pods" -> true
   | _ -> false
 
-let walk ?(hidden = true) root relative visit =
+let walk ?(hidden = true) ?cancel ?visit_directory root relative visit =
+  let check_cancel () =
+    match cancel with Some cancelled when cancelled () -> raise Cancelled | _ -> () in
+  check_cancel ();
   let starting = Workspace_path.checked_path root relative in
   let relative =
     match List.filter (fun part -> part <> "" && part <> ".")
@@ -278,9 +393,11 @@ let walk ?(hidden = true) root relative visit =
   let rules = if relative = "." then root_rules else
     ancestors root "" root_rules (String.split_on_char '/' relative) in
   let rec directory absolute prefix rules =
+    check_cancel ();
     let dir = Unix.opendir absolute in
     let names = Fun.protect ~finally:(fun () -> Unix.closedir dir) (fun () ->
       let rec collect acc =
+        check_cancel ();
         if !entries >= max_walk_entries then (truncated := true; acc)
         else match Unix.readdir dir with
           | exception End_of_file -> acc
@@ -288,6 +405,7 @@ let walk ?(hidden = true) root relative visit =
           | name -> incr entries; collect (name :: acc)
       in List.sort String.compare (collect [])) in
     List.iter (fun name ->
+      check_cancel ();
       let child = Filename.concat absolute name in
       let relative = if prefix = "" then name else prefix ^ "/" ^ name in
       try
@@ -295,6 +413,7 @@ let walk ?(hidden = true) root relative visit =
         | Unix.S_DIR when not (skip_directory name) &&
                           (hidden || name.[0] <> '.') &&
                           not (ignored rules relative true) ->
+            Option.iter (fun visit -> visit relative child) visit_directory;
             directory child relative (rules @ ignore_rules child relative)
         | Unix.S_REG when (hidden || name.[0] <> '.') &&
                           not (ignored rules relative false) ->
@@ -304,6 +423,54 @@ let walk ?(hidden = true) root relative visit =
   in
   directory starting (if relative = "." then "" else relative) rules;
   !truncated
+
+type fuzzy_match = { path : string; is_directory : bool; score : int }
+
+let compare_fuzzy_match left right =
+  let by_score = compare right.score left.score in
+  if by_score <> 0 then by_score else String.compare left.path right.path
+
+let fuzzy_file_search ?cancel root args =
+  let query = fuzzy_query (required_string "query" args) in
+  let relative = optional_string "path" "." args in
+  let hidden = optional_bool "hidden" false args in
+  let max_results = optional_int "max_results" 100 ~minimum:1 ~maximum:100 args in
+  let total_matches = ref 0 and result_count = ref 0 in
+  let results = Array.make max_results None in
+  let add_match path is_directory =
+    match fuzzy_score query path with
+    | None -> ()
+    | Some score ->
+        incr total_matches;
+        let candidate = Some { path; is_directory; score } in
+        let position = ref 0 in
+        while !position < !result_count &&
+              compare_fuzzy_match (Option.get results.(!position))
+                (Option.get candidate) <= 0 do
+          incr position
+        done;
+        if !position < max_results then (
+          let next_count = min max_results (!result_count + 1) in
+          for index = next_count - 1 downto !position + 1 do
+            results.(index) <- results.(index - 1)
+          done;
+          results.(!position) <- candidate;
+          result_count := next_count) in
+  let walk_truncated = walk ~hidden ?cancel
+    ~visit_directory:(fun path _ -> add_match path true)
+    root relative (fun path _ -> add_match path false) in
+  let matches = List.init !result_count (fun index ->
+    let result = Option.get results.(index) in
+    `Assoc [
+      "path", `String result.path;
+      "is_directory", `Bool result.is_directory;
+      "score", `Int result.score
+    ]) in
+  Yojson.Basic.to_string (`Assoc [
+    "matches", `List matches;
+    "total_matches", `Int !total_matches;
+    "truncated", `Bool (walk_truncated || !total_matches > !result_count)
+  ])
 
 let append_bounded output text limit =
   if Buffer.length output + String.length text <= limit then (Buffer.add_string output text; true)
@@ -716,7 +883,7 @@ let process_cwd ?cancel ?context ~root args =
 
 let process_manager context = context.process_manager
 let require_explicit_approval approved =
-  if not approved then fail "this process or Git mutation requires explicit interactive approval"
+  if not approved then fail "this action requires explicit interactive approval"
 
 
 let start_process ~approved ?cancel ?context root args =
@@ -923,6 +1090,9 @@ let schema name description properties required =
                                                     "additionalProperties", `Bool false]]]
 
 let string_field description = `Assoc ["type", `String "string"; "description", `String description]
+let bounded_string_field description maximum =
+  `Assoc ["type", `String "string"; "description", `String description;
+          "maxLength", `Int maximum]
 let integer_field description minimum maximum =
   `Assoc ["type", `String "integer"; "description", `String description;
           "minimum", `Int minimum; "maximum", `Int maximum]
@@ -949,10 +1119,547 @@ let string_array_field description =
   `Assoc ["type", `String "array"; "description", `String description;
           "items", `Assoc ["type", `String "string"]]
 
+let object_field properties required =
+  `Assoc ["type", `String "object";
+          "properties", `Assoc properties;
+          "required", `List (List.map (fun name -> `String name) required);
+          "additionalProperties", `Bool false]
+
+let lsp_position_field =
+  object_field [
+    "line", integer_field "Zero-based document line" 0 max_int;
+    "character", integer_field "Zero-based UTF-16 character offset" 0 max_int
+  ] ["line"; "character"]
+
+let lsp_range_field =
+  object_field ["start", lsp_position_field; "end", lsp_position_field]
+    ["start"; "end"]
+
+let dap_breakpoint_field =
+  object_field [
+    "line", integer_field "One-based source line" 1 max_int;
+    "condition", bounded_string_field "Optional breakpoint condition" 1024;
+    "hit_condition", bounded_string_field "Optional hit condition" 1024;
+    "log_message", bounded_string_field "Optional logpoint message" 1024
+  ] ["line"]
+
+let dap_breakpoints_field =
+  `Assoc ["type", `String "array";
+          "items", dap_breakpoint_field;
+          "description", `String "Source breakpoints (maximum 128)"]
+
 let environment_field =
   `Assoc ["type", `String "object";
           "description", `String "Child-only environment overrides";
           "additionalProperties", string_field "Environment variable value"]
+
+let web_search ~approved ?cancel args =
+  require_explicit_approval approved;
+  let query = required_string "query" args in
+  let page = optional_int "page" 0 ~minimum:0 ~maximum:Web_search.max_page args in
+  let count = optional_int "count" 5 ~minimum:1 ~maximum:Web_search.max_results args in
+  let response = Web_search.search ?cancel ~page ~count ~query () in
+  let result result =
+    `Assoc [
+      "title", `String result.Web_search.title;
+      "url", `String result.url;
+      "snippet", `String result.snippet;
+      "provider", `String result.provider;
+      "citation", `String result.citation
+    ] in
+  Yojson.Basic.to_string (`Assoc [
+    "provider", `String response.provider;
+    "query", `String response.query;
+    "page", `Int response.page;
+    "citations", `List (List.map (fun citation -> `String citation) response.citations);
+    "results", `List (List.map result response.results)
+  ])
+
+let web_fetch ~approved ?cancel args =
+  require_explicit_approval approved;
+  let url = required_string "url" args in
+  let max_bytes = optional_int "max_bytes" Web_search.max_content_bytes
+    ~minimum:1 ~maximum:Web_search.max_content_bytes args in
+  let page = Web_search.fetch_url ?cancel ~max_bytes url () in
+  Yojson.Basic.to_string (`Assoc [
+    "source_url", `String page.source_url;
+    "markdown", `String page.markdown
+  ])
+let image_ocr ~approved ?cancel root args =
+  require_explicit_approval approved;
+  let path = required_string "path" args in
+  let mime = required_string "mime" args in
+  let absolute = Workspace_path.checked_path root path in
+  let image = Workspace_path.read_bounded absolute Native_services.max_image_bytes in
+  match Native_services.recognize ?cancel ~mime image with
+  | Native_services.Available text ->
+      Yojson.Basic.to_string (`Assoc [
+        "status", `String "available";
+        "text", `String text
+      ])
+  | Native_services.Unavailable message ->
+      Yojson.Basic.to_string (`Assoc [
+        "status", `String "unavailable";
+        "message", `String message
+      ])
+
+let clipboard_read ~approved ?cancel () =
+  require_explicit_approval approved;
+  match Native_services.clipboard ?cancel () with
+  | Native_services.Available text ->
+      Yojson.Basic.to_string (`Assoc [
+        "status", `String "available";
+        "text", `String text
+      ])
+  | Native_services.Unavailable message ->
+      Yojson.Basic.to_string (`Assoc [
+        "status", `String "unavailable";
+        "message", `String message
+      ])
+
+let clipboard_write ~approved ?cancel args =
+  require_explicit_approval approved;
+  let text = required_string "text" args in
+  match Native_services.clipboard_write ?cancel text with
+  | Native_services.Available () ->
+      Yojson.Basic.to_string (`Assoc ["status", `String "available"])
+  | Native_services.Unavailable message ->
+      Yojson.Basic.to_string (`Assoc [
+        "status", `String "unavailable";
+        "message", `String message
+      ])
+
+let lsp_start ~approved ?context root args =
+  require_explicit_approval approved;
+  let context = require_session_context context in
+  check_session_context context;
+  let program = required_string "program" args in
+  let arguments = string_list "arguments" args in
+  try Workspace_lsp.start context.lsp_manager ~owner:context.owner ~root
+    ~program ~args:arguments ~execution_approved:true;
+    Yojson.Basic.to_string (`Assoc ["status", `String "started"])
+  with Workspace_lsp.Error message -> fail message
+
+let lsp_preview ?context ~root args =
+  let context = require_session_context context in
+  check_session_context context;
+  let program = required_string "program" args in
+  let arguments = string_list "arguments" args in
+  let preview_id = required_string "preview_id" args in
+  try
+    Workspace_lsp.preview_details context.lsp_manager ~owner:context.owner ~root
+      ~program ~arguments preview_id
+  with Workspace_lsp.Error message -> fail message
+
+let lsp_preview_paths ?context ~root args =
+  let _, files = lsp_preview ?context ~root args in
+  Workspace_lsp.preview_paths files
+
+let lsp_execute ~approved ?cancel ?context root args =
+  let context = require_session_context context in
+  check_session_context context;
+  let program = required_string "program" args in
+  let arguments = string_list "arguments" args in
+  let apply_requested = optional_string "action" "" args = "apply_preview" in
+  if apply_requested then require_explicit_approval approved;
+  let apply_approved = apply_requested && approved in
+  try
+    Workspace_lsp.execute context.lsp_manager ~owner:context.owner ~root
+      ~program ~args:arguments ?cancel ~apply_approved
+      ~on_file_change:context.record_file_change args
+    |> Yojson.Basic.to_string
+  with Workspace_lsp.Error message -> fail message
+
+let ssh_session context id =
+  check_session_context context;
+  Mutex.lock context.ssh_lock;
+  let session = Hashtbl.find_opt context.ssh_sessions id in
+  Mutex.unlock context.ssh_lock;
+  match session with
+  | Some session -> session
+  | None -> fail "unknown SSH session"
+
+let ssh_open ~approved ?cancel ?context args =
+  require_explicit_approval approved;
+  let context = require_session_context context in
+  check_session_context context;
+  let id = required_string "id" args in
+  Workspace_process.validate_id id;
+  let home = Option.value ~default:"" (Sys.getenv_opt "HOME") in
+  if home = "" then fail "HOME is unavailable; configure an owned known_hosts file";
+  let endpoint = {
+    Workspace_ssh.host = required_string "host" args;
+    user = required_string "user" args;
+    remote_root = required_string "remote_root" args;
+    known_hosts = optional_string "known_hosts"
+      (Filename.concat (Filename.concat home ".ssh") "known_hosts") args
+  } in
+  Mutex.lock context.ssh_lock;
+  let already_open = Hashtbl.mem context.ssh_sessions id in
+  Mutex.unlock context.ssh_lock;
+  if already_open then fail "SSH session id is already open";
+  let session =
+    try Workspace_ssh.open_session ?cancel ~owner:context.owner ~endpoint
+      ~host_trusted:true ~network_approved:true ()
+    with Workspace_ssh.Error message -> fail message in
+  Mutex.lock context.ssh_lock;
+  Hashtbl.add context.ssh_sessions id session;
+  Mutex.unlock context.ssh_lock;
+  Yojson.Basic.to_string (`Assoc [
+    "status", `String "connected";
+    "id", `String id;
+    "host", `String endpoint.host;
+    "user", `String endpoint.user;
+    "remote_root", `String endpoint.remote_root;
+    "authentication", `String "system SSH identity; no Pave OAuth/API credential"
+  ])
+
+let ssh_close ?context args =
+  let context = require_session_context context in
+  check_session_context context;
+  let id = required_string "id" args in
+  Mutex.lock context.ssh_lock;
+  let session = Hashtbl.find_opt context.ssh_sessions id in
+  Option.iter (fun _ -> Hashtbl.remove context.ssh_sessions id) session;
+  Mutex.unlock context.ssh_lock;
+  (match session with
+   | None -> fail "unknown SSH session"
+   | Some session ->
+       (try Workspace_ssh.close_session ~owner:context.owner session
+        with Workspace_ssh.Error message -> fail message));
+  Yojson.Basic.to_string (`Assoc ["status", `String "closed"; "id", `String id])
+
+let ssh_read ~approved ?cancel ?context args =
+  require_explicit_approval approved;
+  let context = require_session_context context in
+  let session = ssh_session context (required_string "id" args) in
+  let path = required_string "path" args in
+  try
+    let contents = Workspace_ssh.read_file ?cancel ~owner:context.owner
+      ~read_approved:true ~network_approved:true session ~path () in
+    Yojson.Basic.to_string (`Assoc ["path", `String path; "contents", `String contents])
+  with Workspace_ssh.Error message -> fail message
+
+let ssh_write ~approved ?cancel ?context args =
+  require_explicit_approval approved;
+  let context = require_session_context context in
+  let session = ssh_session context (required_string "id" args) in
+  let path = required_string "path" args in
+  let contents = required_string "contents" args in
+  try
+    let bytes = Workspace_ssh.write_file ?cancel ~owner:context.owner
+      ~network_approved:true ~write_approved:true session ~path ~contents () in
+    Yojson.Basic.to_string (`Assoc [
+      "path", `String path; "bytes_written", `Int bytes
+    ])
+  with Workspace_ssh.Error message -> fail message
+
+let ssh_command ~approved ?cancel ?context args =
+  require_explicit_approval approved;
+  let context = require_session_context context in
+  let session = ssh_session context (required_string "id" args) in
+  let program = required_string "program" args in
+  let arguments = string_list "arguments" args in
+  let timeout = optional_int "timeout_seconds"
+    Workspace_ssh.default_timeout_seconds ~minimum:1
+    ~maximum:Workspace_ssh.max_timeout_seconds args in
+  try
+    let output = Workspace_ssh.run_command ?cancel ~timeout_seconds:timeout
+      ~owner:context.owner ~network_approved:true ~execution_approved:true
+      session ~program ~arguments () in
+    Yojson.Basic.to_string (`Assoc ["output", `String output])
+  with Workspace_ssh.Error message -> fail message
+
+let workspace_snapshot ?cancel ?context root args =
+  let root, args = resolve_path_arguments ?cancel ?context ~root args in
+  let path = required_string "path" args in
+  let limit = optional_int "max_bytes" 16_384 ~minimum:1
+    ~maximum:(max_read_bytes - 512) args in
+  let snapshot = Workspace_edit.read_snapshot ~root ~path in
+  let size = String.length snapshot.contents in
+  let length = min limit size in
+  let content = String.sub snapshot.contents 0 length in
+  if String.contains content '\000' then fail "binary file; workspace snapshots support text only";
+  Printf.sprintf
+    "SHA-256: %s\n%s\n[page: offset 0; bytes: %d; file size: %d; next offset: %d; %s]"
+    snapshot.sha256 content length size length
+    (if length < size then
+       "truncated; continue with read_file offset/line, and apply this hash only if unchanged"
+     else "end of file")
+
+let workspace_eval_bridge ?cancel ?context ~root ~deadline name arguments =
+  let bounded_job_timeout arguments =
+    let requested = optional_int "timeout_seconds" 10
+      ~minimum:1 ~maximum:300 arguments in
+    let remaining = deadline -. Unix.gettimeofday () in
+    if remaining <= 0. then fail "workspace evaluation timed out";
+    let timeout = min requested (max 1 (int_of_float (ceil remaining))) in
+    match arguments with
+    | `Assoc fields ->
+        `Assoc (("timeout_seconds", `Int timeout) ::
+          List.remove_assoc "timeout_seconds" fields)
+    | _ -> fail "workspace tool arguments must be an object" in
+  match name with
+  | "read_file" ->
+      let path = required_string "path" arguments in
+      let lower = String.lowercase_ascii path in
+      if not (Filename.is_relative path) ||
+         Workspace_reader.is_scheme_uri lower ||
+         starts_with lower "worktree://" then
+        fail "workspace evaluation bridge only reads workspace-relative files";
+      read_file ?cancel ?context root arguments
+  | "workspace_snapshot" -> workspace_snapshot ?cancel ?context root arguments
+  | "fuzzy_file_search" -> fuzzy_file_search ?cancel root arguments
+  | "list_files" -> list_files root arguments
+  | "search" -> search root arguments
+  | "glob" -> glob root arguments
+  | "grep" -> grep root arguments
+  | "mobile_project" -> mobile_project root
+  | "process_list" -> process_list ?context root arguments
+  | "process_output" -> process_output ?context root arguments
+  | "process_wait" ->
+      process_wait ?cancel ?context root (bounded_job_timeout arguments)
+  | "process_ready" ->
+      process_ready ?cancel ?context root (bounded_job_timeout arguments)
+  | _ -> fail "workspace evaluation bridge tool is not allowlisted"
+
+let workspace_eval ~approved ?cancel ?context root args =
+  require_explicit_approval approved;
+  let context = require_session_context context in
+  check_session_context context;
+  let language = match required_string "language" args with
+    | "python" -> Workspace_eval.Python
+    | "javascript" -> Workspace_eval.JavaScript
+    | _ -> fail "language must be python or javascript" in
+  let action = optional_string "action" "run" args in
+  if action <> "run" && action <> "reset" then
+    fail "action must be run or reset";
+  let timeout_seconds = optional_int "timeout_seconds" 10
+    ~minimum:1 ~maximum:Workspace_eval.max_timeout_seconds args in
+  let source = if action = "run" then Some (required_string "code" args) else None in
+  let kernel, created =
+    Mutex.lock context.eval_lock;
+    Fun.protect ~finally:(fun () -> Mutex.unlock context.eval_lock) (fun () ->
+      check_session_context context;
+      let current = match language with
+        | Workspace_eval.Python -> context.python_kernel
+        | Workspace_eval.JavaScript -> context.javascript_kernel in
+      match current with
+      | Some kernel -> kernel, false
+      | None ->
+          let kernel = Workspace_eval.create ~owner:context.owner language in
+          (match language with
+           | Workspace_eval.Python -> context.python_kernel <- Some kernel
+           | Workspace_eval.JavaScript -> context.javascript_kernel <- Some kernel);
+          kernel, true) in
+  try
+    match action with
+    | "reset" ->
+        if not created then Workspace_eval.reset kernel;
+        Yojson.Basic.to_string (`Assoc ["status", `String "reset"])
+    | "run" ->
+        let deadline = Unix.gettimeofday () +. float_of_int timeout_seconds in
+        let cancelled () =
+          Option.fold ~none:false ~some:(fun cancel -> cancel ()) cancel ||
+          Unix.gettimeofday () >= deadline in
+        let bridge ~name ~arguments =
+          workspace_eval_bridge ~cancel:cancelled ~context ~root ~deadline
+            name arguments in
+        let result = Workspace_eval.evaluate ~cancel:cancelled ~timeout_seconds
+          ~tool_bridge:bridge kernel (Option.get source) in
+        Yojson.Basic.to_string (`Assoc [
+          "output", `String result.output;
+          "error", (match result.error with None -> `Null | Some text -> `String text);
+          "truncated", `Bool result.truncated
+        ])
+    | _ -> assert false
+  with Workspace_eval.Error message -> fail message
+
+
+let with_dap_effect context ~approved authorization action =
+  require_explicit_approval approved;
+  context.dap_granted_effect := Some authorization;
+  Fun.protect
+    ~finally:(fun () -> context.dap_granted_effect := None)
+    action
+
+let dap_start ~approved ?cancel ?context root args =
+  let context = require_session_context context in
+  check_session_context context;
+  let id = required_string "id" args in
+  Workspace_process.validate_id id;
+  let program = required_string "program" args in
+  let arguments = string_list "arguments" args in
+  let transport =
+    with_dap_effect context ~approved Workspace_dap.Adapter_process (fun () ->
+      Workspace_dap.stdio_transport ?cancel context.dap_manager
+        ~program ~arguments ~cwd:root) in
+  (try ignore (Workspace_dap.create_session context.dap_manager ~id ~transport)
+   with exn -> (try transport.close () with _ -> ()); raise exn);
+  Yojson.Basic.to_string (`Assoc [
+    "status", `String "adapter started";
+    "id", `String id
+  ])
+
+let dap_required_int name args =
+  match field name args with
+  | `Int value -> value
+  | `Null -> fail ("missing required integer argument: " ^ name)
+  | _ -> fail (name ^ " must be an integer")
+
+let dap_optional_string name args =
+  match field name args with
+  | `Null -> None
+  | `String value -> Some value
+  | _ -> fail (name ^ " must be a string")
+
+let dap_breakpoints args =
+  match field "breakpoints" args with
+  | `List rows ->
+      List.map (fun row ->
+        let line = match field "line" row with
+          | `Int line -> line
+          | _ -> fail "each breakpoint requires an integer line" in
+        { Workspace_dap.line;
+          condition = dap_optional_string "condition" row;
+          hit_condition = dap_optional_string "hit_condition" row;
+          log_message = dap_optional_string "log_message" row })
+        rows
+  | _ -> fail "breakpoints must be an array"
+
+let dap_execute ~approved ?cancel ?context _root args =
+  let context = require_session_context context in
+  check_session_context context;
+  let id = required_string "id" args in
+  let action = required_string "action" args in
+  let manager = context.dap_manager in
+  let with_effect authorization call =
+    with_dap_effect context ~approved authorization call in
+  let output = match action with
+    | "initialize" ->
+        Workspace_dap.initialize ?cancel manager ~id
+          ~adapter_id:(required_string "adapter_id" args)
+    | "launch" ->
+        with_effect Workspace_dap.Launch (fun () ->
+          Workspace_dap.launch ?cancel manager ~id
+            ~target:(required_string "target" args)
+            ~arguments:(string_list "arguments" args))
+    | "trust_host" ->
+        let host = Workspace_dap.normalize_host (required_string "host" args) in
+        with_effect (Workspace_dap.Remote_host host) (fun () ->
+          Workspace_dap.trust_attach_host manager ~id ~host);
+        `Assoc ["status", `String "remote host trusted"; "host", `String host]
+    | "attach" ->
+        let host = Workspace_dap.normalize_host (required_string "host" args) in
+        with_effect (Workspace_dap.Remote_host host) (fun () ->
+          Workspace_dap.attach ?cancel manager ~id ~host
+            ~port:(dap_required_int "port" args))
+    | "configuration_done" ->
+        with_effect Workspace_dap.Debug_execution (fun () ->
+          Workspace_dap.configuration_done ?cancel manager ~id)
+    | "set_breakpoints" ->
+        with_effect Workspace_dap.Breakpoints (fun () ->
+          Workspace_dap.set_breakpoints ?cancel manager ~id
+            ~source:(required_string "source" args)
+            ~breakpoints:(dap_breakpoints args))
+    | "threads" -> Workspace_dap.threads ?cancel manager ~id
+    | "stack_trace" ->
+        Workspace_dap.stack_trace ?cancel
+          ~start_frame:(optional_int "start_frame" 0 ~minimum:0 ~maximum:1_000_000 args)
+          ~levels:(optional_int "levels" 50 ~minimum:1 ~maximum:100 args)
+          manager ~id ~thread_id:(dap_required_int "thread_id" args) ()
+    | "scopes" ->
+        Workspace_dap.scopes ?cancel manager ~id
+          ~frame_id:(dap_required_int "frame_id" args)
+    | "variables" ->
+        Workspace_dap.variables ?cancel
+          ?filter:(dap_optional_string "filter" args)
+          ~start:(optional_int "start" 0 ~minimum:0 ~maximum:1_000_000 args)
+          ~count:(optional_int "count" 100 ~minimum:1 ~maximum:1000 args)
+          manager ~id ~reference:(dap_required_int "reference" args) ()
+    | "continue" | "next" | "step_in" | "step_out" ->
+        with_effect Workspace_dap.Debug_execution (fun () ->
+          let thread_id = dap_required_int "thread_id" args in
+          let single_thread = optional_bool "single_thread" false args in
+          match action with
+          | "continue" ->
+              Workspace_dap.continue_ ?cancel ~single_thread manager ~id ~thread_id ()
+          | "next" ->
+              Workspace_dap.next ?cancel ~single_thread manager ~id ~thread_id ()
+          | "step_in" ->
+              Workspace_dap.step_in ?cancel ~single_thread manager ~id ~thread_id ()
+          | _ ->
+              Workspace_dap.step_out ?cancel ~single_thread manager ~id ~thread_id ())
+    | "evaluate" ->
+        with_effect Workspace_dap.Evaluate (fun () ->
+          let frame_id = match field "frame_id" args with
+            | `Null -> None
+            | `Int value -> Some value
+            | _ -> fail "frame_id must be an integer" in
+          Workspace_dap.evaluate ?cancel
+            ~context:(optional_string "context" "watch" args)
+            manager ~id ~expression:(required_string "expression" args) ~frame_id)
+    | "disconnect" ->
+        let terminate_debuggee = optional_bool "terminate_debuggee" false args in
+        if terminate_debuggee then
+          with_effect Workspace_dap.Debug_execution (fun () ->
+            Workspace_dap.disconnect ?cancel ~terminate_debuggee manager ~id)
+        else Workspace_dap.disconnect ?cancel manager ~id
+    | "events" ->
+        `List (Workspace_dap.take_events manager ~id)
+    | "close" ->
+        Workspace_dap.close_session manager ~id;
+        `Assoc ["status", `String "closed"; "id", `String id]
+    | _ -> fail "unsupported DAP action" in
+  Yojson.Basic.to_string output
+
+let token_count args =
+  let encoding = required_string "encoding" args in
+  let text = required_string "text" args in
+  let result = Native_tokenizer.count_tokens ~encoding text in
+  Yojson.Basic.to_string (`Assoc [
+    "encoding", `String result.encoding;
+    "token_count", `Int result.token_count;
+    "input_bytes", `Int (String.length text)
+  ])
+
+let repository_security_scan ?cancel root args =
+  let file_limit = optional_int "file_limit"
+    Repository_security.max_files ~minimum:0
+    ~maximum:Repository_security.max_files args in
+  let finding_limit = optional_int "finding_limit" 100 ~minimum:0
+    ~maximum:100 args in
+  let format = match field "format" args with
+    | `Null -> "summary"
+    | `String value -> value
+    | _ -> fail "format must be a string" in
+  let result =
+    try Repository_security.scan ?cancel ~file_limit ~finding_limit ~root ()
+    with Repository_security.Error message -> fail message in
+  match format with
+  | "sarif" -> Repository_security.sarif ~root result
+  | "summary" ->
+      let findings = List.filter
+        (Repository_security.validate_finding ~root) result.findings in
+      let finding finding =
+        `Assoc [
+          "rule_id", `String finding.Repository_security.rule_id;
+          "path", `String finding.path;
+          "start_line", `Int finding.start_line;
+          "start_column", `Int finding.start_column;
+          "end_line", `Int finding.end_line;
+          "end_column", `Int finding.end_column;
+          "message", `String finding.message;
+          "provenance", `String "deterministic-rule";
+          "validated", `Bool true
+        ] in
+      Yojson.Basic.to_string (`Assoc [
+        "files_scanned", `Int result.files_scanned;
+        "truncated", `Bool (result.truncated ||
+          List.length findings <> List.length result.findings);
+        "findings", `List (List.map finding findings)
+      ])
+  | _ -> fail "format must be summary or sarif"
 
 let is_shell_tool = function
   | "run_command" | "start_process" | "start_shell" -> true
@@ -962,20 +1669,128 @@ let requires_explicit_approval ~name ~args =
   match name with
   | "run_command" | "start_process" | "start_shell"
   | "process_stdin" | "process_close_stdin" | "process_kill"
-  | "worktree_create" | "worktree_commit" | "worktree_remove" -> true
+  | "worktree_create" | "worktree_commit" | "worktree_remove"
+  | "web_search" | "web_fetch" | "image_ocr"
+  | "clipboard_read" | "clipboard_write"
+  | "lsp_start" | "workspace_eval"
+  | "ssh_open" | "ssh_read" | "ssh_write" | "ssh_command"
+  | "dap_start" -> true
+  | "lsp" -> optional_string "action" "" args = "apply_preview"
+  | "dap" ->
+      (match field "action" args with
+       | `String ("launch" | "trust_host" | "attach" | "configuration_done"
+         | "set_breakpoints" | "continue" | "next" | "step_in" | "step_out"
+         | "evaluate") -> true
+       | `String "disconnect" -> optional_bool "terminate_debuggee" false args
+       | _ -> false)
   | "read_file" ->
       (match field "path" args with
        | `String path -> starts_with (String.lowercase_ascii path) "https://"
        | _ -> false)
   | _ -> false
 
-let non_reversible_tool = function
+let non_reversible_tool ~name ~args =
+  match name with
   | "run_command" | "start_process" | "start_shell"
   | "process_stdin" | "process_close_stdin" | "process_kill"
-  | "worktree_create" | "worktree_commit" | "worktree_remove" -> true
+  | "worktree_create" | "worktree_commit" | "worktree_remove"
+  | "lsp_start" | "dap_start" | "ssh_open" | "ssh_read"
+  | "ssh_write" | "ssh_command" | "web_search" | "web_fetch"
+  | "clipboard_write" -> true
+  | "workspace_eval" -> optional_string "action" "run" args = "run"
+  | "dap" ->
+      (match field "action" args with
+       | `String ("launch" | "attach" | "configuration_done"
+         | "set_breakpoints" | "continue" | "next" | "step_in" | "step_out"
+         | "evaluate") -> true
+       | `String "disconnect" -> optional_bool "terminate_debuggee" false args
+       | _ -> false)
   | _ -> false
 
 let definitions = [
+  schema "lsp_start" "Start one private workspace language server with the exact executable and arguments; server startup is NOT SANDBOXED and requires explicit approval."
+    ["program", string_field "Absolute language-server executable";
+     "arguments", string_array_field "Exact argument vector; no shell parsing"] ["program"];
+  schema "lsp" "Use the already approved, session-owned language server for workspace definitions, references, hover, diagnostics, rename previews, and code-action previews. Apply an exact cached workspace-edit preview only after separate explicit approval."
+    ["action", enum_string_field "LSP request" [
+       "definition"; "references"; "hover"; "diagnostics"; "rename";
+       "code_actions"; "apply_preview"; "shutdown"; "cancel"];
+     "program", string_field "Exact executable used by lsp_start";
+     "arguments", string_array_field "Exact arguments used by lsp_start";
+     "path", bounded_string_field "Workspace-relative document path" 4096;
+     "language_id", bounded_string_field "Document language identifier" 128;
+     "position", lsp_position_field;
+     "range", lsp_range_field;
+     "new_name", bounded_string_field "Proposed symbol name" 4096;
+     "preview_id", bounded_string_field "Exact cached rename/code-action preview to apply" 80;
+     "request_id", integer_field "Active request ID to cancel" 1 max_int]
+    ["action"; "program"];
+  schema "workspace_eval" "Run or reset one persistent per-session Python or JavaScript kernel. Execution is UNSANDBOXED; every call requires explicit approval. pave.tool exposes bounded read-only workspace tools and inspection of existing session-owned process jobs; it cannot start or mutate jobs."
+    ["action", enum_string_field "Kernel action (default run)" ["run"; "reset"];
+     "language", enum_string_field "Kernel runtime" ["python"; "javascript"];
+     "code", bounded_string_field "Exact code to review and execute (maximum 2000 bytes)" 2000;
+     "timeout_seconds", integer_field "Evaluation deadline (default 10 seconds)" 1 Workspace_eval.max_timeout_seconds]
+    ["language"];
+  schema "ssh_open" "Open an owner-bound SSH workspace session using system SSH identities and owned known_hosts; no Pave OAuth/API credential is forwarded. Network access requires explicit approval."
+    ["id", string_field "Session-local SSH session ID";
+     "host", bounded_string_field "Pinned SSH host name or address" 253;
+     "user", bounded_string_field "SSH user name" 128;
+     "remote_root", bounded_string_field "Absolute remote workspace root" 4096;
+     "known_hosts", bounded_string_field "Owned known_hosts file (default ~/.ssh/known_hosts)" 4096]
+    ["id"; "host"; "user"; "remote_root"];
+  schema "ssh_close" "Close a private SSH workspace session."
+    ["id", string_field "Session-local SSH session ID"] ["id"];
+  schema "ssh_read" "Read a bounded workspace-relative file from a pinned SSH host. Each remote read requires explicit approval."
+    ["id", string_field "Session-local SSH session ID";
+     "path", bounded_string_field "Path under the configured remote root" 4096]
+    ["id"; "path"];
+  schema "ssh_write" "Atomically write a bounded workspace-relative file to a pinned SSH host. Requires explicit approval of the exact contents."
+    ["id", string_field "Session-local SSH session ID";
+     "path", bounded_string_field "Path under the configured remote root" 4096;
+     "contents", bounded_string_field "Exact file contents (maximum 2000 bytes)" 2000]
+    ["id"; "path"; "contents"];
+  schema "ssh_command" "Execute one remote program directly without a shell on a pinned SSH host. Requires explicit approval of the exact program and arguments."
+    ["id", string_field "Session-local SSH session ID";
+     "program", bounded_string_field "Remote executable name or absolute path" 4096;
+     "arguments", string_array_field "Exact argument vector";
+     "timeout_seconds", integer_field "Remote command deadline" 1 Workspace_ssh.max_timeout_seconds]
+    ["id"; "program"];
+  schema "dap_start" "Start one private workspace DAP adapter as a direct child process with a minimal environment and bounded stdio framing; requires explicit approval."
+    ["id", string_field "Session-local DAP session ID";
+     "program", bounded_string_field "Absolute executable path" 4096;
+     "arguments", string_array_field "Exact adapter argument vector"]
+    ["id"; "program"];
+  schema "dap" "Control one private DAP session. Launch/attach, breakpoints, execution, evaluation, and debuggee termination require effect-specific explicit approval; inspection is read-only."
+    ["id", string_field "Session-local DAP session ID";
+     "action", enum_string_field "DAP operation" [
+       "initialize"; "launch"; "trust_host"; "attach"; "configuration_done";
+       "set_breakpoints"; "threads"; "stack_trace"; "scopes"; "variables";
+       "continue"; "next"; "step_in"; "step_out"; "evaluate";
+       "disconnect"; "events"; "close"];
+     "adapter_id", bounded_string_field "DAP adapter identifier" 128;
+     "target", bounded_string_field "Workspace-relative launch target" 4096;
+     "arguments", string_array_field "Exact debuggee or adapter arguments";
+     "host", bounded_string_field "Remote debuggee host name or address" 253;
+     "port", integer_field "Remote debuggee port" 1 65_535;
+     "source", bounded_string_field "Workspace-relative breakpoint source file" 4096;
+     "breakpoints", dap_breakpoints_field;
+     "thread_id", integer_field "DAP thread identifier" 1 max_int;
+     "start_frame", integer_field "First stack frame index" 0 1_000_000;
+     "levels", integer_field "Maximum stack frames to return" 1 100;
+     "frame_id", integer_field "DAP stack frame identifier" 1 max_int;
+     "reference", integer_field "DAP variables reference" 1 max_int;
+     "filter", enum_string_field "Optional variable filter" ["named"; "indexed"];
+     "start", integer_field "First variable index" 0 1_000_000;
+     "count", integer_field "Maximum variables to return" 1 1000;
+     "single_thread", boolean_field "Limit execution control to the selected thread";
+     "expression", bounded_string_field "Exact watch/hover expression (maximum 2000 bytes)" 2000;
+     "context", enum_string_field "DAP evaluation context" ["watch"; "hover"];
+     "terminate_debuggee", boolean_field "Terminate the debuggee on disconnect (requires explicit approval)"]
+    ["id"; "action"];
+  schema "token_count" "Count tokens using exact vendored cl100k_base or o200k_base ranks; does not contact a provider or infer an upstream tokenizer."
+    ["encoding", enum_string_field "Exact tiktoken encoding" ["cl100k_base"; "o200k_base"];
+     "text", bounded_string_field "Text to count (maximum 1 MiB)" Native_tokenizer.max_input_bytes]
+    ["encoding"; "text"];
   schema "mobile_project" "Detect root mobile project manifests and suggest relevant build/test commands without executing anything."
     [] [];
   schema "read_file" "Read bounded workspace files, directories, documents, archives, notebooks, SQLite, owned artifacts, managed worktrees, or public HTTPS URLs. HTTPS fetches send no credentials and require approval."
@@ -994,6 +1809,11 @@ let definitions = [
      "path", string_field "Workspace-relative or owned worktree directory (default .)";
      "hidden", boolean_field "Include dotfiles and hidden directories (default false)";
      "limit", integer_field "Maximum matching paths (default 100)" 1 500] ["pattern"];
+  schema "fuzzy_file_search" "Rank workspace files and directories by case-insensitive fuzzy path match; respects .gitignore, hidden-path policy and excluded dependency/build/Git directories. Bounded traversal and result count."
+    ["query", bounded_string_field "Non-empty UTF-8 subsequence query (maximum 256 bytes)" 256;
+     "path", string_field "Workspace-relative or owned worktree directory (default .)";
+     "hidden", boolean_field "Include dotfiles and hidden directories (default false)";
+     "max_results", integer_field "Maximum ranked matches (default 100)" 1 100] ["query"];
   schema "search" "Find bounded text matches in non-binary workspace files, respecting nested .gitignore; hidden paths are excluded by default."
     ["pattern", string_field "Literal text to search for";
      "path", string_field "Workspace-relative or owned worktree directory (default .)";
@@ -1001,6 +1821,24 @@ let definitions = [
      "hidden", boolean_field "Include dotfiles and hidden directories (default false)";
      "case_sensitive", boolean_field "Use ASCII-only case matching (default true)";
      "limit", integer_field "Maximum matching lines (default 100)" 1 max_matches] ["pattern"];
+  schema "web_search" "Search with the explicitly configured pinned Brave or Tavily provider. Requires network approval; returns source URLs, citations, and provider provenance."
+    ["query", bounded_string_field "Search query sent to the selected provider" Web_search.max_query_bytes;
+     "page", integer_field "Provider page/offset (default 0)" 0 Web_search.max_page;
+     "count", integer_field "Maximum results (default 5)" 1 Web_search.max_results] ["query"];
+  schema "web_fetch" "Fetch a public HTTPS page without credentials or redirects and convert bounded HTML to Markdown. Requires separate network approval."
+    ["url", bounded_string_field "Credential-free public HTTPS URL on port 443" 4096;
+     "max_bytes", integer_field "Maximum HTML and converted output bytes (default 65536)"
+       1 Web_search.max_content_bytes] ["url"];
+  schema "image_ocr" "Run the fixed local Tesseract helper on a workspace image passed through stdin. Requires explicit approval; never invokes a shell or network."
+    ["path", string_field "Workspace-relative image path";
+     "mime", enum_string_field "Declared image type, checked against bytes"
+       ["image/png"; "image/jpeg"; "image/gif"; "image/tiff"; "image/bmp"]]
+    ["path"; "mime"];
+  schema "clipboard_read" "Read the operating-system clipboard through a fixed platform helper. Clipboard text may contain private credentials; always requires explicit approval."
+    [] [];
+  schema "clipboard_write" "Replace the operating-system clipboard with this exact text. Always requires explicit approval; tool input is capped at 2000 bytes for complete review."
+    ["text", bounded_string_field "Exact clipboard text, maximum 2000 bytes" 2000]
+    ["text"];
   schema "grep" "Find bounded OCaml Str regex matches per line, respecting nested .gitignore; hidden paths are excluded by default. One repetition operator maximum; no backreferences."
     ["pattern", string_field "Regex (up to 512 bytes; at most one repetition; no backreferences)";
      "path", string_field "Workspace-relative or owned worktree directory (default .)";
@@ -1088,7 +1926,11 @@ let definitions = [
      "paths", string_array_field "Exact relative paths to stage and commit";
      "message", string_field "Single-line commit message"] ["id"; "paths"; "message"];
   schema "worktree_remove" "Remove only a clean managed worktree owned by the current private session. Always requires explicit approval."
-    ["id", string_field "Managed worktree ID"] ["id"]
+    ["id", string_field "Managed worktree ID"] ["id"];
+  schema "repository_security_scan" "Opt-in bounded deterministic workspace credential scan. Reports only rule metadata, workspace-relative locations, and validated provenance; never includes matched secret text."
+    ["format", enum_string_field "Result format (default summary)" ["summary"; "sarif"];
+     "file_limit", integer_field "Maximum files scanned (default 2000)" 0 Repository_security.max_files;
+     "finding_limit", integer_field "Maximum findings returned (default 100)" 0 100] [];
 ]
 
 let function_name json =
@@ -1111,7 +1953,8 @@ let available_for ~allow_shell ~enabled =
 
 let execution_mode = function
   | "mobile_project" | "read_file" | "workspace_snapshot"
-  | "list_files" | "glob" | "search" | "grep" ->
+  | "list_files" | "glob" | "search" | "grep" | "fuzzy_file_search"
+  | "token_count" | "repository_security_scan" ->
       Tool_scheduler.Shared
   | _ -> Tool_scheduler.Exclusive
 
@@ -1121,20 +1964,30 @@ let approval_decision ~command_patterns ~name ~args =
   } in
   match name with
   | "mobile_project" | "read_file" | "workspace_snapshot"
-  | "list_files" | "glob" | "search" | "grep" | "process_list"
-  | "process_output" | "process_wait" | "process_ready"
-  | "worktree_list" | "worktree_status" | "worktree_diff" | "worktree_history" ->
+  | "list_files" | "glob" | "search" | "grep" | "fuzzy_file_search"
+  | "repository_security_scan" | "token_count" | "process_list" | "process_output"
+  | "process_wait" | "process_ready" | "worktree_list" | "worktree_status"
+  | "worktree_diff" | "worktree_history" | "clipboard_read" | "ssh_read"
+  | "ssh_close" ->
       tier Approval.Read
-  | "ast_edit" when optional_bool "dry_run" true args -> tier Approval.Read
-  | "write_file" | "edit_file" | "apply_edits" | "ast_edit"
-  | "worktree_create" | "worktree_remove" ->
+  | "lsp" when optional_string "action" "" args = "apply_preview" ->
+      tier Approval.Write
+  | "lsp" -> tier Approval.Read
+  | "dap" ->
+      (match field "action" args with
+       | `String ("initialize" | "threads" | "stack_trace" | "scopes" |
+         "variables" | "events" | "close") -> tier Approval.Read
+       | `String "disconnect" when
+           not (optional_bool "terminate_debuggee" false args) -> tier Approval.Read
+       | _ -> tier Approval.Exec)
+  | "ssh_write" | "write_file" | "edit_file" | "apply_edits" | "ast_edit"
+  | "worktree_create" | "worktree_remove" | "clipboard_write" ->
       tier Approval.Write
   | "run_command" | "start_shell" ->
       (match Protocol.member "command" args with
        | `String command -> Approval.command_decision command_patterns command
        | _ -> tier Approval.Exec)
   | _ -> tier Approval.Exec
-
 let preview_text text =
   let limit = 2000 in
   if String.length text <= limit then text
@@ -1156,23 +2009,6 @@ let bounded_tool_text text limit =
     let length = boundary limit in
     String.sub text 0 length ^
       Printf.sprintf "\n[%d bytes omitted]" (String.length text - length)
-
-let workspace_snapshot ?cancel ?context root args =
-  let root, args = resolve_path_arguments ?cancel ?context ~root args in
-  let path = required_string "path" args in
-  let limit = optional_int "max_bytes" 16_384 ~minimum:1
-    ~maximum:(max_read_bytes - 512) args in
-  let snapshot = Workspace_edit.read_snapshot ~root ~path in
-  let size = String.length snapshot.contents in
-  let length = min limit size in
-  let content = String.sub snapshot.contents 0 length in
-  if String.contains content '\000' then fail "binary file; workspace snapshots support text only";
-  Printf.sprintf
-    "SHA-256: %s\n%s\n[page: offset 0; bytes: %d; file size: %d; next offset: %d; %s]"
-    snapshot.sha256 content length size length
-    (if length < size then
-       "truncated; continue with read_file offset/line, and apply this hash only if unchanged"
-     else "end of file")
 
 let parse_hunks args =
   match field "hunks" args with
@@ -1264,9 +2100,13 @@ let approval_request ?cancel ?context ~root ~name ~args (decision : Approval.dec
     let cwd = process_cwd ?cancel ?context ~root:base_root args in
     ["Working directory: " ^ Printf.sprintf "%S" cwd] in
   let environment_details () =
+    let inherited =
+      "Inherited environment allowlist: " ^
+      String.concat ", " Workspace_process.inherited_environment_names ^
+      "; provider, OAuth, cloud, search, and custom credentials are excluded." in
     let overrides = environment_overrides args in
-    if overrides = [] then ["Environment overrides: none"]
-    else ["Environment overrides (other inherited variables remain):"] @
+    if overrides = [] then [inherited; "Explicit child overrides: none"]
+    else [inherited; "Explicit child overrides:"] @
       List.map (fun (key, value) ->
         key ^ "=" ^ Printf.sprintf "%S" value) overrides in
   let impact, details = match name with
@@ -1282,6 +2122,39 @@ let approval_request ?cancel ?context ~root ~name ~args (decision : Approval.dec
          | _ ->
              "Reads a bounded workspace source; it makes no changes.",
              ["Path: " ^ quoted "path" "(missing)" args])
+    | "web_search" ->
+        let priority = Option.value ~default:"(unset)"
+          (Sys.getenv_opt "PAVE_WEB_SEARCH_PROVIDER_PRIORITY") in
+        let configured = [
+          "brave", "BRAVE_SEARCH_API_KEY";
+          "tavily", "TAVILY_API_KEY"
+        ] |> List.filter_map (fun (provider, variable) ->
+          match Sys.getenv_opt variable with
+          | Some value when value <> "" -> Some provider
+          | _ -> None) in
+        "Sends this query to the first configured public search provider in the explicit priority order; its API credential is sent only to that provider.",
+        ["Query: " ^ quoted "query" "(missing)" args;
+         "Provider priority: " ^ priority;
+         "Credentials present for: " ^
+           (if configured = [] then "none" else String.concat ", " configured);
+         "Credentials are never shown in this approval."]
+    | "web_fetch" ->
+        "Fetches one public HTTPS page without authentication or redirects; the returned page is untrusted.",
+        ["URL: " ^ quoted "url" "(missing)" args;
+         "Only public addresses on port 443 are allowed."]
+    | "image_ocr" ->
+        "Runs the fixed local OCR helper on this workspace image; image bytes are sent to the helper through stdin, with no shell or network.",
+        ["Path: " ^ quoted "path" "(missing)" args;
+         "Declared MIME type: " ^ quoted "mime" "(missing)" args;
+         "Maximum image size: 10 MiB."]
+    | "clipboard_read" ->
+        "Reads the current operating-system clipboard through a fixed platform helper; clipboard contents may include private credentials or personal data.",
+        ["No clipboard content is read before approval."]
+    | "clipboard_write" ->
+        let text = value "text" "" args in
+        "Replaces the current operating-system clipboard with this exact text; the previous clipboard value cannot be restored by /rewind.",
+        [Printf.sprintf "Text (%d bytes):" (String.length text);
+         Printf.sprintf "%S" (preview_text text)]
     | "workspace_snapshot" ->
         "Reads a bounded text page and the file's SHA-256 snapshot; it makes no changes.",
         ["Path: " ^ quoted "path" "(missing)" args]
@@ -1292,6 +2165,13 @@ let approval_request ?cancel ?context ~root ~name ~args (decision : Approval.dec
         "Searches workspace paths; it makes no changes.",
         ["Pattern: " ^ quoted "pattern" "(missing)" args;
          "Directory: " ^ quoted "path" "." args]
+    | "fuzzy_file_search" ->
+        "Ranks workspace file and directory paths against this query; it makes no changes.",
+        ["Query: " ^ quoted "query" "(missing)" args;
+         "Directory: " ^ quoted "path" "." args;
+         "Hidden paths: " ^ (if optional_bool "hidden" false args then "included" else "excluded");
+         "Maximum results: " ^ string_of_int
+           (optional_int "max_results" 100 ~minimum:1 ~maximum:100 args)]
     | "search" | "grep" ->
         "Searches workspace file contents; it makes no changes.",
         ["Pattern: " ^ quoted "pattern" "(missing)" args;
@@ -1382,6 +2262,133 @@ let approval_request ?cancel ?context ~root ~name ~args (decision : Approval.dec
     | "worktree_remove" ->
         "Removes a clean session-owned worktree; dirty or ignored content makes removal fail.",
         ["Worktree ID: " ^ quoted "id" "(missing)" args]
+    | "lsp_start" ->
+        let program = value "program" "(missing)" args in
+        let arguments = string_list "arguments" args in
+        "Starts an unsandboxed language-server process under your account. Server code may access files and the network.",
+        ["Workspace: " ^ Printf.sprintf "%S" base_root;
+         "Program and arguments: " ^ Filename.quote_command program arguments;
+         "The server receives only PATH, LANG, LC_ALL, and TMPDIR."]
+    | "lsp" ->
+        let action = value "action" "(missing)" args in
+        let details =
+          if action = "apply_preview" then (
+            let preview_id = required_string "preview_id" args in
+            let title, files = lsp_preview ?context ~root:base_root args in
+            let rows = Workspace_lsp.preview_file_rows files in
+            let file_details = List.concat_map (fun row ->
+              let path = required_string "path" row in
+              let original = required_string "original_sha256" row in
+              let result = required_string "result_sha256" row in
+              let content = required_string "content" row in
+              ["File: " ^ Printf.sprintf "%S" path;
+               "Original SHA-256: " ^ original;
+               "Proposed SHA-256: " ^ result;
+               "Exact proposed contents:\n" ^ content]) rows in
+            let details =
+              ["Action: apply_preview"; "Preview ID: " ^ preview_id;
+               "Edit: " ^ title] @ file_details in
+            let size = List.fold_left (fun total detail ->
+              String.length detail + total + 1) 0 details in
+            if size > 8_192 then
+              fail "LSP edit preview exceeds the interactive approval limit";
+            details)
+          else [
+            "Action: " ^ action;
+            "Document: " ^ Printf.sprintf "%S"
+              (value "path" "(not required for this action)" args);
+            "Language ID: " ^ quoted "language_id" "(missing)" args;
+            "Position: " ^ Yojson.Basic.to_string (field "position" args);
+            "Range: " ^ Yojson.Basic.to_string (field "range" args);
+            "New name: " ^ quoted "new_name" "(not applicable)" args
+          ] in
+        (if action = "apply_preview" then
+           "Applies this exact cached rename/code-action preview. All target paths, original file hashes, proposed file hashes, and complete proposed contents are shown above; files are revalidated before the one-shot apply."
+         else
+           "Sends a read-only request to the already approved workspace language server."),
+        details
+    | "workspace_eval" ->
+        let action = value "action" "run" args in
+        let code = value "code" "" args in
+        "Runs unsandboxed persistent " ^ value "language" "(missing)" args ^
+          " code or resets that language's session kernel. Kernel code may access files and the network.",
+        ["Action: " ^ action;
+         "Code (" ^ string_of_int (String.length code) ^ " bytes):";
+         Printf.sprintf "%S" code;
+         "Timeout: " ^ string_of_int (optional_int "timeout_seconds" 10
+           ~minimum:1 ~maximum:Workspace_eval.max_timeout_seconds args) ^ " seconds";
+         "pave.tool bridge: read-only workspace_snapshot/read_file/list_files/search/glob/grep/mobile_project and process_list/process_output/process_wait/process_ready; no job start, stdin, close, or kill."]
+    | "ssh_open" ->
+        "Opens an SSH connection to the requested host using system SSH identities and known_hosts; the connection receives no Pave OAuth/API credentials.",
+        ["Session ID: " ^ quoted "id" "(missing)" args;
+         "Host: " ^ quoted "host" "(missing)" args;
+         "User: " ^ quoted "user" "(missing)" args;
+         "Remote root: " ^ quoted "remote_root" "(missing)" args;
+        "Known hosts: " ^ quoted "known_hosts"
+          (match Sys.getenv_opt "HOME" with
+           | Some home when home <> "" ->
+               Filename.concat (Filename.concat home ".ssh") "known_hosts"
+           | _ -> "(unavailable: HOME is not set)") args]
+    | "ssh_close" ->
+        "Closes this session-owned SSH connection.",
+        ["Session ID: " ^ quoted "id" "(missing)" args]
+    | "ssh_read" | "ssh_write" | "ssh_command" ->
+        let context = require_session_context context in
+        let session = ssh_session context (value "id" "(missing)" args) in
+        let endpoint = Workspace_ssh.session_endpoint session in
+        let common = [
+          "Session ID: " ^ quoted "id" "(missing)" args;
+          "SSH endpoint: " ^ endpoint.user ^ "@" ^ endpoint.host ^ ":" ^ endpoint.remote_root
+        ] in
+        (match name with
+         | "ssh_read" ->
+             "Reads remote data from the pinned SSH workspace; no remote file is changed.",
+             common @ ["Path: " ^ quoted "path" "(missing)" args]
+         | "ssh_write" ->
+             let contents = value "contents" "" args in
+             "Writes these exact contents to the pinned SSH workspace.",
+             common @ ["Path: " ^ quoted "path" "(missing)" args;
+                       Printf.sprintf "Contents (%d bytes):" (String.length contents);
+                       Printf.sprintf "%S" contents]
+         | _ ->
+             let program = value "program" "(missing)" args in
+             let arguments = string_list "arguments" args in
+             "Executes this exact remote program and argument vector without a shell.",
+             common @ ["Program and arguments: " ^
+               Filename.quote_command program arguments;
+               "Timeout: " ^ string_of_int (optional_int "timeout_seconds"
+                 Workspace_ssh.default_timeout_seconds ~minimum:1
+                 ~maximum:Workspace_ssh.max_timeout_seconds args) ^ " seconds"])
+    | "dap_start" ->
+        let program = value "program" "(missing)" args in
+        let arguments = string_list "arguments" args in
+        "Starts an unsandboxed DAP adapter as a direct child process; the adapter may access files or the network.",
+        ["Session ID: " ^ quoted "id" "(missing)" args;
+         "Workspace: " ^ Printf.sprintf "%S" base_root;
+         "Program and arguments: " ^ Filename.quote_command program arguments;
+         "Adapter environment contains only PATH and LANG; stderr is discarded from the DAP protocol."]
+    | "dap" ->
+        let action = value "action" "(missing)" args in
+        let impact = match action with
+          | "launch" -> "Launches a workspace debuggee."
+          | "trust_host" -> "Pins the requested remote debug host for this DAP session."
+          | "attach" -> "Attaches the workspace adapter to the approved remote host and port."
+          | "set_breakpoints" -> "Changes active breakpoints in the debuggee."
+          | "configuration_done" -> "Allows the debuggee to begin execution."
+          | "continue" | "next" | "step_in" | "step_out" -> "Controls debuggee execution."
+          | "evaluate" -> "Evaluates an expression in the stopped debuggee."
+          | "disconnect" when optional_bool "terminate_debuggee" false args ->
+              "Disconnects and terminates the debuggee."
+          | _ -> "Performs the requested DAP session operation." in
+        impact,
+        ["Session ID: " ^ quoted "id" "(missing)" args;
+         "Action: " ^ action;
+         "Exact request parameters: " ^ Yojson.Basic.to_string args;
+         "Workspace-confined launch/source paths and effect-specific authorization are enforced."]
+    | "token_count" ->
+        "Counts text locally with exact vendored tokenizer ranks; no network or provider identity is used.",
+        ["Encoding: " ^ quoted "encoding" "(missing)" args;
+         "Input bytes: " ^ string_of_int (String.length (value "text" "" args))]
     | _ ->
         "Performs a tool action that has no safe preview.",
         ["No argument preview is available."] in
@@ -1475,18 +2482,28 @@ let session_tool_names = [
   "start_process"; "start_shell"; "process_list"; "process_output";
   "process_wait"; "process_ready"; "process_stdin"; "process_close_stdin";
   "process_kill"; "worktree_list"; "worktree_status"; "worktree_diff";
-  "worktree_history"; "worktree_create"; "worktree_commit"; "worktree_remove"
+  "worktree_history"; "worktree_create"; "worktree_commit"; "worktree_remove";
+  "lsp_start"; "lsp"; "workspace_eval";
+  "ssh_open"; "ssh_close"; "ssh_read"; "ssh_write"; "ssh_command";
+  "dap_start"; "dap"
 ]
 
 let path_tool_names = [
   "workspace_snapshot"; "list_files"; "search"; "glob"; "grep";
+  "fuzzy_file_search"; "image_ocr";
   "write_file"; "edit_file"; "apply_edits"; "ast_edit"
 ]
 
 let error_message = function
   | Tool_error message | Workspace_edit.Error message | Workspace_path.Error message
   | Workspace_process.Error message | Workspace_git.Error message
-  | Workspace_reader.Error message -> "Error: " ^ message
+  | Workspace_reader.Error message | Repository_security.Error message
+  | Web_search.Error message | Native_services.Error message
+  | Workspace_lsp.Error message | Workspace_dap.Error message
+  | Workspace_dap.Not_approved message | Workspace_eval.Error message
+  | Workspace_ssh.Error message | Native_tokenizer.Error message ->
+      "Error: " ^ message
+  | Workspace_dap.Cancelled -> "Error: DAP operation cancelled"
   | Unix.Unix_error (code, operation, path) ->
       Printf.sprintf "Error: %s %s: %s" operation path (Unix.error_message code)
   | Sys_error message -> "Error: " ^ message
@@ -1528,6 +2545,7 @@ let prepare ?cancel ?context ~root ~name ~args () =
           | "read_file" -> read_file ?cancel ?context root args
           | "workspace_snapshot" -> workspace_snapshot ?cancel ?context tool_root tool_args
           | "list_files" -> list_files tool_root tool_args
+          | "fuzzy_file_search" -> fuzzy_file_search ?cancel tool_root tool_args
           | "search" -> search tool_root tool_args
           | "glob" -> glob tool_root tool_args
           | "grep" -> grep tool_root tool_args
@@ -1552,26 +2570,57 @@ let prepare ?cancel ?context ~root ~name ~args () =
           | "worktree_create" -> worktree_create ~approved ?cancel ?context root args
           | "worktree_commit" -> worktree_commit ~approved ?cancel ?context root args
           | "worktree_remove" -> worktree_remove ~approved ?cancel ?context root args
+          | "repository_security_scan" ->
+              repository_security_scan ?cancel root args
+          | "web_search" -> web_search ~approved ?cancel args
+          | "web_fetch" -> web_fetch ~approved ?cancel args
+          | "image_ocr" -> image_ocr ~approved ?cancel tool_root tool_args
+          | "clipboard_read" -> clipboard_read ~approved ?cancel ()
+          | "clipboard_write" -> clipboard_write ~approved ?cancel args
+          | "lsp_start" -> lsp_start ~approved ?context root args
+          | "lsp" -> lsp_execute ~approved ?cancel ?context root args
+          | "workspace_eval" -> workspace_eval ~approved ?cancel ?context root args
+          | "ssh_open" -> ssh_open ~approved ?cancel ?context args
+          | "ssh_close" -> ssh_close ?context args
+          | "ssh_read" -> ssh_read ~approved ?cancel ?context args
+          | "ssh_write" -> ssh_write ~approved ?cancel ?context args
+          | "ssh_command" -> ssh_command ~approved ?cancel ?context args
+          | "dap_start" -> dap_start ~approved ?cancel ?context root args
+          | "dap" -> dap_execute ~approved ?cancel ?context root args
+          | "token_count" -> token_count args
           | "mobile_project" -> mobile_project root
           | _ -> assert false in
         [Protocol.Text result]
       with
-      | Cancelled -> raise Cancelled
+      | Cancelled | Workspace_dap.Cancelled -> raise Cancelled
       | (Workspace_process.Error _ | Workspace_git.Error _ |
-         Workspace_reader.Error _) as exn ->
+         Workspace_reader.Error _ | Repository_security.Error _
+         | Web_search.Error _ | Native_services.Error _
+         | Workspace_lsp.Error _ | Workspace_dap.Error _
+         | Workspace_dap.Not_approved _ | Workspace_eval.Error _
+         | Workspace_ssh.Error _ | Native_tokenizer.Error _) as exn ->
           (match cancel with
            | Some cancelled when cancelled () -> raise Cancelled
            | _ -> [Protocol.Text (error_message exn)])
-      | exn -> [Protocol.Text (error_message exn)] in
+      | exn ->
+          (match cancel with
+           | Some cancelled when cancelled () -> raise Cancelled
+           | _ -> [Protocol.Text (error_message exn)]) in
     Ok execute
   with
-  | Cancelled -> raise Cancelled
+  | Cancelled | Workspace_dap.Cancelled -> raise Cancelled
   | (Workspace_process.Error _ | Workspace_git.Error _ |
-     Workspace_reader.Error _) as exn ->
+     Workspace_reader.Error _ | Workspace_lsp.Error _ | Workspace_dap.Error _
+     | Workspace_dap.Not_approved _ | Workspace_eval.Error _
+     | Workspace_ssh.Error _) as exn ->
       (match cancel with
        | Some cancelled when cancelled () -> raise Cancelled
        | _ -> Error (error_message exn))
-  | exn -> Error (error_message exn)
+  | exn ->
+      (match cancel with
+       | Some cancelled when cancelled () -> raise Cancelled
+       | _ -> Error (error_message exn))
+
 
 let execute ?cancel ?on_progress ?preflight ?context ?(approved = false)
     ~root ~name ~args () =

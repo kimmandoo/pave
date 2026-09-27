@@ -1,5 +1,10 @@
 let expect label condition =
   if not condition then failwith ("agent approval: " ^ label)
+let contains text fragment =
+  let n = String.length text and m = String.length fragment in
+  let rec find index = index + m <= n &&
+    (String.sub text index m = fragment || find (index + 1)) in
+  find 0
 
 let send_json oc body =
   Printf.fprintf oc
@@ -248,18 +253,19 @@ let () =
            String.starts_with ~prefix:"Shell command was attempted" detail
        | _ -> false);
     expect "shell non-reversible warning reached the user"
-      (List.exists (String.starts_with ~prefix:"Shell command effects may be non-reversible")
-        !shell_events);
+      (List.exists (fun event ->
+        contains event "non-reversible" && contains event "/rewind") !shell_events);
     let process_manager = Pave.Workspace_process.create_manager () in
-    let process_context = {
-      Pave.Tools.owner = "approval-session";
-      process_manager;
-      read_artifact = (fun _ -> None);
-    } in
+    let process_context = Pave.Tools.create_session_context
+      ~owner:"approval-session" ~root ~process_manager
+      ~read_artifact:(fun _ -> None)
+      ~record_file_change:(fun ~path:_ ~before:_ ~after:_ -> ()) () in
     let process_prompts = ref 0 and process_request = ref None in
     let process_effects = ref [] in
     Fun.protect
-      ~finally:(fun () -> Pave.Workspace_process.close_manager process_manager)
+      ~finally:(fun () ->
+        Pave.Tools.close_session_context process_context;
+        Pave.Workspace_process.close_manager process_manager)
       (fun () ->
         let _, process_events = with_agent ~root ~name:"start_process"
           ~arguments:(`Assoc [
@@ -297,8 +303,8 @@ let () =
            String.starts_with ~prefix:"start_process was attempted" detail
        | _ -> false);
     expect "managed process non-reversible warning reached the user"
-      (List.exists (String.starts_with ~prefix:"Process or Git effects may be non-reversible")
-        process_events);
+      (List.exists (fun event ->
+        contains event "non-reversible" && contains event "/rewind") process_events);
     expect "approved managed process exited successfully"
       (Pave.Workspace_process.wait_job process_manager ~id:"approved-process"
         ~timeout_seconds:5 () =

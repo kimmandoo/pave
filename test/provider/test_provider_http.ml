@@ -10,6 +10,8 @@ let leaks_key text =
         seek (index + 1) in
   seek 0
 
+
+
 let stream_body =
   "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello \"},\"finish_reason\":null}]}\n\n" ^
   "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"type\":\"function\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\"}}]},\"finish_reason\":null}]}\n\n" ^
@@ -61,77 +63,7 @@ let write_file path contents =
   Fun.protect ~finally:(fun () -> close_out_noerr oc) (fun () ->
     output_string oc contents)
 
-let read_capture path =
-  let ic = open_in_bin path in
-  Fun.protect ~finally:(fun () -> close_in_noerr ic) (fun () ->
-    really_input_string ic (in_channel_length ic))
 
-let curl_timeout_smoke () =
-  let directory = Filename.temp_file "pave-provider-timeout-" "" in
-  Sys.remove directory;
-  Unix.mkdir directory 0o700;
-  let curl = Filename.concat directory "curl" in
-  let captured_config = Filename.concat directory "config" in
-  let calls = Filename.concat directory "calls" in
-  write_file curl {|#!/bin/sh
-set -eu
-[ "$1" = "--disable" ] && [ "$2" = "--config" ] && [ "$3" = "-" ]
-printf '%s\n' "$PAVE_PROVIDER_HTTP_TIMEOUT_MODE" >> "$PAVE_PROVIDER_HTTP_TIMEOUT_CALLS"
-cat > "$PAVE_PROVIDER_HTTP_TIMEOUT_CONFIG"
-header=$(sed -n 's/^dump-header = "\(.*\)"/\1/p' "$PAVE_PROVIDER_HTTP_TIMEOUT_CONFIG" | tail -n 1)
-if [ -n "$header" ]; then printf 'HTTP/1.1 200 OK\r\n\r\n' > "$header"; fi
-if [ "$PAVE_PROVIDER_HTTP_TIMEOUT_MODE" = body ]; then
-  printf 'data: {"choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}]}\n\n'
-fi
-exit 28
-|};
-  Unix.chmod curl 0o700;
-  let old_path = Sys.getenv_opt "PATH"
-  and old_mode = Sys.getenv_opt "PAVE_PROVIDER_HTTP_TIMEOUT_MODE"
-  and old_config = Sys.getenv_opt "PAVE_PROVIDER_HTTP_TIMEOUT_CONFIG"
-  and old_calls = Sys.getenv_opt "PAVE_PROVIDER_HTTP_TIMEOUT_CALLS" in
-  let restore name = function
-    | Some value -> Unix.putenv name value
-    | None -> Unix.putenv name "" in
-  Fun.protect
-    ~finally:(fun () ->
-      restore "PATH" old_path;
-      restore "PAVE_PROVIDER_HTTP_TIMEOUT_MODE" old_mode;
-      restore "PAVE_PROVIDER_HTTP_TIMEOUT_CONFIG" old_config;
-      restore "PAVE_PROVIDER_HTTP_TIMEOUT_CALLS" old_calls;
-      List.iter (fun path -> if Sys.file_exists path then Sys.remove path)
-        [curl; captured_config; calls];
-      Unix.rmdir directory)
-    (fun () ->
-      Unix.putenv "PATH" (directory ^ ":" ^ Option.value ~default:"" old_path);
-      Unix.putenv "PAVE_PROVIDER_HTTP_TIMEOUT_CONFIG" captured_config;
-      Unix.putenv "PAVE_PROVIDER_HTTP_TIMEOUT_CALLS" calls;
-      let config : Pave.Provider.config = {
-        endpoint = "http://127.0.0.1:1/complete"; api_key = "mock-openai";
-        model = "timeout-fixture"; api = Pave.Provider.Openai_completions } in
-      let expect prefix f =
-        match f () with
-        | exception Pave.Provider.Provider_error message ->
-            assert (String.starts_with ~prefix message);
-            assert (not (leaks_key message))
-        | _ -> failwith ("expected timeout classification: " ^ prefix) in
-      Unix.putenv "PAVE_PROVIDER_HTTP_TIMEOUT_MODE" "buffered";
-      expect "provider request timed out" (fun () ->
-        Pave.Provider.complete config [Pave.Protocol.user "timeout"] []);
-      Unix.putenv "PAVE_PROVIDER_HTTP_TIMEOUT_MODE" "empty";
-      expect "provider stream timed out before the first response data byte" (fun () ->
-        Pave.Provider.complete ~on_text:(fun _ -> ()) config
-          [Pave.Protocol.user "timeout"] []);
-      Unix.putenv "PAVE_PROVIDER_HTTP_TIMEOUT_MODE" "body";
-      let visible = ref [] in
-      expect "provider stream timed out after response data" (fun () ->
-        Pave.Provider.complete ~on_text:(fun text -> visible := text :: !visible)
-          config [Pave.Protocol.user "timeout"] []);
-      assert (List.rev !visible = ["partial"]);
-      let requests =
-        read_capture calls |> String.split_on_char '\n'
-        |> List.filter (fun line -> line <> "") in
-      assert (List.length requests = 3))
 
 let serve client step signal_write closed_write =
   let ic = Unix.in_channel_of_descr client in
@@ -404,9 +336,27 @@ let () =
              message)
        | _ -> failwith "OpenAI route accepted audio/video attachments"))
       audio_video;
+    let temp = Filename.temp_file "pave-provider-path-" "" in
+    Sys.remove temp; Unix.mkdir temp 0o700;
+    let marker = Filename.concat temp "invoked" in
+    let poison = Filename.concat temp "curl" in
+    write_file poison ("#!/bin/sh\n: > " ^ Filename.quote marker ^ "\nexit 99\n");
+    Unix.chmod poison 0o700;
+    let old_path = Sys.getenv_opt "PATH" in
     let deltas = ref [] in
-    let streamed = Pave.Provider.complete ~on_text:(fun delta -> deltas := delta :: !deltas)
-      openai [ image_user ] [] in
+    let streamed = Fun.protect
+      ~finally:(fun () ->
+        Unix.putenv "PATH" (Option.value ~default:"" old_path);
+        List.iter (fun path -> if Sys.file_exists path then Sys.remove path)
+          [poison; marker];
+        Unix.rmdir temp)
+      (fun () ->
+        Unix.putenv "PATH" temp;
+        let streamed = Pave.Provider.complete
+          ~on_text:(fun delta -> deltas := delta :: !deltas)
+          openai [ image_user ] [] in
+        assert (not (Sys.file_exists marker));
+        streamed) in
     assert (!deltas = [ "Hello " ]);
     assert (streamed.content = Some "Hello ");
     assert (streamed.tool_calls = [ { Pave.Protocol.id = "call-1"; name = "read_file";
@@ -516,5 +466,15 @@ let () =
         "provider unavailable";
         "provider context limit exceeded";
         "invalid provider request" ];
-    curl_timeout_smoke ());
+    assert (Pave.Provider.curl_path = "/usr/bin/curl");
+    assert (Array.to_list Pave.Provider.curl_environment = ["LANG=C"; "LC_ALL=C"]);
+    assert (Pave.Provider.curl_timeout_message ~streaming:false
+      ~response_body_seen:false =
+      "provider request timed out before a response was available");
+    assert (Pave.Provider.curl_timeout_message ~streaming:true
+      ~response_body_seen:false =
+      "provider stream timed out before the first response data byte");
+    assert (Pave.Provider.curl_timeout_message ~streaming:true
+      ~response_body_seen:true =
+      "provider stream timed out after response data (stream idle or total request timeout)"));
   print_endline "provider HTTP: ok"

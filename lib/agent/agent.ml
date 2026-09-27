@@ -133,15 +133,16 @@ let file_mutation (call : Protocol.tool_call) =
   match call.name with
   | "write_file" | "edit_file" | "apply_edits" -> true
   | "ast_edit" -> Protocol.member "dry_run" call.arguments = `Bool false
+  | "lsp" -> Protocol.member "action" call.arguments = `String "apply_preview"
   | _ -> false
 
 let file_scope ?cancel t call =
-  try
-    match Protocol.member "path" call.Protocol.arguments with
-    | `String path when String.starts_with ~prefix:"https://" path ||
+  let resolve_path path =
+    match path with
+    | path when String.starts_with ~prefix:"https://" path ||
         String.starts_with ~prefix:"http://" path ||
         String.starts_with ~prefix:"artifact://" path -> Ok (path, "", None)
-    | `String path ->
+    | path ->
         (match Tools.resolve_file_location ?cancel
             ?context:t.workspace_context ~root:t.root path with
          | None when file_mutation call ->
@@ -163,8 +164,27 @@ let file_scope ?cancel t call =
                  let codes = List.map (fun (d : Project_context.diagnostic) -> d.code)
                    scope.diagnostics |> List.sort_uniq String.compare in
                  Error ("Error: scoped instructions could not be resolved (" ^
-                   String.concat ", " codes ^ "); file operation not executed"))
-    | _ -> Error "Error: a workspace-relative file path is required; file operation not executed"
+                   String.concat ", " codes ^ "); file operation not executed")) in
+  try
+    let paths =
+      if call.name = "lsp" &&
+         Protocol.member "action" call.arguments = `String "apply_preview" then
+        Tools.lsp_preview_paths ?context:t.workspace_context ~root:t.root
+          call.arguments
+      else
+        match Protocol.member "path" call.arguments with
+        | `String path -> [path]
+        | _ -> [] in
+    if paths = [] then
+      Error "Error: a workspace-relative file path is required; file operation not executed"
+    else
+      let rec resolve reversed = function
+        | [] -> Ok (List.rev reversed)
+        | path :: rest ->
+            (match resolve_path path with
+             | Error _ as error -> error
+             | Ok scope -> resolve (scope :: reversed) rest) in
+      resolve [] paths
   with
   | Tools.Tool_error message -> Error ("Error: " ^ message)
   | Workspace_git.Error message ->
@@ -352,24 +372,34 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
                       complete "Error: tool is no longer available"
                     else if List.mem call.name
                       ["write_file"; "edit_file"; "read_file"; "workspace_snapshot";
-                       "apply_edits"; "ast_edit"] then
+                       "apply_edits"; "ast_edit"] ||
+                      (call.name = "lsp" &&
+                       (Protocol.member "path" call.arguments <> `Null ||
+                        Protocol.member "action" call.arguments = `String "apply_preview")) then
                       (match file_scope ?cancel t call with
                        | Error message -> complete message
-                       | Ok (scope_key, scoped, location) ->
+                       | Ok scopes ->
                            let mutating = file_mutation call in
-                           if mutating then tracked_path := location;
-                           if scoped <> "" &&
-                              List.assoc_opt scope_key visible <> Some scoped then
-                             if queue_scope t scope_key scoped then
-                               if not mutating then (
-                                 prepared := Some execute;
-                                 Tool_scheduler.Run)
-                               else complete
-                                 ("Error: file mutation withheld until path-scoped instructions " ^
-                                  "are presented as system context; retry this tool call next turn")
-                             else complete
+                           if mutating && call.name <> "lsp" then
+                             tracked_path := (match scopes with
+                               | (_, _, location) :: _ -> location
+                               | [] -> None);
+                           let unseen = List.filter (fun (scope_key, scoped, _) ->
+                             scoped <> "" &&
+                             List.assoc_opt scope_key visible <> Some scoped) scopes in
+                           if unseen <> [] then (
+                             let queued = List.fold_left (fun ok (scope_key, scoped, _) ->
+                               let added = queue_scope t scope_key scoped in
+                               added && ok) true unseen in
+                             if not queued then complete
                                ("Error: scoped instructions exceed the per-turn context limit; " ^
                                 "file operation not executed")
+                             else if mutating then complete
+                               ("Error: file mutation withheld until path-scoped instructions " ^
+                                "for every target are presented as system context; retry this tool call next turn")
+                             else (
+                               prepared := Some execute;
+                               Tool_scheduler.Run))
                            else (
                              prepared := Some execute;
                              Tool_scheduler.Run))
@@ -440,22 +470,23 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
                       "Error: command not approved"
                       else "Error: tool approval denied")]
                   else (
-                    Provider.check_cancel cancel;
-                    if Tools.non_reversible_tool call.name then (
+                    if Tools.non_reversible_tool ~name:call.name ~args:call.arguments then (
+                      let action = match Protocol.member "action" call.arguments with
+                        | `String action -> " (" ^ action ^ ")"
+                        | _ -> "" in
                       let detail = if call.name = "run_command" then
                         "Shell command was attempted; workspace and external side effects may have occurred. /rewind does not reverse shell effects."
                       else
-                        call.name ^ " was attempted; process, Git, workspace, or external side effects may have occurred. /rewind does not reverse this action." in
+                        call.name ^ action ^
+                          " was attempted; external, process, network, or clipboard side effects may have occurred. /rewind does not reverse this action." in
                       Option.iter (fun notify ->
                         try notify (Session_rewind.Non_reversible_effect {
                           tool_name = call.name; detail })
                         with exn -> t.on_event
                           ("Action started, but rewind tracking failed; treat it as non-reversible: " ^
                            Printexc.to_string exn)) t.on_workspace_effect;
-                      t.on_event (if call.name = "run_command" then
-                        "Shell command effects may be non-reversible; /rewind does not undo shell or external effects."
-                      else
-                        "Process or Git effects may be non-reversible; /rewind does not undo them."));
+                      t.on_event
+                        "External, process, network, or clipboard effects may be non-reversible; /rewind does not undo them.");
                     let before = match !tracked_path, t.on_workspace_effect with
                       | Some location, Some _ when location.worktree_id = None ->
                           Some (location, Session_rewind.snapshot_file

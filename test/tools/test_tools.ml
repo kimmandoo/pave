@@ -12,6 +12,76 @@ let rejected f =
   try contains (String.lowercase_ascii (f ())) "error"
   with _ -> true
 
+let lsp_frame message =
+  let body = Yojson.Basic.to_string message in
+  Printf.sprintf "Content-Length: %d\r\n\r\n%s" (String.length body) body
+
+let fake_lsp_io () =
+  let lock = Mutex.create () and ready = Condition.create () in
+  let incoming = Queue.create () and current = ref None and offset = ref 0 in
+  let closed = ref false in
+  let enqueue text =
+    Mutex.lock lock;
+    Queue.add text incoming;
+    Condition.signal ready;
+    Mutex.unlock lock in
+  let read bytes destination length =
+    Mutex.lock lock;
+    let rec await () =
+      match !current with
+      | Some text when !offset < String.length text -> ()
+      | _ ->
+          current := None;
+          offset := 0;
+          if not (Queue.is_empty incoming) then (
+            current := Some (Queue.take incoming);
+            await ())
+          else if not !closed then (
+            Condition.wait ready lock;
+            await ()) in
+    await ();
+    let count = match !current with
+      | None -> 0
+      | Some text ->
+          let count = min length (String.length text - !offset) in
+          Bytes.blit_string text !offset bytes destination count;
+          offset := !offset + count;
+          count in
+    Mutex.unlock lock;
+    count in
+  let write wire =
+    let marker = "\r\n\r\n" in
+    let body_start = Str.search_forward (Str.regexp_string marker) wire 0 +
+      String.length marker in
+    let body = String.sub wire body_start (String.length wire - body_start) in
+    let request = Yojson.Basic.from_string body in
+    let answer = match Pave.Workspace_lsp.member "method" request with
+      | `String "initialize" ->
+          let capabilities = `Assoc [
+            "positionEncoding", `String "utf-16";
+            "definitionProvider", `Bool true;
+            "referencesProvider", `Bool true;
+            "hoverProvider", `Bool true;
+            "renameProvider", `Bool true;
+            "codeActionProvider", `Bool true] in
+          Some (`Assoc ["jsonrpc", `String "2.0";
+            "id", Pave.Workspace_lsp.member "id" request;
+            "result", `Assoc ["capabilities", capabilities]])
+      | `String "shutdown" ->
+          Some (`Assoc ["jsonrpc", `String "2.0";
+            "id", Pave.Workspace_lsp.member "id" request; "result", `Null])
+      | _ -> None in
+    Option.iter (fun answer -> enqueue (lsp_frame answer)) answer in
+  let close () =
+    Mutex.lock lock;
+    closed := true;
+    Condition.broadcast ready;
+    Mutex.unlock lock in
+  { Pave.Workspace_lsp.read = read; write; close; terminate = (fun () -> ()) }
+
+let fake_lsp_manager () =
+  Pave.Workspace_lsp.create_manager
+    ~launcher:(fun ~program:_ ~arguments:_ ~cwd:_ ~environment:_ -> fake_lsp_io ()) ()
 let () =
   let root = Filename.temp_file "pave-tools-" "" in
   Sys.remove root; Unix.mkdir root 0o700;
@@ -27,7 +97,15 @@ let () =
     Unix.mkdir absolute 0o700;
     directories := absolute :: !directories in
   let oc = open_out outside in output_string oc "outside secret\n"; close_out oc;
+  let process_manager = Pave.Workspace_process.create_manager () in
+  let lsp_manager = fake_lsp_manager () in
+  let tool_context = Pave.Tools.create_session_context ~lsp_manager
+    ~owner:"tools-test-session" ~root ~process_manager
+    ~read_artifact:(fun _ -> None)
+    ~record_file_change:(fun ~path:_ ~before:_ ~after:_ -> ()) () in
   Fun.protect ~finally:(fun () ->
+    Pave.Tools.close_session_context tool_context;
+    Pave.Workspace_process.close_manager process_manager;
     List.iter (fun path -> try Sys.remove path with Sys_error _ -> ()) !files;
     List.iter (fun path -> try Unix.rmdir path with Unix.Unix_error _ -> ()) !directories;
     Sys.remove outside; Unix.rmdir root) (fun () ->
@@ -97,6 +175,8 @@ let () =
     Fun.protect ~finally:(fun () -> Sys.remove external_file; Unix.rmdir folder) (fun () ->
       let link = Filename.concat root "external" in
       Unix.symlink folder link; files := link :: !files;
+      assert (not (contains (tool root "fuzzy_file_search" ["query", "hidden"])
+        "external/hidden.swift"));
       assert (rejected (fun () -> tool root "read_file" ["path", "../escape.swift"]));
       assert (rejected (fun () -> tool root "read_file" ["path", "escape.swift"]));
       assert (rejected (fun () -> tool root "read_file" ["path", "external/hidden.swift"]));
@@ -125,6 +205,316 @@ let () =
     create "#literal.swift" "needle-000\n";
     create "root-only.swift" "needle-222\n";
     create "src/root-only.swift" "needle-223\n";
+    directory "src/History";
+    create "history-search.ts" "";
+    create "src/history-search.ts" "";
+    create ".private/history-search.ts" "";
+    create "ignored/history-search.ts" "";
+    create "src/Σummary.ml" "";
+    let fuzzy = Yojson.Basic.from_string
+      (tool_json root "fuzzy_file_search" ["query", `String "histsr"]) in
+    let fuzzy_matches = Yojson.Basic.Util.to_list
+      (Yojson.Basic.Util.member "matches" fuzzy) in
+    assert (Yojson.Basic.Util.member "total_matches" fuzzy = `Int 2 &&
+      Yojson.Basic.Util.member "truncated" fuzzy = `Bool false);
+    assert (Yojson.Basic.Util.member "path" (List.hd fuzzy_matches) =
+      `String "history-search.ts" &&
+      not (contains (Yojson.Basic.to_string fuzzy) ".private") &&
+      not (contains (Yojson.Basic.to_string fuzzy) "ignored/"));
+    let capped_fuzzy = Yojson.Basic.from_string
+      (tool_json root "fuzzy_file_search"
+        ["query", `String "hist"; "max_results", `Int 1]) in
+    assert (Yojson.Basic.Util.member "total_matches" capped_fuzzy = `Int 3 &&
+      Yojson.Basic.Util.member "truncated" capped_fuzzy = `Bool true &&
+      Yojson.Basic.Util.member "path"
+        (List.hd (Yojson.Basic.Util.to_list
+          (Yojson.Basic.Util.member "matches" capped_fuzzy))) =
+        `String "history-search.ts");
+    let directory_fuzzy = Yojson.Basic.from_string
+      (tool_json root "fuzzy_file_search" ["query", `String "hist"]) in
+    assert (List.exists (fun result ->
+      Yojson.Basic.Util.member "path" result = `String "src/History" &&
+      Yojson.Basic.Util.member "is_directory" result = `Bool true)
+      (Yojson.Basic.Util.to_list
+        (Yojson.Basic.Util.member "matches" directory_fuzzy)));
+    let hidden_fuzzy = Yojson.Basic.from_string
+      (tool_json root "fuzzy_file_search"
+        ["query", `String "histsr"; "hidden", `Bool true]) in
+    assert (Yojson.Basic.Util.member "total_matches" hidden_fuzzy = `Int 3 &&
+      contains (Yojson.Basic.to_string hidden_fuzzy) ".private/history-search.ts");
+    let unicode_fuzzy = Yojson.Basic.from_string
+      (tool_json root "fuzzy_file_search" ["query", `String "σmm"]) in
+    assert (contains (Yojson.Basic.to_string unicode_fuzzy) "src/Σummary.ml");
+    assert (contains (tool root "fuzzy_file_search" ["query", ""])
+      "query must not be empty");
+    assert (contains (tool root "fuzzy_file_search"
+      ["query", String.make 1 '\xff']) "valid UTF-8");
+    let scanner_secret = "integration-secret-94821" in
+    create ".env" ("API_KEY=" ^ scanner_secret ^ "\n");
+    let scan = tool_json root "repository_security_scan"
+      ["format", `String "summary"] in
+    let scan_json = Yojson.Basic.from_string scan in
+    let findings =
+      Yojson.Basic.Util.to_list
+        (Yojson.Basic.Util.member "findings" scan_json) in
+    assert (contains scan ".env" && not (contains scan scanner_secret));
+    assert (not (contains scan "escape.swift" || contains scan "external"));
+    assert (List.exists (fun finding ->
+      Yojson.Basic.Util.member "path" finding = `String ".env" &&
+      Yojson.Basic.Util.member "start_line" finding = `Int 1 &&
+      Yojson.Basic.Util.member "validated" finding = `Bool true) findings);
+    let sarif = tool_json root "repository_security_scan"
+      ["format", `String "sarif"] in
+    assert (Yojson.Basic.Util.member "version" (Yojson.Basic.from_string sarif) =
+      `String "2.1.0" && not (contains sarif scanner_secret));
+    let scan_decision = Pave.Tools.approval_decision
+      ~command_patterns:[] ~name:"repository_security_scan" ~args:(`Assoc []) in
+    assert (scan_decision.tier = Pave.Approval.Read &&
+      not (Pave.Tools.requires_explicit_approval
+        ~name:"repository_security_scan" ~args:(`Assoc [])));
+    assert (List.exists (function
+      | `Assoc fields -> (match List.assoc_opt "function" fields with
+          | Some (`Assoc desc) -> List.assoc_opt "name" desc =
+              Some (`String "repository_security_scan")
+          | _ -> false)
+      | _ -> false) Pave.Tools.definitions);
+    let capped_scan = Yojson.Basic.from_string
+      (tool_json root "repository_security_scan"
+        ["format", `String "summary"; "finding_limit", `Int 0]) in
+    assert (Yojson.Basic.Util.member "findings" capped_scan = `List [] &&
+      Yojson.Basic.Util.member "truncated" capped_scan = `Bool true);
+    let fuzzy_decision = Pave.Tools.approval_decision
+      ~command_patterns:[] ~name:"fuzzy_file_search"
+      ~args:(`Assoc ["query", `String "hist"]) in
+    assert (fuzzy_decision.tier = Pave.Approval.Read &&
+      Pave.Tools.execution_mode "fuzzy_file_search" = Pave.Tool_scheduler.Shared);
+    create "sample.png" "not a valid image";
+    let approval_case ?context name fields expected_tier =
+      let args = `Assoc fields in
+      let decision = Pave.Tools.approval_decision
+        ~command_patterns:[] ~name ~args in
+      assert (decision.tier = expected_tier);
+      assert (Pave.Tools.requires_explicit_approval ~name ~args);
+      let request = Pave.Tools.approval_request ?context ~root ~name ~args decision in
+      assert (request.impact <> "");
+      request in
+    let search_secret = "approval-secret-must-not-render" in
+    let previous_search_key = Sys.getenv_opt "BRAVE_SEARCH_API_KEY" in
+    Unix.putenv "BRAVE_SEARCH_API_KEY" search_secret;
+    let search_request = approval_case "web_search"
+      ["query", `String "release documentation"] Pave.Approval.Exec in
+    let search_preview =
+      String.concat "\n" (search_request.impact :: search_request.details) in
+    assert (contains search_preview "release documentation" &&
+      contains search_preview "brave" &&
+      not (contains search_preview search_secret));
+    Unix.putenv "BRAVE_SEARCH_API_KEY"
+      (Option.value ~default:"" previous_search_key);
+    ignore (approval_case "web_fetch"
+      ["url", `String "https://example.com/"] Pave.Approval.Exec);
+    let ocr_request = approval_case "image_ocr"
+      ["path", `String "sample.png"; "mime", `String "image/png"]
+      Pave.Approval.Exec in
+    assert (contains ocr_request.impact "no shell or network");
+    let clipboard_read = approval_case "clipboard_read" []
+      Pave.Approval.Read in
+    assert (clipboard_read.details =
+      ["No clipboard content is read before approval."]);
+    ignore (approval_case "clipboard_write"
+      ["text", `String "reviewed clipboard content"] Pave.Approval.Write);
+    List.iter (fun (name, fields) ->
+      let result = tool_json root name fields in
+      assert (contains result "requires explicit interactive approval"))
+      ["web_search", ["query", `String "never sent"];
+       "web_fetch", ["url", `String "https://example.com/"];
+       "image_ocr", ["path", `String "sample.png";
+                     "mime", `String "image/png"];
+       "clipboard_read", [];
+       "clipboard_write", ["text", `String "must not be copied"]];
+    let lsp_start_request = approval_case ~context:tool_context "lsp_start"
+      ["program", `String "/usr/bin/example-lsp";
+       "arguments", `List [`String "--stdio"]] Pave.Approval.Exec in
+    let lsp_start_preview = String.concat "\n"
+      (lsp_start_request.impact :: lsp_start_request.details) in
+    assert (contains lsp_start_preview "/usr/bin/example-lsp" &&
+      contains lsp_start_preview "--stdio" && contains lsp_start_preview "unsandboxed");
+    Pave.Workspace_lsp.start tool_context.lsp_manager
+      ~owner:"tools-test-session" ~root ~program:"/usr/bin/example-lsp"
+      ~args:["--stdio"] ~execution_approved:true;
+    directory "other";
+    create "other/Second.swift" "old second\n";
+    directory ".pave";
+    directory ".pave/rules";
+    create ".pave/rules/app.md"
+      "---\npaths: App.swift\n---\nAPP-SCOPE-ONLY instruction\n";
+    create ".pave/rules/second.md"
+      "---\npaths: other/Second.swift\n---\nSECOND-SCOPE-ONLY instruction\n";
+    let original = Pave.Workspace_edit.read_snapshot ~root ~path:"App.swift" in
+    let second_original = Pave.Workspace_edit.read_snapshot ~root
+      ~path:"other/Second.swift" in
+    let proposed = "Renamed\n" and second_proposed = "changed second\n" in
+    let preview_file path original content = `Assoc [
+      "path", `String path;
+      "original_sha256", `String original.Pave.Workspace_edit.sha256;
+      "result_sha256", `String (Pave.Workspace_edit.sha256 content);
+      "content", `String content;
+      "changed", `Bool true
+    ] in
+    let preview_files = `List [
+      preview_file "App.swift" original proposed;
+      preview_file "other/Second.swift" second_original second_proposed
+    ] in
+    let preview_id = Pave.Workspace_lsp.store_edit_preview
+      tool_context.lsp_manager ~owner:"tools-test-session" ~root
+      ~program:"/usr/bin/example-lsp" ~arguments:["--stdio"]
+      ~title:"Rename App symbol" preview_files in
+    let apply_request = approval_case ~context:tool_context "lsp"
+      ["action", `String "apply_preview";
+       "program", `String "/usr/bin/example-lsp";
+       "arguments", `List [`String "--stdio"];
+       "preview_id", `String preview_id] Pave.Approval.Write in
+    let apply_preview = String.concat "\n"
+      (apply_request.impact :: apply_request.details) in
+    assert (contains apply_preview "Rename App symbol" &&
+      contains apply_preview "App.swift" &&
+      contains apply_preview "other/Second.swift" &&
+      contains apply_preview original.sha256 &&
+      contains apply_preview (Pave.Workspace_edit.sha256 proposed) &&
+      contains apply_preview "Exact proposed contents:\nRenamed\n" &&
+      contains apply_preview "Exact proposed contents:\nchanged second\n");
+    let lsp_read = Pave.Tools.approval_decision ~command_patterns:[]
+      ~name:"lsp" ~args:(`Assoc [
+        "action", `String "rename";
+        "program", `String "/usr/bin/example-lsp";
+        "path", `String "App.swift"
+      ]) in
+    assert (lsp_read.tier = Pave.Approval.Read &&
+      not (Pave.Tools.requires_explicit_approval ~name:"lsp"
+        ~args:(`Assoc ["action", `String "rename"])));
+    let scoped_provider : Pave.Provider.config = {
+      endpoint = ""; api_key = ""; model = "";
+      api = Pave.Provider.Openai_completions
+    } in
+    let scoped_agent = Pave.Agent.create ~provider:scoped_provider ~root
+      ~system:"scope test" ~workspace_context:tool_context
+      ~on_event:(fun _ -> ()) () in
+    let scoped_call : Pave.Protocol.tool_call = {
+      id = "lsp-apply"; name = "lsp";
+      arguments = `Assoc [
+        "action", `String "apply_preview";
+        "program", `String "/usr/bin/example-lsp";
+        "arguments", `List [`String "--stdio"];
+        "preview_id", `String preview_id
+      ]
+    } in
+    (match Pave.Agent.file_scope scoped_agent scoped_call with
+     | Ok scopes ->
+         assert (List.length scopes = 2);
+         assert (List.exists (fun (path, text, _) ->
+           path = "App.swift" && contains text "APP-SCOPE-ONLY instruction") scopes);
+         assert (List.exists (fun (path, text, _) ->
+           path = "other/Second.swift" &&
+           contains text "SECOND-SCOPE-ONLY instruction") scopes)
+     | Error message -> failwith message);
+    let eval_request = approval_case ~context:tool_context "workspace_eval"
+      ["language", `String "python"; "code", `String "print(1)"]
+      Pave.Approval.Exec in
+    assert (contains (String.concat "\n" eval_request.details) "print(1)");
+    let eval_code code =
+      Pave.Tools.execute ~root ~name:"workspace_eval" ~context:tool_context
+        ~approved:true ~args:(`Assoc [
+          "language", `String "python";
+          "code", `String code;
+          "timeout_seconds", `Int 10
+        ]) () |> Yojson.Basic.from_string in
+    let eval_output result =
+      assert (Yojson.Basic.Util.member "error" result = `Null);
+      Yojson.Basic.Util.member "output" result |> Yojson.Basic.Util.to_string in
+    assert (contains (eval_output (eval_code
+      "print(pave.tool('read_file', {'path': 'snapshot.txt'}))")) "A B");
+    let bridge_denied = eval_code
+      "pave.tool('read_file', {'path': 'HTTPS://example.com/'})" in
+    let bridge_denied_error =
+      Yojson.Basic.Util.member "error" bridge_denied |> Yojson.Basic.Util.to_string in
+    if not (contains bridge_denied_error "tool bridge callback failed") then
+      failwith ("workspace evaluator bridge error was unexpected: " ^ bridge_denied_error);
+    ignore (Pave.Tools.execute ~root ~name:"start_process" ~context:tool_context
+      ~approved:true ~args:(`Assoc [
+        "id", `String "eval-bridge-job";
+        "program", `String "/usr/bin/printf";
+        "arguments", `List [`String "job-bridge-output"]
+      ]) ());
+    let job_bridge = eval_output (eval_code
+      "pave.tool('process_wait', {'id': 'eval-bridge-job', 'timeout_seconds': 2})\n\
+       page = pave.tool('process_output', {'id': 'eval-bridge-job'})\n\
+       print('job-bridge-output' in page)") in
+    assert (contains job_bridge "True");
+    ignore (Pave.Tools.execute ~root ~name:"start_process" ~context:tool_context
+      ~approved:true ~args:(`Assoc [
+        "id", `String "eval-mutation-job";
+        "program", `String "/bin/sleep";
+        "arguments", `List [`String "30"]
+      ]) ());
+    let mutation_denied = eval_code
+      "pave.tool('process_kill', {'id': 'eval-mutation-job'})" in
+    let mutation_error =
+      Yojson.Basic.Util.member "error" mutation_denied |> Yojson.Basic.Util.to_string in
+    assert (contains mutation_error "tool bridge callback failed");
+    let jobs = Pave.Tools.execute ~root ~name:"process_list" ~context:tool_context
+      ~args:(`Assoc []) () in
+    assert (contains jobs "eval-mutation-job · running");
+    ignore (Pave.Tools.execute ~root ~name:"process_kill" ~context:tool_context
+      ~approved:true ~args:(`Assoc ["id", `String "eval-mutation-job"]) ());
+    let ssh_request = approval_case ~context:tool_context "ssh_open"
+      ["id", `String "ssh-test"; "host", `String "host.example.org";
+       "user", `String "dev"; "remote_root", `String "/workspace/project"]
+      Pave.Approval.Exec in
+    let ssh_preview = String.concat "\n" (ssh_request.impact :: ssh_request.details) in
+    assert (contains ssh_preview "host.example.org" &&
+      contains ssh_preview "/workspace/project" &&
+      contains ssh_preview "no Pave OAuth/API credentials");
+    let dap_start_request = approval_case ~context:tool_context "dap_start"
+      ["id", `String "dap-test"; "program", `String "/usr/bin/example-dap";
+       "arguments", `List [`String "--stdio"]] Pave.Approval.Exec in
+    assert (contains (String.concat "\n" dap_start_request.details)
+      "/usr/bin/example-dap");
+    let dap_launch_request = approval_case ~context:tool_context "dap"
+      ["id", `String "dap-test"; "action", `String "launch";
+       "target", `String "App.swift";
+       "arguments", `List [`String "--debug"]] Pave.Approval.Exec in
+    assert (contains (String.concat "\n" dap_launch_request.details)
+      "\"target\":\"App.swift\"");
+    let token_result = Yojson.Basic.from_string
+      (tool_json root "token_count"
+        ["encoding", `String "cl100k_base"; "text", `String "hello world"]) in
+    assert (Yojson.Basic.Util.member "token_count" token_result = `Int 2);
+    assert (not (Pave.Tools.requires_explicit_approval ~name:"dap"
+      ~args:(`Assoc ["action", `String "threads"])));
+    assert (Pave.Tools.non_reversible_tool ~name:"workspace_eval"
+      ~args:(`Assoc ["action", `String "run"]));
+    assert (not (Pave.Tools.non_reversible_tool ~name:"workspace_eval"
+      ~args:(`Assoc ["action", `String "reset"])));
+    List.iter (fun (name, fields) ->
+      let result = Pave.Tools.execute ~context:tool_context ~root ~name
+        ~args:(`Assoc fields) () in
+      assert (contains result "requires explicit interactive approval"))
+      ["lsp_start", ["program", `String "/usr/bin/example-lsp"];
+       "lsp", ["action", `String "apply_preview";
+               "program", `String "/usr/bin/example-lsp";
+               "arguments", `List [`String "--stdio"];
+               "preview_id", `String "unknown-preview"];
+       "workspace_eval", ["language", `String "python";
+                          "code", `String "print(1)"];
+       "ssh_open", ["id", `String "ssh-test"; "host", `String "host.example.org";
+                    "user", `String "dev"; "remote_root", `String "/workspace"];
+       "ssh_read", ["id", `String "missing"; "path", `String "README.md"];
+       "ssh_write", ["id", `String "missing"; "path", `String "README.md";
+                     "contents", `String "changed"];
+       "ssh_command", ["id", `String "missing"; "program", `String "true"];
+       "dap_start", ["id", `String "dap-test"; "program", `String "/usr/bin/example-dap"];
+       "dap", ["id", `String "dap-test"; "action", `String "launch";
+               "target", `String "App.swift"]];
+    
     create "src/Folder.swift/inside.txt" "needle-001\n";
     let glob = tool root "glob" ["pattern", "**/*.swift"] in
     assert (contains glob "App.swift" && contains glob "src/Match.swift");

@@ -86,6 +86,8 @@ let reject_headers ~region ~endpoint ~api_key =
   | exception Invalid_argument _ -> ()
   | _ -> fail "key escaped pinned region or invalid key was accepted"
 
+let () = Pave.Provider.Test.use_curl_helper Sys.executable_name
+
 let () =
   if Array.length Sys.argv >= 3 && Sys.argv.(1) = "--disable" &&
      Sys.argv.(2) = "--config" then

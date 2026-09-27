@@ -105,8 +105,21 @@ let command_arguments command =
   match List.rev !words with
   | [] -> invalid_arg "empty AWS credential_process"
   | program :: arguments -> program, arguments
+let curl_path = "/usr/bin/curl"
+let curl_environment = [|"LANG=C"; "LC_ALL=C"|]
 
-let run_child ?cancel ~timeout ~output_limit ~stdin program arguments =
+(* Explicit fixture injection for tests; production requests use curl_path. *)
+
+module Test = struct
+  let curl_helper = ref None
+
+  let use_curl_helper executable =
+    curl_helper := Some (Unix.realpath executable)
+end
+
+
+let run_child ?exec_path ?child_environment ?cancel
+    ~timeout ~output_limit ~stdin program arguments =
   let input_read, input_write = Unix.pipe () in
   let output_read, output_write = Unix.pipe () in
   let null = try Unix.openfile "/dev/null" [Unix.O_WRONLY] 0 with exn ->
@@ -125,7 +138,12 @@ let run_child ?cancel ~timeout ~output_limit ~stdin program arguments =
        Unix.dup2 null Unix.stderr;
        List.iter (fun fd -> try Unix.close fd with _ -> ())
          [input_read; input_write; output_read; output_write; null];
-       Unix.execvp program (Array.of_list (program :: arguments))
+       let argv = Array.of_list (program :: arguments) in
+       (match exec_path with
+        | None -> Unix.execvp program argv
+        | Some path ->
+            Unix.execve path argv
+              (Option.value ~default:(Unix.environment ()) child_environment))
      with _ -> Unix._exit 127));
   Unix.close input_read;
   Unix.close output_write;
@@ -208,6 +226,14 @@ let curl_http ?cancel ~method_ ~url ~headers ~body () =
   let scheme = if String.starts_with ~prefix:"https://" url then "https"
     else if String.starts_with ~prefix:"http://" url then "http"
     else invalid_arg "unsupported AWS credential endpoint protocol" in
+  let executable, environment = match !Test.curl_helper with
+    | Some executable -> executable, Unix.environment ()
+    | None ->
+        if not (Sys.file_exists curl_path &&
+            (try Unix.access curl_path [Unix.X_OK]; true
+             with Unix.Unix_error _ -> false)) then
+          invalid_arg "trusted AWS credential curl executable is unavailable";
+        curl_path, curl_environment in
   let config = Buffer.create 512 in
   let add name value = Buffer.add_string config (name ^ " = " ^ curl_quote value ^ "\n") in
   Buffer.add_string config "silent\nshow-error\n";
@@ -221,7 +247,8 @@ let curl_http ?cancel ~method_ ~url ~headers ~body () =
   List.iter (fun (name, value) -> add "header" (name ^ ": " ^ value)) headers;
   if body <> "" then add "data" body;
   add "write-out" "%{http_code}";
-  let output = try run_child ?cancel ~timeout:5. ~output_limit:1_048_580
+  let output = try run_child ~exec_path:executable
+      ~child_environment:environment ?cancel ~timeout:5. ~output_limit:1_048_580
       ~stdin:(Buffer.contents config) "curl" ["--disable"; "--config"; "-"]
     with
     | Cancelled as exn -> raise exn

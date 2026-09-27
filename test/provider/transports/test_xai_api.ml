@@ -92,6 +92,8 @@ let fake_curl () =
   output_string output response; close_out output;
   print_string "200"; flush stdout
 
+let () = Pave.Provider.Test.use_curl_helper Sys.executable_name
+
 let () =
   if Array.length Sys.argv >= 3 && Sys.argv.(1) = "--disable" && Sys.argv.(2) = "--config" then
     (try fake_curl () with exn ->

@@ -23,6 +23,18 @@ let quote value =
   Buffer.contents buffer
 
 let close_fd fd = try Unix.close fd with Unix.Unix_error _ -> ()
+let curl_path = "/usr/bin/curl"
+let curl_environment = [|"LANG=C"; "LC_ALL=C"|]
+
+(* Explicit fixture injection for tests; production requests use curl_path. *)
+
+module Test = struct
+  let curl_helper = ref None
+
+  let use_curl_helper executable =
+    curl_helper := Some (Unix.realpath executable)
+end
+
 
 let read_limited path max_bytes =
   let input = open_in_bin path in
@@ -32,17 +44,25 @@ let read_limited path max_bytes =
     really_input_string input length)
 
 let run ?cancel configuration =
+  let executable, environment = match !Test.curl_helper with
+    | Some executable -> executable, Unix.environment ()
+    | None ->
+        if not (Sys.file_exists curl_path &&
+            (try Unix.access curl_path [Unix.X_OK]; true
+             with Unix.Unix_error _ -> false)) then raise Failed;
+        curl_path, curl_environment in
   let reader, writer = Unix.pipe () in
   let output_read, output_write = Unix.pipe () in
   let errors = Unix.openfile "/dev/null" [Unix.O_WRONLY] 0 in
   let pid = try
     Unix.set_close_on_exec writer;
     Unix.set_close_on_exec output_read;
-    Unix.create_process "curl" [|"curl"; "--disable"; "--config"; "-"|]
+    Unix.create_process_env executable
+      [|"curl"; "--disable"; "--config"; "-"|] environment
       reader output_write errors
-    with exn ->
-      List.iter close_fd [reader; writer; output_read; output_write; errors];
-      raise exn in
+  with exn ->
+    List.iter close_fd [reader; writer; output_read; output_write; errors];
+    raise exn in
   List.iter close_fd [reader; output_write; errors];
   let waited = ref false in
   Fun.protect ~finally:(fun () ->

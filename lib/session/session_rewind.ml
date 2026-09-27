@@ -54,6 +54,9 @@ let non_reversible_tool_name = function
   | "run_command" | "start_process" | "start_shell"
   | "process_stdin" | "process_close_stdin" | "process_kill"
   | "worktree_create" | "worktree_commit" | "worktree_remove"
+  | "workspace_eval" | "lsp_start" | "dap_start" | "dap"
+  | "ssh_open" | "ssh_read" | "ssh_write" | "ssh_command"
+  | "web_search" | "web_fetch" | "clipboard_write"
   | "write_file" | "edit_file" | "apply_edits" | "ast_edit" -> true
   | _ -> false
 
@@ -140,7 +143,7 @@ let parse_effect ~owner ~id text =
   let valid_option validate = function None -> true | Some value -> validate value in
   let path_valid = match tool_name, path with
     | name, None when non_reversible_tool_name name -> true
-    | ("write_file" | "edit_file" | "apply_edits" | "ast_edit"), Some path ->
+    | ("write_file" | "edit_file" | "apply_edits" | "ast_edit" | "lsp"), Some path ->
         String.length path > 0 && String.length path <= 4096 &&
         not (String.contains path '\000')
     | _ -> false in
@@ -314,7 +317,7 @@ let write_effect t rewind_entry backup =
 let record_file_change t ~tool_name ~path ~before ~after =
   with_lock t (fun () ->
     if not (List.mem tool_name
-        ["write_file"; "edit_file"; "apply_edits"; "ast_edit"]) then
+        ["write_file"; "edit_file"; "apply_edits"; "ast_edit"; "lsp"]) then
       fail "unsupported workspace rewind tool";
     if String.length path = 0 || String.length path > 4096 ||
        String.contains path '\000' then fail "invalid workspace rewind path";

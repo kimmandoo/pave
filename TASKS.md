@@ -124,13 +124,13 @@ For the account/model/terminal work, complete contracts before new providers: P1
 - [x] Completed workspace read/search contracts with bounded selective local, document/PDF, archive, notebook, SQLite, artifact/worktree and safe HTTPS reads; existing ignore-aware glob, bounded regex grep/search, hidden-name and symlink protections remain enforced. Reader and search regressions passed.
 - [x] Added atomic multi-hunk edits guarded by expected snapshots and conflict checks, plus OCaml AST rename/structural edits with deterministic preview and exact failure reporting.
 - [x] Added cancellable foreground commands and session-owned bounded process/shell jobs with cwd, environment, deadlines, PTY where supported, readiness, stdin and kill; every command or process mutation retains explicit approval.
-- [ ] Add managed LSP lifecycle, definitions/references/diagnostics/hover/rename/code actions with write-through sync and guarded edits; prefer actual language-server semantics over text search. Reference: `packages/coding-agent/src/lsp/`, `docs/tools/lsp.md`.
-- [ ] Add DAP adapter launch/attach, breakpoints, thread/frame/variable inspection, stepping/evaluate and cleanup with read-versus-execute approval. Reference: `packages/coding-agent/src/dap/`, `docs/tools/debug.md`.
-- [ ] Add persistent per-session JavaScript/Python evaluation kernels with explicit reset, timeout/cancel, package policy and safe bridge to tools/jobs; never claim kernel state survives a restart. Reference: `packages/coding-agent/src/eval/`, `docs/tools/eval.md`.
-- [ ] Add web search with explicit provider credentials/priority, source URLs/citations, bounded content and error handling; add web fetch/HTML-to-Markdown as a separate network-trust boundary. Reference: `packages/coding-agent/src/web/search/`, `docs/tools/web_search.md`.
-- [ ] Add optional SSH workspace reads/transfers/commands with host verification, remote path guards and the same approvals as local tools; do not infer permission from a local workspace root. Reference: `packages/coding-agent/src/ssh/`, `packages/coding-agent/src/internal-urls/ssh-protocol.ts`.
-- [ ] Add remaining native services (fast file search, OCR, clipboard, terminal images and token count); R8 added managed Git/worktrees, process supervision and bounded PDF/document text reads. Avoid wholesale Rust/N-API build machinery. Reference: `packages/natives/README.md`, `docs/natives-media-system-utils.md`.
-- [ ] Add opt-in repository security scanning and finding validation with read/write/exec authorization, provenance and SARIF export; never auto-publish secrets or treat unvalidated model findings as facts. Reference: `packages/coding-agent/src/security/`, `docs/tools/security_scan.md`.
+- [x] Added a managed LSP lifecycle with definitions/references/diagnostics/hover and read-only rename/code-action previews. Applying edits requires a one-shot cached preview ID, separate approval of every path/hash/complete proposed file, validated paths/snapshots and per-file instruction gates; server semantics are used rather than text search.
+- [x] Added approved DAP launch/attach, breakpoints, thread/frame/variable inspection, stepping/evaluate and cleanup, with read-only inspection separated from execution approval.
+- [x] Added persistent private-session JavaScript/Python kernels with explicit reset, timeout/cancellation and a documented runtime policy; the bounded bridge is read-only, execution is explicitly unsandboxed and approved, kernels do not survive restart, Python imports are allowlisted, and JS package installation is unsupported.
+- [x] Added provider-priority web search with source URLs/citations and bounded fetch; web fetch remains a separate explicitly approved trust boundary, and network helpers receive only their selected provider credential.
+- [x] Added approved SSH reads/transfers/commands with verified hosts, remote path guards and operation-specific authorization; local workspace access does not authorize remote operations.
+- [x] Added native Unicode-case-folded bounded fuzzy file/directory path search, OCR, clipboard, opt-in terminal images and exact token counting without Rust/N-API build machinery. Fuzzy search respects hidden-file, `.gitignore`, symlink and dependency/build/VCS boundaries and reports result/traversal truncation.
+- [x] Added opt-in deterministic repository credential scanning with read-only authorization, validated provenance, redacted findings and SARIF; hidden/gitignored credential files are scanned, while capped/incomplete scans are explicitly marked and model findings are not trusted.
 - [x] Added session-owned managed Git worktrees, read-only status/diff/history, explicit creation/selected-path commit/removal approval, dirty-worktree removal refusal, and preservation of unrelated base and staged user changes.
 
 ### P5 — Terminal interaction and discoverability
@@ -216,7 +216,7 @@ The P0–P6 cards above remain the detailed acceptance criteria; this roadmap is
 
 ### R9 — IDE and external workspace integrations
 
-- [ ] Complete P4 LSP, DAP, persistent eval, web search/fetch, SSH, native services and security scanning. Keep network, execution, remote-host and write-through actions behind their distinct trust/approval boundaries.
+- [ ] Publish and verify v0.1.54 after completing the locally verified P4 LSP, DAP, persistent evaluation, web search/fetch, SSH, native services and security scanning. Preserve one-shot exact-content LSP approval, per-file instruction gates, child-process secret isolation, and separate network, execution, remote-host and write-through trust boundaries.
 
 ### R10 — Terminal input and overlay foundations
 

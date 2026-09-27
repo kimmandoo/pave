@@ -580,6 +580,8 @@ let converse_stream_fixture () =
       assert (status = Unix.WEXITED 0)))
 
 let () =
+  assert (Aws.curl_path = "/usr/bin/curl");
+  assert (Array.to_list Aws.curl_environment = ["LANG=C"; "LC_ALL=C"]);
   (* Reap the direct helper once, then drain a pipe held by its descendant. *)
   assert (Aws.run_child ~timeout:3. ~output_limit:128 ~stdin:""
     "/bin/sh" ["-c"; "printf ready; sleep 0.2 &"] = "ready");

@@ -46,19 +46,17 @@ let () =
   let manager = Process.create_manager () in
   let other_manager = Process.create_manager () in
   let owner = "workspace-tools-owner" in
-  let context = {
-    Tools.owner = owner;
-    process_manager = manager;
-    read_artifact = (fun id ->
-      if id = "private-fixture" then Some "owned artifact text\n" else None);
-  } in
-  let other_context = {
-    Tools.owner = "different-owner";
-    process_manager = other_manager;
-    read_artifact = (fun _ -> None);
-  } in
+  let context = Tools.create_session_context ~owner ~root ~process_manager:manager
+    ~read_artifact:(fun id ->
+      if id = "private-fixture" then Some "owned artifact text\n" else None)
+    ~record_file_change:(fun ~path:_ ~before:_ ~after:_ -> ()) () in
+  let other_context = Tools.create_session_context ~owner:"different-owner" ~root
+    ~process_manager:other_manager ~read_artifact:(fun _ -> None)
+    ~record_file_change:(fun ~path:_ ~before:_ ~after:_ -> ()) () in
   Fun.protect
     ~finally:(fun () ->
+      Tools.close_session_context context;
+      Tools.close_session_context other_context;
       (try Process.close_manager manager with _ -> ());
       (try Process.close_manager other_manager with _ -> ());
       remove_tree worktree_path;

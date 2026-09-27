@@ -121,7 +121,15 @@ let validate_text label limit value =
   if String.length value > limit || String.contains value '\000' then
     fail (label ^ " is invalid or exceeds its size limit")
 
-let validate_environment overrides =
+let inherited_environment_names = [
+  "PATH"; "HOME"; "TMPDIR"; "TEMP"; "LANG"; "LC_ALL"; "LC_CTYPE";
+  "TERM"; "COLORTERM"; "USER"; "LOGNAME"; "SHELL"; "PWD"; "NO_COLOR"
+]
+
+(* Child processes inherit only portable runtime/navigation values. Provider,
+   OAuth, cloud, search, and custom environment credentials are never ambient. *)
+
+let validate_environment ?(inherit_environment = true) overrides =
   let rec enforce_count count = function
     | [] -> ()
     | _ :: _ when count >= max_environment_entries ->
@@ -130,12 +138,16 @@ let validate_environment overrides =
   in
   enforce_count 0 overrides;
   let env = Hashtbl.create 64 in
-  Array.iter (fun entry ->
-    match String.index_opt entry '=' with
-    | None -> ()
-    | Some index -> Hashtbl.replace env (String.sub entry 0 index)
-        (String.sub entry (index + 1) (String.length entry - index - 1)))
-    (Unix.environment ());
+  if inherit_environment then
+    Array.iter (fun entry ->
+      match String.index_opt entry '=' with
+      | None -> ()
+      | Some index ->
+          let name = String.sub entry 0 index in
+          if List.mem name inherited_environment_names then
+            Hashtbl.replace env name
+              (String.sub entry (index + 1) (String.length entry - index - 1)))
+      (Unix.environment ());
   let total = ref 0 in
   List.iter (fun (name, value) ->
     if name = "" || String.length name > 255 ||
@@ -285,7 +297,8 @@ let launcher_code =
   "    except Exception: pass\n" ^
   "    sys.exit(127)\n"
 
-let environment_with_overrides overrides = validate_environment overrides
+let environment_with_overrides ?inherit_environment overrides =
+  validate_environment ?inherit_environment overrides
 
 let close_fd fd = try Unix.close fd with Unix.Unix_error _ -> ()
 let signal_group pid signal =
@@ -740,14 +753,15 @@ let prune_records_locked manager =
     | None -> fail "too many retained process jobs")
 
 let start_internal manager ~id ?(cwd = None) ?(environment = [])
-    ?timeout_seconds ?(output_limit = default_output_limit) ?(pty_mode = false)
+    ?(inherit_environment = true) ?timeout_seconds
+    ?(output_limit = default_output_limit) ?(pty_mode = false)
     ~program ~arguments () =
   validate_id id;
   validate_program program arguments;
   validate_limit "output_limit" max_output_limit output_limit;
   let timeout_seconds = validate_timeout "timeout_seconds" timeout_seconds in
   let cwd = validate_cwd cwd in
-  let environment = environment_with_overrides environment in
+  let environment = environment_with_overrides ~inherit_environment environment in
   let command = process_description program arguments in
   with_lock manager.lock (fun () ->
     if manager.closed then fail "process manager is closed";
@@ -781,16 +795,17 @@ let start_internal manager ~id ?(cwd = None) ?(environment = [])
        (try ignore (Unix.waitpid [] pid) with Unix.Unix_error _ -> ());
        raise exn))
 
-let start manager ~id ?cwd ?environment ?timeout_seconds ?output_limit ?pty
-    ~program ~arguments () =
-  start_internal manager ~id ?cwd ?environment ?timeout_seconds ?output_limit
+let start manager ~id ?cwd ?environment ?inherit_environment ?timeout_seconds
+    ?output_limit ?pty ~program ~arguments () =
+  start_internal manager ~id ?cwd ?environment ?inherit_environment
+    ?timeout_seconds ?output_limit
     ~pty_mode:(Option.value pty ~default:false) ~program ~arguments ()
 
-let start_shell manager ~id ?cwd ?environment ?timeout_seconds ?output_limit ?pty
-    ~command () =
+let start_shell manager ~id ?cwd ?environment ?inherit_environment
+    ?timeout_seconds ?output_limit ?pty ~command () =
   validate_text "shell command" 65_536 command;
-  start manager ~id ?cwd ?environment ?timeout_seconds ?output_limit ?pty
-    ~program:"/bin/sh" ~arguments:["-c"; command] ()
+  start manager ~id ?cwd ?environment ?inherit_environment ?timeout_seconds
+    ?output_limit ?pty ~program:"/bin/sh" ~arguments:["-c"; command] ()
 
 let read_output manager ~id ?(offset = 0) ?(max_bytes = 65_536) () =
   validate_id id;
@@ -921,15 +936,16 @@ let close_manager manager =
   with_lock manager.lock (fun () -> List.iter (fun job -> job.pid <- 0) jobs)
 
 let run ?cancel ?on_progress ?timeout_seconds ?(output_limit = default_output_limit)
-    ?cwd ?environment ?(stdin = "") ?(pty = false) ~program ~arguments () =
+    ?cwd ?environment ?inherit_environment ?(stdin = "") ?(pty = false)
+    ~program ~arguments () =
   validate_program program arguments;
   if String.length stdin > max_stdin_bytes then fail "stdin data exceeds its size limit";
   validate_limit "output_limit" max_output_limit output_limit;
   let timeout_seconds = Option.value timeout_seconds ~default:default_run_timeout_seconds in
   let manager = create_manager ~max_jobs:1 ~retained_output_bytes:output_limit () in
   Fun.protect ~finally:(fun () -> close_manager manager) (fun () ->
-    start_internal manager ~id:"run" ?cwd ?environment ~timeout_seconds ~output_limit
-      ~pty_mode:pty ~program ~arguments ();
+    start_internal manager ~id:"run" ?cwd ?environment ?inherit_environment
+      ~timeout_seconds ~output_limit ~pty_mode:pty ~program ~arguments ();
     let job = with_lock manager.lock (fun () -> lookup manager "run") in
     (try write_stdin_job job stdin with Error _ -> ());
     close_stdin_job job;
@@ -952,9 +968,10 @@ let run ?cancel ?on_progress ?timeout_seconds ?(output_limit = default_output_li
     wait ();
     result_of_job manager ~id:"run")
 
-let run_shell ?cancel ?on_progress ?timeout_seconds ?output_limit ?cwd ?environment
-    ?stdin ?pty ~command () =
+let run_shell ?cancel ?on_progress ?timeout_seconds ?output_limit ?cwd
+    ?environment ?inherit_environment ?stdin ?pty ~command () =
   validate_text "shell command" 65_536 command;
   run ?cancel ?on_progress ?timeout_seconds ?output_limit ?cwd ?environment
-    ?stdin ?pty ~program:"/bin/sh" ~arguments:["-c"; command] ()
+    ?inherit_environment ?stdin ?pty ~program:"/bin/sh"
+    ~arguments:["-c"; command] ()
 

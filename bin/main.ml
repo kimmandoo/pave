@@ -23,7 +23,8 @@ let () =
     and context_window_auto = ref false and context_window_set = ref false in
   let login = ref "" and login_manual = ref "" and login_device = ref ""
     and logout = ref "" in
-    let account_id = ref None and mask_secrets = ref false in
+  let account_id = ref None and mask_secrets = ref false
+    and enable_security_scan = ref false and terminal_images = ref false in
   let custom_prompt = ref None and prompt_template = ref None
     and append_prompt = ref None in
   let options = [
@@ -66,6 +67,10 @@ let () =
           "approval mode must be always-ask, write, or yolo")),
       "Tool approval mode (always-ask, write, or yolo)";
     "--allow-shell", Arg.Set allow_shell, "Offer model-requested shell commands for individual interactive approval (NOT sandboxed)";
+    "--enable-security-scan", Arg.Set enable_security_scan,
+      "Enable the opt-in repository security scan tool";
+    "--terminal-images", Arg.Set terminal_images,
+      "Show attached images in explicitly identified Kitty/iTerm2 terminals (disabled by default)";
     "--system-prompt", Arg.String (fun text -> custom_prompt := Some text),
       "Explicit custom instructions (replaces discovered SYSTEM.md, not mobile safety)";
     "--system-prompt-template", Arg.String (fun path -> prompt_template := Some path),
@@ -578,6 +583,8 @@ let () =
         (string * (Pave.Session.t * Pave.Workspace_process.manager)) list ref = ref [] in
     let rewind_managers :
         (string * (Pave.Session.t * Pave.Session_rewind.t)) list ref = ref [] in
+    let tool_contexts :
+        (string * Pave.Tools.session_context) list ref = ref [] in
     let process_manager session =
       let owner = Pave.Session.session_id session in
       match List.assoc_opt owner !process_managers with
@@ -616,6 +623,10 @@ let () =
         List.iter (fun error -> on_event ("Error delivering job: " ^ error))
           (Pave.Session_jobs.deliver_pending manager)) !job_managers in
     at_exit (fun () ->
+      List.iter (fun (_, context) ->
+        try Pave.Tools.close_session_context context with exn ->
+          prerr_endline ("Error closing session tools: " ^
+            Printexc.to_string exn)) !tool_contexts;
       List.iter (fun (_, (_, manager)) ->
         try Pave.Session_jobs.close manager with exn ->
           prerr_endline ("Error stopping session jobs: " ^
@@ -697,6 +708,63 @@ let () =
     let worker_tool_approval request = match !runner with
       | Some current -> Pave.Turn_runner.approve_tool current request
       | None -> approve_tool_request request in
+    let tool_context session =
+      let owner = Pave.Session.session_id session in
+      match List.assoc_opt owner !tool_contexts with
+      | Some context -> context
+      | None ->
+          let read_artifact id =
+            try
+              Pave.Session.list_artifacts session
+              |> List.find_opt (fun (item : Pave.Session_artifact.item) -> item.id = id)
+              |> Option.map (fun (item : Pave.Session_artifact.item) ->
+                Pave.Session.read_artifact session ~owner:item.owner ~id)
+            with _ -> None in
+          let record_file_change ~path ~before ~after =
+            let after_snapshot = Pave.Session_rewind.snapshot_file ~root ~path in
+            let before_snapshot, after_snapshot =
+              match after_snapshot with
+              | Pave.Session_rewind.Captured { data; mode }
+                when String.equal data after &&
+                     String.length before <= Pave.Session_rewind.max_snapshot_bytes ->
+                  Pave.Session_rewind.Captured { data = before; mode },
+                  Pave.Session_rewind.Captured { data; mode }
+              | Pave.Session_rewind.Captured { mode; _ } ->
+                  let unavailable = Pave.Session_rewind.Unavailable {
+                    exists = Some true; mode = Some mode;
+                    reason = "file changed before the LSP rewind snapshot was captured" } in
+                  unavailable, unavailable
+              | Pave.Session_rewind.Missing ->
+                  Pave.Session_rewind.Unavailable {
+                    exists = Some true; mode = None;
+                    reason = "LSP-edited file disappeared before rewind capture" },
+                  Pave.Session_rewind.Missing
+              | Pave.Session_rewind.Unavailable { exists; mode; reason } ->
+                  let before = Pave.Session_rewind.Unavailable {
+                    exists = Some true; mode;
+                    reason = "pre-edit content available, but " ^ reason } in
+                  before, Pave.Session_rewind.Unavailable { exists; mode; reason } in
+            let manager = rewind_manager session in
+            (try
+               match Pave.Session_rewind.record_file_change manager
+                   ~tool_name:"lsp" ~path ~before:before_snapshot ~after:after_snapshot with
+               | None -> ()
+               | Some entry ->
+                   worker_event
+                     (if entry.Pave.Session_rewind.status =
+                         Pave.Session_rewind.Rewindable then
+                        "LSP workspace edit checkpoint saved; use /rewind to review it."
+                      else
+                        "LSP workspace edit is not safely rewindable; /rewind records why.")
+             with exn ->
+               worker_event
+                 ("LSP workspace edit completed, but rewind tracking failed; " ^
+                  "treat it as non-reversible: " ^ Printexc.to_string exn)) in
+          let context = Pave.Tools.create_session_context ~owner ~root
+            ~process_manager:(process_manager session) ~read_artifact
+            ~record_file_change () in
+          tool_contexts := (owner, context) :: !tool_contexts;
+          context in
     let agent : Pave.Agent.t option ref = ref None in
     let retained_history : Pave.Protocol.message list ref = ref [] in
     let ephemeral_usage : Pave.Protocol.usage option ref = ref None in
@@ -791,8 +859,12 @@ let () =
           { message with content; tool_result_content; tool_calls }) messages in
     let make_secret_mask provider identity credentials =
       if not !mask_secrets then None else
-      let secrets = (if provider.Pave.Provider.api_key = "" then []
-        else [provider.api_key]) @
+      let search_secrets =
+        ["BRAVE_SEARCH_API_KEY"; "TAVILY_API_KEY"]
+        |> List.filter_map Sys.getenv_opt in
+      let secrets = search_secrets @
+        (if provider.Pave.Provider.api_key = "" then []
+         else [provider.api_key]) @
         Option.to_list (Option.map (fun
           (credential : Pave.Provider.credentials) -> credential.access)
           credentials) in
@@ -1124,6 +1196,8 @@ let () =
         let enabled = custom_tools_enabled &&
           not (List.mem name !disabled_tools) in
         if name = "task" then enabled && Option.is_some !journal
+        else if name = "repository_security_scan" then
+          enabled && !enable_security_scan
         else if List.mem name Pave.Tools.session_tool_names then
           enabled && Option.is_some !journal
         else enabled in
@@ -1176,19 +1250,7 @@ let () =
                   worker_event
                     (tool_name ^ " effects are non-reversible; /rewind will report but not undo them.")) in
       let workspace_context : Pave.Tools.session_context option =
-        Option.map (fun session ->
-          let owner = Pave.Session.session_id session in
-          let read_artifact id =
-            try
-              Pave.Session.list_artifacts session
-              |> List.find_opt (fun (item : Pave.Session_artifact.item) -> item.id = id)
-              |> Option.map (fun (item : Pave.Session_artifact.item) ->
-                Pave.Session.read_artifact session ~owner:item.owner ~id)
-            with _ -> None in
-          { Pave.Tools.owner = owner;
-            process_manager = process_manager session;
-            read_artifact = read_artifact })
-          !journal in
+        Option.map tool_context !journal in
       Pave.Agent.create ~provider ~authentication ?resolve_credential
         ?workspace_context
         ?secret_mask
@@ -1788,6 +1850,17 @@ let () =
       let attachments = !pending_attachments @ [item] in
       Pave.Protocol.validate_attachments attachments;
       set_pending_attachments attachments;
+      (if !terminal_images && String.starts_with ~prefix:"image/" item.mime_type then
+         match !ui with
+         | Some screen ->
+             (try
+                let shown = Tui.show_terminal_image screen ~enabled:true
+                  { Pave.Terminal_image.mime_type = item.mime_type; data = item.data } in
+                if not shown then
+                  notify "Terminal image preview is unsupported here; attachment remains staged."
+              with Invalid_argument message ->
+                notify ("Terminal image preview unavailable: " ^ message))
+         | None -> ());
       notify (Printf.sprintf "Attached %s · %d pending media item%s."
         item.name (List.length attachments)
         (if List.length attachments = 1 then "" else "s")) in

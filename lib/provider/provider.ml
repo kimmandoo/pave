@@ -167,8 +167,38 @@ let rec wait_for ?cancel pid =
       wait_for ?cancel pid)
   with Unix.Unix_error (Unix.EINTR, _, _) -> wait_for ?cancel pid
 
+
+let curl_path = "/usr/bin/curl"
+
+let curl_environment = [|
+  "LANG=C";
+  "LC_ALL=C"
+|]
+(* Explicit fixture injection for tests; production requests use curl_path. *)
+
+module Test = struct
+  let curl_helper = ref None
+
+  let use_curl_helper executable =
+    curl_helper := Some (Unix.realpath executable)
+end
+
+
 let run_curl ?on_chunk ?is_done ?is_finished ?cancel configuration =
   check_cancel cancel;
+  let executable = match !Test.curl_helper with
+    | Some executable -> executable
+    | None -> curl_path in
+  let environment = match !Test.curl_helper with
+    | Some _ -> Unix.environment ()
+    | None -> curl_environment in
+  (match !Test.curl_helper with
+   | Some _ -> ()
+   | None ->
+       if not (Sys.file_exists curl_path &&
+           (try Unix.access curl_path [Unix.X_OK]; true
+            with Unix.Unix_error _ -> false)) then
+         raise (Provider_error "trusted curl executable is unavailable"));
   let input_read, input_write = Unix.pipe () in
   let output_read, output_write =
     try Unix.pipe ()
@@ -187,11 +217,12 @@ let run_curl ?on_chunk ?is_done ?is_finished ?cancel configuration =
     try
       Unix.set_close_on_exec input_write;
       Unix.set_close_on_exec output_read;
-      Unix.create_process "curl" [| "curl"; "--disable"; "--config"; "-" |]
+      let arguments = [| "curl"; "--disable"; "--config"; "-" |] in
+      Unix.create_process_env executable arguments environment
         input_read output_write errors
     with exn ->
       List.iter close_fd [ input_read; input_write; output_read; output_write; errors ];
-      raise (Provider_error ("could not start curl: " ^ Printexc.to_string exn))
+      raise (Provider_error ("could not start trusted curl: " ^ Printexc.to_string exn))
   in
   close_fd input_read;
   close_fd output_write;
@@ -223,6 +254,15 @@ let run_curl ?on_chunk ?is_done ?is_finished ?cancel configuration =
           raise (Provider_error (Printf.sprintf "curl failed (exit status %d)" code))
       | Unix.WSIGNALED signal | Unix.WSTOPPED signal ->
           raise (Provider_error (Printf.sprintf "curl terminated (signal %d)" signal)))
+let curl_timeout_message ~streaming ~response_body_seen =
+  if not streaming then
+    "provider request timed out before a response was available"
+  else
+    let phase = if response_body_seen then
+      "after response data (stream idle or total request timeout)"
+      else "before the first response data byte" in
+    "provider stream timed out " ^ phase
+
 
 let read_file path =
   let ic = open_in_bin path in
@@ -454,7 +494,8 @@ let post_json ?max_request_bytes ?(local = false) ?cancel
         ^ option "write-out" "%{http_code}" in
       let status = try run_curl ?cancel configuration with
         | Provider_error "curl failed (exit status 28)" ->
-            raise (Provider_error "provider request timed out before a response was available") in
+            raise (Provider_error (curl_timeout_message ~streaming:false
+              ~response_body_seen:false)) in
       check_cancel cancel;
       let response = read_file response_path in
       let json =
@@ -518,10 +559,8 @@ let post_stream ?max_request_bytes ?(local = false) ?cancel ~endpoint ~headers
        with
        | Stream_complete -> ()
        | Provider_error "curl failed (exit status 28)" ->
-           let phase = if !response_body_seen then
-             "after response data (stream idle or total request timeout)"
-             else "before the first response data byte" in
-           raise (Provider_error ("provider stream timed out " ^ phase)));
+           raise (Provider_error (curl_timeout_message ~streaming:true
+             ~response_body_seen:!response_body_seen)));
       check_cancel cancel;
       let code = match status_from_headers (read_file header_path) with
         | Some code -> code
