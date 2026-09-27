@@ -216,7 +216,7 @@ The P0–P6 cards above remain the detailed acceptance criteria; this roadmap is
 
 ### R9 — IDE and external workspace integrations
 
-- [ ] Publish and verify v0.1.54 after completing the locally verified P4 LSP, DAP, persistent evaluation, web search/fetch, SSH, native services and security scanning. Preserve one-shot exact-content LSP approval, per-file instruction gates, child-process secret isolation, and separate network, execution, remote-host and write-through trust boundaries.
+- [ ] Publish and verify v0.1.54 after completing the locally verified P4 LSP, DAP, persistent evaluation, web search/fetch, SSH, native services and security scanning. Main CI `36352366139` passed for `3ef721a`; tag `v0.1.54` points to that commit, and release workflow `36358990430` is in progress. Verify assets, checksums, native dependencies, extracted CLIs and saved-auth identity continuity before completion. Preserve one-shot exact-content LSP approval, per-file instruction gates, child-process secret isolation, and separate network, execution, remote-host and write-through trust boundaries.
 
 ### R10 — Terminal input and overlay foundations
 
