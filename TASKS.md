@@ -212,7 +212,7 @@ The P0–P6 cards above remain the detailed acceptance criteria; this roadmap is
 
 ### R8 — Core workspace tools
 
-- [ ] Complete P4 read/search, conflict-aware edit, cancellable shell/job management and safe Git/worktree assistance. Preserve atomic edits, per-command approval, workspace boundaries and user changes. Local forced suite, install build, opam lint and isolated NO_COLOR TUI PTY passed; v0.1.50 workflow `36323658937` published all four archives, but both Darwin binaries link external libzstd (the v0.1.49 Intel binary did not). Release builds now select OCaml 5.5.1 with `ocaml-option-no-compression` and reject libzstd dependencies. Publish and verify corrective v0.1.51 while leaving v0.1.50 immutable; stop before R9.
+- [x] Completed R8 P4 read/search, conflict-aware edits, cancellable shell/jobs, safe Git/worktrees and TUI progress/resize. The forced suite, install build, opam lint and real loopback TUI PTY smoke passed; the Linux PTY SIGHUP fix passed hosted rerun `36323658937`. Public v0.1.51 (`229b57d`) passed all four native jobs and publication in workflow `36326312932` attempt 2; downloaded checksums and exact archive members passed, CI confirmed no libzstd dependency on all four targets, and extracted Darwin arm64/Intel binaries linked only libSystem and passed `--help`/`--providers` locally (Intel under Rosetta). v0.1.50 remains immutable but is superseded; stop before R9.
 
 ### R9 — IDE and external workspace integrations
 
