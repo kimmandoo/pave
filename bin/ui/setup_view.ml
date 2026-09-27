@@ -177,12 +177,13 @@ let run screen ~registry =
       else [
         "02 / 03  ·  KEY NOT SET";
         "Set this variable in your shell; Pave never stores a typed key.";
-        "You can save a model now, but prompts will need the key."] in
+        "Model choices require working credentials."] in
+    let continue = "Continue with Azure CLI identity" in
     match Tui.choose screen ~intro
       ~title:("SETUP · " ^ env ^ " is missing")
-      ~choices:["Choose model without key"; "Back · authentication";
-        "Skip setup"] with
-    | Some "Choose model without key" -> model descriptor (Some env)
+      ~choices:((if descriptor.id = "azure" then [continue] else []) @
+        ["Back · authentication"; "Skip setup"]) with
+    | Some choice when choice = continue -> model descriptor (Some env)
     | Some "Back · authentication" -> authentication descriptor
     | _ -> skip
   and model ?(account_id=None)
@@ -222,10 +223,9 @@ let run screen ~registry =
     match Model_picker.choose ~registry screen ~descriptor ~route_name
       ?account_id ~plain:choices
       ~intro:["03 / 03  ·  MODEL";
-        "Use arrows and Enter to choose an available model.";
-        "Type an ID only if the model you need is not listed."]
-      ~title:"SETUP · Select model"
-      ~choices () with
+        "Choose from models available on this account and API route.";
+        "If none appear, check credentials or the provider listing."]
+      ~title:"SETUP · Select model" () with
     | None | Some "Skip setup" -> skip
     | Some choice when choice = back ->
         if local_without_key then provider () else authentication descriptor

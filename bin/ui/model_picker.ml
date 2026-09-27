@@ -1,5 +1,5 @@
-(* Discovery runs on a cancellable worker; unclassified listings never become
-   verified model suggestions in the chooser. *)
+(* Discovery runs on cancellable workers. Only fresh, route-compatible IDs
+   from a registered provider's successful listing become model choices. *)
 let saved_account_label (account : Pave.Oauth_store.account) =
   match account.credential.account_id with
   | Some id -> "Account ID: " ^ Printf.sprintf "%S" id
@@ -23,9 +23,9 @@ let credential ?registry ?route_name ?account_id
   | None ->
       let route = Pave.Provider_catalog.route descriptor route_name in
       let with_route f = Option.bind route f in
-      let stored_accounts = Pave.Oauth_store.accounts
-        ~path:(Pave.Oauth_store.default_path ()) ~provider:descriptor.id in
-      let select_account () = match account_id, stored_accounts with
+      let stored_accounts = lazy (Pave.Oauth_store.accounts
+        ~path:(Pave.Oauth_store.default_path ()) ~provider:descriptor.id) in
+      let select_account () = match account_id, Lazy.force stored_accounts with
         | Some id, _ ->
             Pave.Oauth_store.account
               ~path:(Pave.Oauth_store.default_path ()) ~provider:descriptor.id
@@ -100,6 +100,70 @@ let supports_route ?registry (descriptor : Pave.Provider_catalog.descriptor)
   Pave.Model_discovery.model_supports_endpoint ?registry
     ~provider:descriptor.id model ~endpoint:route.endpoint
 
+let account_listing (descriptor : Pave.Provider_catalog.descriptor) =
+  match Pave.Model_discovery.credential_policy descriptor.id with
+  | Some (Pave.Model_discovery.OAuth_account _)
+  | Some (Pave.Model_discovery.Stored_api_key _)
+    when descriptor.oauth <> None -> true
+  | _ -> false
+
+(* A successful listing is not an inference authorization check. In particular,
+   configured IDs, OS defaults and unclassified catalogues are not evidence
+   that a model works on this route. The coordinator has already checked the
+   credential and attached its resolved account to the snapshot. *)
+let eligible_models ?registry (descriptor : Pave.Provider_catalog.descriptor)
+    (scope : Pave.Model_discovery_coordinator.scope)
+    (listing : Pave.Model_discovery.listing) =
+  let registry = Option.value ~default:Pave.Provider_catalog.builtin_registry registry in
+  match Pave.Provider_catalog.find ~registry scope.provider,
+    Pave.Provider_catalog.route descriptor scope.route with
+  | Some registered, Some route
+    when registered.id = descriptor.id &&
+      not (Pave.Provider_catalog.unclassified_models ~registry descriptor.id) &&
+      not (descriptor.api_key_env <> None &&
+        Pave.Model_discovery.credential_policy descriptor.id =
+          Some Pave.Model_discovery.Anonymous &&
+        Cli_auth.api_key descriptor = None) &&
+      (match listing.source.id_source with
+       | Pave.Model_catalog.Pinned_account_listing
+       | Pave.Model_catalog.Provider_listing
+       | Pave.Model_catalog.Capability_response -> true
+       | Pave.Model_catalog.Runtime_default
+       | Pave.Model_catalog.Explicit_user_input -> false) &&
+      Option.is_some listing.source.retrieved_at ->
+      List.filter (fun (model : Pave.Model_discovery.model) ->
+        model.identity.provider = scope.provider &&
+        model.identity.route = scope.route &&
+        model.identity.account_id = scope.account_id &&
+        model.provenance.id_source = listing.source.id_source &&
+        model.provenance.retrieved_at = listing.source.retrieved_at &&
+        supports_route ~registry descriptor model route) listing.models
+  | _ -> []
+
+let scope_label (scope : Pave.Model_discovery_coordinator.scope) =
+  scope.provider ^ "@" ^ scope.route ^
+  (match scope.account_id with
+   | None -> ""
+   | Some account -> "#" ^ Pave.Model_identity.encode_component account)
+
+let listing_status ?registry (descriptor : Pave.Provider_catalog.descriptor)
+    scope (listing : Pave.Model_discovery.listing) models =
+  let prefix = scope_label scope in
+  if listing.source.id_source =
+      Pave.Model_catalog.Runtime_default then
+    prefix ^ ": OS-managed model readiness is not verified by discovery"
+  else if listing.source.id_source =
+      Pave.Model_catalog.Explicit_user_input then
+    prefix ^ ": configured IDs are not verified by a live listing"
+  else if Pave.Provider_catalog.unclassified_models ?registry descriptor.id then
+    prefix ^ ": listed IDs have unverified route compatibility"
+  else
+    let excluded = List.length listing.models - List.length models in
+    Printf.sprintf "%s: %d route-compatible listed ID%s%s; inference authorization is not guaranteed"
+      prefix (List.length models) (if List.length models = 1 then "" else "s")
+      (if excluded = 0 then "" else
+        Printf.sprintf " · %d excluded" excluded)
+
 let identity_selector (model : Pave.Model_discovery.model) =
   Pave.Model_identity.selector model.identity
 
@@ -112,11 +176,6 @@ let identity_label (model : Pave.Model_discovery.model) =
    | Some account -> "#" ^ Pave.Model_identity.encode_component account) ^
   " · " ^ display ^ " [" ^ identity.upstream_id ^ "]"
 
-let scope_label (scope : Pave.Model_discovery_coordinator.scope) =
-  scope.provider ^ "@" ^ scope.route ^
-  (match scope.account_id with
-   | None -> ""
-   | Some account -> "#" ^ Pave.Model_identity.encode_component account)
 
 let model_detail ?registry (descriptor : Pave.Provider_catalog.descriptor)
     (model : Pave.Model_discovery.model) =
@@ -195,52 +254,26 @@ let model_details ?registry (descriptor : Pave.Provider_catalog.descriptor) mode
 
 let choose ?registry screen ~(descriptor : Pave.Provider_catalog.descriptor)
     ?(intro = []) ?(plain = []) ?route_name
-    ?account_id:selected_account_id ~title ~choices () =
+    ?account_id:selected_account_id ~title () =
   let registry = Option.value ~default:Pave.Provider_catalog.builtin_registry registry in
   let route_name = Option.value ~default:descriptor.default_route route_name in
-  let aws_process_note =
-    if Sys.getenv_opt "PAVE_AWS_CREDENTIAL_PROCESS" = Some "allow" then
-      "credential_process runs local code and is enabled for this session."
-    else "credential_process is disabled; opt in only for trusted profiles." in
-  let intro = match descriptor.id with
-    | "azure" -> [
-        "Enter Azure deployment name.";
-        "Set endpoint; use an API key or current Azure CLI identity.";
-        "Listing needs current-subscription Azure CLI management read access."]
-      @ intro
-    | "google-vertex" -> [
-        "Type a known Vertex model ID.";
-        "Set Google project/location; authorized-user and service-account ADC work directly.";
-        "Impersonated ADC needs gcloud; no publisher model-list API exists."]
-      @ intro
-    | "apple" -> [
-        "OS-managed ID: default.";
-        "Needs macOS 26+, Apple silicon and Apple Intelligence.";
-        "Text only; no Pave tools or model listing."]
-      @ intro
-    | "amazon-bedrock" -> [
-        aws_process_note;
-        "Active on-demand text IDs and inference profiles are listed; neither proves Invoke permission.";
-        if route_name = "converse-stream" then
-          "ConverseStream streams text and retains native tool continuation."
-        else
-          "Converse buffers; select ConverseStream to stream text."]
-      @ intro
-    | _ -> intro in
   let custom_account_id = Option.bind
     (Pave.Provider_catalog.custom_route registry ~provider:descriptor.id
       ~route:route_name)
     (fun custom -> custom.account_id) in
   let account_selection_cancelled = ref false in
   let account_id = match custom_account_id,
-      (if descriptor.oauth <> None then Cli_auth.api_key descriptor else None),
+      (if account_listing descriptor then Cli_auth.api_key descriptor else None),
       selected_account_id with
     | Some configured, _, Some requested when configured <> requested ->
         failwith "selected account does not match the configured custom route"
     | Some configured, _, _ -> Some configured
-    | None, Some _, _ -> None
+    | None, Some _, Some requested ->
+        failwith ("selected account " ^ requested ^
+          " cannot be used with an environment API key")
+    | None, Some _, None -> None
     | None, None, Some requested -> Some requested
-    | None, None, None when descriptor.oauth <> None ->
+    | None, None, None when account_listing descriptor ->
         let accounts = Pave.Oauth_store.accounts
           ~path:(Pave.Oauth_store.default_path ()) ~provider:descriptor.id in
         (match accounts with
@@ -264,14 +297,24 @@ let choose ?registry screen ~(descriptor : Pave.Provider_catalog.descriptor)
       provider = descriptor.id; account_id; route = route_name };
     run = (fun cancel ->
       let access = credential ~registry ?account_id ~route_name descriptor in
-      let account_id = credential_account_id ~registry
+      let resolved_account = credential_account_id ~registry
         ~provider:descriptor.id ~route:route_name access in
       let result =
-        try Pave.Model_discovery.discover ~registry ~cancel
-          ~provider:descriptor.id ~route_name ?account_id ?credential:access ()
+        if descriptor.api_key_env <> None &&
+          Pave.Model_discovery.credential_policy descriptor.id =
+            Some Pave.Model_discovery.Anonymous &&
+          Cli_auth.api_key descriptor = None then
+          Error (Pave.Model_discovery.Credential_error
+            "API key required for inference; public listing is insufficient")
+        else if account_id <> None && account_id <> resolved_account &&
+          descriptor.id <> "azure"
+        then Error Pave.Model_discovery.Invalid_credential
+        else try Pave.Model_discovery.discover ~registry ~cancel
+          ~provider:descriptor.id ~route_name ?account_id:resolved_account
+          ?credential:access ()
         with Pave.Provider.Cancelled ->
           Error (Pave.Model_discovery.Transport_error "request timed out") in
-      result, account_id);
+      result, resolved_account);
   } in
   let coordinator = Pave.Model_discovery_coordinator.start [request] in
   Fun.protect ~finally:(fun () ->
@@ -280,57 +323,26 @@ let choose ?registry screen ~(descriptor : Pave.Provider_catalog.descriptor)
       match Pave.Model_discovery_coordinator.poll coordinator with
       | [{ scope; status = Pave.Model_discovery_coordinator.Loading }] ->
           Tui.update_choices screen ~verified:[]
-            ~status:(Some (scope_label scope ^
-              ": refreshing the provider listing or configured model roster")) ()
+            ~status:(Some (scope_label scope ^ ": checking live model availability")) ()
       | [{ scope; status = Ready listing }] ->
-          let prefix = scope_label scope in
-          let route = Pave.Provider_catalog.route descriptor route_name in
-          let routed_models = match route with
-            | None -> []
-            | Some route -> List.filter
-                (fun (model : Pave.Model_discovery.model) ->
-                  supports_route ~registry descriptor model route) listing.models in
+          let routed_models = eligible_models ~registry descriptor scope listing in
           let values = List.map identity_selector routed_models in
           let details = model_details ~registry descriptor routed_models in
           let labels = List.map (fun model ->
             identity_selector model, identity_label model) routed_models in
-          if listing.source.id_source = Pave.Model_catalog.Runtime_default then
-            Tui.update_choices screen ~verified:values ~details ~labels
-              ~status:(Some
-                "macOS 26+ · Apple silicon · Apple Intelligence") ()
-          else if listing.source.id_source =
-              Pave.Model_catalog.Explicit_user_input then
-            Tui.update_choices screen ~verified:[] ~listed:values ~details
-              ~labels
-              ~status:(Some (Printf.sprintf
-                "%s: %d configured IDs; provider compatibility is unverified"
-                prefix (List.length values))) ()
-          else if Pave.Provider_catalog.unclassified_models ~registry descriptor.id then
-            Tui.update_choices screen ~verified:[] ~listed:values ~details
-              ~labels
-              ~status:(Some (Printf.sprintf
-                "%s: %d live IDs; inference compatibility is unverified"
-                prefix (List.length values))) ()
-          else
-            let excluded = List.length listing.models -
-              List.length routed_models in
-            Tui.update_choices screen ~verified:values ~details ~labels
-              ~status:(Some (Printf.sprintf "%s: %d live model%s%s"
-                prefix (List.length values)
-                (if List.length values = 1 then "" else "s")
-                (if excluded = 0 then "" else
-                  Printf.sprintf " · %d don't advertise %s"
-                    excluded route_name))) ()
+          Tui.update_choices screen ~verified:values ~details ~labels
+            ~status:(Some (listing_status ~registry descriptor scope listing
+              routed_models)) ()
       | [{ scope; status = Unsupported error }]
       | [{ scope; status = Failed error }] ->
           Tui.update_choices screen ~verified:[]
             ~status:(Some (scope_label scope ^ ": " ^
               Pave.Model_discovery.message error)) ()
       | _ -> () in
-    let selected = Tui.choose screen ~allow_custom:true ~intro ~plain
+    let selected = Tui.choose screen ~intro ~plain
       ~initial_status:"Loading available models…"
       ~wake_fd:(Pave.Model_discovery_coordinator.read_fd coordinator)
-      ~on_wake ~title ~choices in
+      ~on_wake ~title ~choices:[] in
     Option.map (fun input ->
       try
         let _, identity, _ = Pave.Interaction.resolve_model ~registry
@@ -339,104 +351,146 @@ let choose ?registry screen ~(descriptor : Pave.Provider_catalog.descriptor)
         Pave.Model_identity.selector identity
       with Invalid_argument _ -> input) selected)
 
-(* Every provider gets a snapshot. Unsupported routes and missing credentials
-   remain visible in the status summary; only account-scoped live IDs become
-   model choices. *)
+(* Each registered route/account has its own discovery scope. A model discovered
+   for one route or sign-in never gets reused under another identity. *)
 let choose_all ?registry screen ~(active : Pave.Provider_catalog.descriptor)
     ~current_route () =
   let registry = Option.value ~default:Pave.Provider_catalog.builtin_registry registry in
   let providers = active :: List.filter
     (fun (entry : Pave.Provider_catalog.descriptor) -> entry.id <> active.id)
     (Pave.Provider_catalog.all ~registry ()) in
-  let route_actions = Pave.Interaction.model_route_browse_choices ~registry () in
-  let requests = List.map (fun (descriptor : Pave.Provider_catalog.descriptor) ->
-    let route = if descriptor.id = active.id then current_route
-      else descriptor.default_route in
-    let account_id = Option.bind
-      (Pave.Provider_catalog.custom_route registry ~provider:descriptor.id
-        ~route)
-      (fun custom -> custom.account_id) in
-    {
-      Pave.Model_discovery_coordinator.scope = {
-        provider = descriptor.id; account_id; route };
-      run = (fun cancel ->
-        let access = credential ~registry ?account_id ~route_name:route descriptor in
-        let account_id = credential_account_id ~registry
-          ~provider:descriptor.id ~route access in
-        let result =
-          try Pave.Model_discovery.discover ~registry ~cancel
-            ~provider:descriptor.id ~route_name:route ?account_id
-            ?credential:access ()
-          with Pave.Provider.Cancelled ->
-            Error (Pave.Model_discovery.Transport_error "request timed out") in
-        result, account_id);
-    }) providers in
+  let skipped = ref [] in
+  let requests = List.concat_map (fun (descriptor : Pave.Provider_catalog.descriptor) ->
+    let routes = if descriptor.id = active.id then
+      List.sort (fun (a : Pave.Provider_catalog.route) b ->
+        compare (a.name <> current_route) (b.name <> current_route))
+        descriptor.routes
+    else descriptor.routes in
+    List.concat_map (fun (route : Pave.Provider_catalog.route) ->
+      let custom_account_id = Option.bind
+        (Pave.Provider_catalog.custom_route registry ~provider:descriptor.id
+          ~route:route.name)
+        (fun custom -> custom.account_id) in
+      let accounts = match custom_account_id with
+        | Some id -> [Some id]
+        | None when account_listing descriptor &&
+            Cli_auth.api_key descriptor = None ->
+            (match Pave.Oauth_store.accounts
+              ~path:(Pave.Oauth_store.default_path ()) ~provider:descriptor.id with
+             | [] -> [None]
+             | accounts -> List.map (fun account ->
+                 Some account.Pave.Oauth_store.selection_id) accounts)
+        | None -> [None] in
+      let unavailable = if Pave.Provider_catalog.unclassified_models
+          ~registry descriptor.id then
+          Some "route compatibility cannot be verified from this listing"
+        else if descriptor.id = "apple" then
+          Some "OS-managed model readiness is not verified by discovery"
+        else if descriptor.api_key_env <> None &&
+          Pave.Model_discovery.credential_policy descriptor.id =
+            Some Pave.Model_discovery.Anonymous &&
+          Cli_auth.api_key descriptor = None then
+          Some "API key required for inference; the public listing is not enough"
+        else
+          match Pave.Model_discovery.adapter_for ~provider:descriptor.id
+            ~route with
+          | None -> Some "no supported model listing for this API route"
+          | Some adapter ->
+              (match adapter.credential_policy with
+               | Pave.Model_discovery.Required_api_key
+                 when Cli_auth.api_key descriptor = None ->
+                   Some "credentials required"
+               | Pave.Model_discovery.OAuth_account _
+               | Pave.Model_discovery.Stored_api_key _
+                 when accounts = [None] && Cli_auth.api_key descriptor = None ->
+                   Some "saved sign-in or API key required"
+               | _ -> None) in
+      match unavailable with
+      | Some reason ->
+          List.iter (fun account_id ->
+            skipped := (scope_label {
+              Pave.Model_discovery_coordinator.provider = descriptor.id;
+              route = route.name; account_id } ^ ": " ^ reason) :: !skipped)
+            accounts;
+          []
+      | None -> List.map (fun requested_account ->
+        {
+          Pave.Model_discovery_coordinator.scope = {
+            provider = descriptor.id; account_id = requested_account;
+            route = route.name };
+          run = (fun cancel ->
+            let access = credential ~registry ?account_id:requested_account
+              ~route_name:route.name descriptor in
+            let resolved_account = credential_account_id ~registry
+              ~provider:descriptor.id ~route:route.name access in
+            let result =
+              if requested_account <> None &&
+                requested_account <> resolved_account && descriptor.id <> "azure"
+              then Error Pave.Model_discovery.Invalid_credential
+              else try Pave.Model_discovery.discover ~registry ~cancel
+                ~provider:descriptor.id ~route_name:route.name
+                ?account_id:resolved_account ?credential:access ()
+              with Pave.Provider.Cancelled ->
+                Error (Pave.Model_discovery.Transport_error "request timed out") in
+            result, resolved_account);
+        }) accounts) routes) providers in
   let coordinator = Pave.Model_discovery_coordinator.start
     ~max_workers:4 ~timeout_seconds:20. requests in
+  let ready_cache = Array.make (List.length requests) None in
   Fun.protect ~finally:(fun () ->
     Pave.Model_discovery_coordinator.close coordinator) (fun () ->
     let on_wake () =
       let snapshots = Pave.Model_discovery_coordinator.poll coordinator in
-      let verified = ref [] and listed = ref [] and details = ref []
-      and labels = ref [] in
-      let state_text = List.map (fun
+      let verified = ref [] and details = ref [] and labels = ref [] in
+      let state_text = List.mapi (fun index
           (snapshot : Pave.Model_discovery_coordinator.snapshot) ->
-        let descriptor = match Pave.Provider_catalog.find ~registry
-            snapshot.Pave.Model_discovery_coordinator.scope.provider with
-          | Some descriptor -> descriptor
-          | None -> assert false in
         let provider = scope_label snapshot.scope in
         match snapshot.status with
         | Loading -> provider ^ ": loading"
-        | Unsupported (Pave.Model_discovery.Unsupported_route _) ->
-            provider ^ ": choose a registered API route"
-        | Unsupported error ->
-            provider ^ ": " ^ Pave.Model_discovery.message error
-        | Failed Pave.Model_discovery.Missing_credential ->
-            provider ^ ": credentials required"
-        | Failed error ->
+        | Unsupported error | Failed error ->
             provider ^ ": " ^ Pave.Model_discovery.message error
         | Ready listing ->
-            let route = Pave.Provider_catalog.route descriptor
-              snapshot.scope.route in
-            let models = match route with
-              | None -> []
-              | Some route -> List.filter
-                  (fun (model : Pave.Model_discovery.model) ->
-                    supports_route ~registry descriptor model route) listing.models in
-            let values = List.map identity_selector models in
-            let annotations = model_details ~registry descriptor models in
-            let display_labels = List.map (fun model ->
-              identity_selector model, identity_label model) models in
-            if Pave.Provider_catalog.unclassified_models ~registry descriptor.id then
-              listed := !listed @ values
-            else verified := !verified @ values;
-            details := !details @ annotations;
-            labels := !labels @ display_labels;
-            Printf.sprintf "%s: %d %s" provider (List.length models)
-              (if listing.source.id_source = Pave.Model_catalog.Explicit_user_input
-               then "configured IDs" else "live IDs")) snapshots in
-      let route_action_values = List.map fst route_actions in
-      let route_action_labels = route_actions in
-      labels := !labels @ route_action_labels;
+            let values, annotations, display_labels, text =
+              match ready_cache.(index) with
+              | Some cached -> cached
+              | None ->
+                  let descriptor = match Pave.Provider_catalog.find ~registry
+                      snapshot.scope.provider with
+                    | Some descriptor -> descriptor
+                    | None -> assert false in
+                  let models = eligible_models ~registry descriptor
+                    snapshot.scope listing in
+                  let cached = (
+                    List.map identity_selector models,
+                    model_details ~registry descriptor models,
+                    List.map (fun model ->
+                      identity_selector model, identity_label model) models,
+                    listing_status ~registry descriptor snapshot.scope listing
+                      models) in
+                  ready_cache.(index) <- Some cached;
+                  cached in
+            verified := List.rev_append values !verified;
+            details := List.rev_append annotations !details;
+            labels := List.rev_append display_labels !labels;
+            text)
+          snapshots @ List.rev !skipped in
       let finished = List.fold_left (fun count snapshot ->
         match snapshot.Pave.Model_discovery_coordinator.status with
         | Loading -> count | _ -> count + 1) 0 snapshots in
-      let ready = List.fold_left (fun count snapshot ->
-        match snapshot.Pave.Model_discovery_coordinator.status with
-        | Ready _ -> count + 1 | _ -> count) 0 snapshots in
+      let total = List.length snapshots + List.length !skipped in
       let status = Printf.sprintf
-        "%d/%d listings complete · %d ready · Tab browses status · select a [route] action for other APIs"
-        finished (List.length snapshots) ready in
-      Tui.update_choices screen ~verified:!verified ~listed:!listed
-        ~actions:route_action_values ~details:!details ~labels:!labels
+        "%d/%d route/account checks complete · %d listed IDs · Tab: status"
+        (finished + List.length !skipped) total (List.length !verified) in
+      Tui.update_choices screen ~verified:(List.rev !verified)
+        ~details:(List.rev !details) ~labels:(List.rev !labels)
         ~status_pages:state_text ~status:(Some status) () in
-    Tui.choose screen ~allow_custom:true
-      ~intro:["Listed or configured model IDs retain account and route scope.";
-        "Select a [route] action to browse another registered API route.";
-        "Unverified IDs are marked; missing credentials and listing failures are reported.";
-        "Selecting a listed model changes this conversation only."]
-      ~initial_status:(Printf.sprintf "Discovering %d registered providers…"
-        (List.length requests))
+    Tui.choose screen
+      ~intro:["Only freshly listed, route-compatible IDs appear here.";
+        "Listing does not guarantee inference permission; failures are on the status pages.";
+        "Selection changes this conversation only."]
+      ~initial_status:(if requests = [] then
+        "No eligible model listings; check credentials or use a known ID in the CLI"
+        else Printf.sprintf "Checking %d registered route/account listings…"
+          (List.length requests))
       ~wake_fd:(Pave.Model_discovery_coordinator.read_fd coordinator)
-      ~on_wake ~title:"Models · registered providers" ~choices:[])
+      ~on_wake ~title:"Models · available routes" ~choices:[])

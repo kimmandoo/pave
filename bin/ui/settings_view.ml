@@ -77,8 +77,7 @@ let open_view screen ~root ~registry =
            | Some route_name ->
            match Model_picker.choose ~registry screen ~descriptor ~route_name
              ?account_id:values.default_account_id
-             ~title:"Default model · listed or explicitly entered IDs"
-             ~choices:[] () with
+             ~title:"Default model · available on this route" () with
            | None -> ()
            | Some selector ->
                let descriptor, identity, route = Pave.Interaction.resolve_model

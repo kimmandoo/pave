@@ -204,11 +204,18 @@
 (copy_files ../bin/ui/tui.ml)
 (copy_files ../bin/ui/terminal_input.ml)
 (copy_files ../bin/ui/transcript_view.ml)
+(copy_files ../bin/cli_auth.ml)
+(copy_files ../bin/ui/model_picker.ml)
 
 (test
  (name test_chooser_dynamic)
  (modules test_chooser_dynamic tui terminal_input transcript_view)
  (libraries pave unix notty-community notty-community.unix uutf))
+
+(test
+ (name test_model_picker)
+ (modules test_model_picker model_picker cli_auth tui terminal_input transcript_view)
+ (libraries pave unix yojson threads notty-community notty-community.unix uutf))
 
 (test
  (name test_terminal_input)

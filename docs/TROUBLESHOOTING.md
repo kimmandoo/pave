@@ -1,5 +1,12 @@
 # Troubleshooting
 
+### [2026-09-28] Model chooser mixed available and unverified IDs
+
+- **Context / Symptom:** `/model` displayed static suggestions, route actions and manually typed model IDs alongside live model listings, even when those models were not usable on the selected account/API route.
+- **Root Cause:** The dynamic chooser merged suggestion and custom-entry sources with discovery results; a successful public catalog or OS default was also not evidence of route compatibility, credentials or device readiness.
+- **Solution:** Restricted selectable model rows to fresh, route/account-matched listings, kept setup Back/Skip as separate controls, and reported skipped/failed scopes as status instead. Excluded unclassified IDs, public listings without required inference keys and OS defaults without a readiness probe. Kept explicit CLI/session model selection available for known IDs.
+- **Prevention / Reference:** Test model eligibility separately from listing parsing and exercise `/model` in a real PTY with only a local provider; listing success does not guarantee inference permission.
+
 ### [2026-09-28] Approval became unusable when the terminal shrank
 
 - **Context / Symptom:** A pending shell/tool approval immediately returned denial when a resize made the full preview no longer fit, without telling the operator why. Accepting an incomplete preview would be unsafe.

@@ -1509,7 +1509,7 @@ let () =
                        Model_picker.choose ~registry screen ~descriptor ~route_name
                          ?account_id:selected_account_id
                          ~title:("Model · " ^ descriptor.id ^ " (current conversation)")
-                         ~choices:[] () in
+                         () in
                  Option.value ~default:"" picked
              | None ->
                  let providers = Pave.Interaction.selectable_providers ~registry () in
@@ -1535,7 +1535,7 @@ let () =
               (Model_picker.choose ~registry screen ~descriptor
                 ~route_name:route.name ?account_id:selected_account_id
                 ~title:("Model · " ^ descriptor.id ^ "@" ^ route.name)
-                ~choices:[] ())
+                ())
         | Some _, None -> ""
         | None, _ -> selector in
       if selector <> "" then (

@@ -8,7 +8,6 @@ type candidate = {
   label : string;
   custom : bool;
   verified : bool;
-  listed : bool;
   action : bool;
   detail : string option;
 }
@@ -16,7 +15,6 @@ type candidate = {
 type chooser = {
   title : string;
   intro : string array;
-  suggestions : string array;
   plain : string list;
   mutable choices : candidate array;
   allow_custom : bool;
@@ -29,6 +27,7 @@ type chooser = {
   mutable offset : int;
   mutable touched : bool;
   mutable filtered : (string * candidate array) option;
+  mutable matched_models : int;
 }
 
 type submission = { text : string; follow_up : bool }
@@ -51,6 +50,7 @@ type t = {
   mutable revision : int;
   mutable body_cache : (int * int * int * I.t) option;
   mutable layout_cache : (int * int * Transcript_view.snapshot) option;
+  mutable location_cache : (int * I.t) option;
   mutable previous : I.t array option;
   mutable cursor_position : (int * int) option;
   mutable status : string;
@@ -66,8 +66,8 @@ type t = {
 
 let no_color = match Sys.getenv_opt "NO_COLOR" with Some s -> s <> "" | None -> false
 let text_attr = if no_color then A.empty else A.(fg lightwhite)
-let accent = if no_color then A.empty else A.(fg lightcyan ++ st bold)
-let user_attr = if no_color then A.empty else A.(fg lightblue ++ st bold)
+let accent = if no_color then A.(st bold) else A.(fg lightcyan ++ st bold)
+let user_attr = if no_color then A.(st bold) else A.(fg lightblue ++ st bold)
 let muted = if no_color then A.empty else A.(fg lightblack)
 let warning = if no_color then A.empty else A.(fg lightyellow)
 let error = if no_color then A.empty else A.(fg lightred)
@@ -148,7 +148,7 @@ let style_attr (row : Transcript_view.row) =
 
 let transcript_prefix style continuation =
   match style with
-  | Transcript_view.Heading -> "  "
+  | Transcript_view.Heading -> if continuation then "    " else "  ▌ "
   | Transcript_view.Divider -> ""
   | Transcript_view.Tool_state -> "  · "
   | Transcript_view.Code -> "    "
@@ -237,37 +237,34 @@ let matches chooser =
           pos + m <= n &&
           (String.sub value pos m = query || find (pos + 1)) in
         find 0 in
-      let found = ref [] in
+      let found = ref [] and models = ref 0 in
       Array.iter (fun item ->
-        if includes item.value || includes item.label then
-          found := item :: !found) chooser.choices;
+        if includes item.value || includes item.label then (
+          if chooser.dynamic && not item.action then incr models;
+          found := item :: !found)) chooser.choices;
       let found = List.rev !found in
+      chooser.matched_models <- !models;
       let manual =
-        chooser.allow_custom &&
+        not chooser.dynamic && chooser.allow_custom &&
         chooser.filter <> "" &&
         chooser.filter.[String.length chooser.filter - 1] <> '/' &&
         (String.contains chooser.filter '/' || found = []) &&
         not (List.exists (fun item -> item.value = chooser.filter) found) in
       let found = Array.of_list (if manual then
         { value = chooser.filter; label = chooser.filter; custom = true;
-          verified = false; listed = false; action = false; detail = None } :: found
+          verified = false; action = false; detail = None } :: found
         else found) in
       chooser.filtered <- Some (chooser.filter, found);
       found
 
-let candidate_label ?(columns = 80) chooser item =
-  let source =
-    if item.custom then "Use: "
-    else if item.action then "[route] "
-    else if not chooser.dynamic || List.mem item.value chooser.plain then ""
-    else if columns < 40 then
-      if item.verified then "✓ "
-      else if item.listed then "? "
-      else "~ "
-    else if item.verified then "[verified] "
-    else if item.listed then "[listed · API unverified] "
-    else "[suggested] " in
-  source ^ sanitize item.label
+let candidate_label chooser item =
+  (if chooser.dynamic then
+    if item.action then "↩ " else "• "
+   else if item.custom then "Use: " else "") ^ sanitize item.label
+
+let chooser_empty_message chooser =
+  if chooser.filter <> "" then "No available models match this search"
+  else "No available models yet"
 
 let view_height t =
   let _, rows = Notty_unix.Term.size t.term in
@@ -380,24 +377,35 @@ let paint t =
     string accent "  ◆  PAVE" <|>
     string muted (if cols >= 48 then queued else "") <|>
     string muted (usage ^ attached)) in
-  let model = single_line t.model in
-  let model =
-    if cols < 60 then match String.index_opt model '/' with
-      | None -> model
-      | Some split when cols < 45 ->
-          String.sub model (split + 1) (String.length model - split - 1)
-      | Some split ->
-          shorten_width 6 (String.sub model 0 split) ^ "/" ^
-          String.sub model (split + 1) (String.length model - split - 1)
-    else model in
-  let location = styled_line cols text_attr
-    (if cols < 22 then " " ^ shorten_width (max 2 (cols - 1)) model
-    else if cols < 60 then
-      "  MODEL " ^ shorten_width (max 1 (cols - 22)) model ^ "  ·  " ^
-      (if t.session then "SAVED" else "UNSAVED")
-    else "  MODEL  " ^ model ^ "   ·   " ^
-      (if t.session then "SESSION SAVED" else "SESSION UNSAVED") ^
-      "   ·   " ^ single_line t.root) in
+  let location = match t.location_cache with
+    | Some (width, image) when width = cols -> image
+    | _ ->
+      let model = single_line t.model in
+      let model =
+        if cols < 60 then match String.index_opt model '/' with
+          | None -> model
+          | Some split when cols < 45 ->
+              String.sub model (split + 1) (String.length model - split - 1)
+          | Some split ->
+              shorten_width 6 (String.sub model 0 split) ^ "/" ^
+              String.sub model (split + 1) (String.length model - split - 1)
+        else model in
+      let image =
+        if cols < 28 then styled_line cols accent
+          (" " ^ shorten_width (max 2 (cols - 1)) model)
+        else
+          let badge = if cols < 60 then "  MODEL " else "  [MODEL] " in
+          let name_width = if cols < 60 then max 1 (cols - 22)
+            else max 1 (cols / 2 - 11) in
+          let state = if t.session then "  ·  SAVED" else "  ·  UNSAVED" in
+          I.hsnap ~align:`Left cols I.(
+            string accent badge <|>
+            string text_attr (shorten_width name_width model) <|>
+            string muted state <|>
+            string muted (if cols < 60 then ""
+              else "  ·  " ^ single_line t.root)) in
+      t.location_cache <- Some (cols, image);
+      image in
   let divider = I.uchar muted (Uchar.of_int 0x2500) cols 1 in
   let layout = match t.layout_cache with
     | Some (width, revision, layout)
@@ -437,9 +445,12 @@ let paint t =
           if intro_spacer then min 3 (Array.length chooser.intro) + 1
           else if compact_intro then 1
           else 0 in
-        let status_max_rows =
-          if count > 0 then max 1 (min 3 (body_height - 2 - intro_rows))
-          else max 0 (min 3 (body_height - 1 - intro_rows)) in
+        let empty_height =
+          if chooser.dynamic && chooser.matched_models = 0 &&
+            body_height >= (if count > 0 then 3 else 2) then 1 else 0 in
+        let status_max_rows = max 0
+          (min 3 (body_height - 1 - empty_height -
+            (if count > 0 then 1 else 0) - intro_rows)) in
         let status_lines = match status_text with
           | Some status when body_height >= 3 ->
               wrap_chooser_text
@@ -454,51 +465,59 @@ let paint t =
             | Some detail ->
                 wrap_chooser_text
                   ~columns:(max 1 (cols - measure_text detail_prefix))
-                  ~max_rows:4 detail
+                  ~max_rows:(min 4 (body_height - 2 - status_height -
+                    intro_rows - empty_height)) detail
             | None -> [||]
           else [||] in
         let detail_height = Array.length detail_lines in
         let minimum_choices =
           if compact_intro then min 1 count else min 3 count in
         let intro_height =
-          if body_height - 1 - status_height - detail_height - intro_rows >=
-              minimum_choices
+          if body_height - 1 - status_height - detail_height - empty_height -
+              intro_rows >= minimum_choices
           then intro_rows else 0 in
         let page = max 0
-          (body_height - 1 - intro_height - status_height - detail_height) in
+          (body_height - 1 - intro_height - status_height -
+            detail_height - empty_height) in
         if chooser.selected < chooser.offset then chooser.offset <- chooser.selected;
         if page > 0 && chooser.selected >= chooser.offset + page then
           chooser.offset <- chooser.selected - page + 1;
         chooser.offset <- min chooser.offset (max 0 (count - page));
         I.vcat (List.init body_height (fun i ->
           if i = 0 then styled_line cols accent
-            (Printf.sprintf "  ▌  %s  ·  %d matches" chooser.title count)
+            (if chooser.dynamic then
+              Printf.sprintf "  ▌  %s  ·  %d available"
+                chooser.title chooser.matched_models
+             else Printf.sprintf "  ▌  %s  ·  %d matches"
+                chooser.title count)
           else if i <= intro_height then
             if intro_spacer && i = intro_height then I.void cols 1
             else styled_line cols muted ("  " ^ chooser.intro.(i - 1))
-          else if i > intro_height &&
-              i <= intro_height + status_height then
+          else if i <= intro_height + status_height then
             let index = i - intro_height - 1 in
-            styled_line cols text_attr
+            styled_line cols muted
               ((if index = 0 then status_prefix else "     ") ^
                 status_lines.(index))
-          else if i > intro_height + status_height &&
-              i <= intro_height + status_height + detail_height then
-            let index = i - intro_height - status_height - 1 in
+          else if i <= intro_height + status_height + empty_height then
+            styled_line cols text_attr ("  " ^ chooser_empty_message chooser)
+          else if i <= intro_height + status_height + empty_height +
+              detail_height then
+            let index = i - intro_height - status_height - empty_height - 1 in
             styled_line cols muted
               ((if index = 0 then detail_prefix else "    ") ^
                 detail_lines.(index))
           else
             let index = chooser.offset + i - 1 - intro_height -
-              status_height - detail_height in
+              status_height - empty_height - detail_height in
             if index >= count then I.void cols 1
             else let choice = found.(index) in
+              let marker = if index = chooser.selected then
+                (if cols < 40 then "❯ " else "  ❯ ")
+              else if cols < 40 then "  " else "    " in
               styled_line cols
-                (if index = chooser.selected then selected_attr else text_attr)
-                ((if cols < 40 then
-                    if index = chooser.selected then "❯ " else "  "
-                  else if index = chooser.selected then "  ❯ " else "    ") ^
-                 candidate_label ~columns:cols chooser choice)))
+                (if index = chooser.selected then selected_attr
+                 else if choice.action then muted else text_attr)
+                (marker ^ candidate_label chooser choice)))
     | None ->
         (match t.body_cache with
         | Some (width, height, revision, body)
@@ -534,9 +553,15 @@ let paint t =
         let status_page = if Array.length chooser.status_pages = 0 then ""
           else Printf.sprintf " · Tab status %d/%d"
             (chooser.status_page + 1) (Array.length chooser.status_pages) in
+        if chooser.dynamic && Array.length found = 0 then
+          (if cols < 35 then "  No models · Esc cancel"
+           else "  No available models · Esc cancel") ^ status ^ status_page
+        else
         if body_height < 2 then (
-          let label = if Array.length found = 0 then "(no match)"
-            else candidate_label ~columns:cols chooser found.(chooser.selected) in
+          let label = if Array.length found = 0 then
+              (if chooser.dynamic then chooser_empty_message chooser
+               else "(no match)")
+            else candidate_label chooser found.(chooser.selected) in
           Printf.sprintf "  %d/%d %s · %s select · Esc cancel%s%s"
             number (Array.length found) label enter_key status status_page)
         else if cols < 55 then
@@ -706,6 +731,7 @@ let create ~root ~model ~session =
     hint_draft = ""; hint_selected = 0; hint_offset = 0;
     hint_suppressed = None;
     revision = 0; body_cache = None; layout_cache = None;
+    location_cache = None;
     previous = None; cursor_position = None;
     status = idle_status; activity = None;
     activity_started = None; usage_badge = None;
@@ -743,10 +769,12 @@ let reset_status t =
 
 let set_model t model =
   t.model <- model;
+  t.location_cache <- None;
   reset_status t
 
 let set_session t session =
   t.session <- session;
+  t.location_cache <- None;
   paint t
 
 let set_activity t activity =
@@ -1158,46 +1186,33 @@ let read ?wake_fd ?on_wake ?on_interrupt ?on_dequeue ?on_completion t =
     t.paste <- false;
     Buffer.clear paste_buffer) loop
 
-(* Update live choices only on the UI thread; preserve an explicit selection
-   while fresh provider IDs arrive. Listing alone does not verify an API route. *)
-let update_chooser ?(status_pages = []) ?(actions = []) chooser ~verified
-    ~listed ~details ~labels ~status =
+(* Dynamic choices contain only fresh usable IDs and explicit navigation controls.
+   Preserve a touched selection when discovery refreshes the IDs. *)
+let update_chooser ?(status_pages = []) chooser ~verified
+    ~details ~labels ~status =
   let previous = matches chooser in
   let selected = if chooser.selected < Array.length previous then
       Some previous.(chooser.selected).value else None in
-  let confirmed = Hashtbl.create (List.length verified) in
-  List.iter (fun value -> Hashtbl.replace confirmed value ()) verified;
-  let actionable = Hashtbl.create (List.length actions) in
-  List.iter (fun value -> Hashtbl.replace actionable value ()) actions;
-  let discovered = Hashtbl.create (List.length listed) in
-  List.iter (fun value -> Hashtbl.replace discovered value ()) listed;
   let annotations = Hashtbl.create (List.length details) in
   List.iter (fun (value, detail) ->
     Hashtbl.replace annotations value detail) details;
   let display_labels = Hashtbl.create (List.length labels) in
   List.iter (fun (value, label) ->
     Hashtbl.replace display_labels value label) labels;
-  let seen = Hashtbl.create (Array.length chooser.suggestions +
-    List.length verified + List.length listed + List.length actions) in
+  let seen = Hashtbl.create (List.length verified + List.length chooser.plain) in
   let choices = ref [] in
-  let add value =
+  let add ~action value =
     if not (Hashtbl.mem seen value) then (
       Hashtbl.add seen value ();
       choices := { value;
-        label = Option.value ~default:value
+        label = if action then value else Option.value ~default:value
           (Hashtbl.find_opt display_labels value);
-        custom = false;
-        verified = Hashtbl.mem confirmed value;
-        listed = Hashtbl.mem discovered value;
-        action = Hashtbl.mem actionable value;
-        detail = Hashtbl.find_opt annotations value } :: !choices) in
-  List.iter add verified;
-  List.iter add listed;
-  List.iter add actions;
-  Array.iter (fun value ->
-    if not (List.mem value chooser.plain) then add value) chooser.suggestions;
-  Array.iter (fun value ->
-    if List.mem value chooser.plain then add value) chooser.suggestions;
+        custom = false; verified = not action; action;
+        detail = if action then None else Hashtbl.find_opt annotations value
+      } :: !choices) in
+  List.iter (fun value ->
+    if not (List.mem value chooser.plain) then add ~action:false value) verified;
+  List.iter (add ~action:true) chooser.plain;
   chooser.choices <- Array.of_list (List.rev !choices);
   chooser.filtered <- None;
   chooser.status <- Option.map sanitize status;
@@ -1206,8 +1221,7 @@ let update_chooser ?(status_pages = []) ?(actions = []) chooser ~verified
     (max 0 (Array.length chooser.status_pages - 1));
   let found = matches chooser in
   chooser.selected <- (if
-    (verified <> [] || listed <> [] || actions <> []) &&
-      chooser.filter = "" && not chooser.touched then 0
+    verified <> [] && chooser.filter = "" && not chooser.touched then 0
     else match selected with
     | Some value ->
         let rec locate i =
@@ -1217,12 +1231,11 @@ let update_chooser ?(status_pages = []) ?(actions = []) chooser ~verified
     | None -> 0);
   chooser.offset <- min chooser.offset chooser.selected
 
-let update_choices t ~verified ?(listed = []) ?(actions = [])
+let update_choices t ~verified
     ?(details = []) ?(labels = []) ?(status_pages = []) ~status () =
   match t.chooser with
   | Some chooser when chooser.dynamic ->
-      update_chooser ~actions chooser ~verified ~listed ~details ~labels
-        ~status ~status_pages;
+      update_chooser chooser ~verified ~details ~labels ~status ~status_pages;
       paint t
   | _ -> invalid_arg "Tui.update_choices: no dynamic chooser is open"
 
@@ -1233,18 +1246,18 @@ let choose ?(allow_custom = false) ?(intro = []) ?(plain = [])
     alert t "Resize terminal (at least 9 columns × 2 rows) to select";
     None)
   else
-  let suggestions = Array.of_list choices in
+  let dynamic = Option.value dynamic ~default:(Option.is_some wake_fd) in
+  let initial = if dynamic then Array.of_list plain
+    else Array.of_list choices in
   let chooser = { title = sanitize title;
-    intro = Array.of_list (List.map sanitize intro); plain; suggestions;
+    intro = Array.of_list (List.map sanitize intro); plain;
     choices = Array.map (fun value ->
-      { value; label = value; custom = false; verified = false; listed = false;
-        action = false; detail = None }) suggestions;
-
-    allow_custom; dynamic = Option.value dynamic
-      ~default:(Option.is_some wake_fd); status = initial_status;
+      { value; label = value; custom = false; verified = false;
+        action = dynamic; detail = None }) initial;
+    allow_custom; dynamic; status = initial_status;
     status_pages = [||]; status_page = 0;
     filter = ""; selected = 0; offset = 0; touched = false;
-    filtered = None } in
+    filtered = None; matched_models = 0 } in
   let old_scroll = t.scroll in
   let selected () =
     let found = matches chooser in
