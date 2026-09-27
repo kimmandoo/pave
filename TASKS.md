@@ -196,7 +196,7 @@ The P0–P6 cards above remain the detailed acceptance criteria; this roadmap is
 
 ### R4 — Credential and account security
 
-- [ ] Complete P2 auth gates 2–5, multi-account storage, opt-in secret masking and the remote broker decision. Deliver provider/account/route-bound credentials, supported refresh/expiry behavior, safe key instructions and fail-closed lifecycle/error handling; do not add a grant without an authorized matching route.
+- [x] Completed P2 auth gates 2–5, multi-account OAuth storage/migration, opt-in secret masking and the remote-broker decision. Provider/grant/route checks fail closed before authenticated HTTP; OAuth refresh and selection preserve the bound account; Vertex ADC and Bedrock AWS identity stay distinct from API keys/OAuth. R4 passed the forced suite, install build, opam lint, CLI/provider-list smokes, no-network auth preflights and 70×18/100×24 setup PTYs. Public non-draft v0.1.45 followed successful Linux/macOS arm64/x86-64 test/build/package/smoke jobs; all four published archive checksums and extracted macOS arm64 CLI smokes passed. https://github.com/kimmandoo/pave/releases/tag/v0.1.45 (https://github.com/kimmandoo/pave/actions/runs/36281443919).
 
 ### R5 — Authorized cloud and proprietary routes
 
