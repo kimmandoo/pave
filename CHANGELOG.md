@@ -2,6 +2,7 @@
 
 ## 2026-09-28
 
+- release(distribution): published v0.1.53 from `1573366c` after main CI `36334774982` passed all four macOS/Linux OCaml 5.3.0/5.5.1 jobs and release workflow `36335114079` passed all four native test/build/package/smoke jobs plus publication. The public non-draft release contained four archives and `SHA256SUMS`; downloaded checksums and exact three-member archive contents passed. Extracted Darwin arm64 and Intel binaries linked only `libSystem` and passed `--help`/`--providers` locally (Intel under Rosetta). Release: https://github.com/kimmandoo/pave/releases/tag/v0.1.53.
 - fix(ci): reaped AWS credential-process children only once while draining remaining output, matching the confirmed Google ADC subprocess lifecycle fix, and covered a descendant-held pipe with a regression after a hosted Bedrock fixture failed.
 - fix(ci): lengthened the Python listener fixture's lifetime and bounded readiness window after a hosted macOS assertion failed, and reported child status/output on any future failure without weakening production readiness checks.
 - fix(ci): stopped waiting twice for the same Google ADC subprocess after a hosted macOS `waitpid: No child processes` failure identified the cause of intermittent signer errors; continued draining output after child exit and covered delayed pipe EOF with a regression.
