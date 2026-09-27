@@ -1,6 +1,13 @@
 # Troubleshooting
 
 
+### [2026-09-27] Hosted matrix child-process fixtures failed intermittently
+
+- **Context / Symptom:** Hosted CI workflow 36308330776 and release workflow 36308330884 failed tests that launch AWS credential, OpenSSL signer and curl helpers. Errors included `could not start AWS credential_process`, `OpenSSL is required for Google service-account credentials` and `Google OAuth token endpoint unavailable`. The failures varied across architectures and retry attempts; all three affected tests passed individually on the local macOS arm64 host.
+- **Root Cause:** Not conclusively isolated. These messages wrap `Unix.Unix_error` from subprocess setup/I/O without exposing the underlying errno. They occurred during default-parallel hosted test runs; Dune parallelism as a contributing factor remains an inference.
+- **Solution:** Changed hosted CI and release full-suite commands to use `dune runtest --force -j 1`; the local serialized forced suite passed. Hosted verification remains pending.
+- **Prevention / Reference:** Keep one Dune command at a time and constrain hosted forced-suite parallelism; if an individual helper failure recurs, inspect its exact matrix logs before attributing it to a missing executable.
+
 ### [2026-09-27] R7 integration exposed OCaml binder and record inference errors
 
 - **Context / Symptom:** Initial forced tests/builds reported syntax errors from using `effect` as an identifier, a malformed task-dispatch `try ... with`, missing `Agent.create` callback arguments, and ambiguous artifact/job record fields. A fake OpenAI endpoint TUI smoke was also rejected with `remote endpoint overrides are disabled; define a custom provider in user settings`.

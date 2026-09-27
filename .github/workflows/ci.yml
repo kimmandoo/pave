@@ -32,7 +32,7 @@ jobs:
       - name: Check opam package
         run: opam lint pave.opam
       - name: Run tests
-        run: opam exec -- dune runtest --force
+        run: opam exec -- dune runtest --force -j 1
       - name: Build installation artifacts
         run: opam exec -- dune build @install
       - name: Smoke CLI help

@@ -39,7 +39,7 @@ jobs:
       - name: Install dependencies
         run: opam install . --deps-only --with-test -y
       - name: Run tests
-        run: opam exec -- dune runtest --force
+        run: opam exec -- dune runtest --force -j 1
       - name: Build native executable
         env:
           PAVE_RELEASE_VERSION: ${{ github.ref_name }}
