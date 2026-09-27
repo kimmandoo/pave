@@ -1355,12 +1355,18 @@ let confirm_review t ~title ~label ~body ~max_bytes ~wrap
     let cols, rows = Notty_unix.Term.size t.term in
     let content_cols = max 1 (cols - 5) in
     let measure text = I.width (I.string text_attr text) in
+    let activity_height = if Option.is_some t.activity then 1 else 0 in
+    let editor_space = max 1 (rows - 4 - activity_height) in
     let editor_height = match Pave.Composer.search_query t.editor with
       | Some _ -> 1
       | None ->
           let prompt_cols = max 1 (cols - I.width (I.string accent prompt)) in
           let draft = Pave.Composer.layout ~columns:prompt_cols ~measure t.editor in
-          min 4 (max 1 (min (rows - 4) (Array.length draft))) in
+          min 4 (max 1 (min editor_space (Array.length draft))) in
+    let available = max 0 (rows - 4 - editor_height - activity_height) in
+    let hint_count = List.length (hint_matches t) in
+    let hint_height = if available < 2 || hint_count = 0 then 0
+      else min available (min 8 (hint_count + 1)) in
     let header_height = Transcript_view.wrapped_count ~columns:content_cols
       ~measure title in
     let body_height = if wrap then
@@ -1368,7 +1374,7 @@ let confirm_review t ~title ~label ~body ~max_bytes ~wrap
       else List.length body_lines in
     t.chooser = None && String.length body <= max_bytes &&
     cols >= 25 && rows >= 10 &&
-    rows - 4 - editor_height >= header_height + 1 + body_height &&
+    available - hint_height >= header_height + 1 + body_height &&
     (wrap || List.for_all (fun line -> measure line <= content_cols) body_lines) in
   if String.length body > max_bytes then (
     alert t too_large;
@@ -1384,9 +1390,14 @@ let confirm_review t ~title ~label ~body ~max_bytes ~wrap
       Transcript_view.approval ~title t.transcript body);
     t.scroll <- 0;
     alert t label;
+    let resize_notice = "Resize to review · other=no" in
     let rec decision () = match next_input t with
-      | `Resize _ -> if fits () then (paint t; decision ()) else false
-      | `Key (`ASCII ('y' | 'Y'), []) -> true
+      | `Resize _ ->
+          alert t (if fits () then label else resize_notice);
+          decision ()
+      | `Key (`ASCII ('y' | 'Y'), []) ->
+          if fits () then true
+          else (alert t resize_notice; decision ())
       | _ -> false in
     let accepted = decision () in
     alert t (if accepted then approved_text else denied_text);

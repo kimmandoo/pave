@@ -226,8 +226,10 @@ let service_account_assertion ?cancel ~client_email ~private_key ~now () =
       let signature =
         try execute ~stdin:signing_input ?cancel ~timeout:10. "openssl"
           ["dgst"; "-sha256"; "-sign"; private_key_path]
-        with Unix.Unix_error _ ->
-          fail "OpenSSL is required for Google service-account credentials" in
+        with Unix.Unix_error (error, operation, _) ->
+          fail (Printf.sprintf
+            "Google service-account signing subprocess failed (%s: %s)"
+            operation (Unix.error_message error)) in
       if signature = "" then fail "Google service-account JWT signing failed";
       signing_input ^ "." ^ base64url signature)
 

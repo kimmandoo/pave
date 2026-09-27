@@ -1,5 +1,12 @@
 # Troubleshooting
 
+### [2026-09-28] Approval became unusable when the terminal shrank
+
+- **Context / Symptom:** A pending shell/tool approval immediately returned denial when a resize made the full preview no longer fit, without telling the operator why. Accepting an incomplete preview would be unsafe.
+- **Root Cause:** `Tui.confirm_review` treated any non-fitting `Resize` as a denial and did not reserve space for the active row or shortcut hints when calculating review visibility.
+- **Solution:** Kept the pending approval across resize, displayed a compact resize hint and ignored `y` while the complete preview was clipped; after restoring a fitting viewport, the prompt became actionable again. A real loopback-model PTY smoke shrank from 80×24 to 28×10, confirmed `y` could not run the command, restored 80×24 and completed the approved tool.
+- **Prevention / Reference:** Check the complete review area against all reserved UI rows on every approval key and resize, not only when the prompt opens.
+
 ### [2026-09-27] R8 native archives acquired a dynamic zstd dependency
 
 - **Context / Symptom:** Extracted v0.1.50 Darwin arm64 and x86_64 binaries linked `/opt/homebrew/opt/zstd/lib/libzstd.1.dylib` and `/usr/local/opt/zstd/lib/libzstd.1.dylib`. The Intel Rosetta smoke failed with `dyld: Library not loaded` on this arm64 host without Intel Homebrew zstd; v0.1.49's Intel binary linked only `libSystem`. Hosted v0.1.50 smoke passed because its runners had zstd installed.
@@ -9,10 +16,10 @@
 
 ### [2026-09-27] Hosted matrix child-process fixtures failed intermittently
 
-- **Context / Symptom:** Hosted workflow `36308330776` and release workflow `36308330884` reported AWS credential, OpenSSL signer and curl helper failures. Serial CI run `36309981578` passed three targets but still failed `test_vertex_wire`; after its fixture correction, main CI run `36310428334` passed all four jobs. Release run `36310670104` attempt 1 failed only Darwin arm64 `test_vertex_auth` with `OpenSSL is required for Google service-account credentials`; attempt 2 passed all four targets and published v0.1.49. v0.1.51 workflow `36326312932` attempt 1 hit the same Darwin arm64 signer message; its failed-job retry (attempt 2) passed and published.
-- **Root Cause:** The reproducible `test_vertex_wire` failure came from an unnecessary test-side `Unix.fork` around `Vertex_auth.access_token`, which forks to invoke fake `gcloud`; removing the wrapper fixed it. The transient service-account signer failure remains unisolated: `Vertex_auth.service_account_assertion` maps any signer `Unix.Unix_error` to the generic missing-OpenSSL message; both successful release retries passed without exposing the underlying errno.
-- **Solution:** Set both hosted forced suites to `dune runtest --force -j 1` and replaced the test-side fork with scoped environment changes and cleanup while retaining the real helper subprocess. The targeted Vertex wire test and full serialized suite passed locally, all four main-CI jobs passed, and both v0.1.49 and v0.1.51 release attempts 2 passed all four native targets plus publication without a signer workaround. The intermittent signer error remains unisolated.
-- **Prevention / Reference:** Keep hosted full suites serialized and avoid redundant forks around subprocess fixtures; restore environment changes with `Fun.protect`. Inspect the specific signer job log before attributing the generic message to missing OpenSSL; if it recurs, preserve the underlying `Unix_error` for diagnosis.
+- **Context / Symptom:** Hosted workflow `36308330776` and release workflow `36308330884` reported AWS credential, OpenSSL signer and curl helper failures. Serial CI run `36309981578` passed three targets but still failed `test_vertex_wire`; after its fixture correction, main CI run `36310428334` passed all four jobs. Release runs `36310670104` and `36326312932` each failed Darwin arm64 `test_vertex_auth` on attempt 1 with `OpenSSL is required for Google service-account credentials` and published after a successful retry. Docs-only main CI run `36327731436` again failed macOS OCaml 5.5.1 `test_vertex_auth`, while its other three jobs passed.
+- **Root Cause:** The reproducible `test_vertex_wire` failure came from an unnecessary test-side `Unix.fork` around `Vertex_auth.access_token`, which forks to invoke fake `gcloud`; removing the wrapper fixed it. The transient service-account signer failure remains unisolated: the old `service_account_assertion` catch mapped any parent-side signer `Unix.Unix_error` to a misleading missing-OpenSSL message. A child exec failure would instead exit 127. No job log captured the failing syscall or errno.
+- **Solution:** Serialized hosted forced suites and replaced the redundant test-side fork. Updated signer diagnostics to report the Unix operation and errno without the exception's path argument or credential data; no retry, skip, or suppressed test was added. Local targeted Vertex auth and TUI tests passed; hosted diagnostic results are pending.
+- **Prevention / Reference:** Keep hosted full suites serialized and avoid redundant forks around subprocess fixtures; restore environment changes with `Fun.protect`. Capture the first safe failing Unix syscall/errno on the next hosted recurrence before deciding on a root-cause correction.
 
 ### [2026-09-27] R7 integration exposed OCaml binder and record inference errors
 

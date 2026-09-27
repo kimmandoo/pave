@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-09-28
+
+- fix(tui): kept pending tool approval open across terminal shrink/restore, blocked approval while the complete preview was clipped, and showed a compact resize hint rather than silently denying the action.
+- fix(provider): reported the failing Unix operation and errno for service-account signing subprocess errors without exposing key paths or credentials; avoided misdiagnosing every subprocess failure as missing OpenSSL.
+
 ## 2026-09-27
 
 - fix(ci): serialized the hosted forced test suite after intermittent subprocess fixture failures.
