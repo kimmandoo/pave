@@ -4,6 +4,7 @@
 
 - fix(tui): kept pending tool approval open across terminal shrink/restore, blocked approval while the complete preview was clipped, and showed a compact resize hint rather than silently denying the action.
 - fix(provider): reported the failing Unix operation and errno for service-account signing subprocess errors without exposing key paths or credentials; avoided misdiagnosing every subprocess failure as missing OpenSSL.
+- fix(ci): extended safe Unix syscall/errno diagnostics to every Google ADC helper, including fake `gcloud` and `curl` fixtures after an unmodified docs push exposed their intermittent subprocess failures on Linux and macOS.
 - release(distribution): published v0.1.52 from `27a967c` after main CI `36328943310` passed all four macOS/Linux OCaml 5.3.0/5.5.1 jobs and release workflow `36329395334` passed all four native test/build/archive/runtime-dependency/smoke jobs plus publication on its first attempt. The public non-draft release contained four archives and `SHA256SUMS`; downloaded checksums and exact three-member archive contents passed. Extracted Darwin arm64 and Intel binaries linked only `libSystem` and passed `--help`/`--providers` locally (Intel under Rosetta). The intermittent signer failure did not recur; its underlying Unix syscall remains unisolated. Release: https://github.com/kimmandoo/pave/releases/tag/v0.1.52.
 
 ## 2026-09-27
