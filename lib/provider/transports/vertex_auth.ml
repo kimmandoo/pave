@@ -31,6 +31,10 @@ let check_deadline ~cancel ~deadline ~program =
     fail ("Google ADC " ^ Filename.basename program ^ " command timed out")
 
 let close_fd fd = try Unix.close fd with Unix.Unix_error _ -> ()
+let subprocess_unix_error name (error, operation, _) =
+  fail (Printf.sprintf "Google ADC %s subprocess failed (%s: %s)"
+    name operation (Unix.error_message error))
+
 
 let execute ?(stdin = "") ?cancel ~timeout program arguments =
   if timeout <= 0. then fail "invalid Google ADC subprocess deadline";
@@ -166,8 +170,8 @@ let refresh_authorized_user ?cancel ~client_id ~client_secret ~refresh_token () 
     authorized_user_request ~client_id ~client_secret ~refresh_token in
   let output =
     try execute ~stdin:body ?cancel ~timeout:20. "curl" arguments
-    with Unix.Unix_error _ ->
-      fail "Google OAuth token endpoint unavailable" in
+    with Unix.Unix_error (error, operation, path) ->
+      subprocess_unix_error "curl" (error, operation, path) in
   parse_token_response output
 let base64url value =
   let alphabet =
@@ -226,10 +230,8 @@ let service_account_assertion ?cancel ~client_email ~private_key ~now () =
       let signature =
         try execute ~stdin:signing_input ?cancel ~timeout:10. "openssl"
           ["dgst"; "-sha256"; "-sign"; private_key_path]
-        with Unix.Unix_error (error, operation, _) ->
-          fail (Printf.sprintf
-            "Google service-account signing subprocess failed (%s: %s)"
-            operation (Unix.error_message error)) in
+        with Unix.Unix_error (error, operation, path) ->
+          subprocess_unix_error "openssl" (error, operation, path) in
       if signature = "" then fail "Google service-account JWT signing failed";
       signing_input ^ "." ^ base64url signature)
 
@@ -239,8 +241,8 @@ let refresh_service_account ?cancel ~client_email ~private_key () =
   let arguments, body = service_account_request ~assertion in
   let output =
     try execute ~stdin:body ?cancel ~timeout:20. "curl" arguments
-    with Unix.Unix_error _ ->
-      fail "Google OAuth token endpoint unavailable" in
+    with Unix.Unix_error (error, operation, path) ->
+      subprocess_unix_error "curl" (error, operation, path) in
   parse_token_response output
 
 
@@ -330,8 +332,8 @@ let access_token ?cancel () =
               let output =
                 try execute ?cancel ~timeout:30. "gcloud"
                   ["auth"; "application-default"; "print-access-token"]
-                with Unix.Unix_error _ ->
-                  fail "Google Cloud SDK is required for impersonated ADC" in
+                with Unix.Unix_error (error, operation, path) ->
+                  subprocess_unix_error "gcloud" (error, operation, path) in
               check_token (String.trim output)
           | _ -> fail "unsupported Google ADC credential type")
        | None ->
@@ -342,7 +344,8 @@ let access_token ?cancel () =
               "--proto"; "=http"; "--max-redirs"; "0";
               "--header"; "Metadata-Flavor: Google";
               "http://169.254.169.254/computeMetadata/v1/instance/service-accounts/default/token"
-            ] with Unix.Unix_error _ -> fail "Google ADC metadata token unavailable" in
+            ] with Unix.Unix_error (error, operation, path) ->
+              subprocess_unix_error "curl" (error, operation, path) in
           let json = try Yojson.Basic.from_string output
             with Yojson.Json_error _ -> fail "invalid Google metadata token response" in
           (match Protocol.member "access_token" json,
