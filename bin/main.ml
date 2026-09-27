@@ -572,6 +572,44 @@ let () =
     let on_event message = match !ui with
       | Some screen -> Tui.event screen message
       | None -> print_endline message; flush stdout in
+    let job_managers :
+        (string * (Pave.Session.t * Pave.Session_jobs.t)) list ref = ref [] in
+    let rewind_managers :
+        (string * (Pave.Session.t * Pave.Session_rewind.t)) list ref = ref [] in
+    let rewind_manager session =
+      let owner = Pave.Session.session_id session in
+      match List.assoc_opt owner !rewind_managers with
+      | Some (_, manager) -> manager
+      | None ->
+          let manager = Pave.Session_rewind.create ~root ~session in
+          rewind_managers := (owner, (session, manager)) :: !rewind_managers;
+          manager in
+    let current_session_id () =
+      Option.map Pave.Session.session_id !journal in
+    let job_manager session =
+      let owner = Pave.Session.session_id session in
+      match List.assoc_opt owner !job_managers with
+      | Some (_, manager) -> manager
+      | None ->
+          let manager = Pave.Session_jobs.create ~root ~session
+            ~on_notice:(fun message ->
+              if current_session_id () = Some owner then
+                match !runner with
+                | Some active -> Pave.Turn_runner.post active message
+                | None -> on_event message) () in
+          job_managers := (owner, (session, manager)) :: !job_managers;
+          List.iter (fun error -> on_event ("Error delivering job: " ^ error))
+            (Pave.Session_jobs.deliver_pending manager);
+          manager in
+    let deliver_job_results () =
+      List.iter (fun (_, (_, manager)) ->
+        List.iter (fun error -> on_event ("Error delivering job: " ^ error))
+          (Pave.Session_jobs.deliver_pending manager)) !job_managers in
+    at_exit (fun () ->
+      List.iter (fun (_, (_, manager)) ->
+        try Pave.Session_jobs.close manager with exn ->
+          prerr_endline ("Error stopping session jobs: " ^
+            Printexc.to_string exn)) !job_managers);
     let on_delta delta = match !ui with
       | Some screen -> Tui.delta screen delta
       | None -> print_string delta; flush stdout in
@@ -1011,6 +1049,45 @@ let () =
                      | None -> ());
                     record_compaction_usage (List.rev !usages);
                     Some projected)) in
+    let start_child_job ~session ~provider ~authentication ?resolve_credential
+        ?secret_mask ~tool_allowed ~kind ~label ~task () =
+      let history = Pave.Session.context session in
+      let read_tools = ["read_file"; "list_files"; "glob"; "search"; "grep"] in
+      Pave.Session_jobs.start (job_manager session) ~kind ~label
+        ~task:(fun ~cancel ->
+          let child_usage = ref None in
+          let on_usage tokens =
+            child_usage := Some (Option.fold ~none:tokens
+              ~some:(fun previous -> Pave.Protocol.add_usage previous tokens)
+              !child_usage) in
+          let session_guidance =
+            (match Pave.Session.goal session with
+             | Some goal -> ["Current session goal: " ^ goal]
+             | None -> []) @
+            (match Pave.Session.interruption_rule session with
+             | Some rule -> ["Interruption rule: " ^ rule]
+             | None -> []) in
+          let child_system = system ^
+            "\n\nChild-agent constraints: read-only investigation only. " ^
+            "Do not modify files, execute commands, or claim unperformed actions. " ^
+            "Return findings, evidence, and uncertainty concisely." ^
+            (if session_guidance = [] then "" else
+              "\n\n" ^ String.concat "\n" session_guidance) in
+          let child = Pave.Agent.create ~provider ~authentication
+            ?resolve_credential ?secret_mask ~root ~system:child_system
+            ~history ~allow_shell:false
+            ~tool_available:(fun name ->
+              List.mem name read_tools && tool_allowed name)
+            ~approval_mode:Pave.Approval.Ask_exec
+            ~on_usage ~on_event:(fun _ -> ()) ~on_change:(fun _ -> ()) () in
+          let result = Pave.Agent.run ~max_turns:6 ~cancel child task in
+          let usage = match !child_usage with
+            | None -> ""
+            | Some tokens ->
+                Printf.sprintf
+                  "\n\nReported child-agent usage: %d input / %d output tokens."
+                  tokens.input_tokens tokens.output_tokens in
+          (if result = "" then "No visible child-agent response." else result) ^ usage) in
     let make_agent () =
       let provider, authentication, resolve_credential = resolve_provider () in
       let secret_mask = current_secret_mask () in
@@ -1029,19 +1106,65 @@ let () =
         | Some { tools = Some true; _ } -> true
         | Some _ -> false
         | None -> true in
-      let tool_available name = custom_tools_enabled &&
-        not (List.mem name !disabled_tools) in
+      let tool_available name =
+        let enabled = custom_tools_enabled &&
+          not (List.mem name !disabled_tools) in
+        if name = "task" then enabled && Option.is_some !journal else enabled in
+      let delegate_task ~cancel ~label ~task =
+        if cancel () then raise Pave.Provider.Cancelled;
+        match !journal with
+        | None -> failwith "child-agent jobs require a private saved session"
+        | Some session ->
+            start_child_job ~session ~provider ~authentication
+              ?resolve_credential ?secret_mask ~tool_allowed:tool_available
+              ~kind:"delegate" ~label ~task () in
       let on_change (message : Pave.Protocol.message) =
         (match !journal with
         | Some session -> ignore (Pave.Session.append session message)
         | None -> ());
         mark_user_message message in
+      let session_guidance = match !journal with
+        | None -> []
+        | Some session ->
+            (match Pave.Session.goal session with
+             | Some goal -> ["Current session goal: " ^ goal] | None -> []) @
+            (match Pave.Session.interruption_rule session with
+             | Some rule -> ["Interruption rule: " ^ rule] | None -> []) in
+      let agent_system = if session_guidance = [] then system else
+        system ^ "\n\n" ^ String.concat "\n" session_guidance in
+      let on_workspace_effect = match !journal with
+        | None -> None
+        | Some session ->
+            let manager = rewind_manager session in
+            Some (function
+              | Pave.Session_rewind.File_change
+                  { tool_name; path; before; after } ->
+                  (try
+                     (match Pave.Session_rewind.record_file_change manager
+                         ~tool_name ~path ~before ~after with
+                      | None -> ()
+                      | Some rewind_entry ->
+                          worker_event
+                            (if rewind_entry.Pave.Session_rewind.status =
+                                Pave.Session_rewind.Rewindable then
+                               "Workspace change checkpoint saved; use /rewind to review it."
+                             else
+                               "Workspace change is not safely rewindable; use /rewind to review the reason."))
+                   with exn -> worker_event
+                     ("Workspace change completed, but rewind tracking failed; treat it as non-reversible: " ^
+                      Printexc.to_string exn))
+              | Pave.Session_rewind.Non_reversible_effect { tool_name; detail } ->
+                  ignore (Pave.Session_rewind.record_non_reversible manager
+                    ~tool_name ~detail);
+                  worker_event
+                    "Shell command effects may be non-reversible; /rewind will report them but will not undo them.") in
       Pave.Agent.create ~provider ~authentication ?resolve_credential
         ?secret_mask
         ~thinking:(fun () -> !thinking_level)
-        ~root ~system
+        ~root ~system:agent_system
         ~allow_shell:!allow_shell
         ~tool_available
+        ~delegate_task
         ~stream:(!stream || Option.is_some !ui)
         ~approval_mode:!effective_approval_mode
         ~tool_approval:configured.tool_approval
@@ -1052,6 +1175,7 @@ let () =
         ?on_phase:(if Option.is_some !ui then Some worker_phase else None)
         ?on_tool_event:(if Option.is_some !ui || Option.is_some !journal
           then Some worker_tool_event else None)
+        ?on_workspace_effect
         ~history ~on_change ~on_event:worker_event ~on_delta:worker_delta () in
     let get_agent () = match !agent with
       | Some current -> current
@@ -1135,6 +1259,9 @@ let () =
        | _ -> ());
       use_selection (descriptor, Some identity, route) in
     let switch_session ?(inherit_active_model = false) next =
+      let next = match List.assoc_opt (Pave.Session.session_id next)
+          !job_managers with
+        | Some (existing, _) -> existing | None -> next in
       let saved_model = Pave.Session.model next in
       let selected =
         if explicit_model_override then None
@@ -1147,6 +1274,8 @@ let () =
         | None -> !active_descriptor, !active_identity, !active_route in
       Option.iter (Pave.Session.set_model ~registry next) identity;
       journal := Some next;
+      ignore (job_manager next);
+      ignore (rewind_manager next);
       restore_branch_settings next (Pave.Session.leaf_id next);
       (match selected with Some choice -> use_selection choice | None -> agent := None);
       retained_history := [];
@@ -1598,14 +1727,16 @@ let () =
         Option.value ~default:"default" selected ^
         " (compatible provider routes receive their documented reasoning control).") in
     let set_tool_enabled name enabled =
-      let names = Pave.Tools.available ~allow_shell:true
+      let names = "task" :: (Pave.Tools.available ~allow_shell:true
         |> List.filter_map (fun json ->
           match Pave.Protocol.member "name"
             (Pave.Protocol.member "function" json) with
           | `String value -> Some value
-          | _ -> None) in
+          | _ -> None)) in
       if not (List.mem name names) then
         notify ("Error: unknown tool " ^ name)
+      else if name = "task" && enabled && Option.is_none !journal then
+        notify "Error: child-agent delegation requires a private saved session"
       else if enabled && name = "run_command" && not !allow_shell then
         notify "Error: shell tools remain unavailable without --allow-shell"
       else (
@@ -1628,6 +1759,188 @@ let () =
       notify (Printf.sprintf "Attached %s · %d pending media item%s."
         item.name (List.length attachments)
         (if List.length attachments = 1 then "" else "s")) in
+    let emit_lines lines = match !ui with
+      | Some screen -> Tui.events screen lines
+      | None -> List.iter on_event lines in
+    let format_job (job : Pave.Session_jobs.job) =
+      let artifact = match job.artifact with
+        | None -> ""
+        | Some (_, id) -> " · artifact " ^ id in
+      Printf.sprintf "%s · %s · %s · %s%s%s"
+        job.id job.kind (Pave.Session_jobs.status_text job.status)
+        job.label artifact
+        (if job.summary = "" then "" else " · " ^ job.summary) in
+    let list_jobs () = match !journal with
+      | None -> notify "Error: background jobs require a private saved session"
+      | Some session ->
+          let manager = job_manager session in
+          if not (match !runner with Some active -> Pave.Turn_runner.busy active
+            | None -> false) then deliver_job_results ();
+          let jobs = Pave.Session_jobs.jobs manager in
+          emit_lines (if jobs = [] then ["No session-owned jobs."]
+            else "Session jobs:" :: List.map format_job jobs) in
+    let show_job manager id =
+      match Pave.Session_jobs.find manager ~id with
+      | None -> notify "Error: no such job in the active session"
+      | Some job -> emit_lines [format_job job] in
+    let wait_job id = match !journal with
+      | None -> notify "Error: waiting requires a private saved session"
+      | Some session ->
+          let manager = job_manager session in
+          (match Pave.Session_jobs.wait manager ~id with
+           | None -> notify "Error: no such job in the active session"
+           | Some { status = Pave.Session_jobs.Running; _ } ->
+               (match !ui with
+                | Some _ -> notify ("Waiting asynchronously for job " ^ id ^
+                    "; completion will be announced.")
+                | None ->
+                    ignore (Pave.Session_jobs.await manager ~id);
+                    List.iter (fun error ->
+                      on_event ("Error delivering job: " ^ error))
+                      (Pave.Session_jobs.deliver_pending manager);
+                    show_job manager id)
+           | Some _ ->
+               deliver_job_results ();
+               show_job manager id) in
+    let cancel_job id = match !journal with
+      | None -> notify "Error: job cancellation requires a private saved session"
+      | Some session ->
+          let manager = job_manager session in
+          notify (if Pave.Session_jobs.cancel manager ~id then
+            "Cancellation requested for job " ^ id ^
+            "; provider usage may already have been charged."
+          else "No running job with that ID in the active session.") in
+    let show_artifact selected = match !journal with
+      | None -> notify "Error: artifacts require a private saved session"
+      | Some session ->
+          let items = Pave.Session.list_artifacts session in
+          (match selected with
+           | None ->
+               emit_lines (if items = [] then ["No session artifacts."]
+                 else List.map (fun (item : Pave.Session_artifact.item) ->
+                   Printf.sprintf "%s · %s · %d bytes · %s"
+                     item.id item.name item.size item.mime_type) items)
+           | Some id ->
+               (match List.find_opt (fun (item : Pave.Session_artifact.item) ->
+                 item.id = id) items with
+                | None -> notify "Error: artifact is not owned by or referenced from this session"
+                | Some item when item.size > 1_048_576 ->
+                    notify (Printf.sprintf
+                      "Artifact %s is %d bytes; display is limited to 1 MiB."
+                      item.id item.size)
+                | Some item ->
+                    let text = Pave.Session.read_artifact session
+                      ~owner:item.owner ~id:item.id in
+                    if not (String.starts_with ~prefix:"text/" item.mime_type) ||
+                       not (Pave.Session_store.valid_utf8 text) ||
+                       String.contains text (Char.chr 0) then
+                      notify (Printf.sprintf "%s · %s · %d bytes · not displayable text"
+                        item.name item.mime_type item.size)
+                    else emit_lines [text])) in
+    let format_rewind_effect (rewind_entry : Pave.Session_rewind.rewind_effect) =
+      let path = Option.value ~default:"shell/external effects" rewind_entry.path in
+      let detail = if rewind_entry.detail = "" then "" else " · " ^ rewind_entry.detail in
+      Printf.sprintf "%s · %s · %s%s"
+        rewind_entry.id (Pave.Session_rewind.status_text rewind_entry.status) path detail in
+    let rewind_workspace selected = match !journal with
+      | None -> notify "Error: workspace rewind requires a private saved session"
+      | Some session ->
+          let manager = rewind_manager session in
+          (match selected with
+           | None ->
+               let effects = Pave.Session_rewind.list manager in
+               emit_lines (if effects = [] then ["No recorded workspace effects."]
+                 else "Workspace effects · shell effects are never reversed:" ::
+                   List.map format_rewind_effect effects)
+           | Some id ->
+               (match Pave.Session_rewind.find manager ~id with
+                | None -> notify "Error: no workspace effect with that ID in the active session"
+                | Some rewind_entry when rewind_entry.status =
+                    Pave.Session_rewind.Non_reversible ->
+                    notify ("Not reversible: " ^ rewind_entry.detail)
+                | Some rewind_entry when rewind_entry.status = Pave.Session_rewind.Reverted ->
+                    notify "This workspace effect has already been rewound."
+                | Some rewind_entry ->
+                    let request : Pave.Approval.request = {
+                      tool_name = "workspace_rewind"; tier = Pave.Approval.Write;
+                      impact = "Restores one workspace file from its private pre-change snapshot.";
+                      details = [
+                        "Effect: " ^ rewind_entry.id;
+                        "Path: " ^ Option.value ~default:"(unavailable)" rewind_entry.path;
+                        "Tool: " ^ rewind_entry.tool_name;
+                        "The restore proceeds only while current file bytes and mode match the recorded post-change state.";
+                        "Shell and external effects are not reversed."];
+                      reason = Some "Review and confirm this workspace restore." } in
+                    if not (approve_tool_request request) then
+                      notify "Workspace rewind was not approved."
+                    else
+                      (try
+                         let restored = Pave.Session_rewind.rewind manager ~id in
+                         notify (restored ^ ".")
+                       with exn ->
+                         notify ("Error: " ^ Printexc.to_string exn)))) in
+    let start_review_job ~kind ~label ~prompt = match !journal with
+      | None -> notify "Error: reviewed jobs require a private saved session; use /new"
+      | Some session ->
+          let current = get_agent () in
+          let id = start_child_job ~session ~provider:current.provider
+            ~authentication:current.authentication
+            ?resolve_credential:current.resolve_credential
+            ?secret_mask:current.secret_mask
+            ~tool_allowed:current.tool_available ~kind ~label ~task:prompt () in
+          notify (Printf.sprintf
+            "Started review-only %s job %s; provider usage may be billed."
+            kind id) in
+    let set_goal value = match !journal with
+      | None -> notify "Error: goals require a private saved session; use /new"
+      | Some session ->
+          let value = match value with Some "clear" -> None | value -> value in
+          Pave.Session.set_goal session value;
+          rebuild_agent ();
+          notify (match value with
+            | None -> "Session goal cleared."
+            | Some goal -> "Session goal saved: " ^ goal) in
+    let set_interruption_rule value = match !journal with
+      | None -> notify "Error: interruption rules require a private saved session; use /new"
+      | Some session ->
+          let value = match value with Some "clear" -> None | value -> value in
+          Pave.Session.set_interruption_rule session value;
+          rebuild_agent ();
+          notify (match value with
+            | None -> "Session interruption rule cleared."
+            | Some _ -> "Interruption rule saved for future assistant turns. " ^
+                "This is an instruction, not an execution-security boundary.") in
+    let goal_or supplied session prompt =
+      match supplied, Pave.Session.goal session with
+      | Some value, _ -> Some value
+      | None, Some goal -> Some goal
+      | None, None -> notify prompt; None in
+    let workflow_prompt kind goal =
+      match kind with
+      | "plan" ->
+          "Create a review-only implementation plan for this goal:\n" ^ goal ^
+          "\nInspect relevant files using read-only tools. Include ordered steps, " ^
+          "acceptance evidence, dependencies, and irreversible-effect risks. " ^
+          "Do not edit files or execute commands."
+      | "advisor" ->
+          "Independently review this goal and any existing plan in the session. " ^
+          "Find unsupported assumptions, missing acceptance criteria, and a safer " ^
+          "alternative. Cite evidence. Do not edit or execute anything.\n\nGoal: " ^ goal
+      | "watchdog" ->
+          "Perform one bounded, review-only scope and safety check for the goal " ^
+          "and latest conversation. Report concrete drift, unresolved risks, and " ^
+          "non-reversible effects; distinguish evidence from inference. Do not " ^
+          "monitor continuously, edit files, or execute commands.\n\nGoal: " ^ goal
+      | "loop" ->
+          "Run at most three review-only plan/refine passes for this goal. State " ^
+          "each pass, stop when the acceptance criteria are complete or three " ^
+          "passes are exhausted, and return the remaining review checklist. " ^
+          "Never edit files or execute commands.\n\nGoal: " ^ goal
+      | "autoresearch" ->
+          "Research this question in the workspace using read-only tools. Cite " ^
+          "file paths and observed evidence, state what is unknown, and stop after " ^
+          "one bounded investigation. Do not edit files or execute commands.\n\nQuestion: " ^ goal
+      | _ -> invalid_arg "unknown review workflow" in
     let interact () =
       let checkout_branch current target =
         let saved_model = Pave.Session.model_at current (Some target) in
@@ -1740,9 +2053,11 @@ let () =
                   Tui.alert screen "Follow-up queued for after the active turn."
               | _ -> ())
          | _ when busy && (match command with
-             | Pave.Interaction.Prompt _ -> false
+             | Pave.Interaction.Prompt _ | Pave.Interaction.Jobs
+             | Pave.Interaction.Wait _ | Pave.Interaction.Cancel_job _
+             | Pave.Interaction.Artifact _ -> false
              | _ -> true) ->
-             feedback "Wait for the current turn or /cancel it before changing session or model."
+             feedback "Wait for the current turn or /cancel it before changing session, model, or workflow."
          | Pave.Interaction.Model selected -> choose_model selected
          | Pave.Interaction.Setup ->
              (match !ui with
@@ -1910,7 +2225,11 @@ let () =
                    Filename.basename next.Pave.Session.path)
                 with exn -> report_error exn))
         | Pave.Interaction.Tools selected ->
+          let current = get_agent () in
           let definitions = Pave.Tools.available ~allow_shell:true in
+          let definitions = if current.tool_available "task" &&
+              Option.is_some current.delegate_task then
+            definitions @ [Pave.Agent.task_definition] else definitions in
           let entries = List.filter_map (fun json ->
             let function_json = Pave.Protocol.member "function" json in
             match Pave.Protocol.member "name" function_json,
@@ -1945,6 +2264,76 @@ let () =
           (match !ui with
            | Some screen -> Tui.events screen lines
            | None -> List.iter on_event lines)
+        | Pave.Interaction.Jobs -> list_jobs ()
+        | Pave.Interaction.Wait id -> wait_job id
+        | Pave.Interaction.Cancel_job id -> cancel_job id
+        | Pave.Interaction.Artifact selected -> show_artifact selected
+        | Pave.Interaction.Rewind selected -> rewind_workspace selected
+        | Pave.Interaction.Delegate { label; task } ->
+            start_review_job ~kind:"delegate" ~label
+              ~prompt:("Perform this bounded read-only task. Cite evidence and " ^
+                "uncertainty; do not edit files or execute commands.\n\n" ^ task)
+        | Pave.Interaction.Plan supplied ->
+            (match !journal with
+             | None -> notify "Error: planning requires a private saved session; use /new"
+             | Some session ->
+                 (match goal_or supplied session
+                     "Set a session goal with /goal or provide /plan GOAL." with
+                  | None -> ()
+                  | Some goal -> start_review_job ~kind:"plan" ~label:"plan"
+                      ~prompt:(workflow_prompt "plan" goal)))
+        | Pave.Interaction.Goal None ->
+            (match !journal with
+             | None -> notify "Error: goals require a private saved session; use /new"
+             | Some session -> notify (match Pave.Session.goal session with
+                 | None -> "No session goal is set."
+                 | Some goal -> "Session goal: " ^ goal))
+        | Pave.Interaction.Goal (Some value) -> set_goal (Some value)
+        | Pave.Interaction.Advisor supplied ->
+            (match !journal with
+             | None -> notify "Error: advisor jobs require a private saved session; use /new"
+             | Some session ->
+                 (match goal_or supplied session
+                     "Set a session goal or provide /advisor QUESTION." with
+                  | None -> ()
+                  | Some goal -> start_review_job ~kind:"advisor" ~label:"advisor"
+                      ~prompt:(workflow_prompt "advisor" goal)))
+        | Pave.Interaction.Watchdog supplied ->
+            (match !journal with
+             | None -> notify "Error: watchdog review requires a private saved session; use /new"
+             | Some session ->
+                 (match goal_or supplied session
+                     "Set a session goal or provide /watchdog QUESTION." with
+                  | None -> ()
+                  | Some goal -> start_review_job ~kind:"watchdog" ~label:"watchdog"
+                      ~prompt:(workflow_prompt "watchdog" goal)))
+        | Pave.Interaction.Loop supplied ->
+            (match !journal with
+             | None -> notify "Error: review loops require a private saved session; use /new"
+             | Some session ->
+                 (match goal_or supplied session
+                     "Set a session goal or provide /loop GOAL." with
+                  | None -> ()
+                  | Some goal -> start_review_job ~kind:"loop" ~label:"loop"
+                      ~prompt:(workflow_prompt "loop" goal)))
+        | Pave.Interaction.Autoresearch supplied ->
+            (match !journal with
+             | None -> notify "Error: research jobs require a private saved session; use /new"
+             | Some session ->
+                 (match goal_or supplied session
+                     "Set a session goal or provide /autoresearch QUESTION." with
+                  | None -> ()
+                  | Some goal -> start_review_job ~kind:"autoresearch"
+                      ~label:"autoresearch"
+                      ~prompt:(workflow_prompt "autoresearch" goal)))
+        | Pave.Interaction.Rule None ->
+            (match !journal with
+             | None -> notify "Error: interruption rules require a private saved session; use /new"
+             | Some session -> notify (match Pave.Session.interruption_rule session with
+                 | None -> "No session interruption rule is set."
+                 | Some rule -> "Session interruption rule: " ^ rule))
+        | Pave.Interaction.Rule (Some value) ->
+            set_interruption_rule (Some value)
         | Pave.Interaction.Context ->
           let model = !active_descriptor.id ^ "/" ^
             (if !active_model = "" then "(not selected)" else !active_model) in
@@ -2120,21 +2509,27 @@ let () =
           (match !journal with
            | None -> on_event "Error: --session is required to list entries"
            | Some current ->
+               let message_line (entry : Pave.Session.entry)
+                   (message : Pave.Protocol.message) references =
+                 let content = match message.tool_result_content with
+                   | Some blocks -> Pave.Protocol.display_content_blocks blocks
+                   | None -> Option.value ~default:"<tool calls>" message.content in
+                 let names =
+                   List.map (fun (item : Pave.Protocol.attachment) -> item.name)
+                     message.attachments @ references
+                   |> List.sort_uniq String.compare in
+                 let attachments = if names = [] then "" else
+                   " · media: " ^ String.concat ", " names in
+                 Printf.sprintf "%s %s %s%s" entry.id message.role
+                   (Pave.Session_tree.first_line content) attachments in
                let lines = List.filter_map (fun (entry : Pave.Session.entry) ->
                  match entry.kind with
                  | Pave.Session.Message message ->
-                     let content = match message.tool_result_content with
-                       | Some blocks ->
-                           Pave.Protocol.display_content_blocks blocks
-                       | None ->
-                           Option.value ~default:"<tool calls>" message.content in
-                     let attachments = match message.attachments with
-                       | [] -> ""
-                       | items -> " · media: " ^ String.concat ", "
-                           (List.map (fun (item : Pave.Protocol.attachment) ->
-                             item.name) items) in
-                     Some (Printf.sprintf "%s %s %s%s" entry.id message.role
-                       (Pave.Session_tree.first_line content) attachments)
+                     Some (message_line entry message [])
+                 | Pave.Session.Message_artifact (message, references) ->
+                     Some (message_line entry message
+                       (List.map (fun (reference : Pave.Session.attachment_reference) ->
+                         reference.name) references))
                  | Pave.Session.Compaction _ ->
                      Some (entry.id ^ " compaction <summary>")
                  | Pave.Session.Model identity ->
@@ -2188,6 +2583,30 @@ let () =
                      let count = List.length pending_tool_calls in
                      Some (Printf.sprintf "%s exit %s · %d pending tool%s"
                        entry.id kind count (if count = 1 then "" else "s"))
+                 | Pave.Session.Job_started { job_id; label; job_kind; _ } ->
+                     Some (Printf.sprintf "%s job started %s · %s · %s"
+                       entry.id job_id (Pave.Session_tree.first_line label)
+                       (Pave.Session_tree.first_line job_kind))
+                 | Pave.Session.Job_delivery delivery ->
+                     let status = match delivery.status with
+                       | Pave.Session.Completed -> "completed"
+                       | Pave.Session.Failed -> "failed"
+                       | Pave.Session.Cancelled -> "cancelled"
+                       | Pave.Session.Interrupted -> "interrupted" in
+                     Some (Printf.sprintf "%s job %s · %s · %s%s"
+                       entry.id (Pave.Session_tree.first_line delivery.label)
+                       status (Pave.Session_tree.first_line delivery.summary)
+                       (match delivery.artifact with
+                        | None -> ""
+                        | Some (_, id) -> " · artifact " ^ id))
+                 | Pave.Session.Workflow_goal goal ->
+                     Some (entry.id ^ " goal " ^
+                       Option.fold ~none:"<cleared>"
+                         ~some:Pave.Session_tree.first_line goal)
+                 | Pave.Session.Interruption_rule rule ->
+                     Some (entry.id ^ " interruption rule " ^
+                       Option.fold ~none:"<cleared>"
+                         ~some:Pave.Session_tree.first_line rule)
                  | Pave.Session.Branch -> None) (Pave.Session.entries current) in
                (match !ui with
                 | Some screen -> Tui.events screen lines
@@ -2250,6 +2669,12 @@ let () =
         List.iter (fun diagnostic ->
           Tui.event screen ("Instructions: " ^ diagnostic))
           instruction_diagnostics;
+        (match !journal with
+         | Some current ->
+             ignore (job_manager current);
+             ignore (rewind_manager current);
+             deliver_job_results ()
+         | None -> ());
         let active = Pave.Turn_runner.create
           ~run:(fun ~cancel text ->
             let attachments = match !submitted_attachments with
@@ -2287,13 +2712,20 @@ let () =
                      Tui.set_activity screen (Some ("Tool: " ^ name)))
             | Pave.Turn_runner.Tool_event { event; _ } ->
                 render_tool_event screen event
+            | Pave.Turn_runner.Background_notice { message } ->
+                (match !runner with
+                 | Some active when Pave.Turn_runner.busy active -> ()
+                 | _ -> deliver_job_results ());
+                Tui.event screen message
             | Pave.Turn_runner.Turn_completed _ ->
+                deliver_job_results ();
                 submitted_attachments := None;
                 retry_attachments := None;
                 refresh_usage screen;
                 Tui.set_activity screen None;
                 Tui.finish_live screen
             | Pave.Turn_runner.Turn_cancelled _ ->
+                deliver_job_results ();
                 (match !submitted_attachments with
                  | Some (items, true, false) when items <> [] ->
                      set_pending_attachments items
@@ -2305,6 +2737,7 @@ let () =
                 Tui.clear_live screen;
                 Tui.event screen "Turn cancelled."
             | Pave.Turn_runner.Turn_failed { error; _ } ->
+                deliver_job_results ();
                 (match !submitted_attachments with
                  | Some (items, true, false) when items <> [] ->
                      set_pending_attachments items

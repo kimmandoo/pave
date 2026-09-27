@@ -478,3 +478,16 @@
  (name test_apple_foundation_models)
  (modules test_apple_foundation_models)
  (libraries pave unix yojson))
+
+(test
+ (name test_session_artifact)
+ (modules test_session_artifact)
+ (libraries pave unix yojson digestif))
+(test
+ (name test_session_jobs)
+ (modules test_session_jobs)
+ (libraries pave unix yojson threads))
+(test
+ (name test_session_rewind)
+ (modules test_session_rewind)
+ (libraries pave unix yojson threads))

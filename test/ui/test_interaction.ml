@@ -38,6 +38,40 @@ let () =
   (match parse "/tools read_file" with
    | Tools (Some "read_file") -> ()
    | _ -> fail "tool detail selection");
+  (match parse "/jobs", parse "/wait 0123456789abcdef0123456789abcdef",
+      parse "/cancel-job 0123456789abcdef0123456789abcdef",
+      parse "/artifact 0123456789abcdef0123456789abcdef",
+      parse "/delegate reviewer inspect the selected source files",
+      parse "/plan simplify the session lifecycle",
+      parse "/goal simplify the session lifecycle", parse "/goal",
+      parse "/advisor check the proposed plan",
+      parse "/watchdog inspect scope drift", parse "/loop review the goal",
+      parse "/autoresearch locate existing patterns",
+      parse "/rule stop before irreversible changes", parse "/rule" with
+   | Jobs, Wait "0123456789abcdef0123456789abcdef",
+     Cancel_job "0123456789abcdef0123456789abcdef",
+     Artifact (Some "0123456789abcdef0123456789abcdef"),
+     Delegate { label = "reviewer"; task = "inspect the selected source files" },
+     Plan (Some "simplify the session lifecycle"),
+     Goal (Some "simplify the session lifecycle"), Goal None,
+     Advisor (Some "check the proposed plan"),
+     Watchdog (Some "inspect scope drift"), Loop (Some "review the goal"),
+     Autoresearch (Some "locate existing patterns"),
+     Rule (Some "stop before irreversible changes"), Rule None -> ()
+   | _ -> fail "session job and reviewed workflow command parsing");
+(match parse "/rewind",
+    parse "/rewind 0123456789abcdef0123456789abcdef" with
+ | Rewind None, Rewind (Some "0123456789abcdef0123456789abcdef") -> ()
+ | _ -> fail "workspace rewind command parsing");
+if not (List.exists (fun item -> item.name = "/rewind")
+    (suggestions "/rew")) then
+  fail "workspace rewind is missing from completion";
+  invalid "missing wait ID" (fun () -> parse "/wait");
+  invalid "missing delegation task" (fun () -> parse "/delegate reviewer");
+  invalid "multiple rewind IDs" (fun () -> parse
+    "/rewind 0123456789abcdef0123456789abcdef extra");
+  if not (List.exists (fun item -> item.name = "/delegate")
+      (suggestions "/del")) then fail "child delegation is missing from completion";
   (match parse "/queue inspect the active branch" with
    | Queue_prompt "inspect the active branch" -> ()
    | _ -> fail "queued follow-up parsing");

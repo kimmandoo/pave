@@ -10,10 +10,23 @@ let contains text needle =
      seek (offset + 1)) in
   seek 0
 
+let rec remove_tree path =
+  try
+    let stat = Unix.lstat path in
+    if stat.Unix.st_kind = Unix.S_DIR then (
+      Array.iter (fun name -> remove_tree (Filename.concat path name))
+        (Sys.readdir path);
+      Unix.rmdir path)
+    else Sys.remove path
+  with Unix.Unix_error (Unix.ENOENT, _, _) -> ()
 
 let () =
   let dir = Filename.temp_file "pave-journal-" "" in
   Sys.remove dir; Unix.mkdir dir 0o700;
+  let previous_home = Sys.getenv_opt "HOME"
+  and previous_state = Sys.getenv_opt "XDG_STATE_HOME" in
+  Unix.putenv "HOME" dir;
+  Unix.putenv "XDG_STATE_HOME" (Filename.concat dir "state");
   let path = Filename.concat dir "session.jsonl" in
   let fork_path = Filename.concat dir "fork.jsonl" in
   let metadata_path = Filename.concat dir "metadata.jsonl" in
@@ -27,21 +40,16 @@ let () =
   let settings_fork = Filename.concat dir "settings-fork.jsonl" in
   let reset_path = Filename.concat dir "reset.jsonl" in
   let attachment_path = Filename.concat dir "attachment.jsonl" in
+  let large_path = Filename.concat dir "large.jsonl" in
+  let large_fork_path = Filename.concat dir "large-fork.jsonl" in
+  let jobs_path = Filename.concat dir "jobs.jsonl" in
+  let jobs_fork_path = Filename.concat dir "jobs-fork.jsonl" in
   Fun.protect ~finally:(fun () ->
-    (try Sys.remove settings_fork with Sys_error _ -> ());
-    (try Sys.remove settings_path with Sys_error _ -> ());
-    (try Sys.remove reset_path with Sys_error _ -> ());
-    (try Sys.remove attachment_path with Sys_error _ -> ());
-    (try Sys.remove fork_path with Sys_error _ -> ());
-    (try Sys.remove legacy_path with Sys_error _ -> ());
-    (try Sys.remove metadata_fork with Sys_error _ -> ());
-    (try Sys.remove metadata_path with Sys_error _ -> ());
-    (try Sys.remove lifecycle_fork with Sys_error _ -> ());
-    (try Sys.remove lifecycle_path with Sys_error _ -> ());
-    (try Sys.remove terminal_path with Sys_error _ -> ());
-    (try Sys.remove multimodal_path with Sys_error _ -> ());
-    (try Sys.remove path with Sys_error _ -> ());
-    Unix.rmdir dir) (fun () ->
+    (match previous_home with Some value -> Unix.putenv "HOME" value
+      | None -> Unix.putenv "HOME" "");
+    (match previous_state with Some value -> Unix.putenv "XDG_STATE_HOME" value
+      | None -> Unix.putenv "XDG_STATE_HOME" "");
+    remove_tree dir) (fun () ->
     let journal = Pave.Session.open_file path in
     let base = Pave.Session.append journal (message "base") in
     assert (Pave.Session.retry_candidate journal = None);
@@ -400,6 +408,8 @@ let () =
     Pave.Session.set_title settings "Release review";
     Pave.Session.set_label settings ~target_id:settings_target (Some "review");
     Pave.Session.set_pinned settings true;
+    Pave.Session.set_goal settings (Some "Ship the session slice");
+    Pave.Session.set_interruption_rule settings (Some "Stop after a failed gate");
     let settings_tip = Option.get (Pave.Session.leaf_id settings) in
     assert (Pave.Session.model settings = Some
       (model_identity "openai" "responses" "gpt-5"));
@@ -409,6 +419,9 @@ let () =
     assert (Pave.Session.title settings = Some "Release review");
     assert (Pave.Session.labels settings = [settings_target, "review"]);
     assert (Pave.Session.pinned settings);
+    assert (Pave.Session.goal settings = Some "Ship the session slice");
+    assert (Pave.Session.interruption_rule settings =
+      Some "Stop after a failed gate");
     assert (Pave.Session.history settings = [message "settings base"]);
     assert (Pave.Session.label_target settings = Some settings_target);
     let settings_reopened = Pave.Session.open_file settings_path in
@@ -418,8 +431,14 @@ let () =
     assert (Pave.Session.title settings_reopened = Some "Release review");
     assert (Pave.Session.labels settings_reopened = [settings_target, "review"]);
     assert (Pave.Session.pinned settings_reopened);
+    assert (Pave.Session.goal settings_reopened = Some "Ship the session slice");
+    assert (Pave.Session.interruption_rule settings_reopened =
+      Some "Stop after a failed gate");
     let parent_id = Pave.Protocol.member "id" settings.Pave.Session.header in
     let settings_copy = Pave.Session.fork settings settings_fork in
+    assert (Pave.Session.goal settings_copy = Some "Ship the session slice");
+    assert (Pave.Session.interruption_rule settings_copy =
+      Some "Stop after a failed gate");
     assert (Pave.Session.parent_session settings_copy =
       (match parent_id with `String id -> Some id | _ -> assert false));
     assert (Pave.Session.title settings_copy = Some "Release review");
@@ -433,6 +452,8 @@ let () =
     assert (Pave.Session.labels settings = []);
     assert (Pave.Session.model settings = None);
     assert (Pave.Session.pinned settings);
+    assert (Pave.Session.goal settings = None);
+    assert (Pave.Session.interruption_rule settings = None);
     Pave.Session.branch settings settings_tip;
     assert (Pave.Session.model settings = Some
       (model_identity "openai" "responses" "gpt-5"));
@@ -441,6 +462,9 @@ let () =
     assert (Pave.Session.mode settings = Some Pave.Approval.Ask_writes);
     assert (Pave.Session.title settings = Some "Release review");
     assert (Pave.Session.labels settings = [settings_target, "review"]);
+    assert (Pave.Session.goal settings = Some "Ship the session slice");
+    assert (Pave.Session.interruption_rule settings =
+      Some "Stop after a failed gate");
     let reset = Pave.Session.open_file reset_path in
     ignore (Pave.Session.append reset (message "old context"));
     let reset_call : Pave.Protocol.tool_call = {
@@ -504,6 +528,80 @@ let () =
       `List [Pave.Protocol.attachment_to_json attachment]);
     assert (Pave.Session.history (Pave.Session.open_file attachment_path) =
       [attached_user]);
+    let large_data = String.make 65540 'A' in
+    let large_attachment : Pave.Protocol.attachment = {
+      name = "large.png"; mime_type = "image/png"; data = large_data } in
+    let large_user = Pave.Protocol.user ~attachments:[large_attachment] "large" in
+    let large = Pave.Session.open_file large_path in
+    ignore (Pave.Session.append large large_user);
+    let large_input = open_in_bin large_path in
+    let large_json = Fun.protect ~finally:(fun () -> close_in_noerr large_input)
+      (fun () ->
+        ignore (input_line large_input);
+        let row = input_line large_input in
+        assert (not (contains row large_data));
+        Yojson.Basic.from_string row) in
+    assert (Pave.Protocol.member "attachments" large_json = `Null);
+    assert (Pave.Protocol.member "attachmentRefs" large_json <> `Null);
+    let reopened_large = Pave.Session.open_file large_path in
+    assert (Pave.Session.history reopened_large = [large_user]);
+    let large_fork = Pave.Session.fork reopened_large large_fork_path in
+    assert (Pave.Session.history large_fork = [large_user]);
+    let owner = match Pave.Protocol.member "id" large.Pave.Session.header with
+      | `String id -> id | _ -> assert false in
+    let private_item = Pave.Session.store_artifact large ~name:"private.png"
+      ~mime_type:"image/png" "aGVsbG8=" in
+    let unrelated_path = Filename.concat dir "unrelated.jsonl" in
+    let unrelated = Pave.Session.open_file unrelated_path in
+    (match Pave.Session.read_artifact unrelated ~owner ~id:private_item.id with
+     | exception Pave.Protocol.Invalid_response _ -> ()
+     | _ -> failwith "unreferenced cross-session artifact was readable");
+    assert (Pave.Session.read_artifact large ~owner ~id:private_item.id =
+      "aGVsbG8=");
+    assert (List.exists (fun (item : Pave.Session_artifact.item) ->
+      item.Pave.Session_artifact.owner = owner &&
+      item.name = "large.png" && item.mime_type = "image/png" &&
+      item.size = String.length large_data && String.length item.sha256 = 64)
+      (Pave.Session.list_artifacts reopened_large));
+    let jobs = Pave.Session.open_file jobs_path in
+    let anchor = Pave.Session.append jobs (message "job anchor") in
+    let job_owner = match Pave.Protocol.member "id" jobs.Pave.Session.header with
+      | `String id -> id | _ -> assert false in
+    let job_id = "11111111111111111111111111111111" in
+    ignore (Pave.Session.append_job_started jobs ~job_id ~label:"Build" ~job_kind:"build");
+    ignore (Pave.Session.append_job_started jobs ~job_id ~label:"Build" ~job_kind:"build");
+    let delivery : Pave.Session.job_delivery = {
+      owner = job_owner; job_id; label = "Build"; status = Pave.Session.Completed;
+      summary = "Finished"; artifact = None } in
+    ignore (Pave.Session.append_job_delivery jobs delivery);
+    ignore (Pave.Session.append_job_delivery jobs delivery);
+    let job_entry_id = match List.find (fun (entry : Pave.Session.entry) ->
+      match entry.kind with Pave.Session.Job_delivery _ -> true | _ -> false)
+      (Pave.Session.entries jobs) with
+      | entry -> entry.id in
+    (match List.rev (Pave.Session.history jobs) with
+     | { Pave.Protocol.role = "assistant"; content = Some summary; _ } :: _ ->
+         assert (contains summary job_id && contains summary "completed" &&
+           contains summary "Finished")
+     | _ -> failwith "job delivery was not projected into history");
+    Pave.Session.branch jobs anchor;
+    let jobs_reopened = Pave.Session.open_file jobs_path in
+    ignore (Pave.Session.append_job_delivery jobs_reopened delivery);
+    assert (List.length (List.filter (fun (entry : Pave.Session.entry) ->
+      match entry.kind with Pave.Session.Job_delivery _ -> true | _ -> false)
+      (Pave.Session.entries jobs_reopened)) = 1);
+    assert (match Pave.Session.job_states jobs_reopened with
+      | [{ started; delivery = Some received }] ->
+          started.job_id = job_id && received.status = Pave.Session.Completed
+      | _ -> false);
+    Pave.Session.branch jobs_reopened job_entry_id;
+    assert (match List.rev (Pave.Session.history jobs_reopened) with
+      | { Pave.Protocol.role = "assistant"; content = Some summary; _ } :: _ ->
+          contains summary job_id
+      | _ -> false);
+    let jobs_fork = Pave.Session.fork jobs_reopened jobs_fork_path in
+    assert (Pave.Session.history jobs_fork = [message "job anchor"]);
+    assert (Pave.Session.job_states jobs_fork = []);
     let multimodal = Pave.Session.open_file multimodal_path in
     let image_call : Pave.Protocol.tool_call = {
       id = "image-call"; name = "inspect_image"; arguments = `Assoc [] } in

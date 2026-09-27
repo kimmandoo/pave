@@ -26,6 +26,19 @@ type command =
   | Usage
   | Hotkeys
   | Entries
+  | Jobs
+  | Wait of string
+  | Cancel_job of string
+  | Artifact of string option
+  | Rewind of string option
+  | Delegate of { label : string; task : string }
+  | Plan of string option
+  | Goal of string option
+  | Advisor of string option
+  | Watchdog of string option
+  | Loop of string option
+  | Autoresearch of string option
+  | Rule of string option
   | Queue_prompt of string
   | Prompt of string
   | Unknown of string
@@ -35,6 +48,8 @@ type action =
   | A_rename | A_label | A_pin | A_approval | A_thinking | A_tool | A_attach
   | A_cancel | A_queue | A_entries | A_tree | A_tools | A_context | A_usage
   | A_hotkeys | A_branch | A_fork | A_compact | A_retry | A_help | A_quit
+  | A_jobs | A_wait | A_cancel_job | A_artifact | A_rewind | A_delegate
+  | A_plan | A_goal | A_advisor | A_watchdog | A_loop | A_autoresearch | A_rule
 
 type shortcut = { name : string; usage : string; summary : string; action : action }
 
@@ -66,6 +81,19 @@ let commands = [
   { name = "/branch"; usage = "ID"; summary = "Continue from an earlier entry"; action = A_branch };
   { name = "/fork"; usage = "[PATH]"; summary = "Fork the selected journal branch into a private session"; action = A_fork };
   { name = "/compact"; usage = ""; summary = "Summarize older turns"; action = A_compact };
+  { name = "/jobs"; usage = ""; summary = "List session-owned background jobs"; action = A_jobs };
+  { name = "/wait"; usage = "JOB_ID"; summary = "Wait for a session-owned job result"; action = A_wait };
+  { name = "/cancel-job"; usage = "JOB_ID"; summary = "Cancel a background job"; action = A_cancel_job };
+  { name = "/artifact"; usage = "[ID]"; summary = "List session artifacts or show text output"; action = A_artifact };
+  { name = "/rewind"; usage = "[EFFECT_ID]"; summary = "List or request a confirmed, hash-guarded workspace restore"; action = A_rewind };
+  { name = "/delegate"; usage = "LABEL TASK"; summary = "Start a bounded read-only child agent"; action = A_delegate };
+  { name = "/plan"; usage = "[GOAL]"; summary = "Create a review-only plan artifact"; action = A_plan };
+  { name = "/goal"; usage = "[TEXT|clear]"; summary = "Show, set, or clear the session goal"; action = A_goal };
+  { name = "/advisor"; usage = "[QUESTION]"; summary = "Request an independent read-only review"; action = A_advisor };
+  { name = "/watchdog"; usage = "[QUESTION]"; summary = "Run a review-only scope and safety check"; action = A_watchdog };
+  { name = "/loop"; usage = "[GOAL]"; summary = "Run a bounded review-only planning loop"; action = A_loop };
+  { name = "/autoresearch"; usage = "[QUESTION]"; summary = "Run bounded read-only research"; action = A_autoresearch };
+  { name = "/rule"; usage = "[TEXT|clear]"; summary = "Show, set, or clear a session interruption rule"; action = A_rule };
   { name = "/help"; usage = ""; summary = "Show commands and keys"; action = A_help };
   { name = "/quit"; usage = ""; summary = "Exit Pave"; action = A_quit };
 ]
@@ -181,6 +209,32 @@ let parse line =
     | Some A_usage -> no_args (); Usage
     | Some A_hotkeys -> no_args (); Hotkeys
     | Some A_entries -> no_args (); Entries
+    | Some A_jobs -> no_args (); Jobs
+    | Some A_wait -> Wait (require_single_argument name
+        (Option.value ~default:"" argument))
+    | Some A_cancel_job -> Cancel_job (require_single_argument name
+        (Option.value ~default:"" argument))
+    | Some A_artifact -> Artifact (single name argument)
+    | Some A_rewind -> Rewind (single name argument)
+    | Some A_delegate ->
+        (match argument with
+         | None -> invalid_argument (name ^ " requires LABEL TASK")
+         | Some text ->
+             (match String.index_opt text ' ' with
+              | None -> invalid_argument (name ^ " requires LABEL TASK")
+              | Some offset ->
+                  let label = require_single_argument name
+                    (String.sub text 0 offset) in
+                  let task = require_text name (String.sub text (offset + 1)
+                    (String.length text - offset - 1)) in
+                  Delegate { label; task }))
+    | Some A_plan -> Plan (Option.map (require_text name) argument)
+    | Some A_goal -> Goal (Option.map (require_text name) argument)
+    | Some A_advisor -> Advisor (Option.map (require_text name) argument)
+    | Some A_watchdog -> Watchdog (Option.map (require_text name) argument)
+    | Some A_loop -> Loop (Option.map (require_text name) argument)
+    | Some A_autoresearch -> Autoresearch (Option.map (require_text name) argument)
+    | Some A_rule -> Rule (Option.map (require_text name) argument)
     | Some A_tree -> no_args (); Tree
     | None -> Unknown line
 

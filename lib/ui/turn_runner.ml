@@ -1,5 +1,4 @@
 type completion = Completed | Cancelled | Failed of exn
-
 type event =
   | Turn_started of { turn_id : int; prompt : string }
   | Transcript_message of { turn_id : int; text : string }
@@ -9,6 +8,7 @@ type event =
   | Turn_completed of { turn_id : int }
   | Turn_cancelled of { turn_id : int }
   | Turn_failed of { turn_id : int; error : exn }
+  | Background_notice of { message : string }
 
 type submission_kind = Steering | Follow_up
 
@@ -37,6 +37,7 @@ type notice =
   | Approve of int * string * approval * (unit -> bool)
   | Approve_tool of int * Approval.request * approval * (unit -> bool)
   | Finished of int * completion
+  | External of string
 
 type t = {
   read_fd : Unix.file_descr;
@@ -121,6 +122,21 @@ let notify t turn notice =
         Queue.add notice t.notices;
         empty
     | _ -> false) in
+  if wake then (
+    let rec write () =
+      try ignore (Unix.write t.write_fd t.wake_byte 0 1)
+      with
+      | Unix.Unix_error (Unix.EINTR, _, _) -> write ()
+      | Unix.Unix_error (Unix.EAGAIN, _, _) -> () in
+    write ())
+
+let post t message =
+  let wake = with_guard t (fun () ->
+    if t.closed then false
+    else (
+      let empty = Queue.is_empty t.notices in
+      Queue.add (External message) t.notices;
+      empty)) in
   if wake then (
     let rec write () =
       try ignore (Unix.write t.write_fd t.wake_byte 0 1)
@@ -282,6 +298,9 @@ let drain t =
       if Queue.is_empty t.notices then None else Some (Queue.take t.notices)) in
     match notice with
     | None -> ()
+    | Some (External message) ->
+        t.on_event (Background_notice { message });
+        handle ()
     | Some (Message (id, text)) ->
         if not (cancel_requested t id) then
           t.on_event (Transcript_message { turn_id = id; text });

@@ -1,3 +1,4 @@
+type workspace_effect = Session_rewind.workspace_effect
 type phase = Model | Tool of string
 
 type tool_event =
@@ -22,6 +23,7 @@ type t = {
   root : string;
   allow_shell : bool;
   tool_available : string -> bool;
+  delegate_task : (cancel:(unit -> bool) -> label:string -> task:string -> string) option;
   stream : bool;
   approval_mode : Approval.mode;
   tool_approval : (string * Approval.policy) list;
@@ -37,24 +39,26 @@ type t = {
   on_usage : (Protocol.usage -> unit) option;
   on_phase : (phase -> unit) option;
   on_tool_event : (tool_event -> unit) option;
+  on_workspace_effect : (workspace_effect -> unit) option;
   before_request : (cancel:(unit -> bool) option ->
     system:string -> messages:Protocol.message list ->
     tools:Yojson.Basic.t list -> Protocol.message list option) option;
 }
 let create ~provider ~root ~system ?(authentication = Provider.Api_key)
-    ?resolve_credential ?(thinking = fun () -> None) ?(allow_shell = false)
-    ?(tool_available = fun _ -> true) ?(stream = false)
+    ?resolve_credential ?secret_mask ?before_request ?(history = [])
+    ?(thinking = fun () -> None) ?(allow_shell = false)
+    ?(tool_available = fun _ -> true) ?delegate_task ?(stream = false)
     ?(approval_mode = Approval.Ask_exec) ?(tool_approval = [])
     ?(command_patterns = []) ?(approve_command = fun _ -> false)
-    ?approve_tool ?(history = []) ?before_request ?secret_mask
-    ?on_usage ?on_phase ?on_tool_event ?(on_change = fun _ -> ())
+    ?approve_tool ?on_usage ?on_phase ?on_tool_event ?on_workspace_effect
+    ?(on_change = fun _ -> ())
     ?(on_delta = fun _ -> ()) ~on_event () =
   let redact = match secret_mask with
     | Some mask -> Secret_mask.redact mask
     | None -> Fun.id in
-  { provider; authentication; resolve_credential; thinking; root; system; secret_mask; allow_shell;
-    tool_available; stream; approval_mode; tool_approval; command_patterns;
-    approve_command; approve_tool; before_request;
+  { provider; authentication; resolve_credential; thinking; root; system; secret_mask;
+    allow_shell; tool_available; delegate_task; stream; approval_mode;
+    tool_approval; command_patterns; approve_command; approve_tool; before_request;
     history_rev = List.rev history; scoped_pending = [];
     on_change; on_delta = (fun text -> on_delta (redact text));
     on_event = (fun text -> on_event (redact text));
@@ -72,7 +76,22 @@ let create ~provider ~root ~system ?(authentication = Provider.Api_key)
             Tool_aborted {
               call_id = redact call_id; name = redact name;
               result = redact result; side_effects_may_have_occurred } in
-      notify event) on_tool_event }
+      notify event) on_tool_event;
+    on_workspace_effect }
+
+let task_definition = `Assoc [
+  "type", `String "function";
+  "function", `Assoc [
+    "name", `String "task";
+    "description", `String
+      "Start a bounded read-only child agent. It cannot edit files or run shell commands. The result is saved as a session-owned artifact.";
+    "parameters", `Assoc [
+      "type", `String "object";
+      "properties", `Assoc [
+        "label", `Assoc ["type", `String "string"; "maxLength", `Int 256];
+        "task", `Assoc ["type", `String "string"; "maxLength", `Int 8192]];
+      "required", `List [`String "label"; `String "task"];
+      "additionalProperties", `Bool false]]]
 
 
 let mask_tool_calls mask calls =
@@ -152,6 +171,9 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
       String.concat "\n\n" scoped in
     let definitions = Tools.available_for ~allow_shell:t.allow_shell
       ~enabled:t.tool_available in
+    let definitions = match t.delegate_task with
+      | Some _ when t.tool_available "task" -> definitions @ [task_definition]
+      | _ -> definitions in
     let system : Protocol.message =
       { role = "system"; content = Some system_text; tool_calls = [];
         tool_call_id = None; tool_result_content = None; provider_state = None;
@@ -236,9 +258,7 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
                 |> Secret_mask.mask_tool_arguments mask
                 |> Secret_mask.restore_tool_arguments mask }
             | None -> call in
-          let complete result =
-            Tool_scheduler.Complete [Protocol.Text result] in
-          let prepared = ref None in
+          let prepared = ref None and tracked_path = ref None in
           let on_progress = match call.name, t.on_tool_event with
             | "run_command", Some _ ->
                 Some (fun received_bytes ->
@@ -246,6 +266,8 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
                     call_id = call.id; name = call.name; received_bytes
                   }))
             | _ -> None in
+          let complete message =
+            Tool_scheduler.Complete [Protocol.Text message] in
           let prepare () =
             emit_tool_event t (Tool_started {
               call_id = call.id; name = call.name
@@ -255,36 +277,75 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
              | None -> ()
              | Some notify -> notify (Tool call.name));
             try
-              match Tools.prepare ~root:t.root ~name:call.name
-                ~args:call.arguments () with
-              | Error result -> complete result
-              | Ok execute ->
-                  if call.name = "run_command" && not t.allow_shell then
-                    complete "Error: shell execution disabled; ask the user to restart with --allow-shell"
-                  else if not (t.tool_available call.name) then
-                    complete "Error: tool is no longer available"
-                  else if call.name = "write_file" || call.name = "edit_file" ||
-                    call.name = "read_file" then
-                    (match file_scope t call with
-                     | Error message -> complete message
-                     | Ok (path, scoped) ->
-                         if scoped <> "" && List.assoc_opt path visible <> Some scoped then
-                           if queue_scope t path scoped then
-                             if call.name = "read_file" then (
-                               prepared := Some execute;
-                               Tool_scheduler.Run)
+              if call.name = "task" then (
+                if not (t.tool_available "task") then
+                  complete "Error: child-agent delegation is no longer available"
+                else match t.delegate_task with
+                | None -> complete "Error: child-agent delegation is unavailable"
+                | Some delegate ->
+                    let valid_fields = match call.arguments with
+                      | `Assoc fields ->
+                          List.length fields = 2 &&
+                          List.sort String.compare (List.map fst fields) =
+                            ["label"; "task"] &&
+                          List.for_all (function
+                            | ("label" | "task"), `String _ -> true
+                            | _ -> false) fields
+                      | _ -> false in
+                    let argument name = match Protocol.member name call.arguments with
+                      | `String value -> Some value | _ -> None in
+                    if not valid_fields then
+                      complete "Error: task requires exactly one label and task string"
+                    else match argument "label", argument "task" with
+                    | Some label, Some task
+                      when String.trim label <> "" && String.length label <= 256 &&
+                        not (String.exists (fun c ->
+                          Char.code c < 32 || Char.code c = 127) label) &&
+                        String.trim task <> "" && String.length task <= 8192 &&
+                        not (String.contains task (Char.chr 0)) ->
+                        prepared := Some (fun ?cancel ?on_progress:_ () ->
+                          Provider.check_cancel cancel;
+                          let job_id = delegate
+                            ~cancel:(Option.value ~default:(fun () -> false) cancel)
+                            ~label ~task in
+                          [Protocol.Text ("Started read-only child job " ^
+                            job_id ^ ".")]);
+                        Tool_scheduler.Run
+                    | _ -> complete
+                        "Error: task requires a single-line label and a nonempty task of at most 8192 bytes")
+              else
+                match Tools.prepare ~root:t.root ~name:call.name
+                  ~args:call.arguments () with
+                | Error result -> complete result
+                | Ok execute ->
+                    if call.name = "run_command" && not t.allow_shell then
+                      complete "Error: shell execution disabled; ask the user to restart with --allow-shell"
+                    else if not (t.tool_available call.name) then
+                      complete "Error: tool is no longer available"
+                    else if call.name = "write_file" || call.name = "edit_file" ||
+                      call.name = "read_file" then
+                      (match file_scope t call with
+                       | Error message -> complete message
+                       | Ok (path, scoped) ->
+                           if call.name = "write_file" || call.name = "edit_file" then
+                             tracked_path := Some path;
+                           if scoped <> "" && List.assoc_opt path visible <> Some scoped then
+                             if queue_scope t path scoped then
+                               if call.name = "read_file" then (
+                                 prepared := Some execute;
+                                 Tool_scheduler.Run)
+                               else complete
+                                 ("Error: file mutation withheld until path-scoped instructions " ^
+                                  "are presented as system context; retry this tool call next turn")
                              else complete
-                               ("Error: file mutation withheld until path-scoped instructions " ^
-                                "are presented as system context; retry this tool call next turn")
-                           else complete
-                             ("Error: scoped instructions exceed the per-turn context limit; " ^
-                              "file operation not executed")
-                         else (
-                           prepared := Some execute;
-                           Tool_scheduler.Run))
-                  else (
-                    prepared := Some execute;
-                    Tool_scheduler.Run)
+                               ("Error: scoped instructions exceed the per-turn context limit; " ^
+                                "file operation not executed")
+                           else (
+                             prepared := Some execute;
+                             Tool_scheduler.Run))
+                    else (
+                      prepared := Some execute;
+                      Tool_scheduler.Run)
             with
             | Provider.Cancelled -> raise Provider.Cancelled
             | Tools.Cancelled -> raise Tools.Cancelled
@@ -310,11 +371,24 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
                     | Approval.Requires_prompt reason -> reason
                     | Approval.Allowed -> decision.reason
                     | Approval.Denied _ -> assert false in
-                  let prompt_required = shell ||
+                  let delegate = call.name = "task" in
+                  let prompt_required = delegate || shell ||
                     (match resolved with
                      | Approval.Requires_prompt _ -> true
                      | _ -> false) in
-                  let request = Tools.approval_request ~root:t.root
+                  let request = if delegate then
+                    { Approval.tool_name = "task"; tier = Approval.Exec;
+                      impact = "Starts a bounded read-only child agent; provider usage may be billed.";
+                      details = [
+                        "Label: " ^ Option.value ~default:"(missing)"
+                          (match Protocol.member "label" call.arguments with
+                           | `String value -> Some value | _ -> None);
+                        "Task: " ^ Tools.preview_text
+                          (Option.value ~default:"(missing)"
+                            (match Protocol.member "task" call.arguments with
+                             | `String value -> Some value | _ -> None))];
+                      reason = Some "Child-agent work requires explicit approval." }
+                  else Tools.approval_request ~root:t.root
                     ~name:call.name ~args:call.arguments decision in
                   let request = { request with
                     Approval.reason = (match reason with
@@ -335,7 +409,39 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
                       else "Error: tool approval denied")]
                   else (
                     Provider.check_cancel cancel;
-                    execute ?cancel ?on_progress ())
+                    if shell then (
+                      Option.iter (fun notify -> notify
+                        (Session_rewind.Non_reversible_effect {
+                          tool_name = call.name;
+                          detail = "Shell command was attempted; workspace and external side effects may have occurred. /rewind does not reverse shell effects."
+                        })) t.on_workspace_effect;
+                      t.on_event "Shell command effects may be non-reversible; /rewind does not undo shell or external effects.");
+                    let before = match !tracked_path, t.on_workspace_effect with
+                      | Some path, Some _ ->
+                          Some (path, Session_rewind.snapshot_file
+                            ~root:t.root ~path)
+                      | _ -> None in
+                    let content = execute ?cancel ?on_progress () in
+                    let failed = List.exists (function
+                      | Protocol.Text text ->
+                          String.starts_with ~prefix:"Error:" text
+                      | Protocol.Image _ -> false) content in
+                    (match !tracked_path, before with
+                     | Some path, Some (_, before) when not failed ->
+                         let after = Session_rewind.snapshot_file
+                           ~root:t.root ~path in
+                         (match t.on_workspace_effect with
+                          | Some notify ->
+                              (try notify (Session_rewind.File_change {
+                                 tool_name = call.name; path; before; after })
+                               with exn -> t.on_event
+                                 ("Workspace file change completed, but rewind tracking could not be confirmed: " ^
+                                  Printexc.to_string exn))
+                          | None -> ())
+                     | Some _, None when not failed ->
+                         t.on_event "Workspace file changed in an unsaved session; no durable rewind record exists."
+                     | _ -> ());
+                    content)
             with
             | Provider.Cancelled -> raise Provider.Cancelled
             | Tools.Cancelled -> raise Tools.Cancelled

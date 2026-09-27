@@ -66,6 +66,42 @@ let () =
   ] in
   assert (Pave.Session_tree.summary (entry "image" None image_result) =
     "tool · [image/png image]");
+  let owner = "0123456789abcdef0123456789abcdef"
+  and artifact_id = "fedcba9876543210fedcba9876543210" in
+  let reference : Pave.Session.attachment_reference = {
+    owner; id = artifact_id; name = "screenshot.png"; mime_type = "image/png";
+    size = 9; sha256 = String.make 64 'a' } in
+  let artifact_message : Pave.Session.entry = {
+    id = "artifact-message"; parent_id = None;
+    timestamp = "2026-09-25T00:00:04Z";
+    kind = Pave.Session.Message_artifact
+      (message "user" "Look at this", [reference]) } in
+  assert (Pave.Session_tree.summary artifact_message =
+    "user · Look at this · screenshot.png");
+  let started : Pave.Session.entry = {
+    id = "job-started"; parent_id = None;
+    timestamp = "2026-09-25T00:00:05Z";
+    kind = Pave.Session.Job_started {
+      owner; job_id = artifact_id; label = "Plan"; job_kind = "plan" } } in
+  assert (Pave.Session_tree.summary started = "job · Plan · plan · started");
+  let delivered : Pave.Session.entry = {
+    id = "job-delivery"; parent_id = Some "job-started";
+    timestamp = "2026-09-25T00:00:06Z";
+    kind = Pave.Session.Job_delivery {
+      owner; job_id = artifact_id; label = "Plan";
+      status = Pave.Session.Completed; summary = "Saved result";
+      artifact = Some (owner, artifact_id) } } in
+  assert (Pave.Session_tree.summary delivered =
+    "job · Plan · completed · Saved result · artifact " ^ artifact_id);
+  let goal : Pave.Session.entry = {
+    id = "goal"; parent_id = None; timestamp = "2026-09-25T00:00:07Z";
+    kind = Pave.Session.Workflow_goal (Some "Inspect the workflow") } in
+  assert (Pave.Session_tree.summary goal = "goal · Inspect the workflow");
+  let interruption_rule : Pave.Session.entry = {
+    id = "rule"; parent_id = Some "goal"; timestamp = "2026-09-25T00:00:08Z";
+    kind = Pave.Session.Interruption_rule (Some "Stop before irreversible changes") } in
+  assert (Pave.Session_tree.summary interruption_rule =
+    "interruption rule · Stop before irreversible changes");
   let entries = List.init 1030 (fun n -> entry (string_of_int n)
     (if n = 0 then None else Some (string_of_int (n - 1)))
     (message "user" (String.make 512 'x'))) in

@@ -24,6 +24,22 @@ let first_line text =
   String.trim (Buffer.contents buffer) ^
     (if bytes = limit && limit < String.length text then "…" else "")
 
+let message_summary (message : Protocol.message) reference_names =
+  let content = match message.tool_result_content with
+    | Some blocks -> Some (Protocol.display_content_blocks blocks)
+    | None -> message.content in
+  let content = match content with
+    | None | Some "" when message.tool_calls <> [] -> "tool calls"
+    | None -> ""
+    | Some text -> first_line text in
+  let names = List.map (fun (item : Protocol.attachment) -> item.name)
+    message.attachments @ reference_names
+    |> List.sort_uniq String.compare in
+  let attachments = match names with
+    | [] -> ""
+    | items -> " · " ^ String.concat ", " (List.map first_line items) in
+  message.role ^ (if content = "" then "" else " · " ^ content) ^ attachments
+
 let summary (entry : Session.entry) =
   match entry.kind with
   | Session.Branch -> "branch point"
@@ -71,6 +87,20 @@ let summary (entry : Session.entry) =
       Printf.sprintf "usage · %s · %d in / %d out%s"
         (first_line identity) tokens.input_tokens tokens.output_tokens
         (if details = [] then "" else " · " ^ String.concat " · " details)
+  | Session.Job_started { label; job_kind; _ } ->
+      "job · " ^ first_line label ^ " · " ^ first_line job_kind ^ " · started"
+  | Session.Job_delivery { label; status; summary; artifact; _ } ->
+      let status = match status with
+        | Session.Completed -> "completed" | Session.Failed -> "failed"
+        | Session.Cancelled -> "cancelled" | Session.Interrupted -> "interrupted" in
+      "job · " ^ first_line label ^ " · " ^ status ^
+      (if summary = "" then "" else " · " ^ first_line summary) ^
+      (match artifact with None -> "" | Some (_, id) -> " · artifact " ^ id)
+  | Session.Workflow_goal None -> "goal · cleared"
+  | Session.Workflow_goal (Some goal) -> "goal · " ^ first_line goal
+  | Session.Interruption_rule None -> "interruption rule · cleared"
+  | Session.Interruption_rule (Some rule) ->
+      "interruption rule · " ^ first_line rule
   | Session.Tool_lifecycle { name; state; _ } ->
       let state = match state with
         | Session.Tool_started -> "started"
@@ -88,20 +118,10 @@ let summary (entry : Session.entry) =
       let count = List.length pending_tool_calls in
       Printf.sprintf "session exit · %s · %d pending tool%s"
         kind count (if count = 1 then "" else "s")
-  | Session.Message message ->
-      let content = match message.tool_result_content with
-        | Some blocks -> Some (Protocol.display_content_blocks blocks)
-        | None -> message.content in
-      let content = match content with
-        | None | Some "" when message.tool_calls <> [] -> "tool calls"
-        | None -> ""
-        | Some text -> first_line text in
-      let attachments = match message.attachments with
-        | [] -> ""
-        | items -> " · " ^ String.concat ", "
-            (List.map (fun (item : Protocol.attachment) ->
-              first_line item.name) items) in
-      message.role ^ (if content = "" then "" else " · " ^ content) ^ attachments
+  | Session.Message message -> message_summary message []
+  | Session.Message_artifact (message, references) ->
+      message_summary message (List.map (fun (reference : Session.attachment_reference) ->
+        reference.name) references)
 let choices ?(labels = []) ~leaf entries =
   let total = List.length entries in
   let depth_by_id = Hashtbl.create (min 2048 total) in

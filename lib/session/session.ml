@@ -12,8 +12,21 @@ type pending_tool_call = {
   call_id : string; name : string; state : pending_state
 }
 type exit_kind = Normal | Signal | Fatal | Process_exit
+type attachment_reference = {
+  owner : string; id : string; name : string; mime_type : string;
+  size : int; sha256 : string
+}
+type job_status = Completed | Failed | Cancelled | Interrupted
+type job_delivery = {
+  owner : string; job_id : string; label : string; status : job_status;
+  summary : string; artifact : (string * string) option
+}
+type job_started = {
+  owner : string; job_id : string; label : string; job_kind : string
+}
 type kind =
   | Message of Protocol.message
+  | Message_artifact of Protocol.message * attachment_reference list
   | Compaction of {
       summary : string; first_kept_id : string;
       provider_state : Yojson.Basic.t option
@@ -31,13 +44,18 @@ type kind =
       model : string; tokens : Protocol.usage
     }
   | Branch
+  | Job_started of job_started
+  | Job_delivery of job_delivery
   | Tool_lifecycle of tool_lifecycle
+  | Workflow_goal of string option
+  | Interruption_rule of string option
   | Session_exit of { kind : exit_kind; pending_tool_calls : pending_tool_call list }
 type entry = { id : string; parent_id : string option; timestamp : string; kind : kind }
 
 type t = {
   path : string;
   header : Yojson.Basic.t;
+  artifacts : Session_artifact.t;
   mutable records_rev : entry list;
   by_id : (string, entry) Hashtbl.t;
   mutable leaf : string option;
@@ -84,32 +102,52 @@ let model_identity_json (identity : Model_identity.t) =
    | None -> []
    | Some revision -> ["configRevision", `String revision]))
 
-let new_header ?parent_session cwd =
+let new_header ?parent_session ?(artifact_owners = []) cwd =
+  let id = fresh_id () in
   `Assoc [ "type", `String "session"; "version", `Int 1;
-           "id", `String (fresh_id ()); "timestamp", `String (timestamp ());
-           "cwd", `String cwd; "parentSession", option_json parent_session ]
+           "id", `String id; "timestamp", `String (timestamp ());
+           "cwd", `String cwd; "parentSession", option_json parent_session;
+           "artifactOwners", `List (List.map (fun owner -> `String owner)
+             (List.sort_uniq String.compare (id :: artifact_owners))) ]
 
 let entry_json entry =
   let type_name = match entry.kind with
-    | Message _ -> "message" | Compaction _ -> "compaction"
-    | Model _ -> "model" | Thinking _ -> "thinking_level_change"
+    | Message _ | Message_artifact _ -> "message"
+    | Compaction _ -> "compaction"
+    | Model _ -> "model"
+    | Thinking _ -> "thinking_level_change"
     | Tool_selection _ -> "tool_selection" | Mode_change _ -> "mode_change"
     | Title _ -> "title_change" | Label _ -> "label"
     | Pin _ -> "pin_change" | Reset_boundary -> "reset_boundary"
     | Usage _ -> "usage" | Branch -> "branch"
+    | Workflow_goal _ -> "workflow_goal"
+    | Interruption_rule _ -> "interruption_rule"
+    | Job_started _ -> "job_started" | Job_delivery _ -> "job_delivery"
     | Tool_lifecycle _ -> "tool" | Session_exit _ -> "exit" in
   let fields = [ "type", `String type_name;
     "id", `String entry.id; "parentId", option_json entry.parent_id;
     "timestamp", `String entry.timestamp ] in
+  let serialize_message (message : Protocol.message) references =
+    Protocol.validate_attachments message.attachments;
+    let message_json = Protocol.message_to_json ~stored:true
+      { message with attachments = [] } in
+    let reference_json (reference : attachment_reference) = `Assoc [
+      "owner", `String reference.owner; "id", `String reference.id;
+      "name", `String reference.name; "mimeType", `String reference.mime_type;
+      "size", `Int reference.size; "sha256", `String reference.sha256] in
+    `Assoc (fields @ ["message", message_json] @
+      (let inline = if references = [] then message.attachments
+        else List.filter (fun (attachment : Protocol.attachment) ->
+          String.length attachment.data <= 65536) message.attachments in
+       if inline <> [] then
+         ["attachments", `List (List.map Protocol.attachment_to_json inline)]
+       else []) @
+      (if references <> [] then
+        ["attachmentRefs", `List (List.map reference_json references)] else [])) in
   match entry.kind with
-  | Message message ->
-      Protocol.validate_attachments message.attachments;
-      let message_json = Protocol.message_to_json ~stored:true
-        { message with attachments = [] } in
-      `Assoc (fields @ ["message", message_json] @
-        (if message.attachments = [] then [] else
-          ["attachments", `List (List.map Protocol.attachment_to_json
-            message.attachments)]))
+  | Message message -> serialize_message message []
+  | Message_artifact (message, references) ->
+      serialize_message message references
   | Compaction { summary; first_kept_id; provider_state } ->
       `Assoc (fields @ [ "summary", `String summary;
                          "firstKeptEntryId", `String first_kept_id ] @
@@ -131,6 +169,9 @@ let entry_json entry =
         "label", option_json label])
   | Pin pinned -> `Assoc (fields @ ["pinned", `Bool pinned])
   | Reset_boundary | Branch -> `Assoc fields
+  | Workflow_goal value -> `Assoc (fields @ ["goal", option_json value])
+  | Interruption_rule value ->
+      `Assoc (fields @ ["interruptionRule", option_json value])
   | Usage { provider; account_id; route; model; tokens } ->
       let optional_count name = function
         | None -> []
@@ -157,6 +198,17 @@ let entry_json entry =
           tokens.cached_input_modality_tokens @
         optional_modality_tokens "outputModalityTokens"
           tokens.output_modality_tokens)
+  | Job_started { owner; job_id; label; job_kind } ->
+      `Assoc (fields @ ["owner", `String owner; "jobId", `String job_id;
+        "label", `String label; "jobKind", `String job_kind])
+  | Job_delivery { owner; job_id; label; status; summary; artifact } ->
+      `Assoc (fields @ ["owner", `String owner; "jobId", `String job_id;
+        "label", `String label;
+        "status", `String (match status with Completed -> "completed" |
+          Failed -> "failed" | Cancelled -> "cancelled" | Interrupted -> "interrupted");
+        "summary", `String summary] @
+        (match artifact with None -> [] | Some (artifact_owner, id) ->
+          ["artifactOwner", `String artifact_owner; "artifactId", `String id]))
 
   | Tool_lifecycle { call_id; name; state } ->
       let state_fields = match state with
@@ -241,6 +293,10 @@ let valid_text_field limit text =
   text <> "" && String.length text <= limit &&
   not (String.exists (fun char ->
     let code = Char.code char in code < 32 || code = 127) text)
+let valid_workflow_text text =
+  String.length text <= 4096 &&
+  not (String.exists (fun char ->
+    let code = Char.code char in code < 32 || code = 127) text)
 let parse_model_identity json =
   let fields = match json with
     | `Assoc fields -> fields
@@ -303,6 +359,31 @@ let parse_attachment_list json =
        with Protocol.Invalid_response _ -> invalid "invalid attachments");
       attachments
   | _ -> invalid "invalid attachments"
+let valid_hex_id value =
+  String.length value = 32 &&
+  String.for_all (function '0'..'9' | 'a'..'f' -> true | _ -> false) value
+
+let parse_attachment_refs json =
+  match json with
+  | `Null -> []
+  | `List refs ->
+      if List.length refs > Protocol.max_attachments then
+        invalid "too many attachment references";
+      List.map (fun ref_json ->
+        let field name = Protocol.member name ref_json in
+        match field "owner", field "id", field "name", field "mimeType",
+          field "size", field "sha256" with
+        | `String owner, `String id, `String name, `String mime_type,
+          `Int size, `String sha256
+          when valid_hex_id owner && valid_hex_id id &&
+               valid_text_field 256 name &&
+               Protocol.valid_attachment_mime mime_type &&
+               size > 65536 && size <= Protocol.max_attachment_bytes &&
+               String.length sha256 = 64 &&
+               String.for_all (function '0'..'9' | 'a'..'f' -> true | _ -> false) sha256 ->
+            { owner; id; name; mime_type; size; sha256 }
+        | _ -> invalid "invalid attachment reference") refs
+  | _ -> invalid "invalid attachment references"
 
 let parse_disabled_tools json =
   match json with
@@ -350,9 +431,11 @@ let parse_entry json =
     | `String "message" ->
         let message = Protocol.message_from_json (get "message") in
         let attachments = parse_attachment_list (get "attachments") in
-        if attachments <> [] && message.role <> "user" then
+        let references = parse_attachment_refs (get "attachmentRefs") in
+        if (attachments <> [] || references <> []) && message.role <> "user" then
           invalid "attachments on a non-user message";
-        Message { message with attachments }
+        if references = [] then Message { message with attachments }
+        else Message_artifact ({ message with attachments }, references)
     | `String "compaction" ->
         (match get "summary", get "firstKeptEntryId", get "providerState" with
          | `String summary, `String first_kept_id, provider_state
@@ -487,6 +570,40 @@ let parse_entry json =
                     Tool_aborted { side_effects_may_have_occurred } }
               | _ -> invalid "invalid aborted tool event")
          | _ -> invalid "invalid tool lifecycle event")
+    | `String "workflow_goal" ->
+        (match get "goal" with
+         | `Null -> Workflow_goal None
+         | `String text when valid_workflow_text text -> Workflow_goal (Some text)
+         | _ -> invalid "invalid workflow goal")
+    | `String "interruption_rule" ->
+        (match get "interruptionRule" with
+         | `Null -> Interruption_rule None
+         | `String text when valid_workflow_text text ->
+             Interruption_rule (Some text)
+         | _ -> invalid "invalid interruption rule")
+    | `String "job_started" ->
+        (match get "owner", get "jobId", get "label", get "jobKind" with
+         | `String owner, `String job_id, `String label, `String job_kind
+           when valid_hex_id owner && valid_hex_id job_id &&
+                valid_text_field 256 label && valid_text_field 128 job_kind ->
+             Job_started { owner; job_id; label; job_kind }
+         | _ -> invalid "invalid job start")
+    | `String "job_delivery" ->
+        let status = match get "status" with
+          | `String "completed" -> Completed | `String "failed" -> Failed
+          | `String "cancelled" -> Cancelled | `String "interrupted" -> Interrupted
+          | _ -> invalid "invalid job delivery status" in
+        let artifact = match get "artifactOwner", get "artifactId" with
+          | `Null, `Null -> None
+          | `String owner, `String id when valid_hex_id owner && valid_hex_id id ->
+              Some (owner, id)
+          | _ -> invalid "invalid job delivery artifact" in
+        (match get "owner", get "jobId", get "label", get "summary" with
+         | `String owner, `String job_id, `String label, `String summary
+           when valid_hex_id owner && valid_hex_id job_id &&
+                valid_text_field 256 label && String.length summary <= 4096 ->
+             Job_delivery { owner; job_id; label; status; summary; artifact }
+         | _ -> invalid "invalid job delivery")
     | `String "exit" ->
         let kind = match get "exitKind" with
           | `String "normal" -> Normal
@@ -577,10 +694,11 @@ let label_target t =
     | [] -> t.leaf
     | entry :: rest ->
         (match entry.kind with
-         | Message _ | Compaction _ -> Some entry.id
+         | Message _ | Message_artifact _ | Compaction _ -> Some entry.id
          | Model _ | Thinking _ | Tool_selection _ | Mode_change _
          | Title _ | Label _ | Pin _ | Reset_boundary | Usage _ | Branch
-         | Tool_lifecycle _ | Session_exit _ -> find rest) in
+         | Workflow_goal _ | Interruption_rule _
+         | Job_started _ | Job_delivery _ | Tool_lifecycle _ | Session_exit _ -> find rest) in
   find entries
 let usage t =
   List.fold_left (fun total entry -> match entry.kind with
@@ -588,9 +706,10 @@ let usage t =
         (match total with
          | None -> Some tokens
          | Some previous -> Some (Protocol.add_usage previous tokens))
-    | Message _ | Compaction _ | Model _ | Thinking _ | Tool_selection _
-    | Mode_change _ | Title _ | Label _ | Pin _ | Reset_boundary | Branch
-    | Tool_lifecycle _ | Session_exit _ -> total)
+    | Message _ | Message_artifact _ | Compaction _ | Model _ | Thinking _
+    | Tool_selection _ | Mode_change _ | Title _ | Label _ | Pin _ | Reset_boundary
+    | Branch | Workflow_goal _ | Interruption_rule _ | Job_started _
+    | Job_delivery _ | Tool_lifecycle _ | Session_exit _ -> total)
     None (branch_entries t)
 module Usage_routes = Map.Make (struct
   type t = string * string option * string option * string
@@ -604,19 +723,36 @@ let usage_by_route t =
         Usage_routes.update key (function
           | None -> Some tokens
           | Some previous -> Some (Protocol.add_usage previous tokens)) routes
-    | Message _ | Compaction _ | Model _ | Thinking _ | Tool_selection _
-    | Mode_change _ | Title _ | Label _ | Pin _ | Reset_boundary | Branch
-    | Tool_lifecycle _ | Session_exit _ -> routes)
+    | Message _ | Message_artifact _ | Compaction _ | Model _ | Thinking _
+    | Tool_selection _ | Mode_change _ | Title _ | Label _ | Pin _ | Reset_boundary
+    | Branch | Workflow_goal _ | Interruption_rule _ | Job_started _
+    | Job_delivery _ | Tool_lifecycle _ | Session_exit _ -> routes)
     Usage_routes.empty (branch_entries t) in
   Usage_routes.bindings routes
 
-let messages entries =
+let messages ?job_owner entries =
   List.filter_map (fun entry -> match entry.kind with
-    | Message message -> Some message
+    | Message message | Message_artifact (message, _) -> Some message
+    | Job_delivery delivery when
+        Option.fold ~none:true ~some:(fun owner -> owner = delivery.owner) job_owner ->
+        let status = match delivery.status with
+          | Completed -> "completed" | Failed -> "failed"
+          | Cancelled -> "cancelled" | Interrupted -> "interrupted" in
+        let artifact = match delivery.artifact with
+          | None -> ""
+          | Some (owner, id) ->
+              " artifact=session-artifact://" ^ owner ^ "/" ^ id in
+        Some ({ (Protocol.user
+          ("Job " ^ delivery.job_id ^ " " ^ status ^ ": " ^ delivery.summary ^ artifact))
+          with role = "assistant" })
     | Compaction _ | Model _ | Thinking _ | Tool_selection _
     | Mode_change _ | Title _ | Label _ | Pin _ | Reset_boundary | Usage _ | Branch
-    | Tool_lifecycle _ | Session_exit _ -> None) entries
-let history t = messages (branch_entries t)
+    | Workflow_goal _ | Interruption_rule _
+    | Job_started _ | Job_delivery _ | Tool_lifecycle _ | Session_exit _ -> None) entries
+let history t =
+  let owner = match Protocol.member "id" t.header with
+    | `String owner -> owner | _ -> invalid "session ID missing" in
+  messages ~job_owner:owner (branch_entries t)
 let retryable_history history =
   let rec find safe = function
     | [] -> None
@@ -635,10 +771,18 @@ let retry_candidate t =
     | { kind = Message ({ role = "user"; content = Some text; _ } as message);
         parent_id = Some parent; _ } :: _ when String.trim text <> "" ->
         Some (parent, message)
-    | { kind = Message { role = "assistant"; tool_calls = []; _ }; _ } :: rest
+    | { kind = Message_artifact (({ role = "user"; content = Some text; _ } as message), _);
+        parent_id = Some parent; _ } :: _ when String.trim text <> "" ->
+        Some (parent, message)
+    | { kind = Message ({ role = "assistant"; tool_calls = []; _ }); _ } :: rest
+    | { kind = Message_artifact ({ role = "assistant"; tool_calls = []; _ }, _); _ } :: rest
     | { kind = Usage _; _ } :: rest
     | { kind = Tool_lifecycle _; _ } :: rest
     | { kind = Session_exit _; _ } :: rest
+    | { kind = Workflow_goal _; _ } :: rest
+    | { kind = Interruption_rule _; _ } :: rest
+    | { kind = Job_started _; _ } :: rest
+    | { kind = Job_delivery _; _ } :: rest
     | { kind = Title _; _ } :: rest
     | { kind = Label _; _ } :: rest
     | { kind = Pin _; _ } :: rest -> find rest
@@ -648,19 +792,24 @@ let retry_candidate t =
 
 let context t =
   let path = branch_entries t in
+  let owner = match Protocol.member "id" t.header with
+    | `String owner -> owner | _ -> invalid "session ID missing" in
   let latest = List.fold_left (fun found entry -> match entry.kind with
     | Compaction { summary; first_kept_id; provider_state } ->
         `Compaction (entry.id, summary, first_kept_id, provider_state)
     | Reset_boundary -> `Reset entry.id
-    | Message _ | Model _ | Thinking _ | Tool_selection _ | Mode_change _
-    | Title _ | Label _ | Pin _ | Usage _ | Branch | Tool_lifecycle _ | Session_exit _ -> found)
+    | Message _ | Message_artifact _ | Model _ | Thinking _ | Tool_selection _
+    | Mode_change _ | Title _ | Label _ | Pin _ | Usage _ | Branch
+    | Workflow_goal _ | Interruption_rule _ | Job_started _ | Job_delivery _
+    | Tool_lifecycle _ | Session_exit _ -> found)
     `None path in
   match latest with
-  | `None -> messages path
+  | `None -> messages ~job_owner:owner path
   | `Reset marker_id ->
       let rec after = function
         | [] -> invalid "reset boundary missing from branch"
-        | entry :: rest when entry.id = marker_id -> messages rest
+        | entry :: rest when entry.id = marker_id ->
+            messages ~job_owner:owner rest
         | _ :: rest -> after rest in
       after path
   | `Compaction (marker_id, summary, first_kept_id, provider_state) ->
@@ -674,7 +823,7 @@ let context t =
         | entry :: rest when entry.id = first_kept_id -> entry :: rest
         | _ :: rest -> kept rest in
       { (Protocol.user summary) with provider_state } ::
-        messages (kept before @ after)
+        messages ~job_owner:owner (kept before @ after)
 
 
 let compaction_plan t =
@@ -686,6 +835,8 @@ let compaction_plan t =
   let rec last_user candidate = function
     | [] -> candidate
     | { id; kind = Message { role = "user"; _ }; _ } :: rest ->
+        last_user (Some id) rest
+    | { id; kind = Message_artifact ({ role = "user"; _ }, _); _ } :: rest ->
         last_user (Some id) rest
     | _ :: rest -> last_user candidate rest in
   match last_user None active_path with
@@ -709,14 +860,18 @@ let unresolved_tool_calls entries =
       invalid "orphan tool result";
     pending := List.filter (fun call -> call.call_id <> call_id) !pending in
   List.iter (fun entry -> match entry.kind with
-    | Message { role = "assistant"; tool_calls; _ } ->
+    | Message { role = "assistant"; tool_calls; _ }
+    | Message_artifact ({ role = "assistant"; tool_calls; _ }, _) ->
         if !pending <> [] then invalid "assistant before outstanding tool results";
         pending := List.map (fun (call : Protocol.tool_call) ->
           { call_id = call.id; name = call.name; state = Unknown }) tool_calls
-    | Message { role = "tool"; tool_call_id = Some call_id; _ } -> remove call_id
-    | Message { role = "user"; _ } ->
+    | Message { role = "tool"; tool_call_id = Some call_id; _ }
+    | Message_artifact ({ role = "tool"; tool_call_id = Some call_id; _ }, _) ->
+        remove call_id
+    | Message { role = "user"; _ }
+    | Message_artifact ({ role = "user"; _ }, _) ->
         if !pending <> [] then invalid "user before outstanding tool results"
-    | Message _ -> invalid "unsupported transcript role"
+    | Message _ | Message_artifact _ -> invalid "unsupported transcript role"
     | Tool_lifecycle { call_id; state = Tool_started; _ } ->
         update call_id Started
     | Tool_lifecycle { call_id; state = Tool_settled _; _ } ->
@@ -726,7 +881,9 @@ let unresolved_tool_calls entries =
     | Reset_boundary ->
         if !pending <> [] then invalid "reset boundary with outstanding tool calls"
     | Compaction _ | Model _ | Thinking _ | Tool_selection _
-    | Mode_change _ | Title _ | Label _ | Pin _ | Usage _ | Branch | Session_exit _ -> ()) entries;
+    | Mode_change _ | Title _ | Label _ | Pin _ | Usage _ | Branch
+    | Workflow_goal _ | Interruption_rule _
+    | Job_started _ | Job_delivery _ | Session_exit _ -> ()) entries;
   List.rev !pending
 
 let missing_results entries = unresolved_tool_calls entries
@@ -787,7 +944,104 @@ let append t (message : Protocol.message) =
    with Protocol.Invalid_response _ -> invalid "invalid user attachments");
   if message.attachments <> [] && message.role <> "user" then
     invalid "attachments on a non-user message";
-  (append_entry t (Message message)).id
+  let own_id = match Protocol.member "id" t.header with
+    | `String id -> id | _ -> invalid "session ID missing" in
+  let external_attachments = List.filter
+    (fun (attachment : Protocol.attachment) ->
+      String.length attachment.data > 65536) message.attachments in
+  let references = List.map (fun (attachment : Protocol.attachment) ->
+    try
+      let item = Session_artifact.put t.artifacts ~owner:own_id
+        ~name:attachment.name ~mime_type:attachment.mime_type attachment.data in
+      { owner = item.owner; id = item.id; name = item.name;
+        mime_type = item.mime_type; size = item.size; sha256 = item.sha256 }
+    with Session_artifact.Error message -> invalid message) external_attachments in
+  let kind = if references = [] then Message message
+    else Message_artifact (message, references) in
+  (append_entry t kind).id
+let session_id t = match Protocol.member "id" t.header with
+  | `String id -> id | _ -> invalid "session ID missing"
+
+let referenced_artifact t owner id =
+  List.exists (fun entry -> match entry.kind with
+    | Message_artifact (_, refs) -> List.exists (fun (reference : attachment_reference) ->
+        reference.owner = owner && reference.id = id) refs
+    | Job_delivery { artifact = Some (artifact_owner, artifact_id); _ } ->
+        owner = artifact_owner && id = artifact_id
+    | _ -> false) (entries t)
+
+let artifact_authorized t owner =
+  match Protocol.member "artifactOwners" t.header with
+  | `List owners -> List.mem (`String owner) owners
+  | _ -> owner = session_id t
+
+let store_artifact t ~name ~mime_type data =
+  try Session_artifact.put t.artifacts ~owner:(session_id t)
+    ~name ~mime_type data
+  with Session_artifact.Error message -> invalid message
+
+let list_artifacts t =
+  let items = try Session_artifact.list t.artifacts ()
+    with Session_artifact.Error message -> invalid message in
+  List.filter (fun (item : Session_artifact.item) ->
+    item.Session_artifact.owner = session_id t ||
+    referenced_artifact t item.owner item.id) items
+
+let read_artifact t ~owner ~id =
+  if not (artifact_authorized t owner &&
+          (owner = session_id t || referenced_artifact t owner id)) then
+    invalid "artifact is not referenced by this session";
+  try Session_artifact.read t.artifacts ~owner ~id
+  with Session_artifact.Error message -> invalid message
+
+type job_state = { started : job_started; delivery : job_delivery option }
+
+let job_states t =
+  let starts = Hashtbl.create 8 and deliveries = Hashtbl.create 8 in
+  List.iter (fun entry -> match entry.kind with
+    | Job_started start when start.owner = session_id t ->
+        if not (Hashtbl.mem starts start.job_id) then
+          Hashtbl.add starts start.job_id start
+    | Job_delivery delivery when delivery.owner = session_id t ->
+        Hashtbl.replace deliveries delivery.job_id delivery
+    | _ -> ()) (entries t);
+  Hashtbl.fold (fun _job_id started states ->
+    { started; delivery = Hashtbl.find_opt deliveries started.job_id } :: states)
+    starts [] |> List.sort (fun a b ->
+      String.compare a.started.job_id b.started.job_id)
+
+let append_job_started t ~job_id ~label ~job_kind =
+  if not (valid_hex_id job_id && valid_text_field 256 label &&
+          valid_text_field 128 job_kind) then invalid "invalid job start";
+  let owner = session_id t in
+  if List.exists (fun entry -> match entry.kind with
+    | Job_started start -> start.owner = owner && start.job_id = job_id
+    | _ -> false) (entries t) then None
+  else (
+    ignore (append_entry t (Job_started { owner; job_id; label; job_kind }));
+    Some job_id)
+
+let append_job_delivery t delivery =
+  let { owner; job_id; label; summary; artifact; _ } = delivery in
+  if owner <> session_id t then invalid "job delivery belongs to another session";
+  if not (valid_hex_id job_id && valid_text_field 256 label &&
+          String.length summary <= 4096) then invalid "invalid job delivery";
+  Option.iter (fun (artifact_owner, id) ->
+    if not (valid_hex_id artifact_owner && valid_hex_id id &&
+            artifact_authorized t artifact_owner &&
+            (artifact_owner = session_id t ||
+             referenced_artifact t artifact_owner id)) then
+      invalid "invalid or unauthorized job artifact";
+    try ignore (Session_artifact.read t.artifacts ~owner:artifact_owner ~id)
+    with Session_artifact.Error message -> invalid message) artifact;
+  match List.find_opt (fun entry -> match entry.kind with
+    | Job_delivery existing -> existing.owner = owner && existing.job_id = job_id
+    | _ -> false) (entries t) with
+  | Some _ -> None
+  | None ->
+      ignore (append_entry t (Job_delivery delivery));
+      Some job_id
+
 
 let record_tool_event t ~call_id ~name state =
   if not (valid_model_field call_id && valid_model_field name) then
@@ -809,7 +1063,8 @@ let pending_tool_calls t = unresolved_tool_calls (branch_entries t)
 let record_exit t ~kind =
   let path = branch_entries t in
   if List.exists (function
-    | { kind = Message { role = "assistant"; _ }; _ } -> true
+    | { kind = Message { role = "assistant"; _ }; _ }
+    | { kind = Message_artifact ({ role = "assistant"; _ }, _); _ } -> true
     | _ -> false) path then
     let pending_tool_calls = unresolved_tool_calls path in
     Some (append_entry t (Session_exit { kind; pending_tool_calls })).id
@@ -870,6 +1125,28 @@ let set_title t selected =
   if not (valid_text_field 256 selected) then invalid "invalid session title";
   if selected <> Option.value ~default:"" (title t) then
     ignore (append_entry t (Title selected))
+let goal t =
+  latest_value (branch_entries t) (function
+    | Workflow_goal value -> Some value | _ -> None) None
+
+let set_goal t value =
+  (match value with
+   | None -> ()
+   | Some text when valid_workflow_text text -> ()
+   | Some _ -> invalid "invalid workflow goal");
+  if goal t <> value then ignore (append_entry t (Workflow_goal value))
+
+let interruption_rule t =
+  latest_value (branch_entries t) (function
+    | Interruption_rule value -> Some value | _ -> None) None
+
+let set_interruption_rule t value =
+  (match value with
+   | None -> ()
+   | Some text when valid_workflow_text text -> ()
+   | Some _ -> invalid "invalid interruption rule");
+  if interruption_rule t <> value then
+    ignore (append_entry t (Interruption_rule value))
 let set_label t ~target_id label =
   if not (List.exists (fun entry -> entry.id = target_id)
       (branch_entries t)) then invalid "label target is not on the selected branch";
@@ -957,12 +1234,59 @@ let load_journal path =
      | `Null -> ()
      | `String parent when valid_text_field 128 parent -> ()
      | _ -> invalid "invalid parent session ID");
+    let cwd = match Protocol.member "cwd" header with
+      | `String cwd -> cwd | _ -> invalid "session workspace missing" in
+    let artifacts =
+      try Session_artifact.open_for_workspace ~root:cwd
+      with Session_artifact.Error message -> invalid message in
+    let own_id = match Protocol.member "id" header with
+      | `String id when valid_hex_id id -> id
+      | _ -> invalid "invalid session ID" in
+    let authorized = match Protocol.member "artifactOwners" header with
+      | `Null -> [own_id]
+      | `List owners ->
+          let parsed = List.map (function
+            | `String id when valid_hex_id id -> id
+            | _ -> invalid "invalid artifact owner authorization") owners in
+          if not (List.mem own_id parsed) ||
+             List.length parsed <> List.length (List.sort_uniq String.compare parsed)
+          then invalid "invalid artifact owner authorization";
+          parsed
+      | _ -> invalid "invalid artifact owner authorization" in
+    let materialize entry = match entry.kind with
+      | Message_artifact (message, references) when references <> [] ->
+          let attachments = List.map (fun (reference : attachment_reference) ->
+            if not (List.mem reference.owner authorized) then
+              invalid "unauthorized artifact owner";
+            try
+              let item = List.find (fun (item : Session_artifact.item) ->
+                item.Session_artifact.id = reference.id)
+                (Session_artifact.list artifacts ~owner:reference.owner ()) in
+              if item.name <> reference.name || item.mime_type <> reference.mime_type ||
+                 item.size <> reference.size || item.sha256 <> reference.sha256 then
+                invalid "attachment reference metadata mismatch";
+              let data = Session_artifact.read artifacts ~owner:reference.owner
+                ~id:reference.id in
+              if String.length data <> reference.size then
+                invalid "attachment reference size mismatch";
+              { Protocol.name = reference.name; mime_type = reference.mime_type; data }
+            with Session_artifact.Error message -> invalid message) references in
+          (try Protocol.validate_attachments (message.attachments @ attachments)
+           with Protocol.Invalid_response _ -> invalid "invalid referenced attachments");
+          { entry with kind = Message_artifact ({ message with attachments =
+              message.attachments @ attachments }, references) }
+      | Job_delivery { artifact = Some (owner, id); _ } ->
+          if not (List.mem owner authorized) then invalid "unauthorized job artifact";
+          (try ignore (Session_artifact.read artifacts ~owner ~id)
+           with Session_artifact.Error message -> invalid message);
+          entry
+      | _ -> entry in
     let records = ref [] in
     let by_id = Hashtbl.create 32 in
     let seen_ids = Hashtbl.create 32 in
     let leaf = ref None in
     (try while true do
-      let entry = parse_entry (read_json ()) in
+      let entry = materialize (parse_entry (read_json ())) in
       if Hashtbl.mem seen_ids entry.id then invalid "duplicate entry ID";
       Hashtbl.add seen_ids entry.id ();
       (match entry.parent_id with
@@ -981,16 +1305,19 @@ let load_journal path =
              invalid "label target is not an ancestor"
        | _ -> ());
       (match entry.kind with
-       | Message _ | Model _ | Thinking _ | Tool_selection _ | Mode_change _
-       | Title _ | Label _ | Pin _ | Reset_boundary | Usage _ | Tool_lifecycle _
-       | Session_exit _ ->
+       | Message _ | Message_artifact _ | Model _ | Thinking _ | Tool_selection _
+       | Mode_change _ | Title _ | Label _ | Pin _ | Reset_boundary | Usage _
+       | Workflow_goal _ | Interruption_rule _
+       | Tool_lifecycle _ | Job_started _ | Job_delivery _ | Session_exit _ ->
            Hashtbl.add by_id entry.id entry; leaf := Some entry.id
        | Compaction { first_kept_id; _ } ->
            let rec ancestor = function
              | None -> false
              | Some id when id = first_kept_id ->
                  (match (Hashtbl.find by_id id).kind with
-                  | Message { role = "user"; _ } -> true | _ -> false)
+                  | Message { role = "user"; _ }
+                  | Message_artifact ({ role = "user"; _ }, _) -> true
+                  | _ -> false)
              | Some id ->
                  (match (Hashtbl.find by_id id).kind with
                   | Reset_boundary -> false
@@ -1003,7 +1330,7 @@ let load_journal path =
            leaf := entry.parent_id);
       records := entry :: !records
     done with End_of_file -> ());
-    { path; header; records_rev = !records; by_id; leaf = !leaf;
+    { path; header; artifacts; records_rev = !records; by_id; leaf = !leaf;
       disk_size = size })
 
 let migrate_legacy ~cwd path =
@@ -1086,7 +1413,12 @@ let fork_header session =
     | `String cwd -> cwd | _ -> Unix.getcwd () in
   let parent_session = match Protocol.member "id" session.header with
     | `String id -> id | _ -> invalid "session ID missing during fork" in
-  new_header ~parent_session cwd
+  let artifact_owners = List.concat_map (fun entry -> match entry.kind with
+    | Message_artifact (_, refs) ->
+        List.map (fun (reference : attachment_reference) -> reference.owner) refs
+    | Job_delivery { artifact = Some (owner, _); _ } -> [owner]
+    | _ -> []) (branch_entries session) in
+  new_header ~parent_session ~artifact_owners cwd
 
 let fork_content session header =
   line header ^ String.concat ""

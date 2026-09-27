@@ -73,7 +73,8 @@ let serve_client client step ~allow_shell ~first_reply =
   close_out_noerr oc
 
 let with_agent ~root ~name ~arguments ~allow_shell ~approval_mode
-    ~tool_approval ~command_patterns ?approve_tool () =
+    ~tool_approval ~command_patterns ?approve_tool ?delegate_task
+    ?on_workspace_effect () =
   let socket = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
   Unix.bind socket (Unix.ADDR_INET (Unix.inet_addr_loopback, 0));
   Unix.listen socket 2;
@@ -108,7 +109,8 @@ let with_agent ~root ~name ~arguments ~allow_shell ~approval_mode
       api = Pave.Provider.Openai_completions } in
     let events = ref [] in
     let agent = Pave.Agent.create ~provider ~root ~system:"approval integration"
-      ~allow_shell ~approval_mode ~tool_approval ~command_patterns ?approve_tool
+      ~allow_shell ~approval_mode ~tool_approval ~command_patterns
+      ?approve_tool ?delegate_task ?on_workspace_effect
       ~on_event:(fun event -> events := event :: !events) () in
     let result = Pave.Agent.run agent "Exercise approval policy" in
     completed := true;
@@ -173,18 +175,28 @@ let () =
       ~tool_approval:["write_file", A.Prompt] ~command_patterns:[] ());
     expect "headless prompt-required write fails closed"
       (not (Sys.file_exists (Filename.concat root "headless-prompt.txt")));
-    let allowed_calls = ref 0 in
+    let allowed_calls = ref 0 and tracked_effects = ref [] in
     ignore (with_agent ~root ~name:"write_file"
       ~arguments:(`Assoc ["path", `String "allowed.txt";
         "content", `String "approved by write mode"])
       ~allow_shell:false ~approval_mode:A.Ask_exec ~tool_approval:[]
       ~command_patterns:[]
-      ~approve_tool:(fun _ -> incr allowed_calls; true) ());
+      ~approve_tool:(fun _ -> incr allowed_calls; true)
+      ~on_workspace_effect:(fun workspace_effect ->
+        tracked_effects := workspace_effect :: !tracked_effects) ());
     expect "write mode allows a write without prompting" (!allowed_calls = 0);
     expect "allowed write changed the target file"
       (let input = open_in (Filename.concat root "allowed.txt") in
        Fun.protect ~finally:(fun () -> close_in input) (fun () ->
          input_line input = "approved by write mode"));
+    expect "approved write exposes a durable pre/post rewind snapshot"
+      (match !tracked_effects with
+       | [Pave.Session_rewind.File_change {
+            tool_name = "write_file"; path = "allowed.txt";
+            before = Pave.Session_rewind.Missing;
+            after = Pave.Session_rewind.Captured { data; _ } }] ->
+           data = "approved by write mode"
+       | _ -> false);
     let shell_prompts = ref 0 and shell_preview = ref None in
     ignore (with_agent ~root ~name:"run_command"
       ~arguments:(`Assoc ["command", `String "touch mandatory-prompt.txt"])
@@ -210,6 +222,72 @@ let () =
        | None -> false);
     expect "rejected shell command has no side effect"
       (not (Sys.file_exists (Filename.concat root "mandatory-prompt.txt")));
+    let shell_effects = ref [] and shell_events = ref [] in
+    let _, events = with_agent ~root ~name:"run_command"
+      ~arguments:(`Assoc ["command", `String "touch approved-shell.txt"])
+      ~allow_shell:true ~approval_mode:A.Auto_all ~tool_approval:[]
+      ~command_patterns:[]
+      ~approve_tool:(fun request ->
+        expect "approved shell uses the exact command approval"
+          (request.tool_name = "run_command");
+        true)
+      ~on_workspace_effect:(fun workspace_effect ->
+        (match workspace_effect with
+         | Pave.Session_rewind.Non_reversible_effect
+             { tool_name = "run_command"; detail } ->
+             expect "shell effects are recorded before execution"
+               (not (Sys.file_exists (Filename.concat root "approved-shell.txt")));
+             shell_effects := ("run_command", detail) :: !shell_effects
+         | _ -> failwith "agent approval: shell was not marked non-reversible")) () in
+    shell_events := events;
+    expect "approved shell command ran"
+      (Sys.file_exists (Filename.concat root "approved-shell.txt"));
+    expect "shell attempt was recorded as non-reversible"
+      (match !shell_effects with
+       | [("run_command", detail)] ->
+           String.starts_with ~prefix:"Shell command was attempted" detail
+       | _ -> false);
+    expect "shell non-reversible warning reached the user"
+      (List.exists (String.starts_with ~prefix:"Shell command effects may be non-reversible")
+        !shell_events);
+    let task_calls = ref 0 and task_approval = ref None in
+    let _, task_events = with_agent ~root ~name:"task"
+      ~arguments:(`Assoc ["label", `String "review";
+        "task", `String "Inspect the selected workspace read-only"])
+      ~allow_shell:false ~approval_mode:A.Auto_all ~tool_approval:[]
+      ~command_patterns:[]
+      ~approve_tool:(fun request ->
+        task_approval := Some request;
+        true)
+      ~delegate_task:(fun ~cancel ~label ~task ->
+        expect "child delegation has not been cancelled" (not (cancel ()));
+        expect "child label reached the delegate" (label = "review");
+        expect "child task reached the delegate"
+          (task = "Inspect the selected workspace read-only");
+        incr task_calls;
+        "0123456789abcdef0123456789abcdef") () in
+    expect "child agent always requires explicit approval under yolo"
+      (!task_calls = 1 &&
+       (match !task_approval with
+        | Some request -> request.tool_name = "task" &&
+            String.starts_with ~prefix:"Starts a bounded read-only child agent"
+              request.impact
+        | None -> false));
+    expect "delegation result identifies the durable child job"
+      (List.exists (String.starts_with ~prefix:
+        "[task] Started read-only child job 0123456789abcdef0123456789abcdef")
+        task_events);
+    let invalid_task_calls = ref 0 and invalid_task_prompts = ref 0 in
+    ignore (with_agent ~root ~name:"task"
+      ~arguments:(`Assoc ["label", `String "review"; "task", `String "inspect";
+        "unexpected", `String "must be rejected"])
+      ~allow_shell:false ~approval_mode:A.Auto_all ~tool_approval:[]
+      ~command_patterns:[]
+      ~approve_tool:(fun _ -> incr invalid_task_prompts; true)
+      ~delegate_task:(fun ~cancel:_ ~label:_ ~task:_ ->
+        incr invalid_task_calls; "unused") ());
+    expect "task schema rejects unknown arguments before approval or delegation"
+      (!invalid_task_calls = 0 && !invalid_task_prompts = 0);
     let compound_calls = ref 0 in
     ignore (with_agent ~root ~name:"run_command"
       ~arguments:(`Assoc ["command", `String

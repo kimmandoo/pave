@@ -128,7 +128,10 @@ let () =
       | Pave.Turn_runner.Turn_failed { turn_id; error } ->
           require_owner turn_id;
           active_turn_id := None;
-          event ("failure:" ^ Printexc.to_string error))
+          event ("failure:" ^ Printexc.to_string error)
+      | Pave.Turn_runner.Background_notice { message } ->
+          assert (!active_turn_id = None);
+          event ("background:" ^ message))
     ~on_approve:(fun command ->
       assert (Thread.id (Thread.self ()) = caller_thread);
       assert (command = "printf approved");
@@ -269,5 +272,14 @@ let () =
     assert (count "start:dequeue-removed" sequence = 0);
     assert (count "start:dequeue-retained" sequence = 1);
     assert (count "message:dequeue-retained-complete" sequence = 1);
+    let prior = List.length !events in
+    let producer = Thread.create (fun () ->
+      Pave.Turn_runner.post runner "job finished") () in
+    Thread.join producer;
+    let ready, _, _ = Unix.select [Pave.Turn_runner.fd runner] [] [] 3. in
+    assert (ready <> []);
+    Pave.Turn_runner.drain runner;
+    let delivered = after prior in
+    assert (delivered = ["background:job finished"]);
   );
   print_endline "turn runner: ok"
