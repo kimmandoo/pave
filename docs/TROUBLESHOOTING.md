@@ -1,5 +1,12 @@
 # Troubleshooting
 
+### [2026-09-28] Hosted process-listener readiness fixture timed out
+
+- **Context / Symptom:** Main CI `36333579512` passed three OCaml jobs, including macOS 5.3.0 after the ADC reaping fix, but macOS 5.5.1 failed the bare assertion at `test/tools/test_workspace_process.ml:183` while waiting for a Python listener's log and loopback port.
+- **Root Cause:** The fixture allowed only three seconds for a cold Python startup and port/log observation while the child exited after five seconds. The failed run reported no child status/output, so the exact reason readiness was false is unknown; the narrow lifetime and timeout made the fixture sensitive to hosted scheduling.
+- **Solution:** Extended the test listener lifetime to fifteen seconds, allowed eight seconds for both readiness conditions, and made any future failure report its child termination and captured output. The production readiness contract and both required checks remained unchanged.
+- **Prevention / Reference:** Keep a test service alive longer than its startup deadline and report status/output on failed readiness, rather than relying on a bare assertion.
+
 ### [2026-09-28] Model chooser mixed available and unverified IDs
 
 - **Context / Symptom:** `/model` displayed static suggestions, route actions and manually typed model IDs alongside live model listings, even when those models were not usable on the selected account/API route.

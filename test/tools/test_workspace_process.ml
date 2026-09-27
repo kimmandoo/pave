@@ -178,10 +178,17 @@ let () =
   let port_manager = Process.create_manager () in
   Process.start port_manager ~id:"listener" ~program:python3
     ~arguments:["-c";
-      "import socket,sys,time; s=socket.socket(); s.bind(('127.0.0.1',int(sys.argv[1]))); s.listen(); print('LISTENING',flush=True); time.sleep(5)";
+      "import socket,sys,time; s=socket.socket(); s.bind(('127.0.0.1',int(sys.argv[1]))); s.listen(); print('LISTENING',flush=True); time.sleep(15)";
       string_of_int port] ();
-  assert (Process.wait_ready port_manager ~id:"listener" ~timeout_seconds:3
-    ~log_regex:"LISTENING" ~port ());
+  if not (Process.wait_ready port_manager ~id:"listener" ~timeout_seconds:8
+    ~log_regex:"LISTENING" ~port ()) then
+    failwith (Printf.sprintf "listener readiness failed: status=%s output=%S"
+      (match Process.job_status port_manager ~id:"listener" with
+       | Process.Running -> "running"
+       | Process.Completed (Process.Exited code) ->
+           "exit " ^ string_of_int code
+       | Process.Completed _ -> "terminated")
+      (output port_manager "listener"));
   Process.kill_job port_manager ~id:"listener";
   assert (Process.job_status port_manager ~id:"listener" = Process.Completed Process.Cancelled);
   Process.close_manager port_manager;
