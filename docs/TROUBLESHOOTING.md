@@ -1,5 +1,11 @@
 # Troubleshooting
 
+### [2026-09-27] Isolated Codex smoke hid opam state and missed stdin curl config
+
+- **Context / Symptom:** The first isolated CLI smoke set `HOME` to a fresh directory and `opam exec` failed with `Opam has not been initialised, please run opam init`. After retaining the normal home, device login passed but the Codex model-listing smoke reported `request failed or timed out`.
+- **Root Cause:** opam used `HOME` to locate its initialized switch. The login transport invoked `curl --config FILE`, while model discovery invoked `curl --config -` and streamed its configuration on stdin; the task-owned fake curl handled only file paths.
+- **Solution:** Kept the initialized home and isolated Pave state with `XDG_CONFIG_HOME`. Extended the fake curl fixture to accept both config input modes while allow-listing only pinned auth, token and model endpoints; device login, locked refresh, account-bound listing and account-mismatch refusal then passed.
+- **Prevention / Reference:** Isolate application data with `XDG_CONFIG_HOME` without replacing the toolchain's `HOME`; fake-curl fixtures for Pave's HTTP adapters must support both config-file and stdin config invocation.
 ### [2026-09-27] R4 credential integration exposed compile and TUI feedback failures
 
 - **Context / Symptom:** The auth-store migration build found `Unbound record field content`, incomplete credential pattern matches for `selection_id` and `Account_api_key`, non-erasable optional CLI arguments, and an untyped binding record label. Later runs found a missing binding in configured model selection, a unit-return mismatch, unused picker/settings bindings, a shadowed `path` in `test_oauth_store`, and a forked masking fixture whose child lacked placeholder allocations (`curl` exit 52). A real one-second Copilot device-grant PTY returned to Connect Provider without visible timeout feedback.

@@ -21,7 +21,8 @@ let () =
   let max_turns = ref None and list_providers = ref false
     and list_models = ref false and context_window_tokens = ref None
     and context_window_auto = ref false and context_window_set = ref false in
-  let login = ref "" and login_manual = ref "" and logout = ref "" in
+  let login = ref "" and login_manual = ref "" and login_device = ref ""
+    and logout = ref "" in
     let account_id = ref None and mask_secrets = ref false in
   let custom_prompt = ref None and prompt_template = ref None
     and append_prompt = ref None in
@@ -42,6 +43,8 @@ let () =
       "Provider wire API (see --providers)";
     "--login", Arg.Set_string login, "Log in using the provider's OAuth browser callback";
     "--login-manual", Arg.Set_string login_manual, "Log in by pasting the full redirect URL from another browser";
+    "--login-device", Arg.Set_string login_device,
+      "Log in to OpenAI Codex with device approval (headless)";
     "--logout", Arg.Set_string logout, "Remove the locally stored OAuth credential";
     "--account", Arg.String (fun value -> account_id := Some value),
       "Saved provider account ID (selects a specific local sign-in)";
@@ -121,7 +124,8 @@ let () =
         (Pave.Provider_catalog.all ~registry ());
       exit 0);
     if Cli_auth.handle_action ?account_id:!account_id
-         ~login:!login ~login_manual:!login_manual ~logout:!logout () then exit 0;
+         ~login:!login ~login_manual:!login_manual
+         ~login_device:!login_device ~logout:!logout () then exit 0;
     let root = Unix.realpath !root in
     if not (Sys.is_directory root) then failwith "workspace root must be a directory";
     if !list_models && !endpoint <> "" then

@@ -95,8 +95,9 @@ pave --model "$MODEL_SELECTOR" --prompt 'Inspect the Android build failure' --st
 pave --login anthropic
 pave --provider anthropic --model "$MODEL_ID" --root /path/to/mobile/repo
 
-# Codex subscription: separate ChatGPT OAuth and account-scoped Responses API.
+# Codex subscription: browser PKCE or device approval, with account-scoped Responses.
 pave --login openai-codex
+pave --login-device openai-codex
 pave --provider openai-codex --model "$CODEX_MODEL" --prompt 'Inspect this project'
 
 # OpenRouter browser exchange yields a durable API key; or set OPENROUTER_API_KEY.
@@ -127,6 +128,9 @@ The [provider table](#providers) lists credentials and CLI flags. Additional rou
 - **Novita / SiliconFlow:** Novita (`NOVITA_API_KEY`) uses a fixed hosted Chat endpoint, dynamic `/models` and unchanged interleaved reasoning replay. SiliconFlow uses separate global `SILICONFLOW_API_KEY` and China `SILICONFLOW_CN_API_KEY` hosts, text/chat-filtered listings and native Chat; credentials never cross regions. Some models need a vendor-specific thinking switch for tools: no default switch or model-name heuristic is bundled. These routes buffer validated completions.
 - **StepFun:** `STEPFUN_API_KEY` is sent only to `api.stepfun.ai`, not the separate `.com` platform. Its `/v1/models` mixes Chat and audio without capability flags; `--models` calls IDs unclassified and `/model` marks them `[listed · API unverified]`. Select only a known compatible ID. Complete StepFun tool calls may end with its documented `finish_reason: "stop"`; other Chat routes retain strict finish validation.
 - **CoreWeave Serverless:** W&B Inference's fixed host accepts `COREWEAVE_API_KEY` or `WANDB_API_KEY` for native Chat and account `/v1/models`. A CoreWeave control-plane credential is not interchangeable.
+- **Alibaba Coding Plan / Token Plan:** `ALIBABA_CODING_PLAN_API_KEY` is the Coding Plan subscription key; select `--api china` or `--api intl` for the matching pinned host and an explicitly supported model. `ALIBABA_TOKEN_PLAN_API_KEY` is separate and reaches only its pinned Beijing Token Plan route. Both plans lack a Pave account-model listing; both may use the `sk-sp-` prefix, but their keys and hosts are not interchangeable. See [Coding Plan](https://help.aliyun.com/en/model-studio/coding-plan-faq) and [Token Plan](https://help.aliyun.com/en/model-studio/token-plan-personal-quick-start).
+- **Xiaomi MiMo Token Plan:** obtain the subscription key from the Token Plan console and use the matching provider/region: `xiaomi-token-plan-ams` with `XIAOMI_TOKEN_PLAN_AMS_API_KEY`, `xiaomi-token-plan-cn` with `XIAOMI_TOKEN_PLAN_CN_API_KEY`, or `xiaomi-token-plan-sgp` with `XIAOMI_TOKEN_PLAN_SGP_API_KEY`. These `tp-`/`ttp-` keys are not the pay-as-you-go `XIAOMI_API_KEY`; the Token Plan has no documented model-list endpoint, so select a known supported ID. [Official quick access](https://mimo.mi.com/docs/en-US/tokenplan/Token%20Plan/quick-access).
+- **Cloudflare AI Gateway:** configure `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_GATEWAY_ID` and `CLOUDFLARE_AI_GATEWAY_API_KEY` for that gateway. Configure upstream BYOK credentials or Unified Billing in Cloudflare separately; Pave sends the gateway token only as `cf-aig-authorization`, never as an upstream provider key. Choose a provider-qualified model ID or configured `dynamic/ROUTE`; Pave has no authoritative gateway catalog. [Cloudflare API guide](https://developers.cloudflare.com/ai-gateway/usage/chat-completion/).
 
 These routes passed isolated fake-HTTPS/native workspace tool-result scenarios; no live vendor account entitlement or per-model tool support was verified.
 
@@ -145,9 +149,10 @@ In `/model`, use arrows and Enter to choose a discovered ID, or type a canonical
 
 **Sign-in details**
 
-- Remote browser: `pave --login-manual PROVIDER` accepts a full callback URL; OpenRouter also accepts its authorization code alone. GitLab Duo, Devin, Anthropic and Codex require matching callback state.
+- Remote browser: `pave --login-manual PROVIDER` accepts a full callback URL; OpenRouter also accepts its authorization code alone. GitLab Duo, Devin, Anthropic and browser-based Codex require matching callback state.
 - GitLab Duo requires a user-registered `GITLAB_CLIENT_ID` and matching loopback `GITLAB_REDIRECT_URI`; choose its upstream model and API manually. Devin uses its pinned CLI authorization and account-scoped Connect model roster.
 - GitHub Copilot and Kilo use device approval: `pave --login PROVIDER`, then open the shown verification URL and enter its code. `--login-manual` is not supported for either; Kilo's public models do not certify Chat/tool support.
+- OpenAI Codex also supports `pave --login-device openai-codex`: it prints the fixed verification URL and code, then polls the official device-approval endpoints for up to 15 minutes. The authorization code is exchanged through the same pinned OAuth token endpoint; the stored grant remains bound to the same Codex account and Responses route, with locked refresh. No loopback browser callback is opened.
 - `pave --logout PROVIDER` removes every saved sign-in for that provider; add `--account "$ID"` to remove only one. The private store at `${XDG_CONFIG_HOME:-~/.config}/pave/oauth.json` is **unencrypted** (0700 directory, 0600 file); OpenRouter's browser exchange stores an API key. Environment keys take precedence where available. Browser/device-derived credentials cannot be sent to a custom `--endpoint`.
 - Google Vertex and Bedrock Converse use scoped Google ADC or AWS credential-chain identity through their native routes; these are not API keys or saved OAuth credentials.
 
@@ -287,7 +292,7 @@ Use `pave --providers` for the live list. This reference separates wire transpor
 | Provider | Transport | Authentication | CLI selection |
 | --- | --- | --- | --- |
 | OpenAI | Chat Completions, Responses | `OPENAI_API_KEY` | `--provider openai --model MODEL_ID` (Responses by default; `--api chat` for Chat-only models) |
-| OpenAI Codex subscription | account-scoped Codex Responses | `--login openai-codex` (PKCE; refresh) | `--provider openai-codex --model MODEL_ID` |
+| OpenAI Codex subscription | account-scoped Codex Responses | `--login openai-codex` (browser PKCE) or `--login-device openai-codex` (device approval) | `--provider openai-codex --model MODEL_ID` |
 | Anthropic | Messages | `ANTHROPIC_API_KEY` or `--login anthropic` | `--provider anthropic --model MODEL_ID` |
 | Ollama | native `/api/chat` | none (local server) | `--provider ollama --model MODEL_ID` |
 | Google Gemini API | native `generateContent` | `GEMINI_API_KEY` | `--provider google --model MODEL_ID` |
@@ -407,8 +412,8 @@ The TUI `/thinking LEVEL` command stores branch-local metadata; a route sends on
 
 - The built-in CLI lists 71 provider IDs (including two Kimi Code region routes for one sibling identity); 13 identities in the 83-provider reference inventory still have no Pave route. The first 15 routes added after v0.1.39 also passed native fake-HTTPS `read_file` turns. R3 route, discovery, reasoning-replay and CLI tool-result fixtures passed; fixtures do not prove live entitlement.
 - Command Code catalogs describe endpoints but cannot validate a Studio key: choose `--api`. GitLab Duo has no authoritative non-agentic upstream-model roster: supply route and model. Unverified listings stay unclassified in `/model`.
-- Alibaba Coding Plan needs `--api china|intl`; Xiaomi and MiniMax keys are region-bound. Cursor bidirectional Connect and GitLab Duo Agent WebSocket remain unsupported.
-- Google's [Antigravity terms](https://antigravity.google/terms/) prohibit third-party OAuth clients; xAI has no published reusable subscription OAuth registration. Zhipu Coding Plan excludes unofficial clients. Standard API keys are not mislabeled as plan credentials.
+- Alibaba Coding Plan requires an explicit `--api china|intl`; its key is distinct from the Beijing Token Plan key. Xiaomi Token Plan environment keys and endpoints are region-bound, unlike Xiaomi pay-as-you-go. Cloudflare requires a configured account/gateway and uses the gateway-auth header; none of these routes has a Pave account-model listing.
+- Cursor bidirectional HTTP/2 Connect and GitLab Duo Agent WebSocket remain unsupported and have no Pave login/route; GitLab Duo Direct Access is a separate supported route. Gemini CLI, Kimi Code device OAuth, Muse, Stencil/Z.AI Coding Plan, xAI subscription OAuth, Perplexity and Copilot Enterprise also remain unavailable pending the documented matching registration/route/transport prerequisites. Google's [Antigravity terms](https://antigravity.google/terms/) prohibit third-party OAuth clients; standard API keys are not mislabeled as subscription grants.
 
 ## Features
 

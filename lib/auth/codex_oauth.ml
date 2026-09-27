@@ -134,3 +134,129 @@ let refresh ?http ?now (credential : Oauth_store.credential) =
   let prior = { credential with
     metadata = List.remove_assoc "id_token" credential.metadata } in
   with_account (Oauth_flow.refresh ?http ?now (policy ()) prior)
+
+let device_usercode_url =
+  "https://auth.openai.com/api/accounts/deviceauth/usercode"
+
+let device_token_url =
+  "https://auth.openai.com/api/accounts/deviceauth/token"
+
+let device_verification_uri = "https://auth.openai.com/codex/device"
+let device_redirect_uri = "https://auth.openai.com/deviceauth/callback"
+
+let device_post ?http ~url params =
+  ignore (Oauth_flow.validate_url ~local:(Option.is_some http) url);
+  Oauth_flow.unique_params params;
+  let body = Yojson.Basic.to_string (`Assoc
+    (List.map (fun (key, value) -> key, `String value) params)) in
+  if String.length body > 65536 then
+    raise (Oauth_flow.OAuth_error "Codex device request too large");
+  let send = match http with
+    | Some send -> send
+    | None -> Oauth_flow.default_http in
+  let status, response = send ~url ~headers:["Content-Type", "application/json"]
+    ~body in
+  if String.length response > 1_048_576 then
+    raise (Oauth_flow.OAuth_error "Codex device response too large");
+  status, response
+
+let device_json response =
+  let json = try Yojson.Basic.from_string response with _ ->
+    raise (Oauth_flow.OAuth_error "invalid Codex device response") in
+  match json with
+  | `Assoc _ -> json
+  | _ -> raise (Oauth_flow.OAuth_error "invalid Codex device response")
+
+let device_value key json =
+  match Oauth_flow.string_at [key] json with
+  | Some value when String.length value <= 8192
+      && not (Oauth_flow.has_controls value) -> value
+  | _ -> raise (Oauth_flow.OAuth_error "invalid Codex device response")
+
+let device_error json = Oauth_flow.string_at ["error"] json
+
+let device_login ?http ?(now = Unix.gettimeofday) ?(sleep = fun seconds ->
+    ignore (Unix.select [] [] [] seconds)) ?(timeout = 900.)
+    ~on_authorization () =
+  if not (Float.is_finite timeout) || timeout <= 0. || timeout > 900. then
+    raise (Oauth_flow.OAuth_error "invalid Codex device authorization timeout");
+  let start = now () in
+  if not (Float.is_finite start) then
+    raise (Oauth_flow.OAuth_error "invalid Codex device authorization clock");
+  let deadline = start +. timeout in
+  if not (Float.is_finite deadline) then
+    raise (Oauth_flow.OAuth_error "invalid Codex device authorization timeout");
+  let check_deadline () =
+    let current = now () in
+    if not (Float.is_finite current) || current >= deadline then
+      raise (Oauth_flow.OAuth_error "Codex device authorization timed out");
+    current in
+  ignore (check_deadline ());
+  let policy = policy () in
+  let status, response = device_post ?http ~url:device_usercode_url
+    ["client_id", policy.client_id] in
+  ignore (check_deadline ());
+  if status < 200 || status >= 300 then
+    raise (Oauth_flow.OAuth_error "Codex device authorization request rejected");
+  let device = device_json response in
+  let device_auth_id = device_value "device_auth_id" device in
+  let user_code = device_value "user_code" device in
+  let authorization : Oauth_device.authorization = {
+    verification_uri = device_verification_uri;
+    verification_uri_complete = None;
+    user_code;
+  } in
+  on_authorization authorization;
+  let rec poll polls_left =
+    ignore (check_deadline ());
+    if polls_left <= 0 then
+      raise (Oauth_flow.OAuth_error "Codex device authorization timed out");
+    let status, response = device_post ?http ~url:device_token_url
+      ["device_auth_id", device_auth_id; "user_code", user_code] in
+    let current = check_deadline () in
+    if status = 403 || status = 404 then (
+      if polls_left <= 1 then
+        raise (Oauth_flow.OAuth_error "Codex device authorization timed out");
+      let remaining = deadline -. current in
+      if remaining <= 0. then
+        raise (Oauth_flow.OAuth_error "Codex device authorization timed out");
+      sleep (min 5. remaining);
+      poll (polls_left - 1))
+    else if status < 200 || status >= 300 then (
+      let error = try device_error (device_json response) with
+        | Oauth_flow.OAuth_error _ -> None in
+      match error with
+      | Some "access_denied" ->
+          raise (Oauth_flow.OAuth_error "Codex device authorization denied")
+      | Some "expired_token" ->
+          raise (Oauth_flow.OAuth_error "Codex device authorization expired")
+      | _ -> raise (Oauth_flow.OAuth_error "Codex device token request rejected"))
+    else
+      let result = device_json response in
+      (match device_error result with
+       | Some "access_denied" ->
+           raise (Oauth_flow.OAuth_error "Codex device authorization denied")
+       | Some "expired_token" ->
+           raise (Oauth_flow.OAuth_error "Codex device authorization expired")
+       | Some _ ->
+           raise (Oauth_flow.OAuth_error "Codex device token request rejected")
+       | None -> ());
+      let code = device_value "authorization_code" result in
+      let verifier = device_value "code_verifier" result in
+      (match Oauth_flow.response_field "code_challenge" result with
+       | None | Some `Null -> ()
+       | Some (`String challenge)
+         when challenge = Oauth_flow.pkce_challenge verifier -> ()
+       | _ -> raise (Oauth_flow.OAuth_error "Codex device proof key mismatch"));
+      let token = Oauth_flow.post ?http ~url:policy.token_url
+        ~headers:policy.extra_token_headers ~format:policy.token_body
+        ["grant_type", "authorization_code"; "client_id", policy.client_id;
+         "code", code; "redirect_uri", device_redirect_uri;
+         "code_verifier", verifier] in
+      let token_now = now () in
+      if not (Float.is_finite token_now) then
+        raise (Oauth_flow.OAuth_error "invalid Codex device authorization clock");
+      with_account (Oauth_flow.credential ~now:token_now policy token)
+  in
+  let max_polls = int_of_float (ceil (timeout /. 5.)) + 1 in
+  poll max_polls

@@ -123,4 +123,91 @@ let () =
     account_id = Some "workspace-2"});
   expect_error (fun () -> Codex.account_id {credential with
     access = "not-a-jwt"});
+  let device_clock = ref 2000. in
+  let prompted = ref false and device_polls = ref 0
+  and device_sleeps = ref [] in
+  let device_verifier = "device-verifier" in
+  let device_challenge = Flow.pkce_challenge device_verifier in
+  let json_field key body =
+    Yojson.Basic.Util.member key (Yojson.Basic.from_string body) in
+  let device_http ~url ~headers ~body =
+    if url = "https://auth.openai.com/api/accounts/deviceauth/usercode" then (
+      assert (headers = ["Content-Type", "application/json"]);
+      assert (json_field "client_id" body = `String policy.client_id);
+      200, {|{"device_auth_id":"device-1","user_code":"ABCD-EFGH"}|})
+    else if url = "https://auth.openai.com/api/accounts/deviceauth/token" then (
+      assert !prompted;
+      assert (headers = ["Content-Type", "application/json"]);
+      assert (json_field "device_auth_id" body = `String "device-1");
+      assert (json_field "user_code" body = `String "ABCD-EFGH");
+      incr device_polls;
+      match !device_polls with
+      | 1 -> 403, ""
+      | 2 -> 404, "not-json"
+      | _ -> 200, Yojson.Basic.to_string (`Assoc [
+          "authorization_code", `String "device-code";
+          "code_verifier", `String device_verifier;
+          "code_challenge", `String device_challenge ]))
+    else if url = policy.token_url then (
+      assert (headers = ["Content-Type", "application/x-www-form-urlencoded"]);
+      let params = Flow.query_params body in
+      assert (List.assoc "grant_type" params = "authorization_code");
+      assert (List.assoc "client_id" params = policy.client_id);
+      assert (List.assoc "code" params = "device-code");
+      assert (List.assoc "redirect_uri" params =
+        "https://auth.openai.com/deviceauth/callback");
+      assert (List.assoc "code_verifier" params = device_verifier);
+      200, token_response (with_account "workspace-1"))
+    else failwith ("unexpected Codex device URL: " ^ url) in
+  let device_credential = Codex.device_login ~http:device_http
+    ~now:(fun () -> !device_clock)
+    ~sleep:(fun seconds ->
+      device_sleeps := seconds :: !device_sleeps;
+      device_clock := !device_clock +. seconds)
+    ~timeout:60.
+    ~on_authorization:(fun (auth : Pave.Oauth_device.authorization) ->
+      assert (auth.verification_uri = "https://auth.openai.com/codex/device");
+      assert (auth.verification_uri_complete = None);
+      assert (auth.user_code = "ABCD-EFGH");
+      prompted := true) () in
+  assert !prompted;
+  assert (!device_polls = 3);
+  assert (List.rev !device_sleeps = [5.; 5.]);
+  assert (device_credential.account_id = Some "workspace-1");
+  assert (device_credential.refresh = Some "refresh-one");
+  assert (device_credential.expires_at = Some 2610.);
+  assert (device_credential.metadata = []);
+  assert (Codex.account_id device_credential = "workspace-1");
+  let mismatch_http ~url ~headers:_ ~body:_ =
+    if url = "https://auth.openai.com/api/accounts/deviceauth/usercode" then
+      200, {|{"device_auth_id":"device-2","user_code":"WXYZ-1234"}|}
+    else if url = "https://auth.openai.com/api/accounts/deviceauth/token" then
+      200, Yojson.Basic.to_string (`Assoc [
+        "authorization_code", `String "device-code";
+        "code_verifier", `String device_verifier;
+        "code_challenge", `String "wrong-challenge" ])
+    else failwith ("unexpected Codex device URL: " ^ url) in
+  expect_error (fun () -> Codex.device_login ~http:mismatch_http
+    ~now:(fun () -> 3000.) ~timeout:30. ~on_authorization:(fun _ -> ()) ());
+  let denied_http ~url ~headers:_ ~body:_ =
+    if url = "https://auth.openai.com/api/accounts/deviceauth/usercode" then
+      200, {|{"device_auth_id":"device-3","user_code":"NOPE-1234"}|}
+    else if url = "https://auth.openai.com/api/accounts/deviceauth/token" then
+      400, {|{"error":"access_denied"}|}
+    else failwith ("unexpected Codex device URL: " ^ url) in
+  expect_error (fun () -> Codex.device_login ~http:denied_http
+    ~now:(fun () -> 4000.) ~timeout:30. ~on_authorization:(fun _ -> ()) ());
+  let timeout_clock = ref 5000. and timeout_polls = ref 0 in
+  let pending_http ~url ~headers:_ ~body:_ =
+    if url = "https://auth.openai.com/api/accounts/deviceauth/usercode" then
+      200, {|{"device_auth_id":"device-4","user_code":"WAIT-1234"}|}
+    else if url = "https://auth.openai.com/api/accounts/deviceauth/token" then (
+      incr timeout_polls;
+      403, "")
+    else failwith ("unexpected Codex device URL: " ^ url) in
+  expect_error (fun () -> Codex.device_login ~http:pending_http
+    ~now:(fun () -> !timeout_clock)
+    ~sleep:(fun seconds -> timeout_clock := !timeout_clock +. seconds)
+    ~timeout:6. ~on_authorization:(fun _ -> ()) ());
+  assert (!timeout_polls = 2);
   print_endline "codex oauth: ok"

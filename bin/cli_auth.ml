@@ -21,16 +21,25 @@ let grant_type service = match service with
   | "devin" -> Pave.Oauth_store.Provider_session
   | _ -> Pave.Oauth_store.Authorization_code
 
-let binding (descriptor : Pave.Provider_catalog.descriptor) service =
+let binding (descriptor : Pave.Provider_catalog.descriptor) grant_type =
   ({ Pave.Oauth_store.provider = descriptor.id;
-     grant_type = grant_type service;
+     grant_type;
      routes = List.map
        (fun (route : Pave.Provider_catalog.route) ->
          route.name, route.endpoint) descriptor.routes }
    : Pave.Oauth_store.binding)
 
-let handle_action ?account_id ~login ~login_manual ~logout () =
-    let actions = List.filter ((<>) "") [ login; login_manual; logout ] in
+let grant_types service =
+  if service = "openai-codex" then
+    [Pave.Oauth_store.Authorization_code; Pave.Oauth_store.Device_approval]
+  else [grant_type service]
+
+let bindings descriptor service =
+  List.map (binding descriptor) (grant_types service)
+
+let handle_action ?account_id ?(login_device = "")
+    ~login ~login_manual ~logout () =
+    let actions = List.filter ((<>) "") [ login; login_manual; login_device; logout ] in
     if List.length actions > 1 then failwith "choose only one OAuth action";
     (match actions with
      | [] -> false
@@ -52,10 +61,17 @@ let handle_action ?account_id ~login ~login_manual ~logout () =
             | None ->
                 Pave.Oauth_store.remove_provider ~path ~provider:id;
                 Printf.printf "All local OAuth credentials removed for %s.\n" id);
-          true)
+           true)
          else (
            let credential =
-             if service = "openrouter" then (
+             if login_device <> "" then (
+               if service <> "openai-codex" then
+                 failwith "--login-device is only available for openai-codex";
+               Pave.Codex_oauth.device_login
+                 ~on_authorization:(fun (auth : Pave.Oauth_device.authorization) ->
+                   Printf.printf "Open this verification URL:\n%s\nEnter code: %s\nWaiting for authorization...\n%!"
+                     auth.verification_uri auth.user_code) ())
+             else if service = "openrouter" then (
                if login_manual <> "" then (
                  let authorization = Pave.Openrouter_oauth.start () in
                  Printf.printf "Open this authorization URL:\n%s\nPaste the full redirect URL: %!"
@@ -107,19 +123,22 @@ let handle_action ?account_id ~login ~login_manual ~logout () =
                  let code = Pave.Oauth_flow.await_callback authorization listener in
                  oauth_exchange service policy authorization
                    (code ^ "#" ^ authorization.state))) in
-          Option.iter (fun requested ->
-            if credential.Pave.Oauth_store.account_id <> Some requested then
-              failwith "granted account does not match --account; credential was not stored")
-            account_id;
-          let selection_id =
-            Pave.Oauth_store.put_account_with_selection ~path ~provider:id
-              ~binding:(binding descriptor service) credential in
-          Printf.printf "OAuth credential stored for %s%s.\n" id
-            (match credential.Pave.Oauth_store.account_id with
-             | Some value -> " account " ^ value
-             | None -> " local sign-in ID " ^ selection_id);
-         true)
+           Option.iter (fun requested ->
+             if credential.Pave.Oauth_store.account_id <> Some requested then
+               failwith "granted account does not match --account; credential was not stored")
+             account_id;
+           let selection_id =
+             Pave.Oauth_store.put_account_with_selection ~path ~provider:id
+               ~binding:(binding descriptor
+                 (if login_device <> "" then Pave.Oauth_store.Device_approval
+                  else grant_type service)) credential in
+           Printf.printf "OAuth credential stored for %s%s.\n" id
+             (match credential.Pave.Oauth_store.account_id with
+              | Some value -> " account " ^ value
+              | None -> " local sign-in ID " ^ selection_id);
+           true)
      | _ -> assert false)
+
 
 let api_key (descriptor : Pave.Provider_catalog.descriptor) =
   let configured = Option.bind descriptor.api_key_env (fun name ->
@@ -206,7 +225,8 @@ let resolve_builtin_authentication ?account_id
             failwith "OAuth credentials cannot be sent to a custom endpoint";
           let path = Pave.Oauth_store.default_path () in
           let provider_id = descriptor.id in
-          let expected_binding = binding descriptor service in
+          let expected_bindings = bindings descriptor service in
+          let expected_binding = binding descriptor (grant_type service) in
           let stored_accounts =
             Pave.Oauth_store.accounts ~path ~provider:provider_id in
           let stored_account = match account_id, stored_accounts with
@@ -226,7 +246,9 @@ let resolve_builtin_authentication ?account_id
           let selected_account_id = Some stored_account.selection_id in
           let validate_binding (actual : Pave.Oauth_store.binding) =
             if actual.provider <> expected_binding.provider ||
-               actual.grant_type <> expected_binding.grant_type ||
+               not (List.exists (fun expected ->
+                 actual.grant_type = expected.Pave.Oauth_store.grant_type)
+                 expected_bindings) ||
                not (List.mem (route.name, route.endpoint) actual.routes) then
               failwith "saved credential is not authorized for this provider, grant, and API route" in
           (match stored_account.binding with
@@ -245,10 +267,10 @@ let resolve_builtin_authentication ?account_id
               | None -> failwith ("OAuth account removed; run pave --login " ^
                   provider_id) in
             let credential = account.Pave.Oauth_store.credential in
-            (match account.binding with
-             | Some actual -> validate_binding actual
-             | None ->
-                 failwith "saved credential route binding is missing; sign in again");
+            let account_binding = match account.binding with
+              | Some actual -> validate_binding actual; actual
+              | None ->
+                  failwith "saved credential route binding is missing; sign in again" in
             let credential = match credential.expires_at with
               | Some expires when Unix.gettimeofday () >= expires -. 60. ->
                   let policy = match policy with
@@ -258,7 +280,7 @@ let resolve_builtin_authentication ?account_id
                   if updated.account_id <> credential.account_id then
                     failwith "OAuth refresh changed the provider account; credential was not updated";
                   Pave.Oauth_store.put_account ~path ~provider:provider_id
-                    ~binding:expected_binding ~selection_id:account.selection_id
+                    ~binding:account_binding ~selection_id:account.selection_id
                     updated;
                   updated
               | _ -> credential in
