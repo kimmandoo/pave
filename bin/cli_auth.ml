@@ -177,6 +177,11 @@ let resolve_builtin_authentication ?account_id
     ~(route : Pave.Provider_catalog.route) ~endpoint () =
     Pave.Provider.validate_endpoint_override ~api:route.wire
       ~pinned_endpoint:route.endpoint ~requested:endpoint;
+    if route.wire = Pave.Provider.Apple_foundation_models then (
+      if descriptor.id <> "apple" || endpoint <> "" then
+        failwith "Apple Foundation Models requires its registered local route";
+      Pave.Provider.Api_key, "", None)
+    else
     if route.wire = Pave.Provider.Local_chat then (
       if not (List.mem descriptor.id ["lm-studio"; "llama.cpp"; "vllm"]) ||
          descriptor.oauth <> None then
@@ -186,10 +191,17 @@ let resolve_builtin_authentication ?account_id
       let key = api_key descriptor in
       Pave.Provider.Api_key, Option.value ~default:"" key, None)
     else if route.wire = Pave.Provider.Vertex_generate ||
-            route.wire = Pave.Provider.Bedrock_converse then (
+            route.wire = Pave.Provider.Vertex_anthropic ||
+            route.wire = Pave.Provider.Bedrock_converse ||
+            route.wire = Pave.Provider.Bedrock_converse_stream then (
       if endpoint <> "" then
-        failwith "cloud credentials require the provider's derived regional endpoint";
+        failwith "cloud credentials require the provider's derived endpoint";
       Pave.Provider.Cloud_identity, "", None)
+    else if route.wire = Pave.Provider.Azure_responses ||
+            route.wire = Pave.Provider.Azure_chat then
+      (match api_key descriptor with
+       | Some key -> Pave.Provider.Api_key, key, None
+       | None -> Pave.Provider.Cloud_identity, "", None)
     else if route.wire = Pave.Provider.Bedrock_mantle_responses then (
       if endpoint <> "" then
         failwith "Mantle bearer token requires the derived regional endpoint";

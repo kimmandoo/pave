@@ -113,12 +113,16 @@ let () =
             (fun (route : Pave.Provider_catalog.route) -> route.name) entry.routes))
           (match entry.api_key_env, entry.oauth with
            | Some env, Some _ -> env ^ " or OAuth login"
+           | Some env, None when entry.id = "azure" ->
+               env ^ " or Azure CLI Entra identity"
            | Some env, None when List.exists
                (fun (route : Pave.Provider_catalog.route) ->
                  route.wire = Pave.Provider.Local_chat) entry.routes ->
                env ^ " (optional; local)"
            | Some env, None -> env
            | None, Some _ -> "OAuth login required"
+           | None, None when entry.id = "apple" ->
+               "Apple on-device model (macOS 26+; no key)"
            | None, None when entry.id = "google-vertex" ->
                "Google ADC + project/location required"
            | None, None when entry.id = "amazon-bedrock" ->
@@ -228,6 +232,8 @@ let () =
                  "pinned account listing"
              | Pave.Model_catalog.Provider_listing -> "provider listing"
              | Pave.Model_catalog.Capability_response -> "capability response"
+             | Pave.Model_catalog.Runtime_default ->
+                 "OS-managed runtime default"
              | Pave.Model_catalog.Explicit_user_input -> "explicit user input" in
            let retrieved = match listing.source.retrieved_at with
              | None -> "freshness timestamp unavailable"
@@ -240,7 +246,11 @@ let () =
            Printf.printf "%s %s from %s · %s\n"
              (if listing.source.retrieved_at = None then "Configured" else "Fresh")
              source_name
-             (Option.value ~default:"user settings" listing.source.endpoint) retrieved;
+             (match listing.source.id_source with
+              | Pave.Model_catalog.Runtime_default ->
+                  "macOS Foundation Models"
+              | _ -> Option.value ~default:"user settings"
+                  listing.source.endpoint) retrieved;
            List.iter (fun (model : Pave.Model_discovery.model) ->
              let capabilities = model.capabilities in
              let endpoints = match capabilities.supported_endpoints with
@@ -251,7 +261,11 @@ let () =
                         ~provider:descriptor.id model ~endpoint:candidate.endpoint
                     then Some candidate.name else None) descriptor.routes in
              let status =
-               if listing.source.id_source = Pave.Model_catalog.Explicit_user_input ||
+               if listing.source.id_source =
+                   Pave.Model_catalog.Runtime_default then
+                 "OS-managed default; availability is checked during invocation"
+               else if listing.source.id_source =
+                   Pave.Model_catalog.Explicit_user_input ||
                   Pave.Provider_catalog.unclassified_models ~registry descriptor.id then
                  "listed; inference compatibility unverified"
                else if endpoints <> [] then "listed; per-model APIs reported"
@@ -1344,11 +1358,33 @@ let () =
                    on_event (entry.id ^ "  " ^ entry.display_name)) providers;
                  print_string "Provider/model ID (blank cancels): "; flush stdout;
                  (try String.trim (read_line ()) with End_of_file -> "")) in
+      let route_browse =
+        Pave.Interaction.model_route_browse_selection ~registry selector in
+      let selector = match route_browse, !ui with
+        | Some (descriptor, route), Some screen ->
+            let selected_account_id = match !account_id with
+              | Some _ as selected -> selected
+              | None when descriptor.id = !active_descriptor.id ->
+                  Option.bind !active_identity
+                    (fun identity -> identity.account_id)
+              | None when configured.default_provider = Some descriptor.id ->
+                  configured.default_account_id
+              | None -> None in
+            Option.value ~default:""
+              (Model_picker.choose ~registry screen ~descriptor
+                ~route_name:route.name ?account_id:selected_account_id
+                ~title:("Model · " ^ descriptor.id ^ "@" ^ route.name)
+                ~choices:[] ())
+        | Some _, None -> ""
+        | None, _ -> selector in
       if selector <> "" then (
-        let current_provider, current_route = match preferred with
-          | Some descriptor when descriptor.id <> !active_descriptor.id ->
-              descriptor.id, descriptor.default_route
-          | _ -> !active_descriptor.id, !active_route.name in
+        let current_provider, current_route = match route_browse with
+          | Some (descriptor, route) -> descriptor.id, route.name
+          | None ->
+              (match preferred with
+               | Some descriptor when descriptor.id <> !active_descriptor.id ->
+                   descriptor.id, descriptor.default_route
+               | _ -> !active_descriptor.id, !active_route.name) in
         let selected_route =
           match Pave.Provider_catalog.find ~registry current_provider with
           | Some descriptor ->

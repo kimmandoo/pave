@@ -1,6 +1,8 @@
 type api = Openai_completions | Local_chat | Anthropic_messages | Openai_responses
-  | Azure_responses | Bedrock_mantle_responses | Ollama_chat | Gemini_direct
-  | Vertex_generate | Bedrock_converse | Xai_chat | Nvidia_chat
+  | Azure_responses | Azure_chat | Bedrock_mantle_responses | Ollama_chat | Gemini_direct
+  | Vertex_generate | Vertex_anthropic | Bedrock_converse | Bedrock_converse_stream
+  | Apple_foundation_models
+  | Xai_chat | Nvidia_chat
   | Novita_chat | Siliconflow_chat | Siliconflow_cn_chat
   | Stepfun_chat | Coreweave_chat | Synthetic_chat | Zai_chat
   | Zenmux_chat | Wafer_chat | Qianfan_chat | Xiaomi_chat
@@ -531,7 +533,7 @@ let post_stream ?max_request_bytes ?(local = false) ?cancel ~endpoint ~headers
       if Buffer.length pending <> 0 then on_chunk (Buffer.contents pending)))
 
 let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage
-    ?thinking ?cancel config messages tools =
+    ?thinking ?cancel ?apple_helper_path config messages tools =
   check_cancel cancel;
 
   let has_attachments = ref false in
@@ -546,9 +548,11 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage
   if !has_attachments &&
      not (match config.api with
        | Openai_completions | Local_chat | Anthropic_messages | Openai_responses
-       | Azure_responses | Bedrock_mantle_responses | Ollama_chat | Gemini_direct
-       | Vertex_generate | Bedrock_converse | Xai_chat | Nvidia_chat | Novita_chat
-       | Siliconflow_chat | Siliconflow_cn_chat | Stepfun_chat | Coreweave_chat
+       | Azure_responses | Azure_chat | Bedrock_mantle_responses | Ollama_chat
+       | Gemini_direct | Vertex_generate | Bedrock_converse
+       | Bedrock_converse_stream | Xai_chat | Nvidia_chat
+       | Siliconflow_chat | Siliconflow_cn_chat | Stepfun_chat | Novita_chat
+       | Coreweave_chat
        | Synthetic_chat | Zai_chat | Zenmux_chat | Wafer_chat | Qianfan_chat
        | Xiaomi_chat | Kilo_chat | Alibaba_coding_chat | Singularity_dev_chat
        | Opencode_go_chat | Charm_hyper_chat | Singularity_tech_chat | Firepass_chat
@@ -562,7 +566,7 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage
        | Cline_pass_chat | Alibaba_token_plan_chat | Kimi_code_chat
        | Kimi_code_cn_chat | Kimi_code_messages | Kimi_code_cn_messages
        | Fireworks_chat -> true
-       | Devin_connect -> false) then
+       | Vertex_anthropic | Devin_connect | Apple_foundation_models -> false) then
     raise (Provider_error "this provider route does not support user media attachments");
   let has_audio_video = List.exists (fun (message : Protocol.message) ->
     List.exists (fun (attachment : Protocol.attachment) ->
@@ -574,10 +578,14 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage
       "audio/video attachments require a Gemini generateContent route");
   let config = if config.api = Local_chat then
     { config with endpoint = local_endpoint config.endpoint } else config in
+  if config.api = Apple_foundation_models && authentication <> Api_key then
+    raise (Provider_error "Apple Foundation Models does not accept provider credentials");
   if authentication = Cloud_identity &&
-     config.api <> Vertex_generate && config.api <> Bedrock_converse then
+     config.api <> Vertex_generate && config.api <> Vertex_anthropic &&
+     config.api <> Bedrock_converse && config.api <> Bedrock_converse_stream &&
+     config.api <> Azure_responses && config.api <> Azure_chat then
     raise (Provider_error
-      "cloud identity authentication requires an AWS Bedrock or Google Vertex route");
+      "cloud identity authentication requires an AWS Bedrock, Google Vertex, or Azure route");
   if authentication = OAuth &&
      not (match config.api, config.endpoint with
        | Anthropic_messages, "https://api.anthropic.com/v1/messages"
@@ -602,12 +610,47 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage
   reject_controls "API key" api_key;
   if authentication = OAuth && api_key = "" then
     raise (Provider_error "OAuth access token unavailable");
-  let parse f =
+  let parse_with_secret secret f =
     try f () with
     | Protocol.Invalid_response message ->
-        raise (Provider_error ("invalid completion response: " ^ redact api_key message)) in
+        raise (Provider_error ("invalid completion response: " ^
+          redact secret message)) in
+  let parse f = parse_with_secret api_key f in
+  let azure_resolve route =
+    let resolve authentication =
+      try Azure_wire.resolve ~route ~endpoint:config.endpoint
+        ~deployment:config.model ~authentication
+      with Invalid_argument message -> raise (Provider_error message) in
+    ignore (resolve (Azure_wire.Api_key "pave-preflight"));
+    let authentication, secret = match authentication with
+      | Api_key -> Azure_wire.Api_key api_key, api_key
+      | Cloud_identity ->
+          if api_key <> "" then
+            raise (Provider_error
+              "Azure Entra authentication cannot also carry an API key");
+          let token = try Azure_auth.access_token ~endpoint:config.endpoint
+              ?cancel ()
+            with
+            | Azure_auth.Cancelled -> raise Cancelled
+            | Azure_auth.Authentication_error reason ->
+                raise (Provider_error reason) in
+          Azure_wire.Entra_token token, token
+      | OAuth ->
+          raise (Provider_error
+            "Azure routes do not accept subscription OAuth credentials") in
+    let endpoint, headers = resolve authentication in
+    endpoint, headers, secret in
   let result = match config.api with
-  | Openai_completions | Local_chat | Copilot_chat ->
+  | Apple_foundation_models ->
+      if authentication <> Api_key then
+        raise (Provider_error "Apple Foundation Models does not accept provider credentials");
+      (try
+        Apple_foundation_models.complete ?helper_path:apple_helper_path ?on_text
+          ?cancel ~endpoint:config.endpoint ~model:config.model
+          ~api_key messages
+       with Apple_foundation_models.Cancelled -> raise Cancelled
+          | Apple_foundation_models.Error message -> raise (Provider_error message))
+  | Openai_completions | Local_chat | Copilot_chat | Azure_chat ->
       let fields = [ "model", `String config.model;
                      "messages", Protocol.chat_messages_to_json messages ] in
       let fields = if tools = [] then fields else fields @ [ "tools", `List tools ] in
@@ -616,19 +659,25 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage
           not (String.for_all (fun c -> Char.code c > 32 &&
             Char.code c < 127) api_key))
       then raise (Provider_error "invalid local API key");
-      let headers = match config.api with
+      let endpoint, headers, secret = match config.api with
+        | Azure_chat -> azure_resolve Azure_wire.Chat_completions
         | Copilot_chat ->
+            config.endpoint,
             (try Github_copilot_wire.headers ~endpoint:config.endpoint
                ~model:config.model ~token:api_key ~messages
-             with Invalid_argument message -> raise (Provider_error message))
-        | _ -> if api_key = "" then [] else
-            [ "Authorization: Bearer " ^ api_key ] in
+             with Invalid_argument message -> raise (Provider_error message)),
+            api_key
+        | _ ->
+            config.endpoint,
+            (if api_key = "" then [] else
+              [ "Authorization: Bearer " ^ api_key ]),
+            api_key in
       (match on_text with
       | None ->
           let json = post_json ~local:(config.api = Local_chat) ?cancel
-            ~endpoint:config.endpoint ~headers ~secret:api_key
-            (`Assoc fields) in
-          let reply = parse (fun () -> Protocol.parse_completion json) in
+            ~endpoint ~headers ~secret (`Assoc fields) in
+          let reply = parse_with_secret secret
+            (fun () -> Protocol.parse_completion json) in
           (match on_usage with
            | None -> ()
            | Some report ->
@@ -643,10 +692,10 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage
               fields @ [ "stream_options", `Assoc [ "include_usage", `Bool true ] ]
             else fields in
           let body = `Assoc fields in
-          parse (fun () ->
+          parse_with_secret secret (fun () ->
             post_stream ~local:(config.api = Local_chat) ?cancel
-              ~endpoint:config.endpoint ~headers ~secret:api_key
-              body ~on_chunk:(Openai_stream.feed stream)
+              ~endpoint ~headers ~secret body
+              ~on_chunk:(Openai_stream.feed stream)
               ~is_done:(fun () -> Openai_stream.is_done stream)
               ~is_finished:(fun () -> Openai_stream.is_finished stream);
             let reply = Openai_stream.finish stream in
@@ -1134,26 +1183,28 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage
                  Option.iter report (Anthropic_stream.usage stream));
             reply))
   | Openai_responses | Azure_responses | Bedrock_mantle_responses ->
-      let endpoint, headers =
+      let endpoint, headers, secret =
         if config.api = Azure_responses then
-          (try Azure_wire.resolve ~endpoint:config.endpoint
-             ~deployment:config.model ~api_key
-           with Invalid_argument message -> raise (Provider_error message))
+          azure_resolve Azure_wire.Responses
         else if config.api = Bedrock_mantle_responses then
           (try
              let requested = if config.endpoint = "" then
                (Bedrock_mantle.endpoint ~region:(Bedrock_mantle.region ()) ()).url
                else config.endpoint in
-             Bedrock_mantle.resolve ~endpoint:requested ~api_key ()
+             let endpoint, headers =
+               Bedrock_mantle.resolve ~endpoint:requested ~api_key () in
+             endpoint, headers, api_key
            with Invalid_argument message -> raise (Provider_error message))
         else config.endpoint,
-          (if api_key = "" then [] else [ "Authorization: Bearer " ^ api_key ]) in
+          (if api_key = "" then [] else [ "Authorization: Bearer " ^ api_key ]),
+          api_key in
       let body = parse (fun () ->
         Openai_responses_wire.request ~model:config.model messages tools) in
       (match on_text with
       | None ->
-          let json = post_json ?cancel ~endpoint ~headers ~secret:api_key body in
-          let reply = parse (fun () -> Openai_responses_wire.parse_completion json) in
+          let json = post_json ?cancel ~endpoint ~headers ~secret body in
+          let reply = parse_with_secret secret
+            (fun () -> Openai_responses_wire.parse_completion json) in
           (match on_usage with
            | None -> ()
            | Some report ->
@@ -1165,8 +1216,8 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage
           let body = parse (fun () ->
             Openai_responses_wire.request ~stream:true
               ~model:config.model messages tools) in
-          parse (fun () ->
-            post_stream ?cancel ~endpoint ~headers ~secret:api_key
+          parse_with_secret secret (fun () ->
+            post_stream ?cancel ~endpoint ~headers ~secret
               body ~on_chunk:(Openai_responses_stream.feed stream)
               ~is_done:(fun () -> Openai_responses_stream.is_done stream)
               ~is_finished:(fun () -> Openai_responses_stream.is_finished stream);
@@ -1177,37 +1228,86 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage
                  check_cancel cancel;
                  Option.iter report (Openai_responses_stream.usage stream));
             reply))
-  | Bedrock_converse ->
+  | Bedrock_converse | Bedrock_converse_stream ->
       if authentication <> Cloud_identity || api_key <> "" then
-        raise (Provider_error "Bedrock Converse requires AWS cloud identity, not an API key");
+        raise (Provider_error
+          "Bedrock Converse requires AWS cloud identity, not an API key");
+      let streaming = config.api = Bedrock_converse_stream in
       let region, keys =
-        try Aws_auth.region (), Aws_auth.resolve ()
-        with Invalid_argument reason -> raise (Provider_error reason) in
+        try Aws_auth.region (),
+          Aws_auth.resolve
+            ~credential_process_policy:(Aws_auth.credential_process_policy ())
+            ?cancel ()
+        with
+        | Aws_auth.Cancelled -> raise Cancelled
+        | Invalid_argument reason -> raise (Provider_error reason)
+        | Unix.Unix_error _ | Sys_error _ ->
+            raise (Provider_error "AWS credentials are unavailable") in
       let target = try
-        Bedrock_wire.endpoint ~region ~model:config.model
-          ?base_url:(if config.endpoint = "" then None else Some config.endpoint) ()
+        if streaming then
+          Bedrock_wire.converse_stream_endpoint ~region ~model:config.model
+            ?base_url:(if config.endpoint = "" then None else Some config.endpoint) ()
+        else
+          Bedrock_wire.endpoint ~region ~model:config.model
+            ?base_url:(if config.endpoint = "" then None else Some config.endpoint) ()
         with Invalid_argument reason -> raise (Provider_error reason) in
       let body = parse (fun () -> Bedrock_wire.request messages tools) in
       let serialized = Yojson.Basic.to_string body in
       let signed = try
-        Aws_auth.sign ~credentials:keys ~region
-          ~amz_date:(Aws_auth.amz_date ()) ~method_:"POST"
-          ~host:target.host ~path:target.path ~body:serialized ()
+        if streaming then
+          Aws_auth.sign_converse_stream ~credentials:keys ~region
+            ~amz_date:(Aws_auth.amz_date ()) ~method_:"POST"
+            ~host:target.host ~path:target.path ~body:serialized ()
+        else
+          Aws_auth.sign ~credentials:keys ~region
+            ~amz_date:(Aws_auth.amz_date ()) ~method_:"POST"
+            ~host:target.host ~path:target.path ~body:serialized ()
         with Invalid_argument reason -> raise (Provider_error reason) in
       let headers = List.filter_map (fun (name, value) ->
         if name = "content-type" then None else Some (name ^ ": " ^ value)) signed in
-      let json = post_json ~local:(config.endpoint <> "") ?cancel
-        ~endpoint:target.url ~headers ~secret:keys.access_key_id body in
-      let reply = parse (fun () -> Bedrock_wire.parse_response json) in
-      (match on_usage with
-      | None -> ()
-      | Some report ->
-          check_cancel cancel;
-          Option.iter report (Bedrock_wire.usage json));
-      (match on_text, reply.content with
-      | Some emit, Some text -> check_cancel cancel; emit text
-      | _ -> ());
-      reply
+      if not streaming then (
+        let json = post_json ~local:(config.endpoint <> "") ?cancel
+          ~endpoint:target.url ~headers ~secret:keys.access_key_id body in
+        let reply = parse (fun () -> Bedrock_wire.parse_response json) in
+        (match on_usage with
+         | None -> ()
+         | Some report ->
+             check_cancel cancel;
+             Option.iter report (Bedrock_wire.usage json));
+        (match on_text, reply.content with
+         | Some emit, Some text -> check_cancel cancel; emit text
+         | _ -> ());
+        reply
+      ) else
+        let stream = Bedrock_wire.create_converse_stream () in
+        let content = Buffer.create 256 and calls = ref [] and usage = ref None in
+        parse_with_secret keys.access_key_id (fun () ->
+          post_stream ~local:(config.endpoint <> "") ?cancel
+            ~endpoint:target.url ~headers ~secret:keys.access_key_id body
+            ~on_chunk:(fun chunk ->
+              Bedrock_wire.feed_converse_stream stream chunk
+              |> List.iter (function
+                | Bedrock_wire.Text_delta text ->
+                    Buffer.add_string content text;
+                    (match on_text with
+                     | None -> ()
+                     | Some emit -> check_cancel cancel; emit text)
+                | Bedrock_wire.Tool_call call -> calls := call :: !calls
+                | Bedrock_wire.Message_stop _ -> ()
+                | Bedrock_wire.Usage reported -> usage := Some reported))
+            ~is_done:(fun () -> false) ~is_finished:(fun () -> false);
+          Bedrock_wire.finish_converse_stream stream);
+        (match on_usage with
+         | None -> ()
+         | Some report ->
+             check_cancel cancel;
+             Option.iter report !usage);
+        { Protocol.role = "assistant";
+          content = if Buffer.length content = 0 then None
+            else Some (Buffer.contents content);
+          tool_calls = List.rev !calls;
+          tool_call_id = None; tool_result_content = None;
+          provider_state = None; attachments = [] }
   | Ollama_chat ->
       let cloud = api_key <> "" in
       if cloud && config.endpoint <> "https://ollama.com/api/chat" then
@@ -1292,9 +1392,10 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage
       let project, location, access =
         try
           let project, location = Vertex_wire.resolve_environment () in
-          project, location, Vertex_auth.access_token ()
+          project, location, Vertex_auth.access_token ?cancel ()
         with
         | Invalid_argument reason -> raise (Provider_error reason)
+        | Vertex_auth.Cancelled -> raise Cancelled
         | Vertex_auth.Authentication_error reason -> raise (Provider_error reason) in
       let endpoint =
         try Vertex_wire.endpoint ~project ~location ~model:config.model
@@ -1315,6 +1416,53 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage
             check_cancel cancel;
             Option.iter report (Gemini_stream.usage stream));
         reply)
+  | Vertex_anthropic ->
+      if authentication <> Cloud_identity || config.endpoint <> "" || api_key <> "" then
+        raise (Provider_error
+          "Vertex Claude requires Google cloud identity and a derived Google endpoint");
+      let project, location, access =
+        try
+          let project, location = Vertex_wire.resolve_environment () in
+          project, location, Vertex_auth.access_token ?cancel ()
+        with
+        | Invalid_argument reason -> raise (Provider_error reason)
+        | Vertex_auth.Cancelled -> raise Cancelled
+        | Vertex_auth.Authentication_error reason -> raise (Provider_error reason) in
+      let streaming = Option.is_some on_text in
+      let endpoint = try Vertex_anthropic_wire.endpoint
+        ~project ~location ~model:config.model ~streaming
+        with Invalid_argument reason -> raise (Provider_error reason) in
+      let body = parse (fun () ->
+        Vertex_anthropic_wire.request ~model:config.model ~max_tokens:4096
+          ~streaming messages tools) in
+      let headers = ["Authorization: Bearer " ^ access] in
+      if streaming then (
+        let emit = Option.value ~default:(fun _ -> ()) on_text in
+        let stream = Vertex_anthropic_wire.create_stream ~on_text:emit in
+        parse (fun () ->
+          post_stream ?cancel ~endpoint ~headers ~secret:access body
+            ~on_chunk:(Vertex_anthropic_wire.feed_stream stream)
+            ~is_done:(fun () -> Anthropic_stream.is_done stream)
+            ~is_finished:(fun () ->
+              Vertex_anthropic_wire.stream_is_finished stream);
+          let reply = Vertex_anthropic_wire.finish_stream
+            ~model:config.model stream in
+          (match on_usage with
+           | None -> ()
+           | Some report ->
+               check_cancel cancel;
+               Option.iter report (Vertex_anthropic_wire.stream_usage stream));
+          reply))
+      else
+        let json = post_json ?cancel ~endpoint ~headers ~secret:access body in
+        let reply = parse (fun () ->
+          Vertex_anthropic_wire.parse_completion ~model:config.model json) in
+        (match on_usage with
+         | None -> ()
+         | Some report ->
+             check_cancel cancel;
+             Option.iter report (Anthropic_wire.usage json));
+        reply
   | Codex_responses ->
       let account_id = match credential.account_id with
         | Some id when id <> "" -> id

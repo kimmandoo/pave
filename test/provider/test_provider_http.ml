@@ -254,7 +254,10 @@ let serve client step signal_write closed_write =
     let readable, _, _ = Unix.select [client] [] [] 2. in
     assert (readable <> []);
     let byte = Bytes.create 1 in
-    assert (Unix.read client byte 0 1 = 0);
+    let disconnected =
+      try Unix.read client byte 0 1 = 0
+      with Unix.Unix_error (Unix.ECONNRESET, _, _) -> true in
+    assert disconnected;
     ignore (Unix.write_substring closed_write "c" 0 1))
   else (
     Printf.fprintf oc "HTTP/1.1 %d Mock\r\nContent-Type: %s\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s"

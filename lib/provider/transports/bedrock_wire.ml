@@ -12,7 +12,12 @@ let encode_component text =
     | _ -> Buffer.add_string b (Printf.sprintf "%%%02X" (Char.code c))) text;
   Buffer.contents b
 
-type target = { url : string; host : string; path : string }
+type target = {
+  url : string;
+  host : string;
+  path : string;
+  query : (string * string) list;
+}
 
 (* A caller can choose the AWS regional endpoint or a numeric loopback fixture.
    Arbitrary remote base URLs would disclose the SigV4 authorization header. *)
@@ -31,7 +36,15 @@ let endpoint ?base_url ~region ~model () =
       "127.0.0.1:" ^ suffix)
     else invalid_arg "Bedrock endpoint must be the regional AWS runtime or numeric loopback fixture" in
   let path = "/model/" ^ encode_component model ^ "/converse" in
-  { url = base ^ path; host; path }
+  { url = base ^ path; host; path; query = [] }
+let converse_stream_endpoint ?base_url ~region ~model () =
+  let target = endpoint ?base_url ~region ~model () in
+  let suffix = "/converse" in
+  let prefix_length = String.length target.path - String.length suffix in
+  let path = String.sub target.path 0 prefix_length ^ "/converse-stream" in
+  let url_prefix_length = String.length target.url - String.length suffix in
+  { target with url = String.sub target.url 0 url_prefix_length ^ "/converse-stream"; path }
+
 
 let text text = `Assoc ["text", `String text]
 let wire_message role blocks = `Assoc ["role", `String role; "content", `List blocks]
@@ -201,13 +214,218 @@ let usage json =
         output_modality_tokens = None }
   | _ -> None
 
-(* Control-plane discovery only: this list excludes inference profiles and does
-   not establish account/model-access permission to invoke any returned ID. *)
+type converse_stream_event =
+  | Text_delta of string
+  | Tool_call of tool_call
+  | Message_stop of string
+  | Usage of usage
+
+type stream_block =
+  | Text_block of int
+  | Tool_block of int * string * string * Buffer.t
+
+type converse_stream = {
+  frames : Aws_event_stream.decoder;
+  mutable message_started : bool;
+  mutable message_stopped : string option;
+  mutable metadata_seen : bool;
+  mutable active_block : stream_block option;
+  mutable block_indices : int list;
+  mutable tool_ids : string list;
+}
+
+let create_converse_stream () = {
+  frames = Aws_event_stream.create ();
+  message_started = false;
+  message_stopped = None;
+  metadata_seen = false;
+  active_block = None;
+  block_indices = [];
+  tool_ids = [];
+}
+
+let json_event payload =
+  try Yojson.Basic.from_string payload with
+  | Yojson.Json_error _ -> invalid "invalid ConverseStream event JSON"
+  | Stack_overflow -> invalid "ConverseStream event JSON is too deeply nested"
+
+let validate_json_shape json =
+  let nodes = ref 0 in
+  let rec visit depth value =
+    incr nodes;
+    if depth > 64 || !nodes > 100_000 then
+      invalid "ConverseStream event JSON exceeds structure limits";
+    match value with
+    | `Assoc fields -> List.iter (fun (_, child) -> visit (depth + 1) child) fields
+    | `List values -> List.iter (visit (depth + 1)) values
+    | _ -> () in
+  visit 0 json
+
+let stream_int name json =
+  match member name json with
+  | `Int value when value >= 0 -> value
+  | _ -> invalid ("missing or invalid " ^ name)
+
+let event_payload expected json =
+  match json with
+  | `Assoc [name, value] when name = expected -> value
+  | _ -> invalid ("invalid ConverseStream " ^ expected ^ " event")
+
+let unique_block stream index =
+  if List.mem index stream.block_indices then invalid "duplicate ConverseStream content block index";
+  stream.block_indices <- index :: stream.block_indices
+
+let bounded_error_text value =
+  let out = Buffer.create (min 1024 (String.length value)) in
+  let index = ref 0 in
+  while !index < String.length value && Buffer.length out < 1024 do
+    let c = value.[!index] in
+    if Char.code c >= 32 && Char.code c <> 127 then Buffer.add_char out c;
+    incr index
+  done;
+  Buffer.contents out
+
+let decode_converse_event stream frame =
+  let headers = frame.Aws_event_stream.headers in
+  let message_type = Aws_event_stream.string_header headers ":message-type" in
+  (match message_type with
+   | Some ("exception" | "error") ->
+       let error_name = match Aws_event_stream.string_header headers ":exception-type" with
+         | Some name -> name
+         | None -> Option.value ~default:"provider exception"
+             (Aws_event_stream.string_header headers ":error-code") in
+       let error_name = bounded_error_text error_name in
+       let detail = try
+           let json = json_event frame.payload in
+           match member "message" json with `String value -> bounded_error_text value
+           | _ -> error_name
+         with Protocol.Invalid_response _ -> error_name in
+       invalid ("Bedrock ConverseStream " ^ error_name ^ ": " ^ detail)
+   | Some "event" -> ()
+   | _ -> invalid "invalid ConverseStream message type");
+  (match Aws_event_stream.string_header headers ":content-type" with
+   | Some "application/json" -> ()
+   | _ -> invalid "invalid ConverseStream event content type");
+  let name = match Aws_event_stream.string_header headers ":event-type" with
+    | Some name -> name
+    | None -> invalid "missing ConverseStream event type" in
+  let json = json_event frame.payload in
+  validate_json_shape json;
+  let value = event_payload name json in
+  if stream.metadata_seen then invalid "ConverseStream event after metadata";
+  match name with
+  | "messageStart" ->
+      if stream.message_started || stream.message_stopped <> None ||
+         member "role" value <> `String "assistant" then
+        invalid "invalid ConverseStream message start";
+      stream.message_started <- true;
+      []
+  | "contentBlockStart" ->
+      if not stream.message_started || stream.message_stopped <> None ||
+         stream.active_block <> None then invalid "unexpected ConverseStream content block start";
+      let index = stream_int "contentBlockIndex" value in
+      unique_block stream index;
+      (match member "start" value with
+       | `Assoc ["toolUse", tool] ->
+           let id = required_string "toolUseId" tool in
+           let name = required_string "name" tool in
+           if id = "" || name = "" || String.length id > 1024 ||
+              String.length name > 256 || List.mem id stream.tool_ids then
+             invalid "invalid or duplicate ConverseStream tool use";
+           stream.active_block <- Some (Tool_block (index, id, name, Buffer.create 128));
+           []
+       | _ -> invalid "unsupported ConverseStream content block start")
+  | "contentBlockDelta" ->
+      if not stream.message_started || stream.message_stopped <> None then
+        invalid "unexpected ConverseStream content delta";
+      let index = stream_int "contentBlockIndex" value in
+      (match member "delta" value with
+       | `Assoc ["text", `String text] ->
+           (match stream.active_block with
+            | None ->
+                unique_block stream index;
+                stream.active_block <- Some (Text_block index)
+            | Some (Text_block active) when active = index -> ()
+            | _ -> invalid "mismatched ConverseStream text block");
+           [Text_delta text]
+       | `Assoc ["toolUse", `Assoc ["input", `String fragment]] ->
+           (match stream.active_block with
+            | Some (Tool_block (active, _, _, input)) when active = index ->
+                if Buffer.length input + String.length fragment > 1_048_576 then
+                  invalid "ConverseStream tool input exceeds 1 MiB";
+                Buffer.add_string input fragment;
+                []
+            | _ -> invalid "mismatched ConverseStream tool input block")
+       | _ -> invalid "unsupported ConverseStream content delta")
+  | "contentBlockStop" ->
+      if not stream.message_started || stream.message_stopped <> None then
+        invalid "unexpected ConverseStream content block stop";
+      let index = stream_int "contentBlockIndex" value in
+      (match stream.active_block with
+       | Some (Text_block active) when active = index ->
+           stream.active_block <- None;
+           []
+       | Some (Tool_block (active, id, name, input)) when active = index ->
+           stream.active_block <- None;
+           let arguments = json_event (Buffer.contents input) in
+           validate_json_shape arguments;
+           (match arguments with `Assoc _ -> () | _ -> invalid "ConverseStream tool input must be an object");
+           if List.mem id stream.tool_ids then invalid "duplicate ConverseStream tool use ID";
+           stream.tool_ids <- id :: stream.tool_ids;
+           [Tool_call { id; name; arguments }]
+       | _ -> invalid "mismatched ConverseStream content block stop")
+  | "messageStop" ->
+      if not stream.message_started || stream.message_stopped <> None ||
+         stream.active_block <> None then invalid "unexpected ConverseStream message stop";
+      let reason = required_string "stopReason" value in
+      if String.length reason > 64 then invalid "invalid ConverseStream stop reason";
+      (match reason with
+       | "end_turn" | "stop_sequence" when stream.tool_ids = [] -> ()
+       | "tool_use" when stream.tool_ids <> [] -> ()
+       | _ -> invalid ("unsupported stop reason: " ^ reason));
+      stream.message_stopped <- Some reason;
+      [Message_stop reason]
+  | "metadata" ->
+      if stream.message_stopped = None then invalid "ConverseStream metadata before message stop";
+      stream.metadata_seen <- true;
+      let report = member "usage" value in
+      (match report with
+       | `Null -> []
+       | _ ->
+           (match usage (`Assoc ["usage", report]) with
+            | Some value -> [Usage value]
+            | None -> invalid "invalid ConverseStream usage"))
+  | _ -> invalid ("unsupported ConverseStream event: " ^ name)
+
+let feed_converse_stream stream data =
+  try
+    Aws_event_stream.feed stream.frames data
+    |> List.concat_map (decode_converse_event stream)
+  with Aws_event_stream.Invalid_message detail -> invalid ("invalid AWS EventStream: " ^ detail)
+
+let finish_converse_stream stream =
+  (try Aws_event_stream.finish stream.frames with
+   | Aws_event_stream.Invalid_message detail -> invalid ("invalid AWS EventStream: " ^ detail));
+  if not stream.message_started || stream.message_stopped = None || stream.active_block <> None then
+    invalid "incomplete Bedrock ConverseStream response"
+
+(* Control-plane listings do not establish account/model-access permission to
+   invoke any returned foundation model or inference profile. *)
 let discovery_endpoint ~region () =
   ignore (Aws_auth.region ~getenv:(fun _ -> Some region) ());
   let host = "bedrock." ^ region ^ ".amazonaws.com" in
   let path = "/foundation-models" in
-  { url = "https://" ^ host ^ path; host; path }
+  { url = "https://" ^ host ^ path; host; path; query = [] }
+
+let inference_profiles_endpoint ~region ?next_token () =
+  ignore (Aws_auth.region ~getenv:(fun _ -> Some region) ());
+  let host = "bedrock." ^ region ^ ".amazonaws.com" in
+  let path = "/inference-profiles" in
+  let query = ("maxResults", "100") ::
+    Option.fold ~none:[] ~some:(fun value -> ["nextToken", value]) next_token in
+  let query_text = Aws_auth.query_string query in
+  { url = "https://" ^ host ^ path ^ "?" ^ query_text;
+    host; path; query }
 
 let parse_models json =
   let summaries = match member "modelSummaries" json with
@@ -221,3 +439,37 @@ let parse_models json =
         List.mem (`String "ON_DEMAND") inference &&
         member "status" lifecycle = `String "ACTIVE" -> Some id
     | _ -> None) summaries
+
+let valid_listing_text ~max_length value =
+  value <> "" && String.length value <= max_length &&
+  not (String.exists (fun character ->
+    Char.code character < 32 || Char.code character = 127) value)
+
+let parse_inference_profiles json =
+  let summaries = match member "inferenceProfileSummaries" json with
+    | `List summaries -> summaries
+    | _ -> invalid "missing inference profile summaries" in
+  let ids = List.filter_map (fun summary ->
+    let id = required_string "inferenceProfileId" summary in
+    let status = required_string "status" summary in
+    let profile_type = required_string "type" summary in
+    if not (valid_listing_text ~max_length:2048 id) then
+      invalid "invalid inference profile ID";
+    if not (valid_listing_text ~max_length:32 status) ||
+       not (List.mem profile_type ["SYSTEM_DEFINED"; "APPLICATION"]) then
+      invalid "invalid inference profile status or type";
+    (match member "models" summary with
+     | `List models ->
+         List.iter (fun model ->
+           let arn = required_string "modelArn" model in
+           if not (valid_listing_text ~max_length:4096 arn) then
+             invalid "invalid inference profile model ARN") models
+     | _ -> invalid "missing inference profile models");
+    if status = "ACTIVE" then Some id else None) summaries in
+  if List.length ids <> List.length (List.sort_uniq String.compare ids) then
+    invalid "duplicate inference profile ID";
+  let next_token = match member "nextToken" json with
+    | `Null -> None
+    | `String token when valid_listing_text ~max_length:4096 token -> Some token
+    | _ -> invalid "invalid inference profile pagination token" in
+  ids, next_token

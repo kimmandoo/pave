@@ -83,10 +83,25 @@ let run screen ~registry =
       else if List.length saved_accounts > 1 then "Choose saved sign-in account"
       else "Continue with saved sign-in" in
     let login_label = "Sign in (browser or device code)" in
+    let azure_endpoint_set = match Sys.getenv_opt "AZURE_OPENAI_ENDPOINT" with
+      | Some value -> value <> ""
+      | None -> false in
+    let azure_cli_label = "Continue with Azure CLI identity" in
+    let azure_cli_available =
+      descriptor.id = "azure" && not key_is_set && azure_endpoint_set in
+    let intro = if descriptor.id = "azure" then [
+      "Configure AZURE_OPENAI_ENDPOINT for the Azure OpenAI or Foundry resource.";
+      "When no API key is set, Azure CLI az login supplies the local Entra identity.";
+      "Deployment listing uses the current subscription and requires management read access."]
+      else [
+        "A key or saved sign-in lets this provider receive prompts.";
+        "An environment API key takes precedence over every saved grant.";
+        "Use /setup for account access and saved defaults."] in
     let choices =
       (if key_is_set then Option.to_list key_label else []) @
       (if saved_oauth then [saved_label] else []) @
       (if not key_is_set then Option.to_list key_label else []) @
+      (if azure_cli_available then [azure_cli_label] else []) @
       (if oauth then [login_label] else []) @
       ["Back · providers"; "Skip setup"] in
     let local = List.exists (fun (route : Pave.Provider_catalog.route) ->
@@ -94,12 +109,7 @@ let run screen ~registry =
     if (key = None || (local && not key_is_set)) && not oauth then
       model descriptor None
     else match Tui.choose screen ?initial_status:chooser_status
-        ~intro:[
-        "A key or saved sign-in lets this provider receive prompts.";
-        "An environment API key takes precedence over every saved grant.";
-        "Use /setup for account access and saved defaults."]
-      ~title:"SETUP · Connect provider"
-      ~choices with
+        ~intro ~title:"SETUP · Connect provider" ~choices with
     | None | Some "Skip setup" -> skip
     | Some "Back · providers" -> provider ()
     | Some choice when Some choice = key_label ->
@@ -107,6 +117,8 @@ let run screen ~registry =
         (match Sys.getenv_opt env with
          | Some value when value <> "" -> model descriptor None
          | _ -> key_instruction descriptor env)
+    | Some choice when choice = azure_cli_label && azure_cli_available ->
+        model descriptor None
     | Some choice when choice = saved_label ->
         if key_is_set then model descriptor None
         else
@@ -158,10 +170,15 @@ let run screen ~registry =
                descriptor)
     | Some _ -> authentication descriptor
   and key_instruction descriptor env =
-    match Tui.choose screen
-      ~intro:["02 / 03  ·  KEY NOT SET";
+    let intro = if descriptor.id = "azure" then [
+      "Configure AZURE_OPENAI_ENDPOINT and sign in with Azure CLI az login.";
+      "AZURE_OPENAI_API_KEY is optional; Azure CLI identity is used when it is absent.";
+      "Deployment discovery needs current-subscription management read access."]
+      else [
+        "02 / 03  ·  KEY NOT SET";
         "Set this variable in your shell; Pave never stores a typed key.";
-        "You can save a model now, but prompts will need the key."]
+        "You can save a model now, but prompts will need the key."] in
+    match Tui.choose screen ~intro
       ~title:("SETUP · " ^ env ^ " is missing")
       ~choices:["Choose model without key"; "Back · authentication";
         "Skip setup"] with
@@ -170,6 +187,14 @@ let run screen ~registry =
     | _ -> skip
   and model ?(account_id=None)
       (descriptor : Pave.Provider_catalog.descriptor) missing_key =
+    let azure_endpoint_set = match Sys.getenv_opt "AZURE_OPENAI_ENDPOINT" with
+      | Some value -> value <> ""
+      | None -> false in
+    if descriptor.id = "azure" && not azure_endpoint_set then (
+      Tui.alert screen
+        "Set AZURE_OPENAI_ENDPOINT to a documented Azure OpenAI or Foundry resource before selecting its deployment.";
+      authentication descriptor
+    ) else
     let local_without_key = List.exists
       (fun (route : Pave.Provider_catalog.route) ->
         route.wire = Pave.Provider.Local_chat) descriptor.routes &&

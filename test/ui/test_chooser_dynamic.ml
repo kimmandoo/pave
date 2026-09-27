@@ -4,9 +4,11 @@ let chooser : Tui.chooser = {
   plain = [];
   suggestions = [| "openai/gpt-4.1"; "google/gemini-2.5-pro" |];
   choices = [| { Tui.value = "openai/gpt-4.1"; label = "GPT-4.1 · exact";
-      custom = false; verified = false; listed = false; detail = None };
+      custom = false; verified = false; listed = false; action = false;
+      detail = None };
     { Tui.value = "google/gemini-2.5-pro"; label = "Gemini Pro";
-      custom = false; verified = false; listed = false; detail = None } |];
+      custom = false; verified = false; listed = false; action = false;
+      detail = None } |];
   allow_custom = true;
   dynamic = true;
   status = None;
@@ -27,10 +29,20 @@ let () =
     ~verified:[ "openai/o3"; "openai/gpt-4.1"; "openai/o3" ]
     ~listed:[]
     ~details:["openai/gpt-4.1", "context 120000 tokens · APIs chat/responses"]
-    ~labels:["openai/gpt-4.1", "GPT-4.1 · exact"]
+    ~labels:["openai/gpt-4.1", "GPT-4.1 · exact";
+      "commandcode@chat/", "Command Code · browse API models"]
+    ~actions:["commandcode@chat/"]
     ~status:(Some "Verified IDs loaded");
   assert (values () = [ "openai/gpt-4.1" ]);
   assert (chooser.selected = 0 && chooser.filter = "gpt");
+  chooser.filter <- "commandcode@chat";
+  let route_action = List.find (fun (item : Tui.candidate) ->
+    item.value = "commandcode@chat/") (Array.to_list (Tui.matches chooser)) in
+  assert (route_action.action && not route_action.verified &&
+    not route_action.listed);
+  assert (Tui.candidate_label chooser route_action =
+    "[route] Command Code · browse API models");
+  chooser.filter <- "gpt";
   assert ((Tui.matches chooser).(0).value = "openai/gpt-4.1" &&
     (Tui.matches chooser).(0).label = "GPT-4.1 · exact");
   chooser.filter <- "GPT-4.1 · exact";
@@ -69,6 +81,11 @@ let () =
   assert (values () = [ "local/custom" ]);
   assert ((Tui.matches chooser).(0).custom);
   assert (chooser.filter = "local/custom");
+  chooser.filter <- "claude-3-5-sonnet@20240620";
+  chooser.selected <- 0;
+  let bare_model = Tui.matches chooser in
+  assert (bare_model.(0).value = "claude-3-5-sonnet@20240620" &&
+    bare_model.(0).custom);
   chooser.filter <- "gemini";
   Tui.update_chooser chooser ~verified:[] ~listed:[] ~details:[] ~labels:[]
     ~status:(Some "Offline");
@@ -81,7 +98,7 @@ let () =
     suggestions = [| "ollama/offline"; "Back · authentication"; "Skip setup" |];
     choices = Array.map (fun value ->
       { Tui.value; label = value; custom = false; verified = false;
-        listed = false; detail = None })
+        listed = false; action = false; detail = None })
       [| "ollama/offline"; "Back · authentication"; "Skip setup" |];
     filter = ""; selected = 0; offset = 0; touched = false;
     filtered = None } in
@@ -101,7 +118,8 @@ let () =
     "Back · authentication");
   let navigated = { onboarding with
     choices = [| { Tui.value = "ollama/offline"; label = "Offline";
-      custom = false; verified = false; listed = false; detail = None } |];
+      custom = false; verified = false; listed = false; action = false;
+      detail = None } |];
     selected = 0; touched = true; filtered = None } in
   Tui.update_chooser navigated ~verified:["ollama/another"]
     ~listed:[] ~details:[] ~labels:[] ~status:None;

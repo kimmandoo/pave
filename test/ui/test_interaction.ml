@@ -84,6 +84,27 @@ let () =
      identity.upstream_id <> "future-studio-model" ||
      route.name <> "messages" then
     fail "explicit native provider route could not be selected interactively";
+  let route_choices = model_route_browse_choices () in
+  if not (List.mem ("commandcode@chat/",
+      "commandcode@chat · browse API models") route_choices &&
+      List.mem ("gitlab-duo@messages/",
+        "gitlab-duo@messages · browse API models") route_choices &&
+      List.mem ("amazon-bedrock@converse-stream/",
+        "amazon-bedrock@converse-stream · browse API models") route_choices) then
+    fail "multi-route provider model browsing choices are missing";
+  (match model_route_browse_selection "commandcode@chat/" with
+   | Some (descriptor, route)
+     when descriptor.id = "commandcode" && route.name = "chat" -> ()
+   | _ -> fail "registered route browse action was not resolved");
+  (match model_route_browse_selection "amazon-bedrock@converse-stream/" with
+   | Some (descriptor, route)
+     when descriptor.id = "amazon-bedrock" && route.name = "converse-stream" -> ()
+   | _ -> fail "Bedrock ConverseStream browse action was not resolved");
+  if model_route_browse_selection "commandcode@unknown/" <> None ||
+     model_route_browse_selection "ollama@chat/" <> None ||
+     model_route_browse_selection "gitlab-duo@agent/" <> None then
+    fail "unregistered or single-route model browse action was accepted";
+
   let _, identity, route = resolve_model ~current_provider:"commandcode"
     ~current_route:"messages" ~input:"future-studio-next" () in
   if identity.upstream_id <> "future-studio-next" ||

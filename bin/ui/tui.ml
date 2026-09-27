@@ -9,6 +9,7 @@ type candidate = {
   custom : bool;
   verified : bool;
   listed : bool;
+  action : bool;
   detail : string option;
 }
 
@@ -237,11 +238,11 @@ let matches chooser =
         chooser.allow_custom &&
         chooser.filter <> "" &&
         chooser.filter.[String.length chooser.filter - 1] <> '/' &&
-        String.contains chooser.filter '/' &&
+        (String.contains chooser.filter '/' || found = []) &&
         not (List.exists (fun item -> item.value = chooser.filter) found) in
       let found = Array.of_list (if manual then
         { value = chooser.filter; label = chooser.filter; custom = true;
-          verified = false; listed = false; detail = None } :: found
+          verified = false; listed = false; action = false; detail = None } :: found
         else found) in
       chooser.filtered <- Some (chooser.filter, found);
       found
@@ -249,6 +250,7 @@ let matches chooser =
 let candidate_label ?(columns = 80) chooser item =
   let source =
     if item.custom then "Use: "
+    else if item.action then "[route] "
     else if not chooser.dynamic || List.mem item.value chooser.plain then ""
     else if columns < 40 then
       if item.verified then "✓ "
@@ -415,11 +417,24 @@ let paint t =
                 pages.(chooser.status_page) in
               Some (if summary = "" then detail
                 else summary ^ " · " ^ detail) in
+        let intro_spacer =
+          cols >= 52 && body_height >= 9 && chooser.filter = "" &&
+          Array.length chooser.intro > 0 in
+        let compact_intro =
+          cols >= 30 && cols < 52 && body_height >= 4 &&
+          chooser.filter = "" && Array.length chooser.intro > 0 in
+        let intro_rows =
+          if intro_spacer then min 3 (Array.length chooser.intro) + 1
+          else if compact_intro then 1
+          else 0 in
+        let status_max_rows =
+          if count > 0 then max 1 (min 3 (body_height - 2 - intro_rows))
+          else max 0 (min 3 (body_height - 1 - intro_rows)) in
         let status_lines = match status_text with
           | Some status when body_height >= 3 ->
               wrap_chooser_text
                 ~columns:(max 1 (cols - measure_text status_prefix))
-                ~max_rows:3 status
+                ~max_rows:status_max_rows status
           | _ -> [||] in
         let status_height = Array.length status_lines in
         let detail_prefix = "  ↳ " in
@@ -433,14 +448,11 @@ let paint t =
             | None -> [||]
           else [||] in
         let detail_height = Array.length detail_lines in
-        let intro_rows =
-          if cols >= 52 && body_height >= 9 && chooser.filter = "" &&
-              Array.length chooser.intro > 0 then
-            min 3 (Array.length chooser.intro) + 1
-          else 0 in
+        let minimum_choices =
+          if compact_intro then min 1 count else min 3 count in
         let intro_height =
           if body_height - 1 - status_height - detail_height - intro_rows >=
-              min 3 count
+              minimum_choices
           then intro_rows else 0 in
         let page = max 0
           (body_height - 1 - intro_height - status_height - detail_height) in
@@ -452,7 +464,7 @@ let paint t =
           if i = 0 then styled_line cols accent
             (Printf.sprintf "  ▌  %s  ·  %d matches" chooser.title count)
           else if i <= intro_height then
-            if i = intro_height then I.void cols 1
+            if intro_spacer && i = intro_height then I.void cols 1
             else styled_line cols muted ("  " ^ chooser.intro.(i - 1))
           else if i > intro_height &&
               i <= intro_height + status_height then
@@ -1144,13 +1156,15 @@ let read ?wake_fd ?on_wake ?on_interrupt ?on_dequeue ?on_completion t =
 
 (* Update live choices only on the UI thread; preserve an explicit selection
    while fresh provider IDs arrive. Listing alone does not verify an API route. *)
-let update_chooser ?(status_pages = []) chooser ~verified ~listed ~details
-    ~labels ~status =
+let update_chooser ?(status_pages = []) ?(actions = []) chooser ~verified
+    ~listed ~details ~labels ~status =
   let previous = matches chooser in
   let selected = if chooser.selected < Array.length previous then
       Some previous.(chooser.selected).value else None in
   let confirmed = Hashtbl.create (List.length verified) in
   List.iter (fun value -> Hashtbl.replace confirmed value ()) verified;
+  let actionable = Hashtbl.create (List.length actions) in
+  List.iter (fun value -> Hashtbl.replace actionable value ()) actions;
   let discovered = Hashtbl.create (List.length listed) in
   List.iter (fun value -> Hashtbl.replace discovered value ()) listed;
   let annotations = Hashtbl.create (List.length details) in
@@ -1159,8 +1173,8 @@ let update_chooser ?(status_pages = []) chooser ~verified ~listed ~details
   let display_labels = Hashtbl.create (List.length labels) in
   List.iter (fun (value, label) ->
     Hashtbl.replace display_labels value label) labels;
-  let seen = Hashtbl.create
-    (Array.length chooser.suggestions + List.length verified + List.length listed) in
+  let seen = Hashtbl.create (Array.length chooser.suggestions +
+    List.length verified + List.length listed + List.length actions) in
   let choices = ref [] in
   let add value =
     if not (Hashtbl.mem seen value) then (
@@ -1171,9 +1185,11 @@ let update_chooser ?(status_pages = []) chooser ~verified ~listed ~details
         custom = false;
         verified = Hashtbl.mem confirmed value;
         listed = Hashtbl.mem discovered value;
+        action = Hashtbl.mem actionable value;
         detail = Hashtbl.find_opt annotations value } :: !choices) in
   List.iter add verified;
   List.iter add listed;
+  List.iter add actions;
   Array.iter (fun value ->
     if not (List.mem value chooser.plain) then add value) chooser.suggestions;
   Array.iter (fun value ->
@@ -1185,8 +1201,9 @@ let update_chooser ?(status_pages = []) chooser ~verified ~listed ~details
   chooser.status_page <- min chooser.status_page
     (max 0 (Array.length chooser.status_pages - 1));
   let found = matches chooser in
-  chooser.selected <- (if (verified <> [] || listed <> []) && chooser.filter = "" &&
-    not chooser.touched then 0
+  chooser.selected <- (if
+    (verified <> [] || listed <> [] || actions <> []) &&
+      chooser.filter = "" && not chooser.touched then 0
     else match selected with
     | Some value ->
         let rec locate i =
@@ -1196,12 +1213,12 @@ let update_chooser ?(status_pages = []) chooser ~verified ~listed ~details
     | None -> 0);
   chooser.offset <- min chooser.offset chooser.selected
 
-let update_choices t ~verified ?(listed = []) ?(details = []) ?(labels = [])
-    ?(status_pages = []) ~status () =
+let update_choices t ~verified ?(listed = []) ?(actions = [])
+    ?(details = []) ?(labels = []) ?(status_pages = []) ~status () =
   match t.chooser with
   | Some chooser when chooser.dynamic ->
-      update_chooser chooser ~verified ~listed ~details ~labels ~status
-        ~status_pages;
+      update_chooser ~actions chooser ~verified ~listed ~details ~labels
+        ~status ~status_pages;
       paint t
   | _ -> invalid_arg "Tui.update_choices: no dynamic chooser is open"
 
@@ -1217,7 +1234,8 @@ let choose ?(allow_custom = false) ?(intro = []) ?(plain = [])
     intro = Array.of_list (List.map sanitize intro); plain; suggestions;
     choices = Array.map (fun value ->
       { value; label = value; custom = false; verified = false; listed = false;
-        detail = None }) suggestions;
+        action = false; detail = None }) suggestions;
+
     allow_custom; dynamic = Option.value dynamic
       ~default:(Option.is_some wake_fd); status = initial_status;
     status_pages = [||]; status_page = 0;

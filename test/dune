@@ -251,6 +251,11 @@
  (libraries pave unix yojson))
 
 (test
+ (name test_azure_deployment_discovery)
+ (modules test_azure_deployment_discovery)
+ (libraries pave unix yojson))
+
+(test
  (name test_tool_gateways)
  (modules test_tool_gateways)
  (libraries pave unix yojson))
@@ -263,6 +268,16 @@
 (test
  (name test_vertex_wire)
  (modules test_vertex_wire)
+ (libraries pave unix yojson))
+
+(test
+ (name test_vertex_auth)
+ (modules test_vertex_auth)
+ (libraries pave unix yojson))
+
+(test
+ (name test_vertex_anthropic_api)
+ (modules test_vertex_anthropic_api)
  (libraries pave unix yojson))
 
 (test
@@ -457,4 +472,9 @@
 (test
  (name test_r3_routes)
  (modules test_r3_routes)
+ (libraries pave unix yojson))
+
+(test
+ (name test_apple_foundation_models)
+ (modules test_apple_foundation_models)
  (libraries pave unix yojson))

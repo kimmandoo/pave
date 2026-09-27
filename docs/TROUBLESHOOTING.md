@@ -1,5 +1,45 @@
 # Troubleshooting
 
+
+### [2026-09-27] Appending the Apple helper hit a read-only release binary
+
+- **Context / Symptom:** Release packaging failed at `cat "$helper" >> bundle/pave` with `Permission denied` after copying Dune's native executable.
+- **Root Cause:** `cp` preserved the generated `main.exe` mode without the owner-write bit, so the copied binary could execute but could not be extended.
+- **Solution:** Temporarily added owner-write permission before appending helper bytes and restored the read-only executable mode afterward. The extracted three-member archive passed `--help`, `--providers`, and the embedded helper's disabled-Apple-Intelligence diagnostic.
+- **Prevention / Reference:** When extending a copied native executable, grant owner write only for the append operation, restore its executable mode, and smoke the extracted archive.
+
+### [2026-09-27] Apple model picker had no selectable default
+
+- **Context / Symptom:** The Apple provider appeared in first-run setup, but the model picker reported `Model listing unsupported for apple` and offered no model to save.
+- **Root Cause:** The on-device route intentionally has no remote model roster, but discovery had no representation for its known OS-managed `default` ID.
+- **Solution:** Added a credential-free local runtime-default discovery record for `apple@chat/default` and made the picker display its platform/readiness requirements without claiming a provider roster. The real setup flow listed and saved the default in isolated temporary configuration at 30×10 and 70×18 PTYs.
+- **Prevention / Reference:** No remote listing does not mean there is no usable model selector. Register only the fixed OS-managed ID and label it as a local runtime default, not a provider listing.
+
+### [2026-09-27] macOS cancellation fixture treated TCP reset as a hang
+
+- **Context / Symptom:** The forced suite failed in `test_provider_http` with `Unix_error(ECONNRESET, "read", "")`, then timed out its parent-side disconnect assertion.
+- **Root Cause:** The local HTTP fixture assumed a cancelled libcurl request always closed its TCP stream with orderly EOF; on macOS the peer can instead report `ECONNRESET`.
+- **Solution:** Treated only `ECONNRESET` as the expected client disconnect in the fixture, while keeping the bounded wait and parent notification assertion. `opam exec -- dune exec test/test_provider_http.exe` passed.
+- **Prevention / Reference:** Cancellation tests should accept EOF or connection reset as TCP disconnect outcomes without suppressing timeout, unexpected socket errors, or missing server notification.
+
+
+
+
+### [2026-09-27] Swift helper entry point required library parsing
+
+- **Context / Symptom:** Building the macOS Apple helper failed with `'main' attribute cannot be used in a module that contains top-level code`; Swift pointed at the file-scope constants and requested `-parse-as-library`.
+- **Root Cause:** The helper uses an `@main` async entry point alongside file-scope constants, but Dune invoked `swiftc` in its default executable parsing mode.
+- **Solution:** Added `-parse-as-library` to the conditional FoundationModels compiler rule. `opam exec -- dune build @install` then built the helper.
+- **Prevention / Reference:** Keep `@main` Swift helper sources compiled with `swiftc -parse-as-library` when file-scope declarations are present.
+
+
+### [2026-09-27] Vertex service-account signature helper stalled
+
+- **Context / Symptom:** The first direct Vertex service-account ADC exchange did not finish while creating its OpenSSL RSA signature; the helper process remained waiting instead of returning a token.
+- **Root Cause:** The parent/child pipe lifecycle did not guarantee the expected EOF and could block while moving the signing input/output between OCaml and OpenSSL.
+- **Solution:** Replaced the ambiguous subprocess pipe handling with explicit `fork`/`dup2`/`execvp`, nonblocking parent I/O, bounded timeout/cancellation, and process cleanup. `test_vertex_auth` verifies the generated RS256 signature with OpenSSL and exercises auth resolution.
+- **Prevention / Reference:** Close unused pipe ends in both processes and treat helper execution as a bounded, cancellable child process; do not rely on implicit EOF from inherited descriptors.
+
 ### [2026-09-27] OpenRouter model limits were discarded after parsing
 
 - **Context / Symptom:** `/models/user` parsing found `context_length` and `top_provider.max_completion_tokens`, but fresh exact-model rows lost both fields before `--context-window auto` could use them.

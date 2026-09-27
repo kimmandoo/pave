@@ -186,6 +186,25 @@ let parse line =
 
 let selectable_providers ?registry () = Provider_catalog.all ?registry ()
 
+let model_route_browse_choices ?registry () =
+  Provider_catalog.all ?registry ()
+  |> List.concat_map (fun (descriptor : Provider_catalog.descriptor) ->
+    if List.length descriptor.routes < 2 then [] else
+    List.map (fun (route : Provider_catalog.route) ->
+      let value = Printf.sprintf "%s@%s/" descriptor.id route.name in
+      let label = Printf.sprintf "%s@%s · browse API models"
+        descriptor.id route.name in
+      value, label) descriptor.routes)
+
+let model_route_browse_selection ?registry input =
+  Provider_catalog.all ?registry ()
+  |> List.find_map (fun (descriptor : Provider_catalog.descriptor) ->
+    if List.length descriptor.routes < 2 then None else
+    List.find_map (fun (route : Provider_catalog.route) ->
+      if input = Printf.sprintf "%s@%s/" descriptor.id route.name
+      then Some (descriptor, route)
+      else None) descriptor.routes)
+
 let resolve_model ?registry ?current_route ?current_account_id
     ~current_provider ~input () =
   let input = String.trim input in
@@ -248,6 +267,7 @@ let history_for_model ~provider:active_provider ~route:active_route
           | Provider.Openai_responses -> "openai", Some "responses"
           | Provider.Codex_responses -> "openai-codex", None
           | Provider.Gemini_direct -> "google", None
+          | Provider.Vertex_anthropic -> "google-vertex", Some "messages"
           | Provider.Meta_responses -> "meta", None
           | Provider.Opencode_zen_responses -> "opencode-zen", None
           | Provider.Devin_connect -> "devin", None

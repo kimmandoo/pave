@@ -20,7 +20,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-15]
+        os: [ubuntu-24.04, macos-26]
         ocaml: ['5.3.0', '5.5.1']
     steps:
       - uses: actions/checkout@v4
@@ -37,3 +37,13 @@ jobs:
         run: opam exec -- dune build @install
       - name: Smoke CLI help
         run: opam exec -- dune exec pave -- --help
+      - name: Smoke Apple Foundation Models helper
+        if: runner.os == 'macOS'
+        run: |
+          opam exec -- dune build bin/pave-apple-foundation-models
+          _build/default/bin/pave-apple-foundation-models --help
+          providers="$(opam exec -- dune exec pave -- --providers)"
+          case "$providers" in
+            *apple*) ;;
+            *) echo "macOS arm64 binary did not list Apple Foundation Models" >&2; exit 1 ;;
+          esac

@@ -25,10 +25,10 @@ jobs:
           - runner: ubuntu-22.04-arm
             os: linux
             arch: aarch64
-          - runner: macos-15
+          - runner: macos-26
             os: darwin
             arch: arm64
-          - runner: macos-15-intel
+          - runner: macos-26-intel
             os: darwin
             arch: x86_64
     steps:
@@ -43,23 +43,49 @@ jobs:
       - name: Build native executable
         env:
           PAVE_RELEASE_VERSION: ${{ github.ref_name }}
-        run: opam exec -- dune build --profile release bin/main.exe
+          ARCH: ${{ matrix.arch }}
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ] && [ "$ARCH" = "arm64" ]; then
+            opam exec -- dune build --profile release bin/main.exe bin/pave-apple-foundation-models
+          else
+            opam exec -- dune build --profile release bin/main.exe
+          fi
       - name: Package release archive
         env:
           ASSET: pave-${{ matrix.os }}-${{ matrix.arch }}.tar.gz
+          OS: ${{ matrix.os }}
+          ARCH: ${{ matrix.arch }}
         run: |
           set -eu
           mkdir -p bundle
           cp _build/default/bin/main.exe bundle/pave
+          if [ "$OS" = "darwin" ] && [ "$ARCH" = "arm64" ]; then
+            chmod u+w bundle/pave
+            helper=_build/default/bin/pave-apple-foundation-models
+            test -x "$helper"
+            "$helper" --help >/dev/null
+            helper_size="$(wc -c < "$helper" | tr -d '[:space:]')"
+            cat "$helper" >> bundle/pave
+            printf '%016x%s' "$helper_size" PAVEAFM1 >> bundle/pave
+            chmod u-w bundle/pave
+          fi
           cp LICENSE THIRD_PARTY_NOTICES bundle/
           tar -czf "$ASSET" -C bundle pave LICENSE THIRD_PARTY_NOTICES
       - name: Smoke packaged native executable
         env:
           ASSET: pave-${{ matrix.os }}-${{ matrix.arch }}.tar.gz
+          OS: ${{ matrix.os }}
+          ARCH: ${{ matrix.arch }}
         run: |
           set -eu
           unpacked="$(mktemp -d)"
           trap 'rm -rf "$unpacked"' EXIT
+          archive_members="$(tar -tzf "$ASSET")"
+          expected_members="$(printf 'pave\nLICENSE\nTHIRD_PARTY_NOTICES')"
+          if [ "$archive_members" != "$expected_members" ]; then
+            echo "release archive member set changed unexpectedly: $archive_members" >&2
+            exit 1
+          fi
           tar -xzf "$ASSET" -C "$unpacked"
           test -x "$unpacked/pave"
           "$unpacked/pave" --help >/dev/null
@@ -68,6 +94,27 @@ jobs:
             *ollama*) ;;
             *) echo "packaged binary did not list the Ollama provider" >&2; exit 1 ;;
           esac
+          if [ "$OS" = "darwin" ] && [ "$ARCH" = "arm64" ]; then
+            case "$providers" in
+              *apple*) ;;
+              *) echo "packaged Apple-silicon binary did not list Apple Foundation Models" >&2; exit 1 ;;
+            esac
+            set +e
+            apple_output="$("$unpacked/pave" --provider apple --model default --prompt "Reply with OK." 2>&1)"
+            apple_status=$?
+            set -e
+            if [ "$apple_status" -ne 0 ]; then
+              case "$apple_output" in
+                *"Apple Intelligence is disabled"*|*"Apple Foundation Models is unavailable"*|*"Apple Foundation Models requires"*|*"model is not ready"*|*"Apple Intelligence-eligible Apple-silicon Mac"*) ;;
+                *) echo "packaged Apple route failed without an availability diagnostic: $apple_output" >&2; exit 1 ;;
+              esac
+            fi
+          elif [ "$OS" = "darwin" ] && [ "$ARCH" = "x86_64" ]; then
+            case "$providers" in
+              *apple*) echo "macOS Intel archive unexpectedly listed Apple Foundation Models" >&2; exit 1 ;;
+              *) ;;
+            esac
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: pave-${{ matrix.os }}-${{ matrix.arch }}

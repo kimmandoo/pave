@@ -52,13 +52,18 @@ let builtins = [
     default_route = "generate";
     api_key_env = Some "GEMINI_API_KEY"; oauth = None };
   { id = "google-vertex"; display_name = "Google Vertex AI (configured project)";
-    routes = [ { name = "generate"; wire = Provider.Vertex_generate;
-      endpoint = "" } ];
+    routes = [
+      { name = "generate"; wire = Provider.Vertex_generate;
+        endpoint = "" };
+      { name = "messages"; wire = Provider.Vertex_anthropic;
+        endpoint = "" } ];
     default_route = "generate";
     api_key_env = None; oauth = None };
   { id = "amazon-bedrock"; display_name = "Amazon Bedrock Converse (configured region)";
-    routes = [ { name = "converse"; wire = Provider.Bedrock_converse;
-      endpoint = "" } ];
+    routes = [
+      { name = "converse"; wire = Provider.Bedrock_converse; endpoint = "" };
+      { name = "converse-stream"; wire = Provider.Bedrock_converse_stream;
+        endpoint = "" } ];
     default_route = "converse";
     api_key_env = None; oauth = None };
   { id = "bedrock-mantle"; display_name = "AWS Bedrock Mantle (configured region)";
@@ -391,9 +396,12 @@ let builtins = [
       endpoint = "http://127.0.0.1:8000/v1/chat/completions" } ];
     default_route = "chat";
     api_key_env = Some "VLLM_API_KEY"; oauth = None };
-  { id = "azure"; display_name = "Azure OpenAI (configured resource)";
-    routes = [ { name = "responses"; wire = Provider.Azure_responses;
-      endpoint = "" } ];
+  { id = "azure"; display_name = "Azure OpenAI (configured resource/deployment)";
+    routes = [
+      { name = "responses"; wire = Provider.Azure_responses;
+        endpoint = "" };
+      { name = "chat"; wire = Provider.Azure_chat;
+        endpoint = "" } ];
     default_route = "responses";
     api_key_env = Some "AZURE_OPENAI_API_KEY"; oauth = None };
   { id = "github-copilot"; display_name = "GitHub Copilot Chat (public github.com)";
@@ -402,6 +410,13 @@ let builtins = [
     default_route = "chat";
     api_key_env = None; oauth = Some "github-copilot" };
 ]
+@ (if Apple_foundation_models.helper_available () then [
+  { id = "apple"; display_name = "Apple Foundation Models (on-device)";
+    routes = [ { name = "chat"; wire = Provider.Apple_foundation_models;
+      endpoint = "" } ];
+    default_route = "chat";
+    api_key_env = None; oauth = None }
+] else [])
 
 let builtin_registry = { providers = builtins; custom_providers = [] }
 
@@ -460,7 +475,8 @@ let unclassified_models ?(registry = builtin_registry) id =
   Option.is_some (custom_provider registry id) ||
   List.mem id [ "stepfun"; "synthetic"; "wafer-serverless"; "zenmux";
     "xiaomi"; "kilo"; "opencode-zen"; "opencode-go"; "charm-hyper";
-    "yolo-auto"; "meta"; "vercel-ai-gateway"; "commandcode"; "minimax" ]
+    "yolo-auto"; "meta"; "vercel-ai-gateway"; "commandcode"; "minimax";
+    "azure"; "amazon-bedrock" ]
 
 let route provider name =
   let name = if name = "" then provider.default_route else name in
@@ -468,5 +484,9 @@ let route provider name =
   | Some entry when Local_compat.engine provider.id <> None ->
       Some { entry with endpoint = Local_compat.endpoint ~provider:provider.id () }
   | Some entry when provider.id = "azure" ->
-      Some { entry with endpoint = Azure_wire.endpoint () }
+      let route = match entry.wire with
+        | Provider.Azure_responses -> Azure_wire.Responses
+        | Provider.Azure_chat -> Azure_wire.Chat_completions
+        | _ -> assert false in
+      Some { entry with endpoint = Azure_wire.endpoint ~route () }
   | route -> route

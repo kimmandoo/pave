@@ -500,31 +500,66 @@ let discover_bedrock ?http ?cancel credential =
       (try
         Provider.check_cancel cancel;
         let region = Aws_auth.region () in
-        let keys = Aws_auth.resolve () in
-        let target = Bedrock_wire.discovery_endpoint ~region () in
-        let signed = Aws_auth.sign ~content_type:false ~credentials:keys
-          ~region ~amz_date:(Aws_auth.amz_date ()) ~method_:"GET"
-          ~host:target.host ~path:target.path ~body:"" () in
+        let keys = Aws_auth.resolve
+          ~credential_process_policy:(Aws_auth.credential_process_policy ())
+          ?cancel () in
         let http = match http with
           | Some http -> http
           | None -> fun ~url ~headers ->
               default_http ?cancel ~url ~headers () in
-        let response = http ~url:target.url ~headers:signed in
-        Provider.check_cancel cancel;
-        match response with
-        | Error failure -> Error failure
-        | Ok (status, _) when status < 200 || status >= 300 ->
-            Error (Http_error status)
-        | Ok (_, body) when String.length body > max_response_bytes ->
-            Error (Invalid_response "listing exceeds size limit")
-        | Ok (_, body) ->
-            let json = Yojson.Basic.from_string body in
-            (try Ok (Bedrock_wire.parse_models json)
-             with Protocol.Invalid_response reason ->
-               Error (Invalid_response reason))
-       with
+        let request target =
+          Provider.check_cancel cancel;
+          let signed = Aws_auth.sign ~content_type:false ~query:target.Bedrock_wire.query
+            ~credentials:keys ~region ~amz_date:(Aws_auth.amz_date ())
+            ~method_:"GET" ~host:target.host ~path:target.path ~body:"" () in
+          let response = http ~url:target.url ~headers:signed in
+          Provider.check_cancel cancel;
+          match response with
+          | Error failure -> Error failure
+          | Ok (status, _) when status < 200 || status >= 300 ->
+              Error (Http_error status)
+          | Ok (_, body) when String.length body > max_response_bytes ->
+              Error (Invalid_response "listing exceeds size limit")
+          | Ok (_, body) ->
+              Ok (Yojson.Basic.from_string body) in
+        let seen = Hashtbl.create 128 in
+        let ids = ref [] in
+        let add_ids values =
+          List.iter (fun id ->
+            if Hashtbl.mem seen id then
+              raise (Protocol.Invalid_response "duplicate Bedrock model ID");
+            Hashtbl.add seen id ();
+            ids := id :: !ids) values in
+        match request (Bedrock_wire.discovery_endpoint ~region ()) with
+        | Error _ as error -> error
+        | Ok json ->
+            add_ids (Bedrock_wire.parse_models json);
+            let rec profiles page_count next_token seen_tokens =
+              if page_count >= 20 then
+                Error (Invalid_response "inference profile listing exceeds 20 pages")
+              else
+                let target = Bedrock_wire.inference_profiles_endpoint
+                  ~region ?next_token () in
+                match request target with
+                | Error _ as error -> error
+                | Ok json ->
+                    let page_ids, next =
+                      Bedrock_wire.parse_inference_profiles json in
+                    add_ids page_ids;
+                    (match next with
+                     | None -> Ok (List.rev !ids)
+                     | Some token when Hashtbl.mem seen_tokens token ->
+                         Error (Invalid_response
+                           "inference profile listing repeated a pagination token")
+                     | Some token ->
+                         Hashtbl.add seen_tokens token ();
+                         profiles (page_count + 1) (Some token) seen_tokens) in
+            profiles 0 None (Hashtbl.create 8)
+      with
+       | Aws_auth.Cancelled -> raise Provider.Cancelled
        | Invalid_argument reason -> Error (Invalid_response reason)
-       | Yojson.Json_error _ -> Error (Invalid_response "malformed model listing JSON")
+       | Protocol.Invalid_response reason -> Error (Invalid_response reason)
+       | Yojson.Json_error _ -> Error (Invalid_response "malformed listing JSON")
        | Provider.Cancelled -> raise Provider.Cancelled
        | Provider.Provider_error _ | Unix.Unix_error _ | Sys_error _ ->
            Error (Transport_error "request failed or timed out"))
@@ -1156,6 +1191,7 @@ let pinned_endpoint ~provider ~(route : Provider_catalog.route) =
         dynamic (fun () ->
           (Bedrock_mantle.discovery_endpoint
             ~region:(Bedrock_mantle.region ()) ()).Bedrock_mantle.url)
+    | "azure" -> Some Azure_deployment_discovery.endpoint_base
     | "openai" -> Some openai_url
     | "google" -> Some google_url
     | "ollama" -> Some ollama_url
@@ -1213,6 +1249,7 @@ let credential_policy provider =
   | "umans" ->
       Some Anonymous
   | "amazon-bedrock" -> Some Ambient_credentials
+  | "azure" -> Some Optional_api_key
   | "github-copilot" | "devin" | "openai-codex" ->
       Some (OAuth_account provider)
   | "openrouter" -> Some (Stored_api_key provider)
@@ -1425,6 +1462,67 @@ let discover_custom ?http ?cancel ~provider ~route ~account_id ?credential () =
                             raw_models in
                           Ok { models; source }))))
 
+let discover_azure ?cancel ~route ~account_id ?credential () =
+  match check_credential Optional_api_key credential with
+  | Error _ as error -> error
+  | Ok _ ->
+      let discovered =
+        try Ok (Azure_deployment_discovery.list_deployments
+          ?cancel ~endpoint:route.Provider_catalog.endpoint ())
+        with
+        | Azure_auth.Cancelled -> raise Provider.Cancelled
+        | Azure_auth.Authentication_error _ ->
+            Error (Credential_error
+              "Azure deployment listing requires a supported public-cloud endpoint") in
+      (match discovered with
+       | Error _ as error -> error
+       | Ok (Error (Azure_deployment_discovery.Credential_error detail)) ->
+           Error (Credential_error detail)
+       | Ok (Error (Azure_deployment_discovery.Invalid_response detail)) ->
+           Error (Invalid_response detail)
+       | Ok (Ok discovered) ->
+           if Option.fold ~none:false
+               ~some:(fun expected -> expected <> discovered.account_id) account_id
+           then Error Invalid_credential
+           else
+             let retrieved_at = Unix.gettimeofday () in
+             let source = {
+               Model_catalog.id_source = Model_catalog.Pinned_account_listing;
+               capability_source = None;
+               endpoint = Some discovered.endpoint;
+               retrieved_at = Some retrieved_at;
+             } in
+             let models : Model_catalog.model list = List.map
+               (fun (deployment : Azure_deployment_discovery.deployment) ->
+                 ({ Model_catalog.identity = Model_identity.make ~provider:"azure"
+                      ~account_id:discovered.account_id ~route:route.name
+                      ~upstream_id:deployment.id ();
+                    display_name = deployment.display_name;
+                    capabilities = Model_catalog.empty_capabilities;
+                    provenance = source } : Model_catalog.model))
+               discovered.deployments in
+             Ok { models; source })
+
+
+let discover_apple ~route ~account_id ?credential () =
+  if route.Provider_catalog.wire <> Provider.Apple_foundation_models then
+    Error (Unsupported_route ("apple", route.name))
+  else if account_id <> None || Option.is_some credential then
+    Error Invalid_credential
+  else
+    let source : Model_catalog.provenance = {
+      id_source = Model_catalog.Runtime_default;
+      capability_source = None; endpoint = None; retrieved_at = None;
+    } in
+    let model : Model_catalog.model = {
+      identity = Model_identity.make ~provider:"apple" ~route:route.name
+        ~upstream_id:"default" ();
+      display_name = Some "On-device default";
+      capabilities = Model_catalog.empty_capabilities;
+      provenance = source;
+    } in
+    Ok { models = [model]; source }
+
 let discover ?http ?cancel ?route_name ?account_id ?registry
     ~provider ?credential () =
   let registry = Option.value ~default:Provider_catalog.builtin_registry registry in
@@ -1441,7 +1539,12 @@ let discover ?http ?cancel ?route_name ?account_id ?registry
                 discover_custom ?http ?cancel ~provider ~route:custom_route
                   ~account_id ?credential ()
             | None ->
-                (match adapter_for ~provider ~route with
+                if provider = "apple" then
+                  discover_apple ~route ~account_id ?credential ()
+                else if provider = "azure" then
+                  discover_azure ?cancel ~route ~account_id ?credential ()
+                else
+                  (match adapter_for ~provider ~route with
             | None -> Error (Unsupported_provider provider)
             | Some adapter ->
                 (match check_credential adapter.credential_policy credential with
@@ -1466,8 +1569,10 @@ let discover ?http ?cancel ?route_name ?account_id ?registry
                           let retrieved_at = Unix.gettimeofday () in
                           let id_source = match adapter.credential_policy,
                               credential with
-                            | Anonymous, _ | _, None ->
-                                Model_catalog.Provider_listing
+                            | Anonymous, _ -> Model_catalog.Provider_listing
+                            | Ambient_credentials, _ ->
+                                Model_catalog.Pinned_account_listing
+                            | _, None -> Model_catalog.Provider_listing
                             | _, Some _ ->
                                 Model_catalog.Pinned_account_listing in
                           let source = {
