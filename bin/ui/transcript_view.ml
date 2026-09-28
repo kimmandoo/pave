@@ -232,30 +232,36 @@ let heading t ~kind ~group ~provisional text =
   t.table_active <- false;
   add_line t ~kind ~group ~provisional ~style:Heading text
 
+let markdown_prefix line =
+  let length = String.length line in
+  let rec hashes n =
+    if n < 6 && n < length && line.[n] = '#' then hashes (n + 1)
+    else n in
+  let count = hashes 0 in
+  if count > 0 && count < length && line.[count] = ' ' then
+    Subheading, String.sub line (count + 1) (length - count - 1)
+  else if line = ">" then Quote, ""
+  else if String.starts_with ~prefix:"> " line then
+    Quote, String.sub line 2 (length - 2)
+  else if String.starts_with ~prefix:"- " line ||
+    String.starts_with ~prefix:"* " line then
+    List_item, String.sub line 2 (length - 2)
+  else Text, line
+
+let display_line ~fenced line =
+  if String.starts_with ~prefix:"```" line then
+    Code, (if fenced then "end code" else
+      let language = String.trim
+        (String.sub line 3 (String.length line - 3)) in
+      "code" ^ (if language = "" then "" else " · " ^ language))
+  else if fenced then Code, line
+  else markdown_prefix line
+
 let content_line t ~kind ~group ~provisional ?(detail = false) line =
   let line = fit line in
-  let style, line =
-    if String.starts_with ~prefix:"```" line then (
-      let opening = not t.fenced in
-      t.fenced <- opening;
-      Code, (if opening then
-        let language = String.trim
-          (String.sub line 3 (String.length line - 3)) in
-        "╶ code" ^ (if language = "" then "" else " · " ^ language)
-      else "╴ end code"))
-    else if t.fenced then Code, line
-    else if String.starts_with ~prefix:"# " line then
-      Subheading, String.sub line 2 (String.length line - 2)
-    else if String.starts_with ~prefix:"## " line then
-      Subheading, String.sub line 3 (String.length line - 3)
-    else if String.starts_with ~prefix:"### " line then
-      Subheading, String.sub line 4 (String.length line - 4)
-    else if String.starts_with ~prefix:"> " line then
-      Quote, String.sub line 2 (String.length line - 2)
-    else if String.starts_with ~prefix:"- " line ||
-      String.starts_with ~prefix:"* " line then
-      List_item, String.sub line 2 (String.length line - 2)
-    else Text, line in
+  let fence = String.starts_with ~prefix:"```" line in
+  let style, line = display_line ~fenced:t.fenced line in
+  if fence then t.fenced <- not t.fenced;
   if style <> Text then (
     t.table_active <- false;
     add_line t ~kind ~group ~provisional ~detail ~markdown:(style <> Code)
@@ -295,15 +301,20 @@ let content_line t ~kind ~group ~provisional ?(detail = false) line =
 let add_block t kind title text =
   let id = group t in
   heading t ~kind ~group:id ~provisional:false title;
-  String.split_on_char '\n' (sanitize text)
+  let text = sanitize text in
+  let last = ref (String.length text) in
+  while !last > 0 && text.[!last - 1] = '\n' do decr last done;
+  let body = if !last = String.length text then text
+    else String.sub text 0 !last in
+  String.split_on_char '\n' body
   |> List.iter (content_line t ~kind ~group:id ~provisional:false)
 
-let sent t text = add_block t User "YOU" text
-let assistant t text = add_block t Assistant "PAVE" text
-let notice t text = add_block t Notice "NOTICE" text
-let error t text = add_block t Error "ERROR" text
+let sent t text = add_block t User "You" text
+let assistant t text = add_block t Assistant "Pave" text
+let notice t text = add_block t Notice "Note" text
+let error t text = add_block t Error "Error" text
 let approval ?(title = "SHELL APPROVAL · review before deciding") t text =
-  add_block t Approval title text
+  add_block t Approval (single_line title) text
 
 let valid_tool_name name =
   name <> "" && String.length name <= 64 &&
@@ -348,31 +359,35 @@ let tool_result ?group:existing ?(aborted = false) ?(is_error = false) t name re
     let row = t.rows.(i) in
     if row.group = id && row.kind = Tool && row.style = Heading then (
       mark_dirty t i;
-      set_text row (name ^ " · " ^ outcome))
+      set_text row name)
   done;
   let length = String.fold_left (fun count char ->
     if char = '\n' then count + 1 else count) 1 result in
   add_line t ~kind:(if error then Error else Tool) ~group:id
     ~provisional:false ~style:Tool_state
-    (name ^ (if aborted then " · aborted" else
-      if failed then " · error" else " · done") ^ " · details hidden");
-  let position = ref 0 in
-  for index = 0 to min (length - 1) (max_tool_lines - 1) do
+    (Printf.sprintf "%s · %d %s · collapsed" outcome length
+      (if length = 1 then "line" else "lines"));
+  let position = ref 0 and previewed = ref false in
+  for _index = 0 to min (length - 1) (max_tool_lines - 1) do
     let stop = match String.index_from_opt result !position '\n' with
       | Some stop -> stop | None -> String.length result in
     let bytes = stop - !position in
     let line = sanitize (String.sub result !position
       (min bytes max_line_bytes)) in
     let line = if bytes > max_line_bytes then fit (line ^ "…") else fit line in
-    if index < 2 then (
+    if not !previewed && String.trim line <> "" &&
+      not (String.starts_with ~prefix:"```" line) then (
+      previewed := true;
+      let style, preview = display_line ~fenced:t.fenced line in
       let excerpt =
-        if String.length line <= 160 then line
+        if String.length preview <= 160 then preview
         else let prefix = ref 160 in
-          while !prefix > 0 && Char.code line.[!prefix] land 0xc0 = 0x80 do
+          while !prefix > 0 && Char.code preview.[!prefix] land 0xc0 = 0x80 do
             decr prefix done;
-          String.sub line 0 !prefix ^ "…" in
+          String.sub preview 0 !prefix ^ "…" in
       add_line t ~kind:(if error then Error else Tool) ~group:id
-        ~provisional:false ~preview:true excerpt);
+        ~provisional:false ~preview:true ~style
+        ~markdown:(style <> Code) excerpt);
     content_line t ~kind:(if error then Error else Tool)
       ~group:id ~provisional:false ~detail:true line;
     position := stop + 1
@@ -406,7 +421,7 @@ let delta t chunk =
   if chunk <> "" then (
     if not t.streaming then (
       let id = group t in
-      heading t ~kind:Assistant ~group:id ~provisional:true "PAVE";
+      heading t ~kind:Assistant ~group:id ~provisional:true "Pave";
       t.streaming <- true);
     let id = t.next_group - 1 in
     match String.split_on_char '\n' chunk with
@@ -424,6 +439,14 @@ let finish t =
   t.streaming <- false;
   t.fenced <- false;
   t.table_active <- false;
+  while t.count > 0 &&
+    (let row = t.rows.(t.count - 1) in
+     row.kind = Assistant && row.provisional &&
+     row.style = Text && row.text = "") do
+    mark_dirty t (t.count - 1);
+    t.count <- t.count - 1;
+    t.rows.(t.count) <- blank
+  done;
   for i = 0 to t.count - 1 do t.rows.(i).provisional <- false done;
   t.revision <- t.revision + 1
 
@@ -490,15 +513,15 @@ let toggle t ~first:_ ~last =
       for i = 0 to t.count - 1 do
         let row = t.rows.(i) in
         if row.group = id && row.style = Tool_state &&
-          String.ends_with ~suffix:" · details hidden" row.text then
+          String.ends_with ~suffix:" · collapsed" row.text then
           set_text row (String.sub row.text 0
-            (String.length row.text - String.length " · details hidden") ^
-            " · details shown")
+            (String.length row.text - String.length " · collapsed") ^
+            " · expanded")
         else if row.group = id && row.style = Tool_state &&
-          String.ends_with ~suffix:" · details shown" row.text then
+          String.ends_with ~suffix:" · expanded" row.text then
           set_text row (String.sub row.text 0
-            (String.length row.text - String.length " · details shown") ^
-            " · details hidden")
+            (String.length row.text - String.length " · expanded") ^
+            " · collapsed")
       done;
       t.revision <- t.revision + 1;
       Some id
@@ -625,17 +648,16 @@ let snapshot t ~columns ~measure =
         if visible t row then push i row
       done;
       if t.live <> "" then (
-        let style =
-          if String.starts_with ~prefix:"```" t.live || t.fenced then Code
-          else if String.starts_with ~prefix:"# " t.live ||
-            String.starts_with ~prefix:"## " t.live ||
-            String.starts_with ~prefix:"### " t.live then Subheading
-          else if String.starts_with ~prefix:"> " t.live then Quote
-          else if String.starts_with ~prefix:"- " t.live ||
-            String.starts_with ~prefix:"* " t.live then List_item
-          else Text in
-        let text, runs = if style = Code then t.live, plain_runs t.live
-          else inline_markdown t.live in
+        let style, line = display_line ~fenced:t.fenced t.live in
+        let style, line = if style <> Text then style, line
+          else match table_cells line with
+            | Some cells when table_separator cells ->
+                Table_separator, table_rule cells
+            | Some cells when t.table_active ->
+                Table_row, table_row_text cells
+            | _ -> Text, line in
+        let text, runs = if style = Code || style = Table_separator then
+          line, plain_runs line else inline_markdown line in
         push t.count { kind = Assistant; style; text; runs;
           provisional = true; group = t.next_group - 1; detail = false;
           preview = false });

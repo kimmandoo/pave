@@ -37,6 +37,36 @@ let () =
     Unix.putenv "XDG_STATE_HOME" state;
     let module Store = Pave.Session_store in
     assert (Store.recent ~root = []);
+    let module Recent = Pave.Recent_model in
+    let first_model = Pave.Model_identity.make
+      ~provider:"openai-codex" ~account_id:"account-A"
+      ~route:"responses" ~upstream_id:"gpt-6-luna" () in
+    let second_model = Pave.Model_identity.make
+      ~provider:"openai-codex" ~account_id:"account-B"
+      ~route:"responses" ~upstream_id:"gpt-6-luna" () in
+    assert (Recent.load ~root = None);
+    Recent.save ~root first_model;
+    assert (Recent.load ~root = Some first_model);
+    assert (Recent.load ~root:other = None);
+    Recent.save ~root second_model;
+    assert (Recent.load ~root = Some second_model);
+    let recent_file = child (Store.directory ~root) "last-model.json" in
+    assert ((Unix.stat recent_file).Unix.st_perm land 0o077 = 0);
+    Unix.chmod (Store.directory ~root) 0o755;
+    assert (Recent.load ~root = None);
+    Unix.chmod (Store.directory ~root) 0o700;
+    assert (Recent.load ~root = Some second_model);
+    Unix.chmod recent_file 0o644;
+    assert (Recent.load ~root = None);
+    Recent.save ~root first_model;
+    assert (Recent.load ~root = Some first_model);
+    let fd = Unix.openfile recent_file [Unix.O_WRONLY; Unix.O_TRUNC] 0o600 in
+    let invalid_model = {|{"provider":"tampered"}|} in
+    ignore (Unix.write_substring fd invalid_model 0 (String.length invalid_model));
+    Unix.close fd;
+    assert (Recent.load ~root = None);
+    Recent.save ~root second_model;
+    assert (Recent.load ~root = Some second_model);
     let unmanaged = Pave.Session.open_file
       ~cwd:(Unix.realpath root) (child root "external.jsonl") in
     ignore (Pave.Session.append unmanaged (Pave.Protocol.user "outside store"));

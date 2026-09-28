@@ -69,6 +69,18 @@ let () =
   assert (Identity.equal slash_model.identity parsed_slash &&
     slash_route.name = "chat" &&
     parsed_slash.upstream_id = "org/model");
+  let scoped_id = "company/very-long-model-name-with-distinctive-suffix-B" in
+  let scoped_listing = listing ~provider:"openai" ~route:"chat"
+    ~account_id:"team-a" ~ids:[scoped_id] () in
+  let scoped_model = List.hd
+    (Model_picker.eligible_models openai chat scoped_listing) in
+  let exact = Model_picker.identity_selector scoped_model in
+  let label = Model_picker.identity_label scoped_model in
+  let detail = Model_picker.model_detail openai scoped_model in
+  assert (String.ends_with ~suffix:scoped_id label &&
+    String.starts_with ~prefix:"openai@chat#team-a · " label &&
+    Option.fold ~none:false ~some:(fun text ->
+      String.starts_with ~prefix:("exact identity " ^ exact) text) detail);
   let off_route : Discovery.listing = { chat_listing with
     models = List.map (fun (model : Discovery.model) ->
       { model with capabilities = {

@@ -6,13 +6,13 @@ let measure cluster = Notty.I.width (Notty.I.string Notty.A.empty cluster)
 let rendered t width = layout t ~columns:width ~measure
 let lines t width = Array.to_list (Array.map (fun visual -> visual.text) (rendered t width))
 let has text lines = List.exists (String.equal text) lines
-let has_tool_state t name status =
-  let prefix = name ^ " · " ^ status in
+let has_tool_state t kind status =
+  let prefix = status ^ " · " in
   let rec find index =
     if index = t.count then false
     else
       let row = t.rows.(index) in
-      (row.kind = Tool && row.style = Tool_state &&
+      (row.kind = kind && row.style = Tool_state &&
        String.starts_with ~prefix row.text) || find (index + 1) in
   find 0
 let heading_count t kind =
@@ -42,17 +42,18 @@ let () =
   let initial = lines transcript 64 in
   expect "distinct user block" (heading_count transcript User = 1);
   expect "streamed assistant grouped with tool activity" (heading_count transcript Assistant = 2);
-  expect "tool settled state and first preview visible"
-    (has "http_request · completed" initial &&
+  expect "settled tool has one title, outcome, and a compact preview"
+    (has "http_request" initial &&
     not (has "http_request · running" initial) &&
-    has_tool_state transcript "http_request" "done" &&
-    has "HTTP/1.1 200 OK" initial);
+    has_tool_state transcript Tool "completed" &&
+    has "HTTP/1.1 200 OK" initial &&
+    not (has "line two" initial));
   expect "collapsed output hides remaining lines" (not (has "secret later line" initial));
   expect "tool expansion chooses current tool"
     (Option.is_some (toggle transcript ~first:0 ~last:(transcript.count - 1)));
   let expanded = lines transcript 64 in
-  expect "expanded output contains full result" (has "secret later line" expanded &&
-    has "fourth line" expanded);
+  expect "expanded output contains full result"
+    (has "secret later line" expanded && has "fourth line" expanded);
   expect "tool collapse restores compact result"
     (Option.is_some (toggle transcript ~first:0 ~last:(transcript.count - 1)));
   expect "collapsed result hidden again" (not (has "secret later line" (lines transcript 64)));
@@ -62,7 +63,7 @@ let () =
     not (has "Building a client" after) &&
     not (has "Final **response**" after));
   expect "completed tool execution remains visible"
-    (has_tool_state transcript "http_request" "done");
+    (has_tool_state transcript Tool "completed");
   error transcript "Error: provider unavailable";
   expect "errors distinguished" (heading_count transcript Error = 1);
   let narrow = rendered transcript 8 in
@@ -99,14 +100,27 @@ let () =
   expect "streamed headings have semantic styling"
     (Array.exists (fun (visual : visual) -> visual.row.style = Subheading)
       (rendered markdown 20));
-  expect "code fences remain code, not terminal controls"
-    (has "╶ code · ocaml" (lines markdown 20) &&
-     has "╴ end code" (lines markdown 20));
+  expect "code fences retain language and fence boundary semantics"
+    (has "code · ocaml" (lines markdown 20) &&
+     has "end code" (lines markdown 20));
   expect "markdown prefixes become styling, not duplicated visible punctuation"
     (has "Heading" (lines markdown 20) &&
      has "bullet" (lines markdown 20) &&
      has "quote" (lines markdown 20) &&
      not (has "- bullet" (lines markdown 20)));
+  let live_markdown = create () in
+  delta live_markdown "> **quoted**";
+  let live_quote = rendered live_markdown 30 in
+  expect "live quote removes markup but retains semantic inline style"
+    (Array.exists (fun (visual : visual) ->
+       visual.row.style = Quote && visual.text = "quoted" &&
+       Array.exists (fun (run : inline_run) -> run.style = Bold &&
+         run.content = "quoted") visual.runs) live_quote);
+  delta live_markdown "\n```ocaml";
+  expect "live code fence uses the same language label as settled output"
+    (Array.exists (fun (visual : visual) ->
+       visual.row.style = Code && visual.text = "code · ocaml")
+       (rendered live_markdown 30));
   let rich = create () in
   assistant rich
     "A **bold** `code` and [docs](https://example.test).\n| Name | Status |\n| ---- | ------ |\n| API | ready |";
@@ -179,16 +193,68 @@ let () =
   let failed_tool = create () in
   event failed_tool "[http_request]";
   event failed_tool "[http_request] Error: HTTP 503";
-  expect "tool failure has error semantics"
-    (Array.exists (fun (visual : visual) ->
-      visual.row.kind = Error && visual.row.style = Tool_state)
-      (rendered failed_tool 60));
+  expect "tool failure has distinct error outcome and preserved diagnostics"
+    (has_tool_state failed_tool Error "failed" &&
+     has "Error: HTTP 503" (lines failed_tool 60));
+  let compact_tool = create () in
+  event compact_tool ("[run_command] \n```text\n" ^
+    String.make 280 'x' ^ "\n```\nprivate diagnostics");
+  expect "collapsed tool skips empty and fence-only previews"
+    (not (has "private diagnostics" (lines compact_tool 32)) &&
+     Array.exists (fun (visual : visual) ->
+       visual.row.preview && visual.row.style = Code)
+       (rendered compact_tool 32));
+  ignore (toggle compact_tool ~first:0 ~last:(compact_tool.count - 1));
+  let full_tool = rendered compact_tool 16 in
+  expect "expanded long code wraps without losing original content"
+    (Array.for_all (fun (visual : visual) -> measure visual.text <= 16)
+       full_tool &&
+     has "private diagnostics" (lines compact_tool 32) &&
+     Array.exists (fun (row : row) ->
+       row.detail && row.style = Code && row.text = String.make 280 'x')
+       (Array.sub compact_tool.rows 0 compact_tool.count));
+  let final_answer = create () in
+  event final_answer "[run_command] done";
+  delta final_answer "Final answer";
+  finish final_answer;
+  let final_rows = rendered final_answer 30 in
+  let last = final_rows.(Array.length final_rows - 1) in
+  expect "completed answer stays the last visible row at 30 by 3"
+    (last.row.kind = Assistant && last.row.style = Text &&
+     last.text = "Final answer" && not last.row.provisional &&
+     final_rows.(Array.length final_rows - 2).row.style = Heading);
+  let persisted_answer = create () in
+  assistant persisted_answer "Persisted answer\n\n";
+  let persisted_rows = rendered persisted_answer 30 in
+  expect "saved answer omits terminal blank rows but retains its content"
+    (Array.length persisted_rows = 2 &&
+     persisted_rows.(1).row.kind = Assistant &&
+     persisted_rows.(1).text = "Persisted answer");
+  let streamed_answer = create () in
+  delta streamed_answer "Streamed answer\n\n";
+  finish streamed_answer;
+  let streamed_rows = rendered streamed_answer 30 in
+  expect "settled stream leaves the answer, not a blank line, at viewport end"
+    (Array.length streamed_rows = 2 &&
+     streamed_rows.(1).row.kind = Assistant &&
+     streamed_rows.(1).text = "Streamed answer");
   let approval_block = create () in
   approval approval_block "pwd";
   let malicious = create () in
   sent malicious "safe\027[31m\194\155unsafe\226\128\174rtl";
   expect "transcript strips C0, C1 and bidi display controls while preserving prose"
     (has "safe [31m unsafe rtl" (lines malicious 64));
+  let hostile_tool = create () in
+  event hostile_tool "[run_command] safe\027[31m\194\155unsafe\nprivate detail";
+  expect "collapsed tool preview sanitizes output without revealing later lines"
+    (has "safe [31m unsafe" (lines hostile_tool 64) &&
+     not (has "private detail" (lines hostile_tool 64)));
+  ignore (toggle hostile_tool ~first:0 ~last:(hostile_tool.count - 1));
+  expect "expanded tool diagnostics stay sanitized"
+    (has "private detail" (lines hostile_tool 64) &&
+     Array.for_all (fun (visual : visual) ->
+       not (String.contains visual.text '\027'))
+       (rendered hostile_tool 64));
   expect "approval retains exact reviewable command"
     (heading_count approval_block Approval = 1 &&
       has "pwd" (lines approval_block 60));
@@ -199,6 +265,11 @@ let () =
     (heading_count tool_approval Approval = 1 &&
      has "TOOL APPROVAL · review before deciding" (lines tool_approval 64) &&
      has "Path: Sources/App.swift" (lines tool_approval 64));
+  let untrusted_title = create () in
+  approval ~title:"Review\027[31m\ncommand" untrusted_title "pwd";
+  expect "approval header sanitizes controls and stays on one line"
+    (has "Review [31m command" (lines untrusted_title 64) &&
+     has "pwd" (lines untrusted_title 64));
   let large = create () in
   sent large (String.make 4096 'A');
   let compact = snapshot large ~columns:1 ~measure:(fun _ -> 1) in
@@ -220,9 +291,15 @@ let () =
       entry.row.text = "http_request · running") running.entries);
   event history "[http_request] first output\nsecond output\nsecret output";
   let completed = snapshot history ~columns:8 ~measure in
-  expect "tool heading updates after a cached running snapshot"
+  expect "settled tool shows its identity and a collapsed successful outcome"
     (Array.exists (fun (entry : entry) ->
-      entry.row.text = "http_request · completed") completed.entries &&
+      entry.row.kind = Tool && entry.row.style = Heading &&
+      entry.row.text = "http_request") completed.entries &&
+    Array.exists (fun (entry : entry) ->
+      entry.row.kind = Tool && entry.row.style = Tool_state &&
+      String.starts_with ~prefix:"completed" entry.row.text &&
+      String.ends_with ~suffix:"collapsed" entry.row.text)
+      completed.entries &&
     not (Array.exists (fun (entry : entry) ->
       entry.row.text = "http_request · running") completed.entries));
   expect "old history and collapsed preview survive tool settlement"

@@ -1,5 +1,19 @@
 # Troubleshooting
 
+### [2026-09-28] A selected model reverted after relaunch
+
+- **Context / Symptom:** An interactive `/model` selection sent the chosen ID to local Chat inference, but closing Pave and relaunching in the same workspace restored the configured default instead.
+- **Root Cause:** Model switches updated the current agent and optional conversation journal but never recorded a workspace-scoped choice when the conversation had no saved journal. User/project setup defaults were the only startup fallback.
+- **Solution:** Stored the exact provider/account/route/upstream-ID tuple and custom-route revision in an owned, atomically replaced private workspace state file after successful interactive selection. Fresh interactive launches restore it unless an explicit CLI/account/session selector wins; missing, malformed, stale custom-route and insecure state falls back to settings. An isolated LM Studio PTY reproduced `initial` instead of `picked-local-model` before the change, then relaunched with `picked-local-model` and sent that exact ID to `/v1/chat/completions`; an explicit `--model initial` and another workspace retained their own defaults.
+- **Prevention / Reference:** A displayed model label is not a model identity. Test a completed selection across process restart, account/route preservation, CLI precedence and private state permissions, not just within one conversation.
+
+### [2026-09-28] Hosted CI repeated metadata and helper build work
+
+- **Context / Symptom:** The four-job main CI matrix linted the same opam metadata on every host/compiler combination and rebuilt the macOS helper after `@install`; hosted jobs still spent substantial time on cold dependency installation and compiler setup.
+- **Root Cause:** Static opam lint is platform-independent, and `@install` already includes the native helper. Separate compiler/OS test jobs and native release jobs cover different contracts; removing full suites or relying on an unpinned shared dependency cache would weaken validation without a demonstrated speedup.
+- **Solution:** Kept the four compiler/OS test jobs and native package/extracted-binary safeguards, ran `opam lint` only once on Ubuntu/OCaml 5.5.1, and reused `@install` for the helper's `--help`/provider smoke. `actionlint` passed. Cold opam dependency downloads, compiler setup and forced tests remain the dominant costs; no broad CI time reduction is claimed.
+- **Prevention / Reference:** Compare job-step timings before removing coverage; preserve serial `dune runtest --force -j 1` because parallel hosted fixture failures were previously reproduced.
+
 ### [2026-09-28] A listed model was not usable for the selected inference route
 
 - **Context / Symptom:** Model selection could offer a Codex row marked `supported_in_api: false` and a Devin row explicitly marked `supportsToolCalls: false`; selecting either for an agent turn failed before the expected answer. A Devin router with no `modelFeatures` field failed the local tool preflight despite upstream allowing tools by default.

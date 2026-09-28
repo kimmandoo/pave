@@ -159,14 +159,39 @@ let () =
       configured.max_turns) !max_turns in
     if max_turns <= 0 then failwith "--max-turns must be positive";
     let explicit_model_override = !explicit_selection in
+    let recent_model =
+      if explicit_model_override || !session_supplied || !prompt_supplied ||
+         Option.is_some !account_id then None
+      else
+        Option.bind (Pave.Recent_model.load ~root)
+          (fun (identity : Pave.Model_identity.t) ->
+            let valid = match Pave.Provider_catalog.find ~registry
+                identity.provider with
+              | None -> false
+              | Some descriptor ->
+                  (match Pave.Provider_catalog.route descriptor identity.route with
+                   | None -> false
+                   | Some _ ->
+                       match Pave.Provider_catalog.custom_route registry
+                           ~provider:identity.provider ~route:identity.route with
+                       | None -> identity.config_revision = None
+                       | Some custom ->
+                           identity.account_id = custom.account_id &&
+                           identity.config_revision =
+                             Some (Pave.Custom_provider.fingerprint custom)) in
+            if valid then Some identity else None) in
     let configured_provider_name = if !provider_name <> "" then !provider_name
-      else Option.value ~default:"openai" configured.default_provider in
+      else match recent_model with
+        | Some identity -> identity.provider
+        | None -> Option.value ~default:"openai" configured.default_provider in
     let configured_account_id =
       match !account_id with
       | Some _ as selected -> selected
-      | None when configured.default_provider = Some configured_provider_name ->
-          configured.default_account_id
-      | None -> None in
+      | None -> (match recent_model with
+          | Some identity -> identity.account_id
+          | None when configured.default_provider = Some configured_provider_name ->
+              configured.default_account_id
+          | None -> None) in
     let canonical_model_provider =
       match String.index_opt !model '/' with
       | None -> None
@@ -337,7 +362,9 @@ let () =
                Printexc.to_string exn)));
     let saved_model =
       if explicit_model_override then None
-      else Option.bind !journal Pave.Session.model in
+      else match Option.bind !journal Pave.Session.model with
+        | Some _ as selected -> selected
+        | None -> recent_model in
     let validate_identity_binding (identity : Pave.Model_identity.t) =
       match Pave.Provider_catalog.custom_route registry
           ~provider:identity.provider ~route:identity.route with
@@ -1358,7 +1385,11 @@ let () =
       (match !ui with
        | Some screen ->
            Tui.set_model screen (selection_label descriptor identity route);
-           refresh_usage screen
+           refresh_usage screen;
+           Option.iter (fun selected ->
+             try Pave.Recent_model.save ~root selected with exn ->
+               on_event ("Recent model was not saved: " ^ error_message exn))
+             identity
        | None -> ()) in
     let apply_model_selection
         ((descriptor : Pave.Provider_catalog.descriptor),
@@ -1676,7 +1707,7 @@ let () =
             raise exn in
         apply_model_selection (descriptor, identity, route);
         on_event ("Active model: " ^ Pave.Model_identity.selector identity ^
-          ". /setup saves a default for future sessions.")
+          ". /setup saves a cross-workspace default.")
       ) else match !ui with
         | Some screen ->
             Tui.reset_status screen;
@@ -1714,8 +1745,8 @@ let () =
           else
             (match Tui.choose screen
               ~intro:["Account connected; your active model has not changed.";
-                "Choose a model now for this conversation only.";
-                "Use /setup again to save a default for future sessions."]
+                "Choose a model for this workspace and its next launch.";
+                "Use /setup to save a default across workspaces."]
               ~title:("SETUP · Connected to " ^ descriptor.id)
               ~choices:["Choose model now"; "Keep current model"] with
              | Some "Choose model now" ->
@@ -2782,7 +2813,7 @@ let () =
       send !prompt)
     else if Unix.isatty Unix.stdin && Unix.isatty Unix.stdout
       && Sys.getenv_opt "TERM" <> Some "dumb" then (
-      let screen = Tui.create ~root
+      let screen = Tui.create ~root ~version:Embedded_installer.version
         ~model:(selection_label !active_descriptor !active_identity !active_route)
         ~session:(!session <> "") () in
       Fun.protect ~finally:(fun () ->

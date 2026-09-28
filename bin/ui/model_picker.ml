@@ -170,12 +170,11 @@ let identity_selector (model : Pave.Model_discovery.model) =
 
 let identity_label (model : Pave.Model_discovery.model) =
   let identity = model.identity in
-  let display = Option.value ~default:identity.upstream_id model.display_name in
   identity.provider ^ "@" ^ identity.route ^
   (match identity.account_id with
    | None -> ""
    | Some account -> "#" ^ Pave.Model_identity.encode_component account) ^
-  " · " ^ display ^ " [" ^ identity.upstream_id ^ "]"
+  " · " ^ identity.upstream_id
 
 
 let model_detail ?registry (descriptor : Pave.Provider_catalog.descriptor)
@@ -242,7 +241,8 @@ let model_detail ?registry (descriptor : Pave.Provider_catalog.descriptor)
       observed.tm_hour observed.tm_min observed.tm_sec)
     model.provenance.retrieved_at in
   match List.filter_map Fun.id
-    [context; id_source; capability_source; retrieved_at; output_limit;
+    [Some ("exact identity " ^ identity_selector model);
+     context; id_source; capability_source; retrieved_at; output_limit;
      compaction; tools; display_name; endpoints; tokenizer; listing_endpoint] with
   | [] -> None
   | parts -> Some (String.concat " · " parts)

@@ -169,12 +169,14 @@ These routes passed isolated fake-HTTPS/native workspace tool-result scenarios; 
 | --- | --- |
 | `/setup` → **Connect account only** | Sign in without changing the current model or saved default; optionally pick a model afterward. |
 | `/setup` → **Choose user default** | Guided provider → access → API/model selection, saved for later launches. |
-| `/model` | Search models across connected providers and switch **this conversation only**. |
-| `/settings` | Edit project defaults for the **next launch**. |
+| `/model` | Search models across connected providers, switch the current conversation, and remember the exact model for this workspace on the next interactive launch. |
+| `/settings` | Edit project defaults; the workspace's last interactive model choice takes precedence on subsequent launches unless an explicit CLI or session model is selected. |
 
 API-key providers read environment variables, never keys typed into the TUI. Browser URLs and device codes appear on the regular terminal while the full-screen UI is suspended; the transcript and draft return afterward.
 
 In `/model`, use arrows and Enter to choose a discovered ID, or type a canonical `PROVIDER@API[#ACCOUNT]/EXACT_MODEL_ID` selector. Tab browses each provider's loading/ready/unsupported/failure status while successful results stay selectable; unclassified IDs may not support Chat or tools. A bare ID keeps the current provider and API. Saved sessions restore their route; switching models keeps conversation text but retains signed provider state **only** when provider, account, model and API all match. Escape cancels discovery and preserves the draft.
+
+Long model labels are abbreviated only to fit the terminal; the picker still searches and selects the complete ID. Recent selections are stored in private workspace-scoped state under `${XDG_STATE_HOME:-~/.local/state}/pave/sessions/`, separate from conversation journals and user/project defaults. An explicit `--provider`, `--model`, `--api`, `--endpoint`, `--account`, or `--session` overrides the recent choice. Release binaries show their embedded version on the interactive launch screen; a source build shows `source`.
 
 **Sign-in details**
 

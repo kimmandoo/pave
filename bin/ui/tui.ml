@@ -78,6 +78,7 @@ type t = {
   mutable term : Notty_unix.Term.t;
   mutable input : Terminal_input.t;
   root : string;
+  version : string;
   mutable model : string;
   mutable session : bool;
   editor : Pave.Composer.t;
@@ -218,18 +219,19 @@ let idle_status =
 
 let hotkeys = Keybindings.hotkeys Keybindings.bindings
 
-(* Two ASCII columns per 8px SVG pixel keep the mark square in a terminal. *)
-let startup_logo =
+(* Two ASCII columns per 8px SVG pixel keep the rounded P nearly square. *)
+let startup_logo version =
   let mint = I.string accent "##" and shadow = I.string muted "++"
   and cursor = I.string warning "**" and blank = I.string A.empty "  " in
   let pixel = function
     | '#' -> mint | '+' -> shadow | '*' -> cursor | _ -> blank in
   let mark = I.vcat (List.map (fun row ->
     I.hcat (List.init (String.length row) (fun index -> pixel row.[index])))
-    [ "#######"; "########"; "##+++++##"; "##+    ##+";
-      "##+    ##+"; "##+    ##+"; "########++"; "#######++";
-      "##++++++"; "##+"; "##+     *"; " ++" ]) in
-  I.(mark <-> void 1 1 <-> string accent "      P A V E")
+    [ "  #####  "; " ####### "; " ##   ## "; " ##   ## ";
+      " ####### "; " ######+ "; " ##++++  "; " ##      ";
+      " ##      "; " ##    * "; "  ++     " ]) in
+  I.(mark <-> void 1 1 <->
+    string accent ("  P A V E  " ^ version))
 
 let sanitize = Transcript_view.sanitize
 let single_line = Transcript_view.single_line
@@ -264,11 +266,11 @@ let style_attr (row : Transcript_view.row) =
   | Transcript_view.Tool, Transcript_view.Heading -> warning
   | _, (Transcript_view.Heading | Transcript_view.Subheading) -> accent
   | _, Transcript_view.Table_header -> accent
-  | _, Transcript_view.Table_row -> text_attr
   | _, Transcript_view.Table_separator -> muted
-  | _, Transcript_view.Code -> text_attr
-  | _, Transcript_view.Quote -> text_attr
-  | _, Transcript_view.Tool_state -> warning
+  | _, Transcript_view.Code ->
+      if no_color then text_attr else A.(fg lightgreen)
+  | _, Transcript_view.Quote -> muted
+  | _, Transcript_view.Tool_state -> muted
   | _, _ -> text_attr
 
 let inline_attr = function
@@ -284,9 +286,9 @@ let transcript_prefix style continuation =
   match style with
   | Transcript_view.Heading -> if continuation then "    " else "  ▌ "
   | Transcript_view.Divider -> ""
-  | Transcript_view.Tool_state -> "  · "
-  | Transcript_view.Code -> "    "
-  | Transcript_view.Quote -> if continuation then "    " else "  › "
+  | Transcript_view.Tool_state -> "  ↳ "
+  | Transcript_view.Code -> "  │ "
+  | Transcript_view.Quote -> if continuation then "    " else "  │ "
   | Transcript_view.List_item -> if continuation then "    " else "  • "
   | Transcript_view.Table_header
   | Transcript_view.Table_row
@@ -295,7 +297,11 @@ let transcript_prefix style continuation =
 
 let styled_visual cols (visual : Transcript_view.visual) =
   let row = visual.row in
-  let prefix = transcript_prefix row.style visual.continuation in
+  let prefix = match row.style, row.kind, visual.continuation with
+    | Transcript_view.Heading, Transcript_view.User, false -> "  ◆ "
+    | Transcript_view.Heading, Transcript_view.Tool, false -> "  ◇ "
+    | Transcript_view.Heading, Transcript_view.Error, false -> "  ! "
+    | _ -> transcript_prefix row.style visual.continuation in
   let attr = style_attr row in
   let prefix = if cols <= I.width (I.string attr prefix) then "" else prefix in
   let body = if Array.length visual.runs = 0 then
@@ -340,18 +346,52 @@ let shorten_width width text =
   if measure text <= width then text
   else (Transcript_view.wrap ~columns:(width - 1) ~measure text).(0) ^ "…"
 
-let shorten_activity width text =
+let shorten_middle width text =
   if measure_text text <= width then text
-  else if width < 2 then "" else
-  let boundaries = Pave.Composer.segment text in
-  let rec fit index used =
-    if index >= Array.length boundaries then boundaries.(index - 1)
-    else
-      let start = boundaries.(index - 1) and stop = boundaries.(index) in
-      let chunk = String.sub text start (stop - start) in
-      let next = used + measure_text chunk in
-      if next >= width then start else fit (index + 1) next in
-  String.sub text 0 (fit 1 0) ^ "…"
+  else if width < 5 then shorten_width width text
+  else
+    let boundaries = Pave.Composer.segment text in
+    let count = Array.length boundaries - 1 in
+    let left_width = (width - 1) / 2 in
+    let rec left index used =
+      if index >= count then boundaries.(count)
+      else
+        let start = boundaries.(index) and stop = boundaries.(index + 1) in
+        let next = used + measure_text (String.sub text start (stop - start)) in
+        if next > left_width then start else left (index + 1) next in
+    let rec right index used =
+      if index <= 0 then 0
+      else
+        let start = boundaries.(index - 1) and stop = boundaries.(index) in
+        let next = used + measure_text (String.sub text start (stop - start)) in
+        if next > width - 1 - left_width then stop
+        else right (index - 1) next in
+    let prefix_end = left 0 0 and suffix_start = right count 0 in
+    String.sub text 0 prefix_end ^ "…" ^
+    String.sub text suffix_start (String.length text - suffix_start)
+
+let shorten_model_label width label =
+  if width < 5 then shorten_width width label else
+  match String.index_opt label ' ' with
+  | Some split when String.length label >= split + 4 &&
+      String.sub label split 4 = " · " ->
+      let scope = String.sub label 0 split in
+      let model = String.sub label (split + 4)
+        (String.length label - split - 4) in
+      let separator = " · " in
+      let available = max 0 (width - measure_text separator) in
+      let scope = shorten_middle (min (available / 3) (measure_text scope))
+        scope in
+      scope ^ separator ^ shorten_middle
+        (available - measure_text scope) model
+  | _ -> shorten_middle width label
+
+let shorten_activity width text =
+  if String.starts_with ~prefix:"Tool: " text then
+    let name = String.sub text 6 (String.length text - 6) in
+    shorten_width width
+      ("Tool: " ^ shorten_middle (max 0 (width - 6)) name)
+  else shorten_width width text
 
 let activity_status ?received_bytes ?(width = max_int) ~state ~elapsed () =
   let elapsed = max 0. elapsed in
@@ -562,8 +602,9 @@ let paint t =
           | Some progress when state = "Tool: " ^ progress.name ->
               progress.received_bytes
           | _ -> None in
-        Some ("  " ^ activity_status ~state:(single_line state) ~elapsed
-          ?received_bytes ~width:(max 0 (cols - 2)) ()) in
+        let indent = if cols < 40 then " " else "  " in
+        Some (indent ^ activity_status ~state:(single_line state) ~elapsed
+          ?received_bytes ~width:(max 0 (cols - String.length indent)) ()) in
   let activity_rows = match activity_text with
     | None -> [||]
     | Some text -> [| styled_line cols accent text |] in
@@ -578,37 +619,46 @@ let paint t =
     | names -> Printf.sprintf " · %d media attachment%s ready"
         (List.length names) (if List.length names = 1 then "" else "s") in
 
+  let brand = "  ◆  PAVE " ^ t.version in
+  let indicators = (if cols >= 48 then queued else "") ^ usage ^ attached in
   let header = I.hsnap ~align:`Left cols I.(
-    string accent "  ◆  PAVE" <|>
-    string muted (if cols >= 48 then queued else "") <|>
-    string muted (usage ^ attached)) in
+    string accent (shorten_width cols brand) <|>
+    string muted (shorten_width (max 0 (cols - measure brand)) indicators)) in
   let location = match t.location_cache with
     | Some (width, image) when width = cols -> image
     | _ ->
       let model = single_line t.model in
-      let model =
-        if cols < 60 then match String.index_opt model '/' with
-          | None -> model
-          | Some split when cols < 45 ->
-              String.sub model (split + 1) (String.length model - split - 1)
-          | Some split ->
-              shorten_width 6 (String.sub model 0 split) ^ "/" ^
-              String.sub model (split + 1) (String.length model - split - 1)
-        else model in
+      let display_model width =
+        match String.index_opt model '/' with
+        | None -> shorten_middle width model
+        | Some split ->
+            let scope = String.sub model 0 split in
+            let upstream = String.sub model (split + 1)
+              (String.length model - split - 1) in
+            let scope = shorten_middle (min (max 0 ((width - 1) / 3))
+              (measure scope)) scope in
+            scope ^ "/" ^ shorten_middle
+              (max 0 (width - 1 - measure scope)) upstream in
       let image =
         if cols < 28 then styled_line cols accent
-          (" " ^ shorten_width (max 2 (cols - 1)) model)
+          (" " ^ display_model (cols - 1))
         else
           let badge = if cols < 60 then "  MODEL " else "  [MODEL] " in
-          let name_width = if cols < 60 then max 1 (cols - 22)
-            else max 1 (cols / 2 - 11) in
-          let state = if t.session then "  ·  SAVED" else "  ·  UNSAVED" in
+          let state = if cols < 45 then
+            (if t.session then " · S" else " · U")
+          else if t.session then "  ·  SAVED" else "  ·  UNSAVED" in
+          let space = max 0 (cols - measure badge - measure state) in
+          let root = if cols < 60 then "" else
+            let prefix = "  ·  " in
+            prefix ^ shorten_middle
+              (min (cols / 4) (max 0 (space - measure prefix - 12)))
+              (single_line t.root) in
+          let name_width = max 0 (space - measure root) in
           I.hsnap ~align:`Left cols I.(
             string accent badge <|>
-            string text_attr (shorten_width name_width model) <|>
+            string text_attr (display_model name_width) <|>
             string muted state <|>
-            string muted (if cols < 60 then ""
-              else "  ·  " ^ single_line t.root)) in
+            string muted root) in
       t.location_cache <- Some (cols, image);
       image in
   let divider = I.uchar muted (Uchar.of_int 0x2500) cols 1 in
@@ -725,10 +775,17 @@ let paint t =
               let marker = if index = chooser.selected then
                 (if cols < 40 then "❯ " else "  ❯ ")
               else if cols < 40 then "  " else "    " in
+              let label = candidate_label chooser choice in
+              let width = max 0 (cols - measure marker) in
+              let label = if chooser.dynamic && not choice.action then
+                let prefix = "• " in
+                prefix ^ shorten_model_label
+                  (max 0 (width - measure prefix)) (sanitize choice.label)
+                else shorten_width width label in
               styled_line cols
                 (if index = chooser.selected then selected_attr
                  else if choice.action then muted else text_attr)
-                (marker ^ candidate_label chooser choice)))
+                (marker ^ label)))
     | None ->
         (match t.body_cache with
         | Some (width, height, revision, body)
@@ -736,16 +793,18 @@ let paint t =
         | _ ->
             let body =
               if total = 0 then (
-                let logo_width = I.width startup_logo
-                and logo_height = I.height startup_logo in
+                let logo = startup_logo t.version in
+                let logo_width = I.width logo
+                and logo_height = I.height logo in
                 if cols < logo_width || body_height < logo_height then
                   I.vsnap ~align:`Bottom body_height
-                    (styled_line cols accent "  PAVE")
+                    (styled_line cols accent
+                      ("  PAVE " ^ t.version))
                 else
                   let left = (cols - logo_width) / 2
                   and top = (body_height - logo_height) / 2 in
                   I.(void cols top
-                    <-> hsnap ~align:`Left cols (void left 1 <|> startup_logo)
+                    <-> hsnap ~align:`Left cols (void left 1 <|> logo)
                     <-> void cols (body_height - top - logo_height)))
               else
                 I.vsnap ~align:`Bottom body_height
@@ -771,12 +830,18 @@ let paint t =
            else "  No available models · Esc cancel") ^ status ^ status_page
         else
         if body_height < 2 then (
+          let prefix = Printf.sprintf "  %d/%d "
+            number (Array.length found) in
+          let select_hint = if cols >= 20 then " ↵" else "" in
+          let width = max 0 (cols - measure prefix - measure select_hint) in
           let label = if Array.length found = 0 then
-              (if chooser.dynamic then chooser_empty_message chooser
-               else "(no match)")
-            else candidate_label chooser found.(chooser.selected) in
-          Printf.sprintf "  %d/%d %s · %s select · Esc cancel%s%s"
-            number (Array.length found) label enter_key status status_page)
+              shorten_width width "(no match)"
+            else
+              let choice = found.(chooser.selected) in
+              if chooser.dynamic && not choice.action then
+                shorten_model_label width (sanitize choice.label)
+              else shorten_middle width (sanitize choice.label) in
+          prefix ^ label ^ select_hint)
         else if cols < 55 then
           Printf.sprintf "  %d/%d · %s select · Esc cancel%s%s"
             number (Array.length found) enter_key status status_page
@@ -885,7 +950,7 @@ let paint t =
             if source < 0 || source >= total then I.void cols 1
             else styled_visual cols (Transcript_view.visual_at layout source)
         | None when index = spare - 1 ->
-            styled_line cols accent "  PAVE"
+            styled_line cols accent ("  PAVE " ^ t.version)
         | None -> I.void cols 1)) candidates
   else Array.concat [
     [| header; location; divider |];
@@ -1019,7 +1084,8 @@ let close t =
     ~finally:(fun () ->
       Fun.protect (fun () -> Notty_unix.Term.release t.term)
         ~finally:(fun () -> restore_terminal_signals t.signals))
-let create ?(keybinding_overrides = []) ~root ~model ~session () =
+let create ?(keybinding_overrides = []) ?(version = "source")
+    ~root ~model ~session () =
   let bindings =
     match Keybindings.apply_overrides Keybindings.bindings
       keybinding_overrides with
@@ -1037,7 +1103,8 @@ let create ?(keybinding_overrides = []) ~root ~model ~session () =
     raise exn in
   let t = try {
     term; input = Terminal_input.create term;
-    root; model; session; editor = Pave.Composer.create ();
+    root; version = single_line version; model; session;
+    editor = Pave.Composer.create ();
     transcript = Transcript_view.create (); tool_groups = Hashtbl.create 8;
     scroll = 0; chooser = None; overlays = [];
     hint_suppressed = None;

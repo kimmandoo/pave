@@ -92,6 +92,42 @@ let () =
     Notty.I.width (Notty.I.string Notty.A.empty row) <= 18) rows);
   let clipped = Tui.wrap_chooser_text ~columns:18 ~max_rows:2 detail in
   assert (Array.length clipped = 2 && String.ends_with ~suffix:"…" clipped.(1));
+  let scoped = { chooser with plain = []; choices = [||];
+    filter = ""; filtered = None; touched = false } in
+  let id_a = "openai@chat#team-a/company/very-long-model-name-suffix-A" in
+  let id_b = "openai@chat#team-b/company/very-long-model-name-suffix-B" in
+  Tui.update_chooser scoped ~verified:[id_a; id_b]
+    ~labels:[id_a, "openai@chat#team-a · company/very-long-model-name-suffix-A";
+      id_b, "openai@chat#team-b · company/very-long-model-name-suffix-B"]
+    ~details:[id_a, "exact identity " ^ id_a;
+      id_b, "exact identity " ^ id_b] ~status:None;
+  let a = (Tui.matches scoped).(0) and b = (Tui.matches scoped).(1) in
+  let visible width (item : Tui.candidate) =
+    Tui.shorten_model_label width item.label in
+  let measure text = Notty.I.width (Notty.I.string Notty.A.empty text) in
+  let contains_ellipsis text =
+    let rec find i =
+      i + String.length "…" <= String.length text &&
+      (String.sub text i (String.length "…") = "…" || find (i + 1)) in
+    find 0 in
+  assert (a.value = id_a && b.value = id_b &&
+    a.detail = Some ("exact identity " ^ id_a) &&
+    b.detail = Some ("exact identity " ^ id_b));
+  List.iter (fun width ->
+    let first = visible width a and second = visible width b in
+    assert (measure first <= width && measure second <= width &&
+      String.ends_with ~suffix:"A" first &&
+      String.ends_with ~suffix:"B" second &&
+      first <> second &&
+      (width > 24 || (contains_ellipsis first &&
+        contains_ellipsis second)))) [24; 62];
+  scoped.filter <- "team-b";
+  assert (values scoped = [id_b]);
+  scoped.filter <- "suffix-A";
+  assert (values scoped = [id_a]);
+  scoped.filter <- "";
+  scoped.selected <- 1;
+  assert ((Tui.matches scoped).(scoped.selected).value = id_b);
   let approval_rows = Tui.approval_body_rows ~columns:8
     ~measure:(fun text ->
       Notty.I.width (Notty.I.string Notty.A.empty text))
@@ -115,7 +151,7 @@ let () =
   let compact = Tui.activity_status ~state:"Tool: run_command"
     ~elapsed:1.25 ~received_bytes:1536 ~width:18 () in
   assert (Notty.I.width (Notty.I.string Notty.A.empty compact) <= 18);
-  assert (String.starts_with ~prefix:"◓ Tool: run" compact);
+  assert (String.starts_with ~prefix:"◓ Tool: ru" compact);
   assert (String.ends_with ~suffix:" · 1s" compact);
   assert (Tui.activity_tick_delay 0. = 1. &&
     abs_float (Tui.activity_tick_delay 0.125 -. 0.875) < 0.000000001);
@@ -154,7 +190,7 @@ let () =
     Tui.reset_tool_progress active "call-1" = None);
   assert (Tui.transcript_prefix Transcript_view.Heading false = "  ▌ ");
   assert (Tui.transcript_prefix Transcript_view.Heading true = "    ");
-  assert (Tui.transcript_prefix Transcript_view.Code false = "    ");
+  assert (Tui.transcript_prefix Transcript_view.Code false = "  │ ");
   assert (Tui.transcript_prefix Transcript_view.List_item true = "    ");
   print_endline "dynamic chooser availability and navigation: ok"
 
