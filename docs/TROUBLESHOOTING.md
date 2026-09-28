@@ -1,5 +1,12 @@
 # Troubleshooting
 
+### [2026-09-28] Nested Xcode projects were omitted from mobile inventory
+
+- **Context / Symptom:** `mobile_project` listed nested Gradle settings but omitted a valid `ios/App.xcodeproj/project.pbxproj` in the same workspace.
+- **Root Cause:** The directory visitor sequenced two OCaml `if` expressions without isolating their branches; the `.xcodeproj` test was parsed within the `.xcworkspace` branch and never ran for ordinary project directories.
+- **Solution:** Made Xcode workspace and project checks mutually exclusive, recorded the actual Xcode manifest path, and verified nested iOS plus Android manifests together in a real workspace-tool fixture.
+- **Prevention / Reference:** Parenthesize side-effecting conditional branches and assert each supported directory kind in the same filesystem regression.
+
 ### [2026-09-28] R12 media and mention completion accepted mismatched inputs
 
 - **Context / Symptom:** AAC ADTS bytes saved with an `.mp3` extension were accepted as MP3. Completing `@src/a` to a filename containing commas, quotes or a terminal period produced a reference that was not parsed as that filename. A quoted mention could span a newline, and an inline-code mention crossing lines could be attached.

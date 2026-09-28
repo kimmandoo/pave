@@ -723,114 +723,173 @@ let edit_file root args =
 let shell_quote text =
   "'" ^ String.concat "'\\''" (String.split_on_char '\'' text) ^ "'"
 
-let mobile_project root =
-  let manifest name =
-    let path = Filename.concat root name in
-    try (Unix.lstat path).Unix.st_kind = Unix.S_REG
-    with Unix.Unix_error (Unix.ENOENT, _, _) -> false
-  in
-  let directory name =
-    let path = Filename.concat root name in
-    try (Unix.lstat path).Unix.st_kind = Unix.S_DIR
-    with Unix.Unix_error (Unix.ENOENT, _, _) -> false
-  in
-  let xcode_items suffix =
-    let dir = Unix.opendir root in
-    Fun.protect ~finally:(fun () -> Unix.closedir dir) (fun () ->
-      let rec collect visited found =
-        if visited >= max_walk_entries || List.length found >= 20 then List.rev found
-        else match Unix.readdir dir with
-          | exception End_of_file -> List.rev found
-          | name ->
-              if Filename.check_suffix name suffix && directory name then
-                collect (visited + 1) (name :: found)
-              else collect (visited + 1) found
-      in collect 0 [])
-  in
+type mobile_candidate =
+  | Xcode_workspace of string * string
+  | Xcode_project of string * string
+  | Swift_package of string
+  | Gradle_manifest of string
+  | Pubspec_manifest of string
+  | Node_manifest of string
+  | Oversized_manifest of string
+
+let mobile_project ?cancel root =
+  let max_candidates = 100 in
+  let candidates = ref [] and candidate_count = ref 0
+  and truncated = ref false in
+  let add_candidate candidate =
+    if !candidate_count < max_candidates then (
+      incr candidate_count;
+      candidates := candidate :: !candidates
+    ) else truncated := true in
+  let add_regular path candidate =
+    try
+      let absolute = Workspace_path.checked_path root path in
+      let stat = Unix.lstat absolute in
+      if stat.Unix.st_kind = Unix.S_REG then
+        if stat.Unix.st_size > max_write_bytes then
+          add_candidate (Oversized_manifest path)
+        else add_candidate (candidate path)
+    with Unix.Unix_error _ | Workspace_path.Error _ -> () in
+  let visit_directory relative _absolute =
+    let name = Filename.basename relative in
+    if Filename.check_suffix name ".xcworkspace" then (
+      let manifest = Filename.concat relative "contents.xcworkspacedata" in
+      add_regular manifest (fun _ -> Xcode_workspace (relative, manifest))
+    ) else if Filename.check_suffix name ".xcodeproj" then (
+      let manifest = Filename.concat relative "project.pbxproj" in
+      add_regular manifest (fun _ -> Xcode_project (relative, manifest))) in
+  let visit_file relative _absolute =
+    match Filename.basename relative with
+    | "Package.swift" -> add_regular relative (fun _ -> Swift_package relative)
+    | "settings.gradle" | "settings.gradle.kts" | "gradlew" ->
+        add_regular relative (fun _ -> Gradle_manifest relative)
+    | "pubspec.yaml" -> add_regular relative (fun _ -> Pubspec_manifest relative)
+    | "package.json" -> add_regular relative (fun _ -> Node_manifest relative)
+    | _ -> () in
+  let walk_truncated = walk ~hidden:true ?cancel ~visit_directory
+    root "." visit_file in
+  if walk_truncated then truncated := true;
+  let candidates = List.rev !candidates in
   let output = Buffer.create 1024 in
-  let add stack commands =
-    Buffer.add_string output (stack ^ "\n");
-    List.iter (fun command -> Buffer.add_string output ("  " ^ command ^ "\n")) commands
-  in
-  let workspaces = xcode_items ".xcworkspace" in
-  let projects = xcode_items ".xcodeproj" in
-  List.iter (fun name ->
-    let quoted = shell_quote name in
-    add ("Xcode workspace: " ^ name)
-      ["xcodebuild -list -workspace " ^ quoted;
-       "xcodebuild -workspace " ^ quoted ^ " -scheme '<scheme-from-list>' build";
-       "xcodebuild -workspace " ^ quoted ^ " -scheme '<scheme-from-list>' test"])
-    workspaces;
-  List.iter (fun name ->
-    let quoted = shell_quote name in
-    add ("Xcode project: " ^ name)
-      ["xcodebuild -list -project " ^ quoted;
-       "xcodebuild -project " ^ quoted ^ " -scheme '<scheme-from-list>' build";
-       "xcodebuild -project " ^ quoted ^ " -scheme '<scheme-from-list>' test"])
-    projects;
-  if manifest "Package.swift" then
-    add "Swift Package Manager: Package.swift" ["swift build"; "swift test"];
-  let android_root =
-    if manifest "settings.gradle" || manifest "settings.gradle.kts" || manifest "gradlew" then Some ""
-    else if directory "android" &&
-            (manifest "android/settings.gradle" || manifest "android/settings.gradle.kts" ||
-             manifest "android/gradlew")
-    then Some "android/" else None
-  in
-  (match android_root with
-   | None -> ()
-   | Some prefix ->
-       let gradle = if manifest (prefix ^ "gradlew") then "./gradlew" else "gradle" in
-       let command action = (if prefix = "" then "" else "cd android && ") ^ gradle ^ " " ^ action in
-       add ("Android Gradle: " ^ prefix ^ "settings.gradle[.kts] / gradlew")
-         [command "tasks"; command "assembleDebug"; command "test"]);
-  if manifest "pubspec.yaml" then (
-    let flutter =
-      try
-        let pubspec = Workspace_path.read_bounded (Filename.concat root "pubspec.yaml") max_write_bytes in
-        Some (find_from pubspec "flutter:" 0 <> None)
-      with Workspace_path.Error _ -> None
-    in
-    match flutter with
-    | Some true ->
-        add "Flutter: pubspec.yaml" ["flutter pub get"; "flutter test"; "flutter build apk"; "flutter build ios"]
-    | Some false -> add "Dart: pubspec.yaml" ["dart pub get"; "dart test"]
-    | None -> add "Dart/Flutter: pubspec.yaml (too large to inspect dependencies)"
-        ["inspect pubspec.yaml to identify the SDK"]);
-  if manifest "package.json" then (
-    let package =
-      try Some (Yojson.Basic.from_string (Workspace_path.read_bounded
-        (Filename.concat root "package.json") max_write_bytes))
-      with Workspace_path.Error _ | Yojson.Json_error _ -> None
-    in
-    match package with
-    | None -> Buffer.add_string output "package.json could not be parsed (or exceeds 1 MiB).\n"
-    | Some (`Assoc _ as json) ->
-        let has_dependency name =
-          List.exists (fun section ->
-            match field section json with
-            | `Assoc entries -> List.mem_assoc name entries
-            | _ -> false) ["dependencies"; "devDependencies"]
-        in
-        let scripts = field "scripts" json in
-        let has_script name =
-          match scripts with
-          | `Assoc entries -> List.mem_assoc name entries
-          | _ -> false
-        in
-        let script_commands =
-          (if has_script "build" then ["npm run build"] else []) @
-          (if has_script "test" then ["npm test"] else [])
-        in
-        if has_dependency "expo" then
-          add "Expo: package.json" (["npx expo export"] @ script_commands)
-        else if has_dependency "react-native" then
-          add "React Native: package.json (use Xcode/Gradle above for native builds)"
-            script_commands
-    | Some _ -> Buffer.add_string output "package.json must contain a JSON object.\n");
-  if Buffer.length output = 0 then
-    "No supported mobile project manifests found at workspace root."
-  else "Detected mobile project stacks and suggested commands (not executed):\n" ^ Buffer.contents output
+  let truncation_notice = "[truncated; narrow the workspace and retry]\n" in
+  let output_limit = max_read_bytes - String.length truncation_notice in
+  let output_truncated = ref false in
+  let append text =
+    if not !output_truncated then
+      if not (append_bounded output text output_limit) then (
+        truncated := true;
+        output_truncated := true) in
+  let stack_count = ref 0 in
+  let add_stack name commands =
+    incr stack_count;
+    if !stack_count = 1 then
+      append "Detected mobile project stacks and suggested commands (not executed):\n";
+    append (name ^ "\n" ^
+      String.concat "" (List.map (fun command -> "  " ^ command ^ "\n") commands)) in
+  let add_diagnostic text = append (text ^ "\n") in
+  let directory path =
+    match Filename.dirname path with "." -> "" | parent -> parent in
+  let command_in path command =
+    let parent = directory path in
+    if parent = "" then command
+    else "cd " ^ shell_quote parent ^ " && " ^ command in
+  let read_manifest path =
+    try Some (Workspace_path.read_bounded
+      (Workspace_path.checked_path root path) max_write_bytes)
+    with Unix.Unix_error _ | Workspace_path.Error _ -> None in
+  let gradle_paths = List.filter_map (function
+    | Gradle_manifest path -> Some path
+    | _ -> None) candidates in
+  let rendered_gradle = Hashtbl.create max_candidates in
+  let render_xcode kind flag bundle manifest =
+    let name = Filename.basename bundle in
+    let target = flag ^ " " ^ shell_quote name in
+    add_stack ("Xcode " ^ kind ^ ": " ^ manifest)
+      [command_in bundle ("xcodebuild -list " ^ target);
+       command_in bundle ("xcodebuild " ^ target ^
+         " -scheme '<scheme-from-list>' build");
+       command_in bundle ("xcodebuild " ^ target ^
+         " -scheme '<scheme-from-list>' test")] in
+  let render_gradle path =
+    let parent = directory path in
+    if not (Hashtbl.mem rendered_gradle parent) then (
+      Hashtbl.add rendered_gradle parent ();
+      let manifests = List.filter (fun manifest -> directory manifest = parent)
+        gradle_paths in
+      let wrapper = if parent = "" then "gradlew" else parent ^ "/gradlew" in
+      let executable =
+        if List.mem wrapper manifests then "./gradlew" else "gradle" in
+      let label = "Android Gradle: " ^ String.concat ", " manifests in
+      add_stack label
+        (List.map (command_in path)
+          [executable ^ " tasks"; executable ^ " assembleDebug";
+           executable ^ " test"])) in
+  List.iter (function
+    | Xcode_workspace (bundle, manifest) ->
+        render_xcode "workspace" "-workspace" bundle manifest
+    | Xcode_project (bundle, manifest) ->
+        render_xcode "project" "-project" bundle manifest
+    | Swift_package path ->
+        add_stack ("Swift Package Manager: " ^ path)
+          (List.map (command_in path) ["swift build"; "swift test"])
+    | Gradle_manifest path -> render_gradle path
+    | Pubspec_manifest path ->
+        (match read_manifest path with
+         | None -> add_diagnostic
+             ("Ignored unreadable mobile manifest: " ^ path ^
+              " (no commands suggested).")
+         | Some pubspec ->
+             let commands = if find_from pubspec "flutter:" 0 <> None then
+               ["flutter pub get"; "flutter test"; "flutter build apk";
+                "flutter build ios"]
+             else ["dart pub get"; "dart test"] in
+             let stack = if find_from pubspec "flutter:" 0 <> None
+               then "Flutter: " else "Dart: " in
+             add_stack (stack ^ path) (List.map (command_in path) commands))
+    | Node_manifest path ->
+        (match read_manifest path with
+         | None -> add_diagnostic
+             ("Ignored unreadable mobile manifest: " ^ path ^
+              " (no commands suggested).")
+         | Some text ->
+             (match Yojson.Basic.from_string text with
+              | `Assoc _ as json ->
+                  let has_dependency name =
+                    List.exists (fun section ->
+                      match field section json with
+                      | `Assoc entries -> List.mem_assoc name entries
+                      | _ -> false) ["dependencies"; "devDependencies"] in
+                  let scripts = field "scripts" json in
+                  let has_script name =
+                    match scripts with
+                    | `Assoc entries -> List.mem_assoc name entries
+                    | _ -> false in
+                  let script_commands =
+                    (if has_script "build" then ["npm run build"] else []) @
+                    (if has_script "test" then ["npm test"] else []) in
+                  if has_dependency "expo" then
+                    add_stack ("Expo: " ^ path)
+                      (List.map (command_in path)
+                        ("npx expo export" :: script_commands))
+                  else if has_dependency "react-native" then
+                    add_stack ("React Native: " ^ path ^
+                      " (use Xcode/Gradle above for native builds)")
+                      (List.map (command_in path) script_commands)
+              | _ -> add_diagnostic
+                  ("Ignored invalid mobile manifest: " ^ path ^
+                   " (no commands suggested).")
+              | exception Yojson.Json_error _ -> add_diagnostic
+                  ("Ignored invalid mobile manifest: " ^ path ^
+                   " (no commands suggested).")))
+    | Oversized_manifest path ->
+        add_diagnostic
+          (Printf.sprintf "Ignored oversized mobile manifest: %s (exceeds %d-byte limit; no commands suggested)."
+             path max_write_bytes))
+    candidates;
+  if !stack_count = 0 then
+    add_diagnostic "No supported mobile project manifests found under workspace.";
+  let result = Buffer.contents output in
+  if !truncated then result ^ truncation_notice else result
 
 let run_command ?cancel ?on_progress root args =
   let command = required_string "command" args in
@@ -1414,7 +1473,7 @@ let workspace_eval_bridge ?cancel ?context ~root ~deadline name arguments =
   | "search" -> search root arguments
   | "glob" -> glob root arguments
   | "grep" -> grep root arguments
-  | "mobile_project" -> mobile_project root
+  | "mobile_project" -> mobile_project ?cancel root
   | "process_list" -> process_list ?context root arguments
   | "process_output" -> process_output ?context root arguments
   | "process_wait" ->
@@ -1791,7 +1850,7 @@ let definitions = [
     ["encoding", enum_string_field "Exact tiktoken encoding" ["cl100k_base"; "o200k_base"];
      "text", bounded_string_field "Text to count (maximum 1 MiB)" Native_tokenizer.max_input_bytes]
     ["encoding"; "text"];
-  schema "mobile_project" "Detect root mobile project manifests and suggest relevant build/test commands without executing anything."
+  schema "mobile_project" "Inventory bounded mobile manifests throughout the checked workspace, exclude ignored, generated and symlinked paths, report truncation, and suggest commands without executing them."
     [] [];
   schema "read_file" "Read bounded workspace files, directories, documents, archives, notebooks, SQLite, owned artifacts, managed worktrees, or public HTTPS URLs. HTTPS fetches send no credentials and require approval."
     ["path", string_field "Workspace-relative path or supported local://, artifact://, worktree://, or HTTPS source";
@@ -2588,7 +2647,7 @@ let prepare ?cancel ?context ~root ~name ~args () =
           | "dap_start" -> dap_start ~approved ?cancel ?context root args
           | "dap" -> dap_execute ~approved ?cancel ?context root args
           | "token_count" -> token_count args
-          | "mobile_project" -> mobile_project root
+          | "mobile_project" -> mobile_project ?cancel root
           | _ -> assert false in
         [Protocol.Text result]
       with

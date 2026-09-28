@@ -11,7 +11,7 @@ Only unchecked, independently verifiable work belongs here. The completed implem
 
 ### A — Project evidence and selection
 
-- [ ] **M01 — Bounded manifest inventory.** Find checked mobile subprojects, showing truncation and rejecting symlink/generated roots. **Accept:** a monorepo reports its separate manifests; a deceptive symlink never supplies an executable command.
+- [x] **M01 — Bounded manifest inventory.** Find checked mobile subprojects, showing truncation and rejecting symlink/generated roots. **Accept:** a monorepo reports its separate manifests; a deceptive symlink never supplies an executable command.
 - [ ] **M02 — Xcode map.** Associate real `.xcworkspace`/`.xcodeproj` entries and shared schemes with their roots. **Depends:** M01. **Accept:** a missing/private scheme remains unknown, not a guessed target.
 - [ ] **M03 — SwiftPM map.** Identify packages and candidate test roots without evaluating `Package.swift`. **Depends:** M01. **Accept:** a package beside an Xcode project remains distinct; computed targets stay unknown.
 - [ ] **M04 — Android module map.** Identify declared Gradle modules, wrapper and source roots without executing build scripts. **Depends:** M01. **Accept:** dynamic includes or missing wrapper do not become invented variants.

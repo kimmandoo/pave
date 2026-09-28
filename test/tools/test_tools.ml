@@ -86,6 +86,9 @@ let () =
   let root = Filename.temp_file "pave-tools-" "" in
   Sys.remove root; Unix.mkdir root 0o700;
   let outside = Filename.temp_file "pave-outside-" ".swift" in
+  let outside_mobile = Filename.temp_file "pave-outside-mobile-" "" in
+  Sys.remove outside_mobile; Unix.mkdir outside_mobile 0o700;
+  let outside_manifest = Filename.concat outside_mobile "Package.swift" in
   let files = ref [] and directories = ref [] in
   let create path text =
     let absolute = Filename.concat root path in
@@ -108,7 +111,9 @@ let () =
     Pave.Workspace_process.close_manager process_manager;
     List.iter (fun path -> try Sys.remove path with Sys_error _ -> ()) !files;
     List.iter (fun path -> try Unix.rmdir path with Unix.Unix_error _ -> ()) !directories;
-    Sys.remove outside; Unix.rmdir root) (fun () ->
+    Sys.remove outside;
+    (try Sys.remove outside_manifest with Sys_error _ -> ());
+    Unix.rmdir outside_mobile; Unix.rmdir root) (fun () ->
     create "App.swift" "one\none\n";
     create "snapshot.txt" "alpha beta\n";
     let snapshot = Pave.Workspace_edit.read_snapshot ~root ~path:"snapshot.txt" in
@@ -632,7 +637,71 @@ let () =
     assert (rejected (fun () -> tool_json root "read_file"
       ["path", `String "large.txt"; "offset", `Int 70013]));
     create "settings.gradle.kts" "";
-    assert (contains (String.lowercase_ascii (tool root "mobile_project" [])) "android");
+    directory "ios";
+    directory "ios/App.xcodeproj";
+    create "ios/App.xcodeproj/project.pbxproj" "// iOS project manifest\n";
+    directory "packages";
+    directory "packages/swift";
+    create "packages/swift/Package.swift" "// Swift package manifest\n";
+    directory "packages/flutter";
+    create "packages/flutter/pubspec.yaml" "name: sample\nflutter:\n";
+    directory "packages/react-native";
+    create "packages/react-native/package.json"
+      {|{"dependencies":{"react-native":"1"},"scripts":{"test":"test"}}|};
+    directory "android";
+    create "android/settings.gradle.kts" "rootProject.name = 'mobile'\n";
+    directory "Pods";
+    directory "Pods/Hidden.xcodeproj";
+    create "Pods/Hidden.xcodeproj/project.pbxproj" "// generated dependency\n";
+    directory "build/Generated.xcodeproj";
+    create "build/Generated.xcodeproj/project.pbxproj" "// generated project\n";
+    create ".gitignore" "vendor/\n";
+    directory "vendor";
+    directory "vendor/Ignored.xcodeproj";
+    create "vendor/Ignored.xcodeproj/project.pbxproj" "// ignored project\n";
+    let outside_channel = open_out outside_manifest in
+    output_string outside_channel "// outside Swift package\n";
+    close_out outside_channel;
+    let link = Filename.concat root "linked-mobile" in
+    Unix.symlink outside_mobile link;
+    files := link :: !files;
+    directory "large";
+    create "large/Package.swift"
+      (String.make (Pave.Workspace_path.max_write_bytes + 1) 'x');
+    let mobile = tool root "mobile_project" [] in
+    if not (contains mobile "Xcode project: ios/App.xcodeproj/project.pbxproj")
+    then failwith ("mobile inventory missed the iOS manifest:\n" ^ mobile);
+    assert (contains mobile
+      "cd 'ios' && xcodebuild -list -project 'App.xcodeproj'");
+    assert (contains mobile "Android Gradle: android/settings.gradle.kts");
+    assert (contains mobile "cd 'android' && gradle tasks");
+    assert (contains mobile "Swift Package Manager: packages/swift/Package.swift");
+    assert (contains mobile
+      "cd 'packages/swift' && swift build");
+    assert (contains mobile "Flutter: packages/flutter/pubspec.yaml");
+    assert (contains mobile "React Native: packages/react-native/package.json");
+    assert (contains mobile "cd 'packages/react-native' && npm test");
+    assert (not (contains mobile "Pods/Hidden.xcodeproj"));
+    assert (not (contains mobile "build/Generated.xcodeproj"));
+    assert (not (contains mobile "vendor/Ignored.xcodeproj"));
+    assert (not (contains mobile "linked-mobile"));
+    assert (not (contains mobile "cd 'linked-mobile' && swift"));
+    assert (contains mobile "Ignored oversized mobile manifest: large/Package.swift");
+    assert (not (contains mobile "Swift Package Manager: large/Package.swift"));
+    assert (not (contains mobile "cd 'large' && swift"));
+    directory "many";
+    for index = 0 to 100 do
+      let project = Printf.sprintf "many/Project%03d.xcodeproj" index in
+      directory project;
+      create (project ^ "/project.pbxproj") "// project manifest\n"
+    done;
+    let truncated_mobile = tool root "mobile_project" [] in
+    assert (contains truncated_mobile
+      "Android Gradle: android/settings.gradle.kts");
+    assert (contains truncated_mobile
+      "Xcode project: ios/App.xcodeproj/project.pbxproj");
+    assert (contains truncated_mobile "[truncated; narrow the workspace and retry]");
+    assert (String.length truncated_mobile <= Pave.Workspace_path.max_read_bytes);
     let command = tool root "run_command" ["command", "printf 'command-ok\\n'"] in
     assert (contains command "Status: exit 0");
     assert (contains command "command-ok");
