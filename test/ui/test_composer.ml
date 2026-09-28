@@ -339,4 +339,46 @@ let () =
   Pave.Composer.undo pasted_editor;
   assert (Pave.Composer.pasted_ranges pasted_editor =
     [0, String.length "typed thinkdeep"]);
+  let repeated_editor = Pave.Composer.create () in
+  Pave.Composer.insert repeated_editor "thinkdeep";
+  Pave.Composer.home repeated_editor;
+  Pave.Composer.begin_paste repeated_editor;
+  Pave.Composer.insert repeated_editor "thinkdeep ";
+  Pave.Composer.end_paste repeated_editor;
+  assert (Pave.Composer.pasted_ranges repeated_editor = [0, 10]);
+  let expanded, names = Pave.Prompt_shortcuts.expand
+    ~enabled:["thinkdeep"] ~disabled:[]
+    ~paste_ranges:(Pave.Composer.pasted_ranges repeated_editor)
+    (Pave.Composer.text repeated_editor) in
+  assert (expanded =
+    "thinkdeep Please reason carefully through this request" &&
+    names = ["thinkdeep"]);
+  Pave.Composer.undo repeated_editor;
+  assert (Pave.Composer.text repeated_editor = "thinkdeep");
+  Pave.Composer.redo repeated_editor;
+  assert (Pave.Composer.text repeated_editor = "thinkdeep thinkdeep");
+  Pave.Composer.clear repeated_editor;
+  Pave.Composer.insert repeated_editor "thinkdeep";
+  Pave.Composer.home repeated_editor;
+  for _ = 1 to 9 do Pave.Composer.select_right repeated_editor done;
+  Pave.Composer.begin_paste repeated_editor;
+  Pave.Composer.insert repeated_editor "thinkdeep";
+  Pave.Composer.end_paste repeated_editor;
+  assert (Pave.Composer.pasted_ranges repeated_editor = [0, 9]);
+  let expanded, names = Pave.Prompt_shortcuts.expand
+    ~enabled:["thinkdeep"] ~disabled:[]
+    ~paste_ranges:(Pave.Composer.pasted_ranges repeated_editor)
+    (Pave.Composer.text repeated_editor) in
+  assert (expanded = "thinkdeep" && names = []);
+  Pave.Composer.clear repeated_editor;
+  Pave.Composer.insert repeated_editor "e";
+  Pave.Composer.begin_paste repeated_editor;
+  Pave.Composer.insert repeated_editor "\204\129";
+  Pave.Composer.end_paste repeated_editor;
+  assert (Pave.Composer.pasted_ranges repeated_editor = [0, 3]);
+  let restored_editor = Pave.Composer.create () in
+  Pave.Composer.set restored_editor (Pave.Composer.text repeated_editor);
+  Pave.Composer.restore_pasted_ranges restored_editor
+    (Pave.Composer.pasted_ranges repeated_editor);
+  assert (Pave.Composer.pasted_ranges restored_editor = [0, 3]);
   print_endline "terminal composer: ok"

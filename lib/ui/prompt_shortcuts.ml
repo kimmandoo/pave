@@ -55,14 +55,15 @@ let marker_at text line_start line_end =
     if count < 3 then None
     else Some (marker, count, first, !i)
 
-let has_closing_ticks text start line_end count =
+let closing_ticks text start count =
+  let length = String.length text in
   let rec scan i =
-    if i >= line_end then false
+    if i >= length then None
     else if text.[i] <> '`' then scan (i + 1)
     else
       let j = ref i in
-      while !j < line_end && text.[!j] = '`' do incr j done;
-      if !j - i = count then true else scan !j
+      while !j < length && text.[!j] = '`' do incr j done;
+      if !j - i = count then Some !j else scan !j
   in
   scan start
 
@@ -94,46 +95,38 @@ let expand ~enabled ~disabled ~paste_ranges text =
       List.exists (fun (paste_start, paste_stop) ->
         start < paste_stop && paste_start < stop) paste_ranges
     in
+    let inline_end = ref 0 in
     let process_line start stop =
-      let rec scan i inline_ticks =
+      let rec scan i =
         if i >= stop then ()
+        else if i < !inline_end then scan (min stop !inline_end)
         else if text.[i] = '`' then begin
           let run_end = ref i in
           while !run_end < stop && text.[!run_end] = '`' do incr run_end done;
           let count = !run_end - i in
-          if inline_ticks = 0 then begin
-            if has_closing_ticks text !run_end stop count then
-              let rec find_close j =
-                if j >= stop then stop
-                else if text.[j] <> '`' then find_close (j + 1)
-                else
-                  let k = ref j in
-                  while !k < stop && text.[!k] = '`' do incr k done;
-                  if !k - j = count then !k else find_close !k
-              in
-              scan (find_close !run_end) 0
-            else scan !run_end 0
-          end else if count = inline_ticks then scan !run_end 0
-          else scan !run_end inline_ticks
-        end else if inline_ticks <> 0 then scan (i + 1) inline_ticks
-        else
+          (match closing_ticks text !run_end count with
+          | Some closing ->
+              inline_end := closing;
+              scan (min stop closing)
+          | None -> scan !run_end)
+        end else
           let rec try_shortcuts = function
-            | [] -> scan (i + 1) 0
+            | [] -> scan (i + 1)
             | shortcut :: rest ->
                 if not (is_selected shortcut) ||
                    not (token_at text i shortcut.name)
                 then try_shortcuts rest
                 else
                   let token_end = i + String.length shortcut.name in
-                  if overlaps_paste i token_end then scan token_end 0
+                  if overlaps_paste i token_end then scan token_end
                   else begin
                     add_replacement i token_end shortcut.prose shortcut.name;
-                    scan token_end 0
+                    scan token_end
                   end
           in
           try_shortcuts lexicon
       in
-      scan start 0
+      scan start
     in
     let rec lines line_start fenced =
       if line_start >= length then ()
@@ -141,7 +134,8 @@ let expand ~enabled ~disabled ~paste_ranges text =
         let line_end =
           try String.index_from text line_start '\n' with Not_found -> length
         in
-        let marker = marker_at text line_start line_end in
+        let marker = if !inline_end > line_start then None
+          else marker_at text line_start line_end in
         match fenced, marker with
         | Some (fence_char, fence_count), Some (char, count, _, marker_end)
           when char = fence_char && count >= fence_count ->

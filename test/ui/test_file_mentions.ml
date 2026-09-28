@@ -50,6 +50,11 @@ let () =
     expect "Unicode text content" (contains text.prompt "hello 世界\n");
     expect "prompt suffix retained" (String.ends_with ~suffix:" please" text.prompt);
     expect "text file is not a media attachment" (text.attachments = []);
+    let sentence = Pave.File_mentions.expand ~root
+      "Summarize @src/notes.md." in
+    expect "sentence-final mention attaches without consuming punctuation"
+      (contains sentence.prompt "[Attached text file: src/notes.md]" &&
+       String.ends_with ~suffix:"]." sentence.prompt);
     let quoted = Pave.File_mentions.expand ~root
       "Read @\"src/notes extra.txt\" now" in
     expect "quoted path content" (contains quoted.prompt "quoted text");
@@ -135,6 +140,16 @@ let () =
            (context.start = String.length "Review " &&
             context.stop = String.length "Review @src/notes.md")
      | None -> fail "cursor in an @ token was not recognized");
+    (match Pave.File_mentions.completion_context "Read (@src/no"
+        (String.length "Read (@src/no") with
+     | Some context ->
+         expect "parenthesized reference completion" (context.prefix = "src/no")
+     | None -> fail "parenthesized @ token was not recognized");
+    (match Pave.File_mentions.completion_context "Read,@src/no"
+        (String.length "Read,@src/no") with
+     | Some context ->
+         expect "comma-separated reference completion" (context.prefix = "src/no")
+     | None -> fail "comma-separated @ token was not recognized");
     (match Pave.File_mentions.completion_context "Read @\"src/notes extra"
         (String.length "Read @\"src/notes") with
      | Some context -> expect "quoted path prefix" (context.prefix = "src/notes")
@@ -145,6 +160,10 @@ let () =
     expect "completion finds exact workspace paths"
       (List.exists (fun item -> item.Pave.File_mentions.path = "src/notes.md")
         listing.candidates);
+    expect "unfinished nonexistent directory has no completions"
+      ((Pave.File_mentions.complete_paths ~root "src/not-yet/").candidates = []);
+    expect "file cannot be completed as directory"
+      ((Pave.File_mentions.complete_paths ~root "src/notes.md/").candidates = []);
     expect "completion obeys ignore rules"
       (not (List.exists (fun item ->
          String.starts_with ~prefix:"ignored" item.Pave.File_mentions.path)

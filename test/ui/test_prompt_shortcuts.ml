@@ -26,6 +26,13 @@ let () =
      "./thinkdeep thinkdeep.md .thinkdeep foo.thinkdeep @thinkdeep");
   expect "only visible shortcut is reported" (names = ["thinkdeep"]);
 
+  let multiline = "Explain `literal\nthinkdeep` then thinkdeep" in
+  let expanded, names = expand multiline in
+  expect "inline code spanning lines does not expand"
+    (expanded = "Explain `literal\nthinkdeep` then " ^
+      "Please reason carefully through this request" &&
+     names = ["thinkdeep"]);
+
   let repeated, names = expand "thinkdeep, then thinkdeep; finally verifyfirst." 
       ~enabled:["thinkdeep"; "verifyfirst"] in
   expect "all repeated tokens expand"

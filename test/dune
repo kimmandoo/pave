@@ -229,12 +229,12 @@
 (copy_files ../bin/ui/transcript_view.ml)
 (copy_files ../bin/cli_auth.ml)
 (copy_files ../bin/ui/model_picker.ml)
-(copy_files ../bin/cli_completion.ml)
 
 (test
  (name test_cli_completion)
- (modules test_cli_completion cli_completion)
- (libraries unix))
+ (modules test_cli_completion)
+ (libraries pave unix)
+ (action (run %{test} %{exe:../bin/main.exe})))
 
 (test
  (name test_prompt_shortcuts)

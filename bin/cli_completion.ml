@@ -45,22 +45,44 @@ let value_cases options =
     ") return ;;\n")
   |> String.concat ""
 
-let generate_bash ~executable ~options ~task_operations =
+let task_cases ~task_operations ~task_options ~shell =
+  List.map (fun operation ->
+    let flags = task_options operation in
+    let candidates = match shell with
+      | "bash" -> "COMPREPLY=( $(compgen -W " ^
+          shell_quote (String.concat " " flags) ^ " -- \"$cur\") )"
+      | "zsh" -> "compadd -- " ^ words flags
+      | _ -> assert false in
+    "      " ^ shell_quote operation ^ ") " ^ candidates ^ " ;;\n")
+    task_operations
+  |> String.concat ""
+
+let generate_bash ~executable ~options ~task_operations ~task_options =
   let flags = List.map (fun option -> option.name) options in
-  let static_flags = words flags in
-  let top_commands = words ["task"; "update"; "completions"] in
+  let static_flags = shell_quote (String.concat " " flags) in
+  let top_commands = shell_quote "task update completions" in
   let dynamic kind =
     "    --" ^ kind ^ ") while IFS= read -r candidate; do " ^
     "COMPREPLY+=(\"$candidate\"); done < <(" ^ shell_quote executable ^
-    " __complete " ^ kind ^ " \"$cur\"); return ;;\n" in
+    " __complete " ^ kind ^ " \"$cur\" \"$root\"); " ^
+    (if kind = "session" then "compopt -o filenames; " else "") ^
+    "return ;;\n" in
   "_pave_completion() {\n" ^
-  "  local cur prev candidate\n" ^
+  "  local cur prev candidate root=. i\n" ^
   "  cur=\"${COMP_WORDS[COMP_CWORD]}\"\n" ^
   "  prev=\"${COMP_WORDS[COMP_CWORD-1]}\"\n" ^
+  "  for ((i=1; i+1<COMP_CWORD; i++)); do\n" ^
+  "    if [[ ${COMP_WORDS[i]} == --root ]]; then root=${COMP_WORDS[i+1]}; fi\n" ^
+  "  done\n" ^
   "  if [[ ${COMP_WORDS[1]} == task ]]; then\n" ^
   "    if [[ $COMP_CWORD -eq 2 ]]; then\n" ^
-  "      COMPREPLY=( $(compgen -W " ^ words task_operations ^
-  " -- \"$cur\") )\n      return\n    fi\n    return\n  fi\n" ^
+  "      COMPREPLY=( $(compgen -W " ^
+  shell_quote (String.concat " " task_operations) ^
+  " -- \"$cur\") )\n      return\n    fi\n" ^
+  "    if [[ \"$cur\" == -* ]]; then\n" ^
+  "      case \"${COMP_WORDS[2]}\" in\n" ^
+  task_cases ~task_operations ~task_options ~shell:"bash" ^
+  "      esac\n    fi\n    return\n  fi\n" ^
   "  case \"$prev\" in\n" ^ dynamic "model" ^ dynamic "session" ^
   "    completions) COMPREPLY=( $(compgen -W 'bash zsh fish' -- \"$cur\") ); return ;;\n" ^
   enum_cases options ~shell:"bash" ^ value_cases options ^ "  esac\n" ^
@@ -69,17 +91,25 @@ let generate_bash ~executable ~options ~task_operations =
   "  else\n    COMPREPLY=( $(compgen -W " ^ top_commands ^ " -- \"$cur\") )\n  fi\n" ^
   "}\ncomplete -F _pave_completion " ^ shell_quote executable ^ "\n"
 
-let generate_zsh ~executable ~options ~task_operations =
+let generate_zsh ~executable ~options ~task_operations ~task_options =
   let flags = List.map (fun option -> option.name) options in
   let static_flags = words flags in
   let dynamic kind =
     "    --" ^ kind ^ ") candidates=(${(f)\"$(" ^ shell_quote executable ^
-    " __complete " ^ kind ^ " \"$cur\")\"}); compadd -Q -- \"${candidates[@]}\"; return ;;\n" in
+    " __complete " ^ kind ^ " \"$cur\" \"$root\")\"}); " ^
+    "compadd -- \"${candidates[@]}\"; return ;;\n" in
   "_pave_completion() {\n" ^
-  "  local cur=${words[CURRENT]} prev=${words[CURRENT-1]} candidates\n" ^
+  "  local cur=${words[CURRENT]} prev=${words[CURRENT-1]} candidates root=. i\n" ^
+  "  for ((i=2; i+1<CURRENT; i++)); do\n" ^
+  "    if [[ ${words[i]} == --root ]]; then root=${words[i+1]}; fi\n" ^
+  "  done\n" ^
   "  if [[ ${words[2]} == task ]]; then\n" ^
   "    if [[ $CURRENT -eq 3 ]]; then compadd -- " ^
-  words task_operations ^ "; fi\n    return\n  fi\n" ^
+  words task_operations ^ "; return; fi\n" ^
+  "    if [[ \"$cur\" == -* ]]; then\n" ^
+  "      case \"${words[3]}\" in\n" ^
+  task_cases ~task_operations ~task_options ~shell:"zsh" ^
+  "      esac\n    fi\n    return\n  fi\n" ^
   "  case \"$prev\" in\n" ^ dynamic "model" ^ dynamic "session" ^
   "    completions) compadd -- bash zsh fish; return ;;\n" ^
   enum_cases options ~shell:"zsh" ^ value_cases options ^ "  esac\n" ^
@@ -92,40 +122,82 @@ let fish_option name =
     " -l " ^ fish_quote (String.sub name 2 (String.length name - 2))
   else " -o " ^ fish_quote (String.sub name 1 (String.length name - 1))
 
-let generate_fish ~executable ~options ~task_operations =
+let generate_fish ~executable ~options ~task_operations ~task_options =
   let base = "complete -c " ^ fish_quote executable ^ " -f" in
-  let top = "__fish_use_subcommand" in
+  let top = "__pave_top" and global = "__pave_global" in
   let static = List.concat_map (fun option ->
     let flag = base ^ fish_option option.name in
     let valued = flag ^ (if option.takes_value then " -r" else "") ^
-      " -n " ^ fish_quote top in
+      " -n " ^ fish_quote global in
     let choices = List.map (fun choice ->
       flag ^ " -a " ^ fish_quote choice ^ " -n " ^
-      fish_quote (top ^ "; __fish_seen_argument " ^ option.name))
+      fish_quote (global ^ "; and __fish_seen_argument " ^ option.name))
       option.choices in
     let dynamic = match option.name with
       | "--model" | "--session" ->
           let kind = String.sub option.name 2 (String.length option.name - 2) in
-          [flag ^ " -r -a (" ^ fish_quote executable ^
-            " __complete " ^ fish_quote kind ^
-            " (commandline -ct)) -n " ^ fish_quote top]
+          [flag ^ " -r -a " ^ fish_quote ("(" ^ executable ^
+            " __complete " ^ kind ^ " (commandline -ct) (__pave_root))") ^
+            " -n " ^ fish_quote global]
       | _ -> [] in
     valued :: (choices @ dynamic)) options in
   let subcommands = [
     base ^ " -a " ^ fish_quote "task update completions" ^ " -n " ^
       fish_quote top;
     base ^ " -a " ^ fish_quote (String.concat " " task_operations) ^
-      " -n " ^ fish_quote "__fish_seen_subcommand_from task";
+      " -n " ^ fish_quote "__pave_task_operations";
     base ^ " -a " ^ fish_quote "bash zsh fish" ^ " -n " ^
-      fish_quote "__fish_seen_subcommand_from completions";
+      fish_quote "__pave_completions";
     base ^ " -a " ^ fish_quote "--check" ^ " -n " ^
-      fish_quote "__fish_seen_subcommand_from update"
+      fish_quote "__pave_update"
   ] in
-  String.concat "\n" (static @ subcommands) ^ "\n"
+  let task_flags = List.concat_map (fun operation ->
+    List.map (fun flag ->
+      base ^ fish_option flag ^ " -r -n " ^
+      fish_quote ("__pave_task_option " ^ operation))
+      (task_options operation)) task_operations in
+  let predicates =
+    "function __pave_top\n" ^
+    "  set -l tokens (commandline -xpc)\n" ^
+    "  test (count $tokens) -eq 1\n" ^
+    "end\n" ^
+    "function __pave_global\n" ^
+    "  set -l tokens (commandline -xpc)\n" ^
+    "  test (count $tokens) -lt 2; or not contains -- $tokens[2] task update completions\n" ^
+    "end\n" ^
+    "function __pave_task_operations\n" ^
+    "  set -l tokens (commandline -xpc)\n" ^
+    "  test (count $tokens) -eq 2; and test \"$tokens[2]\" = task\n" ^
+    "end\n" ^
+    "function __pave_task_option\n" ^
+    "  set -l tokens (commandline -xpc)\n" ^
+    "  test (count $tokens) -ge 3; and test \"$tokens[2]\" = task; and test \"$tokens[3]\" = \"$argv[1]\"\n" ^
+    "end\n" ^
+    "function __pave_completions\n" ^
+    "  set -l tokens (commandline -xpc)\n" ^
+    "  test (count $tokens) -eq 2; and test \"$tokens[2]\" = completions\n" ^
+    "end\n" ^
+    "function __pave_update\n" ^
+    "  set -l tokens (commandline -xpc)\n" ^
+    "  test (count $tokens) -eq 2; and test \"$tokens[2]\" = update\n" ^
+    "end\n" ^
+    "function __pave_root\n" ^
+    "  set -l tokens (commandline -xpc)\n" ^
+    "  set -l root .\n" ^
+    "  set -l index 2\n" ^
+    "  while test (math $index + 1) -le (count $tokens)\n" ^
+    "    if test \"$tokens[$index]\" = --root\n" ^
+    "      set root $tokens[(math $index + 1)]\n" ^
+    "    end\n" ^
+    "    set index (math $index + 1)\n" ^
+    "  end\n" ^
+    "  echo $root\n" ^
+    "end\n" in
+  predicates ^ String.concat "\n" (static @ task_flags @ subcommands) ^ "\n"
 
-let generate ~shell ~executable ~options ~task_operations =
+let generate ~shell ~executable ~options ~task_operations ~task_options =
   match shell with
-  | "bash" -> generate_bash ~executable ~options ~task_operations
-  | "zsh" -> generate_zsh ~executable ~options ~task_operations
-  | "fish" -> generate_fish ~executable ~options ~task_operations
+  | "bash" -> generate_bash ~executable ~options ~task_operations ~task_options
+  | "zsh" -> generate_zsh ~executable ~options ~task_operations ~task_options
+  | "fish" -> generate_fish ~executable ~options ~task_operations ~task_options
   | _ -> invalid_arg ("unsupported completion shell: " ^ shell)

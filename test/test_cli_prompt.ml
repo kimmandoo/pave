@@ -301,6 +301,32 @@ let () =
         text_records) = long_text ^ "\n")
       "JSONL text chunks exceeded their UTF-8 byte bound";
 
+    let unsafe_text = "\027[31mred\027[0m\nplain" in
+    let unsafe_event = Yojson.Basic.to_string (`Assoc [
+      "choices", `List [`Assoc [
+        "index", `Int 0;
+        "delta", `Assoc ["content", `String unsafe_text];
+        "finish_reason", `Null]]]) in
+    let unsafe_stream = "data: " ^ unsafe_event ^ "\n\n" ^
+      "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n" ^
+      "data: [DONE]\n\n" in
+    let safe_jsonl = with_server
+      [response 200 "text/event-stream" unsafe_stream]
+      (fun _ _ _ -> ())
+      (fun endpoint -> run Sys.argv.(1) root ~input:"inspect"
+        (base_arguments endpoint @ ["--output"; "jsonl"])) in
+    assert_success safe_jsonl "control-safe JSONL text";
+    let safe_text = records safe_jsonl.stdout
+      |> List.filter (fun record -> record_type record = `String "text_delta")
+      |> List.map (fun record -> member "text" record) in
+    check (not (List.exists (function
+      | `String text -> String.contains text '\027'
+      | _ -> true) safe_text) &&
+      List.exists (function
+        | `String text -> contains text "red" && contains text "\nplain"
+        | _ -> false) safe_text)
+      "JSONL retained terminal escape bytes or dropped ordinary text";
+
     let tool_call =
       "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-private\",\"type\":\"function\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"missing.txt\\\"}\"}}]},\"finish_reason\":null}]}\n\n" ^
       "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n" ^

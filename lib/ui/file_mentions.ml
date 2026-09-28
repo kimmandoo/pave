@@ -67,7 +67,9 @@ let parse_reference text start =
       if index < length && not (is_space text.[index]) &&
          not (is_punctuation text.[index]) then finish (index + 1)
       else index in
-    let stop = finish (start + 1) in
+    let stop = ref (finish (start + 1)) in
+    while !stop > start + 1 && text.[!stop - 1] = '.' do decr stop done;
+    let stop = !stop in
     if stop = start + 1 then None
     else
       let path = String.sub text (start + 1) (stop - start - 1) in
@@ -231,6 +233,11 @@ let completion_context text cursor =
          | Some _ -> incr index
          | None when is_space char ->
              token_start := !index + 1; incr index
+         | None when (match char with
+             | ',' | ';' | ':' -> true
+             | '(' | '[' | '{' -> text.[!token_start] <> '@'
+             | _ -> false) ->
+             token_start := !index + 1; incr index
          | None when is_quote char && !index = !token_start + 1 &&
                     text.[!token_start] = '@' ->
              quote := Some char; incr index
@@ -298,9 +305,13 @@ let complete_paths ~root prefix =
         if List.length !found < max_candidates then
           found := { path; is_directory } :: !found
         else overflow := true in
-    let walked = Tools.walk ~hidden:false
-      ~visit_directory:(fun path _ -> add path true)
-      root directory (fun path _ -> add path false) in
+    let walked = try
+      if (Unix.lstat (Workspace_path.checked_path root directory)).Unix.st_kind
+         <> Unix.S_DIR then false
+      else Tools.walk ~hidden:false
+        ~visit_directory:(fun path _ -> add path true)
+        root directory (fun path _ -> add path false)
+    with Unix.Unix_error ((Unix.ENOENT | Unix.ENOTDIR), _, _) -> false in
     { candidates = List.sort (fun left right ->
         String.compare left.path right.path) !found;
       truncated = walked || !overflow }

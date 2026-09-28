@@ -40,6 +40,7 @@ let () =
       ];
       jsonl_outcome_sent := true) in
   let jsonl_delta text =
+    let text = Transcript_view.sanitize text in
     let length = String.length text in
     let is_continuation char =
       let code = Char.code char in code >= 0x80 && code <= 0xbf in
@@ -169,13 +170,14 @@ let () =
        | 3 ->
            print_string (Cli_completion.generate ~shell:Sys.argv.(2)
              ~executable:"pave" ~options:completion_options
-             ~task_operations:Task_cli.operations);
+             ~task_operations:Task_cli.operations
+             ~task_options:Task_cli.operation_options);
            flush stdout
        | _ -> failwith "usage: pave completions bash|zsh|fish");
       exit 0);
     if Array.length Sys.argv > 1 && Sys.argv.(1) = "__complete" then (
-      let candidates kind =
-        let root = Unix.realpath "." in
+      let candidates kind root =
+        let root = Unix.realpath root in
         match kind with
         | "session" ->
             (try Pave.Session_store.recent ~root
@@ -219,11 +221,13 @@ let () =
              with _ -> [])
         | _ -> [] in
       (match Sys.argv with
-       | [| _; "__complete"; kind; prefix |] ->
-           candidates kind
+       | [| _; "__complete"; kind; prefix; workspace |] ->
+           (try candidates kind workspace
+            with Unix.Unix_error _ | Sys_error _ -> [])
            |> List.filter (fun value ->
              not (String.exists (fun char ->
-               Char.code char <= 32 || Char.code char = 127) value))
+               let byte = Char.code char in
+               byte < 32 || byte = 127) value))
            |> Cli_completion.filter_candidates ~prefix
            |> List.iter print_endline;
            flush stdout

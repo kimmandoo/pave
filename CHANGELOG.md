@@ -1,6 +1,8 @@
 # Changelog
 
 ## 2026-09-28
+- fix(cli): preserved exact pasted spans and multiline code exclusions for opt-in shortcuts, completed sentence-final `@` references and punctuation-bound path search, removed terminal controls from JSONL text, and corrected Bash/Zsh/Fish completions for options, task flags, workspace roots, and spaced session paths.
+- fix(distribution): staged release assets in a draft, verified checksums and the complete uploaded asset set before publication, and refused to replace assets on an existing public release.
 - feat(cli): completed R12 with shared slash grammar, bounded headless prompts, checked text/media attachments, ordered JSONL outcomes, opt-in prose shortcuts that skip paths/code/pasted text, and generated shell completions; kept TUI model labels sanitized and separate from exact selectors.
 - fix(auth): routed account-scoped Devin and other OAuth models through their saved grant without premature unscoped credential discovery, including automatic context-window metadata; inferred the sole grant, asked before ambiguous interactive prompts, and kept headless requests fail-closed.
 - release(distribution): published v0.1.62 from `c1564d8` after main CI `36393472252` passed all four OCaml/macOS/Linux jobs and release workflow `36394191915` passed four native suite/build/package/extracted-executable jobs plus publication. Downloaded all five assets, verified four SHA-256 hashes and exact three-member archives; extracted Darwin arm64 linked only `libSystem`, passed CLI smokes, rendered the fatter P and `v0.1.62`, showed dot-pattern progress and completed output at 30×10/30×3, and exited 143 with terminal modes restored from a live `/new` confirmation.

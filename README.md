@@ -128,7 +128,7 @@ In the TUI, type `@path` or `@"path with spaces"` in the draft. Completion stays
 
 `--output jsonl` writes ordered turn, text, tool and outcome records to stdout; diagnostics go to stderr. Completed turns exit 0, provider failures 1, tool failures 2 and cancellation 130. Plain text remains the default. Prose shortcuts are opt-in with `--shortcut NAME` and individually disableable with `--disable-shortcut NAME`; available names are `thinkdeep`, `verifyfirst` and `planfirst`. Pasted text, code, paths and tool output are not expanded. TUI headers use sanitized model display names when available and fall back to the upstream ID; labels never change the exact selector.
 
-`pave completions bash|zsh|fish` prints a script generated from CLI metadata. Model and session candidates come from authorized local state only; completion does not contact providers.
+`pave completions bash|zsh|fish` prints a script generated from CLI/task option metadata. Model and session candidates come only from authorized local state for the effective `--root` workspace (or the current directory); completion does not contact providers. Session paths containing spaces remain selectable.
 
 
 ### Non-chat model tasks

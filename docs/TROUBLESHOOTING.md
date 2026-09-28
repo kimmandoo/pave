@@ -1,12 +1,26 @@
 # Troubleshooting
 
 
-### [2026-09-28] Fish completion left dynamic model candidates unevaluated
+### [2026-09-28] Paste provenance rewrote the wrong shortcut token
 
-- **Context / Symptom:** Generated fish completion wrapped the model/session lookup in a single-quoted argument, so fish would register the command substitution as literal text instead of running it.
-- **Root Cause:** Fish single quotes suppress expansions; the generated dynamic `-a` argument was quoted as a whole. No fish parser was installed, so source review against fish's quoting rules exposed the defect before release.
-- **Solution:** Kept the executable and command arguments individually quoted but emitted the surrounding command substitution unquoted. Bash/zsh completion syntax remained valid; fish syntax could not be parser-checked in this environment.
-- **Prevention / Reference:** Keep fish command substitutions outside single-quoted literals; see [fish quoting rules](https://fishshell.com/docs/current/language.html#quotes).
+- **Context / Symptom:** Typing `thinkdeep`, moving to the start and bracket-pasting `thinkdeep ` marked the original typed token as pasted while the inserted token could be expanded.
+- **Root Cause:** Paste tracking inferred an inserted span from the longest common prefix/suffix after the edit; repeated text made that diff ambiguous. Inline-code detection also restarted on each line even when a backtick span crossed a newline.
+- **Solution:** Tracked the actual insertion range while the paste was active, normalized grapheme boundaries, and carried an inline-code closing position across lines. Focused composer and shortcut regressions passed with repeated text, identical replacements, combining marks and multiline inline code.
+- **Prevention / Reference:** Preserve input provenance at the edit boundary; a content diff cannot identify which copy of repeated text came from a paste.
+
+### [2026-09-28] Workspace mentions lost punctuation and missing-path completion failed
+
+- **Context / Symptom:** `@src/notes.md.` stayed literal even though `src/notes.md` existed; Tab after `(@src/no` did not offer a match, and completing `@src/not-yet/` raised a filesystem error.
+- **Root Cause:** The unquoted parser treated terminal periods as part of a filename, completion tokenization did not recognize punctuation that the reference parser accepted, and the walker was called for absent/non-directory parents.
+- **Solution:** Trimmed trailing unquoted periods without consuming the sentence punctuation, aligned completion boundaries with mention parsing, and returned an empty result for missing/non-directory parents. The focused mention regression passed.
+- **Prevention / Reference:** Exercise a reference in ordinary sentence punctuation and both existing and missing completion directories.
+
+### [2026-09-28] Fish completion evaluated dynamic candidates while sourcing
+
+- **Context / Symptom:** The R12 generator emitted unquoted `-a (pave __complete ...)` for model/session values, attempting to evaluate `commandline -ct` while loading the completion script instead of when completing a value.
+- **Root Cause:** Fish evaluates an unquoted command substitution in the command invoking `complete`. Fish's `complete -a` deliberately accepts a **quoted** substitution string and evaluates it later for each completion; the previous session's source-only diagnosis reversed these two stages.
+- **Solution:** Quoted the complete `-a` substitution so candidate lookup is deferred, replaced `__fish_use_subcommand` with predicates based on the actual first subcommand, and passed an explicitly selected workspace root to local candidate lookup. Installed Fish for verification: `fish -n` parsed the script and `complete -C` offered global flags after `--provider`, task operations and task-specific flags. Bash/Zsh syntax and Bash completion scenarios also passed.
+- **Prevention / Reference:** Verify evaluation timing in the [fish `complete` documentation](https://fishshell.com/docs/current/cmds/complete.html), not from general shell quoting rules alone.
 
 ### [2026-09-28] TUI path completion rejected a canonical macOS workspace
 

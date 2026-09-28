@@ -1,5 +1,17 @@
 let operations = ["embed"; "image"; "speak"; "transcribe"; "rerank"]
 
+let operation_options operation =
+  let specific = match operation with
+    | "embed" -> ["--input"]
+    | "image" -> ["--prompt"; "--output"]
+    | "speak" -> ["--input"; "--voice"; "--output"]
+    | "transcribe" -> ["--file"]
+    | "rerank" -> ["--query"; "--document"; "--top-n"]
+    | _ -> [] in
+  if List.mem operation operations then
+    ["--model"; "--root"] @ specific else []
+
+
 let general_help =
   "Usage: pave task OPERATION --model EXACT_ID [options]\n\n" ^
   "Non-chat API tasks (not provider chat routes):\n" ^
@@ -119,32 +131,28 @@ let ensure_only used options =
 
 let execute operation options cancelled =
   let model = required "--model" options.model in
+  ensure_only (operation_options operation) options;
   let cancel () = !cancelled in
   let result = match operation with
     | "embed" ->
-        ensure_only ["--input"] options;
         Pave.Non_chat.embed ~cancel ~key:(Option.value ~default:"" (Sys.getenv_opt "OPENAI_API_KEY"))
           ~model ~input:(required "--input" options.input) ()
     | "image" ->
-        ensure_only ["--prompt"; "--output"] options;
         Pave.Non_chat.generate_image ~cancel
           ~key:(Option.value ~default:"" (Sys.getenv_opt "OPENAI_API_KEY")) ~model
           ~root:options.root ~prompt:(required "--prompt" options.prompt)
           ~output:(required "--output" options.output) ()
     | "speak" ->
-        ensure_only ["--input"; "--voice"; "--output"] options;
         Pave.Non_chat.speak ~cancel
           ~key:(Option.value ~default:"" (Sys.getenv_opt "OPENAI_API_KEY")) ~model
           ~root:options.root ~input:(required "--input" options.input)
           ~voice:(required "--voice" options.voice)
           ~output:(required "--output" options.output) ()
     | "transcribe" ->
-        ensure_only ["--file"] options;
         Pave.Non_chat.transcribe ~cancel
           ~key:(Option.value ~default:"" (Sys.getenv_opt "OPENAI_API_KEY")) ~model
           ~root:options.root ~input:(required "--file" options.file) ()
     | "rerank" ->
-        ensure_only ["--query"; "--document"; "--top-n"] options;
         Pave.Non_chat.rerank ~cancel
           ~key:(Option.value ~default:"" (Sys.getenv_opt "COHERE_API_KEY")) ~model
           ~query:(required "--query" options.query) ~documents:options.documents

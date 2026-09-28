@@ -98,6 +98,15 @@ let merge_ranges ranges =
     | _ -> (start, stop) :: acc) []
   |> List.rev
 
+let normalize_pasted_ranges t =
+  let floor position =
+    let index = at_or_after t.boundaries t.boundary_count position in
+    t.boundaries.(if t.boundaries.(index) = position then index else index - 1) in
+  let ceil position =
+    t.boundaries.(at_or_after t.boundaries t.boundary_count position) in
+  t.pasted <- List.map (fun (start, stop) -> floor start, ceil stop) t.pasted
+    |> merge_ranges
+
 let transform_pasted_ranges t ~start ~old_stop ~new_stop =
   if t.pasted <> [] then (
     let delta = new_stop - old_stop in
@@ -114,7 +123,8 @@ let transform_pasted_ranges t ~start ~old_stop ~new_stop =
 let mark_pasted t ~start ~stop =
   if start < stop then (
     t.paste_touched <- true;
-    t.pasted <- merge_ranges ((start, stop) :: t.pasted))
+    t.pasted <- (start, stop) :: t.pasted;
+    normalize_pasted_ranges t)
 
 let restore_pasted_ranges t ranges =
   let boundaries = segment t.text in
@@ -131,6 +141,7 @@ let install_at t text pos ~start ~old_stop ~new_stop =
   t.text <- text;
   t.boundaries <- boundaries;
   t.boundary_count <- Array.length boundaries;
+  if t.pasted <> [] then normalize_pasted_ranges t;
   t.cursor <- boundaries.(at_or_after boundaries t.boundary_count pos);
   clear_selection t;
   t.preferred_column <- None
@@ -323,12 +334,7 @@ let end_paste t =
         record ~before_selection t ~start:!start
           ~removed:(String.sub before !start (!old_stop - !start))
           ~inserted:(String.sub t.text !start (!new_stop - !start))
-          ~before:cursor;
-        mark_pasted t ~start:!start ~stop:!new_stop)
-      else match before_selection with
-        | Some anchor ->
-            mark_pasted t ~start:(min anchor cursor) ~stop:(max anchor cursor)
-        | None -> ());
+          ~before:cursor));
   t.journal.grouping <- false
 
 let insert t value =
@@ -357,11 +363,14 @@ let insert t value =
         done;
         t.boundary_count <- count;
         t.text <- t.text ^ value;
-        t.cursor <- String.length t.text)
+        t.cursor <- String.length t.text;
+        if List.exists (fun (_, stop) -> stop > suffix_start) t.pasted then
+          normalize_pasted_ranges t)
       else replace t ~start ~stop ~value
           ~position:(start + String.length value);
       if t.paste = None then
-        record ~before_selection t ~start ~removed ~inserted:value ~before)
+        record ~before_selection t ~start ~removed ~inserted:value ~before
+      else mark_pasted t ~start ~stop:t.cursor)
 
 let is_boundary t position =
   let rec find index =
