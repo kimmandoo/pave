@@ -12,6 +12,15 @@ let delta turn_id text =
   Tui.Agent_event (Pave.Turn_runner.Text_delta { turn_id; text })
 
 let () =
+  let mouse_event button =
+    (`Mouse (`Press (`Scroll button), (0, 0), []) : Notty.Unescape.event) in
+  expect "mouse-wheel up scrolls toward earlier transcript rows"
+    (Tui.mouse_scroll_delta (mouse_event `Up) = Some 1);
+  expect "mouse-wheel down scrolls toward recent transcript rows"
+    (Tui.mouse_scroll_delta (mouse_event `Down) = Some (-1));
+  expect "ordinary mouse clicks do not scroll the transcript"
+    (Tui.mouse_scroll_delta
+      (`Mouse (`Press `Left, (0, 0), []) : Notty.Unescape.event) = None);
   let image : Pave.Protocol.attachment = {
     name = "sample.PNG"; mime_type = "image/png"; data = "iVBORw0KGgo=";
   } in

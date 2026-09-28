@@ -1,5 +1,19 @@
 # Troubleshooting
 
+### [2026-09-29] Groovy Gradle inventory omitted the first included module
+
+- **Context / Symptom:** The bounded mobile inventory reported `:legacy-lib:shared` but omitted `:legacy-app` from `include ':legacy-app', ':legacy-lib:shared'`.
+- **Root Cause:** The bare-include parser consumed its first literal while matching the Groovy form, then split only the remaining tokens.
+- **Solution:** Preserved that first argument, limited inferred modules to top-level unconditional literal includes, and kept dynamic, conditional and unsupported includes unresolved. Regression coverage exercised Groovy multi-argument includes, a static include after interpolation, and misleading method/conditional calls; the tool test passed without executing Gradle.
+- **Prevention / Reference:** Keep positive coverage for every supported include spelling and pair dynamic/conditional cases with a later static include so scanning cannot silently stop early.
+
+### [2026-09-29] TUI mouse wheel left transcript scroll unchanged
+
+- **Context / Symptom:** Vertical mouse-wheel input did not move the interactive transcript.
+- **Root Cause:** The terminal was created with mouse reporting disabled and the input loop discarded all mouse events.
+- **Solution:** Enabled terminal mouse reporting and mapped only wheel-up/down events to the existing bounded transcript scroll. A real 100×30 PTY with a loopback Ollama fixture showed wheel-up moving from later transcript markers to earlier ones, then wheel-down restoring the later viewport; clicks and unrelated input remained non-scrolling.
+- **Prevention / Reference:** Verify the emitted SGR mouse protocol and visible viewport transition in a real PTY; a decoder-only unit test does not prove terminal reporting is enabled.
+
 ### [2026-09-29] Short streamed replies paused until the activity heartbeat
 
 - **Context / Symptom:** In a real PTY, a local SSE fixture emitted two short text deltas 3 ms apart and then paused; the second delta did not appear for 771 ms, despite already arriving over HTTP.

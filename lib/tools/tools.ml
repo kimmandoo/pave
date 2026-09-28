@@ -723,11 +723,214 @@ let edit_file root args =
 let shell_quote text =
   "'" ^ String.concat "'\\''" (String.split_on_char '\'' text) ^ "'"
 
+type gradle_token =
+  | Gradle_word of string
+  | Gradle_string of string option
+  | Gradle_symbol of char
+  | Gradle_newline
+
+let gradle_tokens source =
+  let length = String.length source in
+  let starts index value =
+    index + String.length value <= length &&
+    String.sub source index (String.length value) = value in
+  let is_word_start = function
+    | 'a' .. 'z' | 'A' .. 'Z' | '_' | '$' -> true
+    | _ -> false in
+  let is_word_char = function
+    | 'a' .. 'z' | 'A' .. 'Z' | '0' .. '9' | '_' | '$' -> true
+    | _ -> false in
+  let quoted start quote triple =
+    let delimiter = if triple then String.make 3 quote else String.make 1 quote in
+    let rec find index interpolated =
+      if index >= length then (length, None)
+      else if starts index delimiter then
+        index + String.length delimiter,
+        (if interpolated then None
+         else Some (String.sub source start (index - start)))
+      else if source.[index] = '\\' then
+        find (min length (index + 2)) interpolated
+      else if source.[index] = '$' then find (index + 1) true
+      else find (index + 1) interpolated in
+    find start false in
+  let rec skip_block index depth =
+    if index >= length then length
+    else if starts index "/*" then skip_block (index + 2) (depth + 1)
+    else if starts index "*/" then
+      if depth = 1 then index + 2 else skip_block (index + 2) (depth - 1)
+    else skip_block (index + 1) depth in
+  let rec scan index acc =
+    if index >= length then List.rev acc
+    else match source.[index] with
+    | ' ' | '\t' | '\012' -> scan (index + 1) acc
+    | '\n' -> scan (index + 1) (Gradle_newline :: acc)
+    | '\r' ->
+        let next = if index + 1 < length && source.[index + 1] = '\n'
+          then index + 2 else index + 1 in
+        scan next (Gradle_newline :: acc)
+    | '/' when starts index "//" ->
+        let rec line_end cursor =
+          if cursor >= length || source.[cursor] = '\n' ||
+             source.[cursor] = '\r' then cursor
+          else line_end (cursor + 1) in
+        scan (line_end (index + 2)) acc
+    | '/' when starts index "/*" ->
+        let stop = skip_block (index + 2) 1 in
+        let newlines = ref 0 in
+        for cursor = index to stop - 1 do
+          if source.[cursor] = '\n' then incr newlines
+        done;
+        scan stop (List.init !newlines (fun _ -> Gradle_newline) @ acc)
+    | ('"' | '\'') as quote ->
+        let triple = starts index (String.make 3 quote) in
+        let begin_content = index + (if triple then 3 else 1) in
+        let stop, value = quoted begin_content quote triple in
+        scan stop (Gradle_string value :: acc)
+    | char when is_word_start char ->
+        let stop = ref (index + 1) in
+        while !stop < length && is_word_char source.[!stop] do
+          incr stop
+        done;
+        scan !stop
+          (Gradle_word (String.sub source index (!stop - index)) :: acc)
+    | symbol -> scan (index + 1) (Gradle_symbol symbol :: acc)
+  in
+  scan 0 []
+
+let gradle_module_path value =
+  if value = ":" then Some ""
+  else
+    let value = if String.starts_with ~prefix:":" value then
+        String.sub value 1 (String.length value - 1)
+      else value in
+    let parts = String.split_on_char ':' value in
+    let safe part =
+      part <> "" && part <> "." && part <> ".." &&
+      String.for_all (function
+        | 'a' .. 'z' | 'A' .. 'Z' | '0' .. '9' | '_' | '-' | '.' -> true
+        | _ -> false) part in
+    if value <> "" && List.for_all safe parts then
+      Some (String.concat "/" parts)
+    else None
+
+let gradle_included_modules source =
+  let tokens = gradle_tokens source in
+  let modules = ref [] and unresolved = ref false in
+  let add_arguments arguments =
+    let arguments = List.filter (function [] -> false | _ -> true) arguments in
+    if arguments = [] then unresolved := true;
+    List.iter (function
+      | [Gradle_string (Some value)] ->
+          (match gradle_module_path value with
+          | Some module_path -> modules := module_path :: !modules
+          | None -> unresolved := true)
+      | _ -> unresolved := true) arguments in
+  let split_arguments tokens =
+    let rec loop parens brackets braces current arguments = function
+      | [] -> List.rev (List.rev current :: arguments), [], false
+      | Gradle_symbol ')' :: rest when parens = 0 && brackets = 0 &&
+                                      braces = 0 ->
+          List.rev (List.rev current :: arguments), rest, true
+      | Gradle_newline :: rest when parens = 0 && brackets = 0 &&
+                                   braces = 0 ->
+          List.rev (List.rev current :: arguments),
+          Gradle_newline :: rest, false
+      | Gradle_symbol ',' :: rest when parens = 0 && brackets = 0 &&
+                                      braces = 0 ->
+          loop parens brackets braces [] (List.rev current :: arguments) rest
+      | (Gradle_symbol '(' as token) :: rest ->
+          loop (parens + 1) brackets braces (token :: current) arguments rest
+      | (Gradle_symbol ')' as token) :: rest ->
+          loop (parens - 1) brackets braces (token :: current) arguments rest
+      | (Gradle_symbol '[' as token) :: rest ->
+          loop parens (brackets + 1) braces (token :: current) arguments rest
+      | (Gradle_symbol ']' as token) :: rest ->
+          loop parens (brackets - 1) braces (token :: current) arguments rest
+      | (Gradle_symbol '{' as token) :: rest ->
+          loop parens brackets (braces + 1) (token :: current) arguments rest
+      | (Gradle_symbol '}' as token) :: rest ->
+          loop parens brackets (braces - 1) (token :: current) arguments rest
+      | token :: rest ->
+          loop parens brackets braces (token :: current) arguments rest in
+    loop 0 0 0 [] [] tokens in
+  let rec scan parens brackets braces statement_start previous guarded = function
+    | [] -> ()
+    | Gradle_newline :: rest when parens = 0 && brackets = 0 &&
+                                  braces = 0 ->
+        scan 0 0 0 (not guarded) None guarded rest
+    | Gradle_newline :: rest ->
+        scan parens brackets braces false (Some Gradle_newline) guarded rest
+    | Gradle_symbol ';' :: rest when parens = 0 && brackets = 0 &&
+                                    braces = 0 ->
+        scan 0 0 0 true None false rest
+    | Gradle_word "include" :: Gradle_symbol '(' :: rest
+      when parens = 0 && brackets = 0 && braces = 0 &&
+           statement_start && not guarded ->
+        let arguments, rest, closed = split_arguments rest in
+        if not closed then unresolved := true;
+        add_arguments arguments;
+        scan 0 0 0 false (Some (Gradle_symbol ')')) false rest
+    | Gradle_word "include" ::
+        ((Gradle_string _ | Gradle_word _ | Gradle_symbol '*') as first) :: rest
+      when parens = 0 && brackets = 0 && braces = 0 &&
+           statement_start && not guarded ->
+        let rec statement acc = function
+          | [] -> List.rev acc, []
+          | (Gradle_newline | Gradle_symbol ';') :: rest ->
+              List.rev acc, rest
+          | token :: rest -> statement (token :: acc) rest in
+        let arguments, rest = statement [first] rest in
+        let rec split current acc = function
+          | [] -> List.rev (List.rev current :: acc)
+          | Gradle_symbol ',' :: rest ->
+              split [] (List.rev current :: acc) rest
+          | token :: rest -> split (token :: current) acc rest in
+        add_arguments (split [] [] arguments);
+        scan 0 0 0 true None false rest
+    | Gradle_word "include" :: rest ->
+        (match previous with
+        | Some (Gradle_symbol '.') -> ()
+        | _ -> unresolved := true);
+        scan parens brackets braces false (Some (Gradle_word "include"))
+          false rest
+    | (Gradle_word ("if" | "else" | "for" | "while" | "when") as token) ::
+      rest ->
+        scan parens brackets braces false (Some token) true rest
+    | (Gradle_symbol '(' as token) :: rest ->
+        scan (parens + 1) brackets braces false (Some token) guarded rest
+    | (Gradle_symbol ')' as token) :: rest ->
+        scan (max 0 (parens - 1)) brackets braces false (Some token)
+          guarded rest
+    | (Gradle_symbol '[' as token) :: rest ->
+        scan parens (brackets + 1) braces false (Some token) guarded rest
+    | (Gradle_symbol ']' as token) :: rest ->
+        scan parens (max 0 (brackets - 1)) braces false (Some token)
+          guarded rest
+    | (Gradle_symbol '{' as token) :: rest ->
+        scan parens brackets (braces + 1) false (Some token) false rest
+    | (Gradle_symbol '}' as token) :: rest ->
+        scan parens brackets (max 0 (braces - 1)) false (Some token)
+          false rest
+    | token :: rest ->
+        scan parens brackets braces false (Some token)
+          (guarded && parens > 0) rest in
+  scan 0 0 0 true None false tokens;
+  List.sort_uniq String.compare !modules, !unresolved
+
+let join_relative directory name =
+  if directory = "" || directory = "." then name
+  else Filename.concat directory name
+
+let relative_label path = if path = "" then "." else path
+
+let source_roots = ["src/main"; "src/test"; "src/androidTest"]
+
 type mobile_candidate =
   | Xcode_workspace of string * string
   | Xcode_project of string * string
   | Swift_package of string
-  | Gradle_manifest of string
+  | Gradle_settings of string
+  | Gradle_wrapper of string
   | Pubspec_manifest of string
   | Node_manifest of string
   | Oversized_manifest of string
@@ -751,6 +954,8 @@ let mobile_project ?cancel root =
   let max_candidates = 100 in
   let candidates = ref [] and candidate_count = ref 0
   and truncated = ref false in
+  let directories = Hashtbl.create 256 in
+  Hashtbl.replace directories "." ();
   let add_candidate candidate =
     if !candidate_count < max_candidates then (
       incr candidate_count;
@@ -793,6 +998,7 @@ let mobile_project ?cancel root =
     | _ -> () in
 
   let visit_directory relative _absolute =
+    Hashtbl.replace directories relative ();
     let name = Filename.basename relative in
     if Filename.check_suffix name ".xcworkspace" then (
       let manifest = Filename.concat relative "contents.xcworkspacedata" in
@@ -803,8 +1009,10 @@ let mobile_project ?cancel root =
   let visit_file relative _absolute =
     match Filename.basename relative with
     | "Package.swift" -> add_regular relative (fun _ -> Swift_package relative)
-    | "settings.gradle" | "settings.gradle.kts" | "gradlew" ->
-        add_regular relative (fun _ -> Gradle_manifest relative)
+    | "settings.gradle" | "settings.gradle.kts" ->
+        add_regular relative (fun _ -> Gradle_settings relative)
+    | "gradlew" | "gradlew.bat" ->
+        add_regular relative (fun _ -> Gradle_wrapper relative)
     | "pubspec.yaml" -> add_regular relative (fun _ -> Pubspec_manifest relative)
     | "package.json" -> add_regular relative (fun _ -> Node_manifest relative)
     | name when Filename.check_suffix name ".xcscheme" ->
@@ -829,7 +1037,7 @@ let mobile_project ?cancel root =
   let add_stack name commands =
     incr stack_count;
     if !stack_count = 1 then
-      append "Detected mobile project stacks and suggested commands (not executed):\n";
+      append "Detected mobile project evidence and suggested commands (not executed):\n";
     append (name ^ "\n" ^
       String.concat "" (List.map (fun command -> "  " ^ command ^ "\n") commands)) in
   let add_diagnostic text = append (text ^ "\n") in
@@ -849,10 +1057,12 @@ let mobile_project ?cancel root =
     try Some (Workspace_path.read_bounded
       (Workspace_path.checked_path root path) max_write_bytes)
     with Unix.Unix_error _ | Workspace_path.Error _ -> None in
-  let gradle_paths = List.filter_map (function
-    | Gradle_manifest path -> Some path
+  let gradle_settings = List.filter_map (function
+    | Gradle_settings path -> Some path
     | _ -> None) candidates in
-  let rendered_gradle = Hashtbl.create max_candidates in
+  let gradle_wrappers = List.filter_map (function
+    | Gradle_wrapper path -> Some path
+    | _ -> None) candidates in
   let render_xcode kind flag bundle manifest =
     let name = Filename.basename bundle in
     let target = flag ^ " " ^ shell_quote name in
@@ -877,29 +1087,108 @@ let mobile_project ?cancel root =
     add_stack ("Xcode " ^ kind ^ ": " ^ manifest ^ "\n" ^ provenance)
       (command_in bundle ("xcodebuild -list " ^ target) :: scheme_commands) in
 
-  let render_gradle path =
-    let parent = directory path in
-    if not (Hashtbl.mem rendered_gradle parent) then (
-      Hashtbl.add rendered_gradle parent ();
-      let manifests = List.filter (fun manifest -> directory manifest = parent)
-        gradle_paths in
-      let wrapper = if parent = "" then "gradlew" else parent ^ "/gradlew" in
-      let executable =
-        if List.mem wrapper manifests then "./gradlew" else "gradle" in
-      let label = "Android Gradle: " ^ String.concat ", " manifests in
-      add_stack label
-        (List.map (command_in path)
-          [executable ^ " tasks"; executable ^ " assembleDebug";
-           executable ^ " test"])) in
+  let render_gradle settings_path =
+    let parent = directory settings_path in
+    let wrappers = List.filter (fun path -> directory path = parent)
+      gradle_wrappers in
+    let wrapper_text = match wrappers with
+      | [] ->
+          "  Gradle wrapper: not found beside settings; system Gradle availability is unknown."
+      | paths ->
+          String.concat "\n" (List.map (fun path ->
+            "  Gradle wrapper script: " ^ path ^
+            " (regular-file evidence only; not executed)") paths) in
+    let module_lines source =
+      let modules, unresolved = gradle_included_modules source in
+      let modules = "" :: modules in
+      let module_lines = List.concat_map (fun module_path ->
+        let gradle_path = if module_path = "" then ":"
+          else ":" ^ String.concat ":"
+            (String.split_on_char '/' module_path) in
+        let module_directory = if module_path = "" then parent
+          else join_relative parent module_path in
+        let heading = if module_path = "" then
+            "  Declared module: : (settings root)"
+          else "  Declared module: " ^ gradle_path in
+        if not (Hashtbl.mem directories
+          (if module_directory = "" then "." else module_directory)) then
+          [heading;
+           "    Conventional module directory not found: " ^
+             relative_label module_directory ^
+             " (projectDir mapping remains unknown)."]
+        else
+          let roots = List.filter_map (fun source_root ->
+            let path = join_relative module_directory source_root in
+            if Hashtbl.mem directories path then Some path else None)
+            source_roots in
+          [heading;
+           "    Candidate module directory: " ^
+             relative_label module_directory ^
+             " (conventional path; projectDir mapping is not evaluated)."] @
+          (match roots with
+           | [] -> ["    Candidate source roots: none found under conventional src/."]
+           | roots -> List.map (fun path ->
+               "    Candidate source root: " ^ path) roots)) modules in
+      module_lines @
+      (if unresolved then
+        ["  Unresolved dynamic or unsupported module include; additional modules remain unknown."]
+       else []) @
+      ["  Task names, variants, projectDir remapping and SDK readiness remain unknown."] in
+    match read_manifest settings_path with
+    | None ->
+        add_stack
+          ("Android Gradle settings: " ^ settings_path ^
+           "\n  Settings file is unreadable; no modules inferred.\n" ^
+           wrapper_text) []
+    | Some settings ->
+        let lines = module_lines settings in
+        add_stack
+          ("Android Gradle settings: " ^ settings_path ^ "\n" ^
+           wrapper_text ^ "\n" ^ String.concat "\n" lines)
+          [] in
   List.iter (function
     | Xcode_workspace (bundle, manifest) ->
         render_xcode "workspace" "-workspace" bundle manifest
     | Xcode_project (bundle, manifest) ->
         render_xcode "project" "-project" bundle manifest
     | Swift_package path ->
-        add_stack ("Swift Package Manager: " ^ path)
-          (List.map (command_in path) ["swift build"; "swift test"])
-    | Gradle_manifest path -> render_gradle path
+        (match read_manifest path with
+        | None -> add_diagnostic
+            ("Ignored unreadable Swift package manifest: " ^ path ^
+             " (no test roots suggested).")
+        | Some _ ->
+            let package_root = directory path in
+            let tests_root = join_relative package_root "Tests" in
+            let child_roots = Hashtbl.fold (fun candidate () found ->
+              if directory candidate = tests_root then candidate :: found
+              else found) directories []
+              |> List.sort String.compare in
+            let test_roots =
+              if Hashtbl.mem directories tests_root then
+                tests_root :: child_roots
+              else [] in
+            let root_lines = match test_roots with
+              | [] -> ["  Candidate test roots: none found under conventional Tests/."]
+              | roots -> List.map (fun candidate ->
+                  "  Candidate test root: " ^ candidate ^
+                  " (filesystem convention only; target mapping unknown)") roots in
+            add_stack
+              (String.concat "\n"
+                (("Swift Package Manager: " ^ path) ::
+                 ("  Package root: " ^ relative_label package_root) ::
+                 root_lines @
+                 ["  Package.swift was read as bounded text, never evaluated.";
+                  "  Computed/unsupported test targets and SDK requirements remain unknown."]))
+              [])
+    | Gradle_settings path -> render_gradle path
+    | Gradle_wrapper path ->
+        let parent = directory path in
+        if not (List.exists (fun settings -> directory settings = parent)
+            gradle_settings) then
+          add_stack
+            ("Gradle wrapper script: " ^ path ^
+             "\n  No settings file was discovered beside the wrapper; modules and tasks remain unknown.")
+            []
     | Pubspec_manifest path ->
         (match read_manifest path with
          | None -> add_diagnostic
@@ -1917,7 +2206,7 @@ let definitions = [
     ["encoding", enum_string_field "Exact tiktoken encoding" ["cl100k_base"; "o200k_base"];
      "text", bounded_string_field "Text to count (maximum 1 MiB)" Native_tokenizer.max_input_bytes]
     ["encoding"; "text"];
-  schema "mobile_project" "Inventory bounded mobile manifests throughout the checked workspace, exclude ignored, generated and symlinked paths, report truncation, and suggest commands without executing them."
+  schema "mobile_project" "Inventory bounded mobile manifests and map SwiftPM test-root candidates plus literal Gradle modules, wrappers and conventional source roots; never execute project code or infer computed targets, dynamic modules, tasks or variants."
     [] [];
   schema "read_file" "Read bounded workspace files, directories, documents, archives, notebooks, SQLite, owned artifacts, managed worktrees, or public HTTPS URLs. HTTPS fetches send no credentials and require approval."
     ["path", string_field "Workspace-relative path or supported local://, artifact://, worktree://, or HTTPS source";

@@ -1254,6 +1254,12 @@ let paint_resized t =
   | _ -> ());
   paint t
 
+let mouse_scroll_delta (event : Notty.Unescape.event) =
+  match event with
+  | `Mouse (`Press (`Scroll `Up), _, _) -> Some 1
+  | `Mouse (`Press (`Scroll `Down), _, _) -> Some (-1)
+  | _ -> None
+
 let scroll_by t delta =
   t.scroll <- max 0 (t.scroll + delta);
   t.revision <- t.revision + 1;
@@ -1279,7 +1285,7 @@ let restore_terminal_signals signals =
 
 (* Preserve CR and LF separately for Terminal_input's Enter and paste decoder. *)
 let create_terminal () =
-  let term = Notty_unix.Term.create ~mouse:false ~bpaste:true () in
+  let term = Notty_unix.Term.create ~mouse:true ~bpaste:true () in
   try
     let input_fd, _ = Notty_unix.Term.fds term in
     let state = Unix.tcgetattr input_fd in
@@ -1727,7 +1733,11 @@ let read ?wake_fd ?on_wake ?on_interrupt ?on_dequeue ?on_completion t =
         loop ()
     | `Resize _ -> paint_resized t; loop ()
     | `Tick -> paint t; loop ()
-    | `Mouse _ -> loop ()
+    | `Mouse _ as event ->
+        Option.iter (fun direction ->
+          scroll_by t (direction * view_height t))
+          (mouse_scroll_delta event);
+        loop ()
     | `Paste `Start ->
         t.paste <- true;
         Buffer.clear paste_buffer;

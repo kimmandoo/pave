@@ -636,7 +636,13 @@ let () =
       ["path", `String "large.txt"; "line", `Int 2]) "TARGET-END");
     assert (rejected (fun () -> tool_json root "read_file"
       ["path", `String "large.txt"; "offset", `Int 70013]));
-    create "settings.gradle.kts" "";
+    create "settings.gradle.kts"
+      {|rootProject.name = "workspace"
+include(":docs", "feature:shared", ":missing")
+include(*computedModules)
+// include(":ghost")
+|};
+    create "gradlew" "#!/bin/sh\nexit 99\n";
     directory "ios";
     directory "ios/App.xcodeproj";
     create "ios/App.xcodeproj/project.pbxproj" "// iOS project manifest\n";
@@ -670,14 +676,47 @@ let () =
 
     directory "packages";
     directory "packages/swift";
-    create "packages/swift/Package.swift" "// Swift package manifest\n";
+    create "packages/swift/Package.swift"
+      {|import PackageDescription
+let targets = computedTargets()
+let package = Package(name: "fixture", targets: targets)
+// .testTarget(name: "CommentOnlyTests", path: "CommentOnlyTests")
+|};
+    directory "packages/swift/Tests";
+    directory "packages/swift/Tests/FixtureTests";
     directory "packages/flutter";
     create "packages/flutter/pubspec.yaml" "name: sample\nflutter:\n";
     directory "packages/react-native";
     create "packages/react-native/package.json"
       {|{"dependencies":{"react-native":"1"},"scripts":{"test":"test"}}|};
     directory "android";
-    create "android/settings.gradle.kts" "rootProject.name = 'mobile'\n";
+    create "android/settings.gradle.kts"
+      {|rootProject.name = "nested"
+include(":app")
+include(":feature:${computedName}")
+if (featureEnabled)
+  include(":conditional")
+include(":actual")
+other.include(":not-a-gradle-module")
+|};
+    directory "android/app";
+    directory "android/app/src";
+    directory "android/app/src/main";
+    directory "android/actual";
+    directory "android/actual/src";
+    directory "android/actual/src/main";
+    directory "legacy";
+    create "legacy/settings.gradle" "include ':legacy-app', ':legacy-lib:shared'\n";
+    directory "legacy/legacy-app";
+    directory "legacy/legacy-app/src";
+    directory "legacy/legacy-app/src/test";
+    directory "docs";
+    directory "docs/src";
+    directory "docs/src/main";
+    directory "feature";
+    directory "feature/shared";
+    directory "feature/shared/src";
+    directory "feature/shared/src/androidTest";
     directory "Pods";
     directory "Pods/Hidden.xcodeproj";
     create "Pods/Hidden.xcodeproj/project.pbxproj" "// generated dependency\n";
@@ -696,6 +735,13 @@ let () =
     directory "large";
     create "large/Package.swift"
       (String.make (Pave.Workspace_path.max_write_bytes + 1) 'x');
+    let groovy_modules, groovy_unresolved =
+      Pave.Tools.gradle_included_modules
+        "include ':legacy-app', ':legacy-lib:shared'\n" in
+    if groovy_modules <> ["legacy-app"; "legacy-lib/shared"] ||
+       groovy_unresolved then
+      failwith (Printf.sprintf "static Groovy includes parsed as [%s], unresolved=%b"
+        (String.concat ", " groovy_modules) groovy_unresolved);
     let mobile = tool root "mobile_project" [] in
     if not (contains mobile "Xcode project: ios/App.xcodeproj/project.pbxproj")
     then failwith ("mobile inventory missed the iOS manifest:\n" ^ mobile);
@@ -729,22 +775,44 @@ let () =
     assert (not (contains mobile "-scheme 'Personal'"));
     assert (not (contains mobile "<scheme-from-list>"));
 
-    assert (contains mobile "Android Gradle: android/settings.gradle.kts");
-    assert (contains mobile "cd 'android' && gradle tasks");
-    assert (contains mobile "Swift Package Manager: packages/swift/Package.swift");
+    assert (contains mobile "Android Gradle settings: settings.gradle.kts");
+    assert (contains mobile "Gradle wrapper script: gradlew");
+    assert (contains mobile "Declared module: :docs");
+    assert (contains mobile "Candidate source root: docs/src/main");
+    assert (contains mobile "Declared module: :feature:shared");
+    assert (contains mobile "Candidate source root: feature/shared/src/androidTest");
+    assert (contains mobile "Declared module: :missing");
+    assert (contains mobile "Conventional module directory not found: missing");
+    assert (contains mobile "Unresolved dynamic or unsupported module include");
+    assert (contains mobile "Task names, variants, projectDir remapping and SDK readiness remain unknown.");
+    assert (not (contains mobile "assembleDebug") &&
+      not (contains mobile "gradle tasks"));
+    assert (contains mobile "Android Gradle settings: android/settings.gradle.kts");
     assert (contains mobile
-      "cd 'packages/swift' && swift build");
-    assert (contains mobile "Flutter: packages/flutter/pubspec.yaml");
-    assert (contains mobile "React Native: packages/react-native/package.json");
-    assert (contains mobile "cd 'packages/react-native' && npm test");
-    assert (not (contains mobile "Pods/Hidden.xcodeproj"));
-    assert (not (contains mobile "build/Generated.xcodeproj"));
-    assert (not (contains mobile "vendor/Ignored.xcodeproj"));
-    assert (not (contains mobile "linked-mobile"));
-    assert (not (contains mobile "cd 'linked-mobile' && swift"));
-    assert (contains mobile "Ignored oversized mobile manifest: large/Package.swift");
-    assert (not (contains mobile "Swift Package Manager: large/Package.swift"));
-    assert (not (contains mobile "cd 'large' && swift"));
+      "Gradle wrapper: not found beside settings; system Gradle availability is unknown.");
+    assert (contains mobile "Declared module: :app");
+    assert (not (contains mobile "Declared module: :feature:computedName"));
+    assert (contains mobile "Declared module: :actual");
+    assert (contains mobile "Candidate source root: android/actual/src/main");
+    let unexpected_modules = ["conditional"; "not-a-gradle-module"]
+      |> List.filter (fun name ->
+        contains mobile ("Declared module: :" ^ name)) in
+    if unexpected_modules <> [] then
+      failwith ("Gradle parser inferred guarded or method includes: " ^
+        String.concat ", " unexpected_modules);
+    assert (contains mobile "Android Gradle settings: legacy/settings.gradle");
+    if not (contains mobile "Declared module: :legacy-app") then
+      failwith ("Gradle Groovy include missing from mobile map:\n" ^ mobile);
+    assert (contains mobile "Candidate source root: legacy/legacy-app/src/test");
+    assert (contains mobile "Swift Package Manager: packages/swift/Package.swift");
+    assert (contains mobile "Package root: packages/swift");
+    assert (contains mobile "Candidate test root: packages/swift/Tests");
+    assert (contains mobile "Candidate test root: packages/swift/Tests/FixtureTests");
+    assert (contains mobile "Computed/unsupported test targets and SDK requirements remain unknown.");
+    assert (not (contains mobile "CommentOnlyTests") &&
+      not (contains mobile "computedTargets"));
+    assert (not (contains mobile "swift build") &&
+      not (contains mobile "swift test"));
     directory "many";
     for index = 0 to 100 do
       let project = Printf.sprintf "many/Project%03d.xcodeproj" index in
@@ -753,7 +821,7 @@ let () =
     done;
     let truncated_mobile = tool root "mobile_project" [] in
     assert (contains truncated_mobile
-      "Android Gradle: android/settings.gradle.kts");
+      "Android Gradle settings: android/settings.gradle.kts");
     assert (contains truncated_mobile
       "Xcode project: ios/App.xcodeproj/project.pbxproj");
     assert (contains truncated_mobile "[truncated; narrow the workspace and retry]");

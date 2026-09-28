@@ -233,7 +233,7 @@ The searchable setup picker queries the chosen provider asynchronously. Use Up/D
 ### Terminal experience
 
 - **Conversation:** Pixel-art Pave appears only in an empty transcript; the first message replaces it. Roles, Markdown, tool progress and folded results use distinct blocks. `Option+O` on macOS or `Alt+O` elsewhere toggles the latest visible tool result.
-- **Navigation:** Type `/` for filtered slash-command hints (`/re` narrows them). Up/Down selects; Tab inserts. Return/Enter runs an exact command, or inserts a partial match that still needs a second Return/Enter to submit; Escape keeps the draft. `/help` shows the catalog.
+- **Navigation:** Type `/` for filtered slash-command hints (`/re` narrows them). Up/Down selects; Tab inserts. Return/Enter runs an exact command, or inserts a partial match that still needs a second Return/Enter to submit; Escape keeps the draft. Mouse-wheel scrolling moves the transcript without changing the draft. `/help` shows the catalog.
 - **Status:** The model row identifies saved versus unsaved sessions; activity switches from `Working` to the running tool and back. Elapsed time advances through slow responses and shell approval without idle polling. Idle usage shows measured branch/conversation input and output tokens when available; `/usage` details provider/account/model/route provenance and reported cache/reasoning counts, never an estimated price.
 - **Streaming:** Routes that deliver incremental text pace stream-driven repaints at 60 Hz; a short chunk remains visible by the next frame even if the provider pauses. Completion is shown immediately. Routes that return only a buffered response cannot show text before the provider delivers it.
 - **Failures:** Provider, auth and tool errors appear as readable error blocks. Failed or cancelled streaming text is removed; unknown exceptions retain diagnostic text. Approving a visible shell command still requires a separate `y`.
@@ -284,7 +284,7 @@ Command patterns apply to shell arguments and use `*` for wildcard matching: den
 | `Ctrl+P`/`Ctrl+N` · `Ctrl+R` | Explicit older/newer history · incremental reverse search (Return recalls on macOS; Enter elsewhere, Escape cancels) |
 | `Ctrl/Option+←/→` (macOS) · `Ctrl/Alt+←/→` (other terminals) · `Ctrl+W` | Move or delete by word; editor draft stays intact during model output |
 | `Ctrl+Z`/`Ctrl+Y` · `Ctrl+K`/`Ctrl+U` · `Option+Y` (macOS) / `Alt+Y` (other terminals) | Undo/redo a draft edit · kill after/before the cursor · yank killed text; bracketed paste is one undo step |
-| `PgUp`/`PgDn` · `Ctrl+Home`/`Ctrl+End` · `Option+O` (macOS) / `Alt+O` (other terminals) | Scroll the transcript, jump to its beginning/end, or expand/collapse the latest visible tool result |
+| `PgUp`/`PgDn` · mouse wheel · `Ctrl+Home`/`Ctrl+End` · `Option+O` (macOS) / `Alt+O` (other terminals) | Scroll the transcript, jump to its beginning/end, or expand/collapse the latest visible tool result |
 | `Ctrl+C` · `Ctrl+D` | Close a picker or cancel account sign-in; in the composer, interrupt a turn without losing the draft or clear a nonempty idle draft; `Ctrl+D` exits when empty. |
 | `/` then `Tab` | Search available slash commands; Return/Enter inserts a partial match or runs an exact command; Escape returns to the draft |
 | `/setup` · `/model [PROVIDER[@API]/MODEL_ID]` | Connect an account without changing defaults, or configure the user default · choose the active conversation model/API across connected providers |
