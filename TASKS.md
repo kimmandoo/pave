@@ -216,7 +216,7 @@ The P0–P6 cards above remain the detailed acceptance criteria; this roadmap is
 
 ### R9 — IDE and external workspace integrations
 
-- [ ] Publish and verify v0.1.54 after completing the locally verified P4 LSP, DAP, persistent evaluation, web search/fetch, SSH, native services and security scanning. Main CI `36352366139` passed for `3ef721a`; tag `v0.1.54` points to that commit, and release workflow `36358990430` is in progress. Verify assets, checksums, native dependencies, extracted CLIs and saved-auth identity continuity before completion. Preserve one-shot exact-content LSP approval, per-file instruction gates, child-process secret isolation, and separate network, execution, remote-host and write-through trust boundaries.
+- [x] Published v0.1.54 from `3ef721a` after main CI `36352366139` and release workflow `36358990430` passed all four native build/test/package/dependency/smoke jobs and publication. The public non-draft release contains all four archives and `SHA256SUMS`; every checksum passed and each archive contained exactly `pave`, `LICENSE` and `THIRD_PARTY_NOTICES`. Extracted Darwin arm64 and Intel binaries linked only `libSystem` and passed `--help`, `--providers` and `task --help` locally (Intel under Rosetta); hosted jobs passed Linux dependency and executable smokes. OAuth-store/account-identity regressions passed the forced suite; no live vendor credentials were used. Release: https://github.com/kimmandoo/pave/releases/tag/v0.1.54. Preserved one-shot exact-content LSP approval, per-file instruction gates, child-process secret isolation, and separate network, execution, remote-host and write-through trust boundaries.
 
 ### R10 — Terminal input and overlay foundations
 
