@@ -315,6 +315,11 @@ let activity_tick = 0.125
 let activity_tick_delay elapsed =
   let phase = mod_float (max 0. elapsed) activity_tick in
   if phase = 0. then activity_tick else activity_tick -. phase
+let activity_started_at started activity now =
+  match activity with
+  | None -> None
+  | Some _ -> Some (Option.value ~default:now started)
+
 
 let received_bytes_text bytes =
   let bytes = max 0 bytes in
@@ -1068,7 +1073,7 @@ let set_activity t activity =
    | None, _ -> ());
   if t.activity <> activity then (
     let now = Unix.gettimeofday () in
-    t.activity_started <- Option.map (fun _ -> now) activity;
+    t.activity_started <- activity_started_at t.activity_started activity now;
     t.activity <- activity;
     paint t)
 let set_usage t = function
@@ -1175,9 +1180,8 @@ let tool_started t call_id name =
     Hashtbl.replace t.tool_groups call_id
       (Transcript_view.start_tool t.transcript name));
   t.active_tool <- Some { call_id; name; received_bytes = None };
-  t.activity <- Some ("Tool: " ^ name);
-  t.activity_started <- Some (Unix.gettimeofday ());
-  paint t
+  let activity = Some ("Tool: " ^ name) in
+  if t.activity = activity then paint t else set_activity t activity
 
 let update_tool_progress active call_id name received_bytes =
   match active with
@@ -1199,13 +1203,7 @@ let finish_tool ?(aborted = false) ?(is_error = false)
     t call_id name result =
   let group = Hashtbl.find_opt t.tool_groups call_id in
   Hashtbl.remove t.tool_groups call_id;
-  let finishing_active = match t.active_tool with
-    | Some progress -> progress.call_id = call_id
-    | None -> false in
   t.active_tool <- reset_tool_progress t.active_tool call_id;
-  if finishing_active then (
-    t.activity <- None;
-    t.activity_started <- None);
   change_transcript t (fun () ->
     Transcript_view.tool_result ?group ~aborted ~is_error
       t.transcript name result);

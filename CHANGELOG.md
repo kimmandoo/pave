@@ -2,6 +2,8 @@
 
 ## 2026-09-28
 
+- fix(tui): kept active-turn elapsed time continuous across model/tool phases and after tool settlement, while still clearing it at completion, cancellation and failure.
+- test(tui): reproduced the phase reset in a real local PTY, then verified monotonic Thinking→Tool→Thinking elapsed time, 48 KiB byte progress through a 52×14 resize, cross-provider usage identity, and cancellation rollback with an unsent draft. No vendor credentials or provider traffic were used.
 - feat(workspace): added session-owned LSP/DAP, persistent approved JavaScript/Python evaluation, bounded web search/fetch, verified SSH operations, Unicode-case-folded bounded fuzzy path search, native OCR/clipboard/terminal-image services, exact tokenization, and deterministic repository scanning; made LSP edits require a one-shot exact-content preview and separate approval.
 - feat(tui): unified terminal, resize and worker notifications through a wake-safe UI event queue; centralized focus-aware keybindings, grapheme selection and undo, resize-safe overlays, bounded bracketed paste, CRLF handling and terminal restoration on signals.
 - feat(tui): rendered streamed Markdown emphasis, inline code, links and pipe tables as semantic transcript styles; preserved model/account selection through discovery updates; and retained exact provider/account/route/model provenance for ephemeral usage.

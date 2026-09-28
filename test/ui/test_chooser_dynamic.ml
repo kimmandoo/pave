@@ -114,6 +114,17 @@ let () =
       (Notty.I.string Notty.A.empty base_status)) () = base_status);
   assert (Tui.activity_tick_delay 0. = 0.125 &&
     abs_float (Tui.activity_tick_delay 0.124 -. 0.001) < 0.000000001);
+  let turn_started =
+    Tui.activity_started_at None (Some "Thinking") 100. in
+  let tool_started =
+    Tui.activity_started_at turn_started (Some "Tool: run_command") 101. in
+  let model_resumed =
+    Tui.activity_started_at tool_started (Some "Thinking") 103. in
+  assert (turn_started = Some 100. && tool_started = turn_started &&
+    model_resumed = turn_started);
+  let idle = Tui.activity_started_at model_resumed None 105. in
+  assert (idle = None &&
+    Tui.activity_started_at idle (Some "Thinking") 110. = Some 110.);
   let progress : Tui.tool_progress = {
     call_id = "call-1"; name = "run_command"; received_bytes = None;
   } in
