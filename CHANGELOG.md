@@ -1,6 +1,7 @@
 # Changelog
 
 ## 2026-09-28
+- release(distribution): published v0.1.63 from `209042b` after main CI `36426249176` passed all four OCaml/macOS/Linux jobs and release workflow `36427056362` passed four native test/build/package/extracted-executable jobs plus publication. Downloaded all five assets, verified four SHA-256 hashes and exact three-member archives; extracted Darwin arm64 linked only `libSystem`, passed CLI smokes, rendered `v0.1.63` and first-run setup in a real 70×18 PTY, and exited 143 on SIGTERM.
 - fix(cli): rejected AAC audio disguised as MP3, preserved punctuation-bearing and quoted `@` paths through completion and attachment, kept multiline code and email-like text literal during mention and shortcut expansion, and corrected Bash/Fish value, model, task voice and subcommand completions.
 - fix(cli): preserved exact pasted spans and multiline code exclusions for opt-in shortcuts, completed sentence-final `@` references and punctuation-bound path search, removed terminal controls from JSONL text, and corrected Bash/Zsh/Fish completions for options, task flags, workspace roots, and spaced session paths.
 - fix(distribution): staged release assets in a draft, verified checksums and the complete uploaded asset set before publication, and refused to replace assets on an existing public release.
