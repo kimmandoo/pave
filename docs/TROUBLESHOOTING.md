@@ -1,5 +1,19 @@
 # Troubleshooting
 
+### [2026-09-28] R12 media and mention completion accepted mismatched inputs
+
+- **Context / Symptom:** AAC ADTS bytes saved with an `.mp3` extension were accepted as MP3. Completing `@src/a` to a filename containing commas, quotes or a terminal period produced a reference that was not parsed as that filename. A quoted mention could span a newline, and an inline-code mention crossing lines could be attached.
+- **Root Cause:** The MP3 signature recognized any `FF Ex` sync prefix, including AAC headers; completion did not quote punctuation recognized as mention delimiters. Quoted references and inline-code state searched or reset across line boundaries incorrectly.
+- **Solution:** Checked the MPEG Layer III header bits before accepting raw MP3 frames, quoted punctuation-bearing completions, confined quoted references to a line, and retained inline-code state across lines. Preserved email-like and quoted references while expanding opt-in prose shortcuts.
+- **Prevention / Reference:** Round-trip completed paths through the mention parser and attachment loader; verify mismatched media signatures, incomplete quotes and code spans at line boundaries.
+
+### [2026-09-28] Generated shell completions omitted option values
+
+- **Context / Symptom:** Fish offered no `jsonl` for `--output j` or voices for `task speak --voice a`; Bash offered global flags after `update --` and did not complete voices. Bash model completion after `ollama@ch` also needed candidates relative to Readline's `@` word break.
+- **Root Cause:** Fish registered enum candidates separately from required option arguments, task completion treated option values like flags, and Bash returned whole model selectors even when Readline replaced only the suffix after `@`.
+- **Solution:** Registered required Fish options with their choices, consumed pending Bash/Zsh task values, constrained subcommand flags, and adapted Bash model candidates to Readline word boundaries. Added executable-generated Bash/Fish completion scenarios for values, prefixes, workspace roots and dash-prefixed arguments.
+- **Prevention / Reference:** Source generated scripts and exercise actual shell completion functions instead of asserting script text; use a workspace root containing spaces.
+
 
 ### [2026-09-28] Paste provenance rewrote the wrong shortcut token
 

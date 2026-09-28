@@ -50,6 +50,14 @@ let () =
     write (child root "voice.mp3") mp3;
     let mp3_attachment = Pave.Session_attachment.load ~root "voice.mp3" in
     assert (mp3_attachment.mime_type = "audio/mp3");
+    let frame = "\255\251\144\000" in
+    write (child root "frame.mp3") frame;
+    assert ((Pave.Session_attachment.load ~root "frame.mp3").mime_type = "audio/mp3");
+    let adts = "\255\241\080\128\000\031\252" in
+    write (child root "voice.aac") adts;
+    assert ((Pave.Session_attachment.load ~root "voice.aac").mime_type = "audio/aac");
+    write (child root "disguised.mp3") adts;
+    rejected (fun () -> Pave.Session_attachment.load ~root "disguised.mp3");
     let mp4 = "\000\000\000\012ftypisom" in
     write (child root "clip.mp4") mp4;
     let video = Pave.Session_attachment.load ~root "clip.mp4" in

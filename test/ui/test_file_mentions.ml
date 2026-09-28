@@ -60,11 +60,35 @@ let () =
     expect "quoted path content" (contains quoted.prompt "quoted text");
     expect "quoted path label" (contains quoted.prompt
       "[Attached text file: src/notes extra.txt]");
+    List.iter (fun (name, contents) ->
+      let path = "src/" ^ name in
+      write (Filename.concat root path) contents;
+      let rendered = Pave.File_mentions.render_reference ~directory:false path in
+      (match Pave.File_mentions.references rendered with
+      | [reference] ->
+          expect ("completed mention retains filename " ^ name)
+            (reference.path = path && reference.stop = String.length rendered)
+      | _ -> fail ("completed mention cannot be parsed: " ^ rendered));
+      expect ("completed mention attaches filename " ^ name)
+        (contains (Pave.File_mentions.expand ~root rendered).prompt contents))
+      ["a,b.txt", "file containing comma";
+       "terminal.", "file ending in period";
+       "single'quote.txt", "file containing apostrophe";
+       "double\"quote.txt", "file containing quote"];
+    expect "unterminated quoted path cannot consume a later line's quote"
+      (Pave.File_mentions.references "Read @\"src/notes.md\n\" later" = []);
     let prose = "literal @person@host and @missing/path; code `@src/notes.md`" in
     let unchanged = Pave.File_mentions.expand ~root prose in
     expect "email and unresolved mentions stay prose" (unchanged.prompt = prose);
     expect "code span stays prose"
       (Pave.File_mentions.references "`@src/notes.md`" = []);
+    let multiline_code = "Literal `first line\n@src/notes.md` outside" in
+    expect "multiline inline code does not attach its mention"
+      (Pave.File_mentions.references multiline_code = [] &&
+       (Pave.File_mentions.expand ~root multiline_code).prompt = multiline_code);
+    expect "multiline inline code mention is not completable"
+      (Pave.File_mentions.completion_context multiline_code
+         (String.length "Literal `first line\n@src/no") = None);
     expect "email is not a file reference"
       (Pave.File_mentions.references "person@host" = []);
     let tilde_fence = "~~~text\n@src/notes.md\n~~~" in
@@ -156,6 +180,25 @@ let () =
      | None -> fail "quoted @ token was not recognized");
     expect "code token is not completable"
       (Pave.File_mentions.completion_context "`@src/no`" 7 = None);
+    (match Pave.File_mentions.completion_context
+        "Read @\"src/no\n\" later" (String.length "Read @\"src/no") with
+     | Some context ->
+         expect "unfinished quoted completion stays on its line"
+           (context.prefix = "src/no" &&
+            context.stop = String.length "Read @\"src/no")
+     | None -> fail "unfinished quoted completion disappeared");
+    (match Pave.File_mentions.completion_context
+        "`unclosed @src/no" (String.length "`unclosed @src/no") with
+     | Some context ->
+         expect "unmatched backtick does not hide ordinary mention"
+           (context.prefix = "src/no")
+     | None -> fail "unmatched backtick hid ordinary mention");
+    (match Pave.File_mentions.completion_context
+        "Read @\"missing\n@src/no" (String.length "Read @\"missing\n@src/no") with
+     | Some context ->
+         expect "unterminated quote does not hide next line's mention"
+           (context.prefix = "src/no")
+     | None -> fail "unterminated quote hid next line's mention");
     let listing = Pave.File_mentions.complete_paths ~root "src/no" in
     expect "completion finds exact workspace paths"
       (List.exists (fun item -> item.Pave.File_mentions.path = "src/notes.md")

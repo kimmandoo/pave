@@ -1,6 +1,7 @@
 # Changelog
 
 ## 2026-09-28
+- fix(cli): rejected AAC audio disguised as MP3, preserved punctuation-bearing and quoted `@` paths through completion and attachment, kept multiline code and email-like text literal during mention and shortcut expansion, and corrected Bash/Fish value, model, task voice and subcommand completions.
 - fix(cli): preserved exact pasted spans and multiline code exclusions for opt-in shortcuts, completed sentence-final `@` references and punctuation-bound path search, removed terminal controls from JSONL text, and corrected Bash/Zsh/Fish completions for options, task flags, workspace roots, and spaced session paths.
 - fix(distribution): staged release assets in a draft, verified checksums and the complete uploaded asset set before publication, and refused to replace assets on an existing public release.
 - feat(cli): completed R12 with shared slash grammar, bounded headless prompts, checked text/media attachments, ordered JSONL outcomes, opt-in prose shortcuts that skip paths/code/pasted text, and generated shell completions; kept TUI model labels sanitized and separate from exact selectors.

@@ -1,5 +1,12 @@
 let operations = ["embed"; "image"; "speak"; "transcribe"; "rerank"]
 
+let voice_choices =
+  ["alloy"; "ash"; "ballad"; "coral"; "echo"; "fable"; "onyx"; "nova";
+   "sage"; "shimmer"; "verse"; "marin"; "cedar"]
+
+let option_choices operation name =
+  if operation = "speak" && name = "--voice" then voice_choices else []
+
 let operation_options operation =
   let specific = match operation with
     | "embed" -> ["--input"]
@@ -35,7 +42,9 @@ let help operation =
       "Requires OPENAI_API_KEY. Writes a single 1024x1024 PNG to a new workspace-relative .png file."
   | "speak" ->
       "Usage: pave task speak --model ID --input TEXT --voice VOICE --output PATH [--root DIR]\n" ^
-      "Requires OPENAI_API_KEY. VOICE is alloy, ash, ballad, coral, echo, fable, onyx, nova, sage, shimmer, verse, marin, or cedar; writes a new workspace-relative WAV file."
+      "Requires OPENAI_API_KEY. VOICE is " ^
+      String.concat ", " voice_choices ^
+      "; writes a new workspace-relative WAV file."
   | "transcribe" ->
       "Usage: pave task transcribe --model ID --file PATH [--root DIR]\n" ^
       "Requires OPENAI_API_KEY. Reads a workspace-relative audio file (up to 25 MB) and prints transcript text."

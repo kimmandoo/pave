@@ -24,8 +24,13 @@ let mime_type path data =
   let starts prefix = length >= String.length prefix &&
     String.sub data 0 (String.length prefix) = prefix in
   let mp4_container = length >= 12 && String.sub data 4 4 = "ftyp" in
-  let mp3 = starts "ID3" || (length >= 2 &&
-    Char.code data.[0] = 0xff && Char.code data.[1] land 0xe0 = 0xe0) in
+  let mp3 = starts "ID3" || (length >= 4 &&
+    Char.code data.[0] = 0xff &&
+    let header = Char.code data.[1] in
+    header land 0xe0 = 0xe0 && header land 0x06 = 0x02 &&
+    header land 0x18 <> 0x08 &&
+    let format = Char.code data.[2] in
+    format land 0xf0 <> 0xf0 && format land 0x0c <> 0x0c) in
   let aac = length >= 2 && Char.code data.[0] = 0xff &&
     Char.code data.[1] land 0xf6 = 0xf0 in
   match String.lowercase_ascii (Filename.extension path) with

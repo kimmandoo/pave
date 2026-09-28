@@ -37,7 +37,8 @@ let token_at text start token =
        (text.[stop] = '.' && stop + 1 < text_length &&
         is_word_byte text.[stop + 1])) in
     not (left_path || right_path ||
-         (start > 0 && text.[start - 1] = '@'))
+         (start > 0 && text.[start - 1] = '@') ||
+         (stop < text_length && text.[stop] = '@'))
 
 let marker_at text line_start line_end =
   let i = ref line_start in
@@ -109,7 +110,13 @@ let expand ~enabled ~disabled ~paste_ranges text =
               inline_end := closing;
               scan (min stop closing)
           | None -> scan !run_end)
-        end else
+        end else if text.[i] = '@' && i + 1 < stop &&
+          (text.[i + 1] = '"' || text.[i + 1] = '\'') &&
+          File_mentions.reference_boundary text i then
+          (match File_mentions.parse_reference text i with
+          | Some reference -> scan (min stop reference.stop)
+          | None -> scan stop)
+        else
           let rec try_shortcuts = function
             | [] -> scan (i + 1)
             | shortcut :: rest ->

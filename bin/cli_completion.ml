@@ -53,7 +53,20 @@ let task_cases ~task_operations ~task_options ~shell =
           shell_quote (String.concat " " flags) ^ " -- \"$cur\") )"
       | "zsh" -> "compadd -- " ^ words flags
       | _ -> assert false in
-    "      " ^ shell_quote operation ^ ") " ^ candidates ^ " ;;\n")
+    let values = List.map (fun flag ->
+      let choices = Task_cli.option_choices operation flag in
+      let completion = match shell, choices with
+        | "bash", _ :: _ -> "COMPREPLY=( $(compgen -W " ^
+            shell_quote (String.concat " " choices) ^ " -- \"$cur\") ); "
+        | "zsh", _ :: _ -> "compadd -- " ^ words choices ^ "; "
+        | _, [] -> ""
+        | _ -> assert false in
+      "          " ^ shell_quote flag ^ ") " ^ completion ^ "return ;;\n")
+      flags |> String.concat "" in
+    "      " ^ shell_quote operation ^ ")\n" ^
+    "        case \"$prev\" in\n" ^ values ^ "        esac\n" ^
+    "        if [[ \"$cur\" == -* ]]; then " ^ candidates ^ "; fi\n" ^
+    "        return ;;\n")
     task_operations
   |> String.concat ""
 
@@ -65,8 +78,13 @@ let generate_bash ~executable ~options ~task_operations ~task_options =
     "    --" ^ kind ^ ") while IFS= read -r candidate; do " ^
     "COMPREPLY+=(\"$candidate\"); done < <(" ^ shell_quote executable ^
     " __complete " ^ kind ^ " \"$cur\" \"$root\"); " ^
-    (if kind = "session" then "compopt -o filenames; " else "") ^
-    "return ;;\n" in
+    (if kind = "model" then
+      "if [[ $COMP_WORDBREAKS == *'@'* && $cur == *@* ]]; then " ^
+      "local word_prefix=${cur%${cur##*@}}; " ^
+      "for ((i=0; i<${#COMPREPLY[@]}; i++)); do " ^
+      "COMPREPLY[i]=${COMPREPLY[i]#\"$word_prefix\"}; done; fi; "
+     else "") ^
+    "compopt -o filenames; return ;;\n" in
   "_pave_completion() {\n" ^
   "  local cur prev candidate root=. i\n" ^
   "  cur=\"${COMP_WORDS[COMP_CWORD]}\"\n" ^
@@ -79,12 +97,18 @@ let generate_bash ~executable ~options ~task_operations ~task_options =
   "      COMPREPLY=( $(compgen -W " ^
   shell_quote (String.concat " " task_operations) ^
   " -- \"$cur\") )\n      return\n    fi\n" ^
-  "    if [[ \"$cur\" == -* ]]; then\n" ^
-  "      case \"${COMP_WORDS[2]}\" in\n" ^
+  "    case \"${COMP_WORDS[2]}\" in\n" ^
   task_cases ~task_operations ~task_options ~shell:"bash" ^
-  "      esac\n    fi\n    return\n  fi\n" ^
+  "    esac\n    return\n  fi\n" ^
+  "  if [[ ${COMP_WORDS[1]} == update ]]; then\n" ^
+  "    if [[ $COMP_CWORD -eq 2 ]]; then\n" ^
+  "      COMPREPLY=( $(compgen -W '--check' -- \"$cur\") )\n    fi\n" ^
+  "    return\n  fi\n" ^
+  "  if [[ ${COMP_WORDS[1]} == completions ]]; then\n" ^
+  "    if [[ $COMP_CWORD -eq 2 ]]; then\n" ^
+  "      COMPREPLY=( $(compgen -W 'bash zsh fish' -- \"$cur\") )\n    fi\n" ^
+  "    return\n  fi\n" ^
   "  case \"$prev\" in\n" ^ dynamic "model" ^ dynamic "session" ^
-  "    completions) COMPREPLY=( $(compgen -W 'bash zsh fish' -- \"$cur\") ); return ;;\n" ^
   enum_cases options ~shell:"bash" ^ value_cases options ^ "  esac\n" ^
   "  if [[ \"$cur\" == -* ]]; then\n" ^
   "    COMPREPLY=( $(compgen -W " ^ static_flags ^ " -- \"$cur\") )\n" ^
@@ -106,12 +130,16 @@ let generate_zsh ~executable ~options ~task_operations ~task_options =
   "  if [[ ${words[2]} == task ]]; then\n" ^
   "    if [[ $CURRENT -eq 3 ]]; then compadd -- " ^
   words task_operations ^ "; return; fi\n" ^
-  "    if [[ \"$cur\" == -* ]]; then\n" ^
-  "      case \"${words[3]}\" in\n" ^
+  "    case \"${words[3]}\" in\n" ^
   task_cases ~task_operations ~task_options ~shell:"zsh" ^
-  "      esac\n    fi\n    return\n  fi\n" ^
+  "    esac\n    return\n  fi\n" ^
+  "  if [[ ${words[2]} == update ]]; then\n" ^
+  "    if [[ $CURRENT -eq 3 ]]; then compadd -- --check; fi\n" ^
+  "    return\n  fi\n" ^
+  "  if [[ ${words[2]} == completions ]]; then\n" ^
+  "    if [[ $CURRENT -eq 3 ]]; then compadd -- bash zsh fish; fi\n" ^
+  "    return\n  fi\n" ^
   "  case \"$prev\" in\n" ^ dynamic "model" ^ dynamic "session" ^
-  "    completions) compadd -- bash zsh fish; return ;;\n" ^
   enum_cases options ~shell:"zsh" ^ value_cases options ^ "  esac\n" ^
   "  if [[ \"$cur\" == -* ]]; then compadd -- " ^ static_flags ^
   "\n  else compadd -- task update completions\n  fi\n}\n" ^
@@ -125,22 +153,25 @@ let fish_option name =
 let generate_fish ~executable ~options ~task_operations ~task_options =
   let base = "complete -c " ^ fish_quote executable ^ " -f" in
   let top = "__pave_top" and global = "__pave_global" in
-  let static = List.concat_map (fun option ->
+  let valued_options =
+    List.filter_map (fun option ->
+      if option.takes_value then Some option.name else None) options @
+    List.concat_map task_options task_operations
+    |> List.sort_uniq String.compare in
+  let flag_condition predicate =
+    fish_quote (predicate ^ "; and not __pave_value_pending") in
+  let static = List.map (fun option ->
     let flag = base ^ fish_option option.name in
-    let valued = flag ^ (if option.takes_value then " -r" else "") ^
-      " -n " ^ fish_quote global in
-    let choices = List.map (fun choice ->
-      flag ^ " -a " ^ fish_quote choice ^ " -n " ^
-      fish_quote (global ^ "; and __fish_seen_argument " ^ option.name))
-      option.choices in
+    let choices = if option.choices = [] then "" else
+      " -a " ^ fish_quote (String.concat " " option.choices) in
     let dynamic = match option.name with
       | "--model" | "--session" ->
           let kind = String.sub option.name 2 (String.length option.name - 2) in
-          [flag ^ " -r -a " ^ fish_quote ("(" ^ executable ^
-            " __complete " ^ kind ^ " (commandline -ct) (__pave_root))") ^
-            " -n " ^ fish_quote global]
-      | _ -> [] in
-    valued :: (choices @ dynamic)) options in
+          " -a " ^ fish_quote ("(" ^ executable ^
+            " __complete " ^ kind ^ " (commandline -ct) (__pave_root))")
+      | _ -> "" in
+    flag ^ (if option.takes_value then " -r" else "") ^
+    choices ^ dynamic ^ " -n " ^ flag_condition global) options in
   let subcommands = [
     base ^ " -a " ^ fish_quote "task update completions" ^ " -n " ^
       fish_quote top;
@@ -153,10 +184,22 @@ let generate_fish ~executable ~options ~task_operations ~task_options =
   ] in
   let task_flags = List.concat_map (fun operation ->
     List.map (fun flag ->
-      base ^ fish_option flag ^ " -r -n " ^
-      fish_quote ("__pave_task_option " ^ operation))
+      let choices = Task_cli.option_choices operation flag in
+      base ^ fish_option flag ^ " -r" ^
+      (if choices = [] then "" else
+        " -a " ^ fish_quote (String.concat " " choices)) ^
+      " -n " ^ flag_condition ("__pave_task_option " ^ operation))
       (task_options operation)) task_operations in
   let predicates =
+    "function __pave_value_pending\n" ^
+    "  string match -q -- '-*' (commandline -ct); or return 1\n" ^
+    "  set -l tokens (commandline -xpc)\n" ^
+    "  switch $tokens[-1]\n" ^
+    "    case " ^ String.concat " " (List.map fish_quote valued_options) ^ "\n" ^
+    "      return 0\n" ^
+    "  end\n" ^
+    "  return 1\n" ^
+    "end\n" ^
     "function __pave_top\n" ^
     "  set -l tokens (commandline -xpc)\n" ^
     "  test (count $tokens) -eq 1\n" ^

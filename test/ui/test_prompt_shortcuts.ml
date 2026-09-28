@@ -25,6 +25,14 @@ let () =
      "```text\nthinkdeep\n```\n~~~\nverifyfirst\n~~~\n" ^
      "./thinkdeep thinkdeep.md .thinkdeep foo.thinkdeep @thinkdeep");
   expect "only visible shortcut is reported" (names = ["thinkdeep"]);
+  let text = "thinkdeep@host @\"thinkdeep\" @'thinkdeep' " ^
+    "@\"thinkdeep left unfinished\nthinkdeep" in
+  let expanded, names = expand text in
+  expect "email addresses and quoted file mentions do not become shortcuts"
+    (expanded = "thinkdeep@host @\"thinkdeep\" @'thinkdeep' " ^
+      "@\"thinkdeep left unfinished\n" ^
+      "Please reason carefully through this request" &&
+     names = ["thinkdeep"]);
 
   let multiline = "Explain `literal\nthinkdeep` then thinkdeep" in
   let expanded, names = expand multiline in

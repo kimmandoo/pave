@@ -44,14 +44,18 @@ let decode_quoted text start stop =
   loop start;
   Buffer.contents output
 
+let line_end text start =
+  try String.index_from text start '\n' with Not_found -> String.length text
+
 let parse_reference text start =
   let length = String.length text in
   if start >= length || text.[start] <> '@' ||
      not (reference_boundary text start) then None
   else if start + 1 < length && is_quote text.[start + 1] then (
     let quote = text.[start + 1] in
+    let stop = line_end text (start + 2) in
     let rec close index escaped =
-      if index >= length then None
+      if index >= stop then None
       else if escaped then close (index + 1) false
       else if text.[index] = '\\' then close (index + 1) true
       else if text.[index] = quote then Some index
@@ -74,9 +78,6 @@ let parse_reference text start =
     else
       let path = String.sub text (start + 1) (stop - start - 1) in
       Some { start; stop; path; quote = None })
-
-let line_end text start =
-  try String.index_from text start '\n' with Not_found -> String.length text
 
 let fence_marker text start stop =
   let index = ref start in
@@ -110,16 +111,17 @@ let closing_ticks text start stop count =
 
 let references text =
   let length = String.length text in
-  let found = ref [] in
+  let found = ref [] and inline_end = ref 0 in
   let scan_line start stop =
     let rec scan index =
       if index >= stop then ()
+      else if index < !inline_end then scan (min stop !inline_end)
       else if text.[index] = '`' then (
         let finish = ref index in
         while !finish < stop && text.[!finish] = '`' do incr finish done;
         let count = !finish - index in
-        (match closing_ticks text !finish stop count with
-         | Some close -> scan close
+        (match closing_ticks text !finish length count with
+         | Some close -> inline_end := close; scan (min stop close)
          | None -> scan !finish))
       else if text.[index] = '@' then
         (match parse_reference text index with
@@ -133,7 +135,8 @@ let references text =
     if start < length then (
       let stop = line_end text start in
       let next = if stop < length then stop + 1 else length in
-      let marker = fence_marker text start stop in
+      let marker = if !inline_end > start then None
+        else fence_marker text start stop in
       match fenced, marker with
       | Some (fence_char, fence_count), Some (char, count, marker_end)
         when char = fence_char && count >= fence_count &&
@@ -222,11 +225,22 @@ let completion_context text cursor =
     while !index < cursor do
       let char = text.[!index] in
       if char = '`' && !quote = None then (
-        while !index < cursor && text.[!index] = '`' do incr index done;
-        in_code := not !in_code)
+        let run_end = ref !index in
+        while !run_end < cursor && text.[!run_end] = '`' do incr run_end done;
+        let count = !run_end - !index in
+        match closing_ticks text !run_end length count with
+        | Some closing ->
+            if closing > cursor then in_code := true;
+            index := min cursor closing
+        | None ->
+            token_start := !run_end;
+            index := !run_end)
       else if not !in_code then
         (match !quote with
-         | Some _ when char = '\\' ->
+         | Some _ when char = '\n' ->
+             quote := None; token_start := !index + 1; incr index
+         | Some _ when char = '\\' && !index + 1 < length &&
+                       text.[!index + 1] <> '\n' ->
              index := min cursor (!index + 2)
          | Some delimiter when char = delimiter ->
              quote := None; incr index
@@ -254,8 +268,9 @@ let completion_context text cursor =
       match quote_char with
       | Some _ when cursor < path_start -> None
       | Some delimiter ->
+          let stop_line = line_end text path_start in
           let rec close index escaped =
-            if index >= length then None
+            if index >= stop_line then None
             else if escaped then close (index + 1) false
             else if text.[index] = '\\' then close (index + 1) true
             else if text.[index] = delimiter then Some index
@@ -263,7 +278,7 @@ let completion_context text cursor =
           let closing = close path_start false in
           let stop = match closing with
             | Some position -> position + 1
-            | None -> length in
+            | None -> stop_line in
           if cursor > stop then None
           else
             let prefix_end = min cursor (Option.value ~default:stop closing) in
@@ -317,7 +332,10 @@ let complete_paths ~root prefix =
       truncated = walked || !overflow }
 
 let render_reference ?quote ~directory path =
-  let needs_quote = quote <> None || String.exists is_space path in
+  let needs_quote = quote <> None ||
+    String.exists (fun char -> is_space char || is_punctuation char ||
+      is_quote char) path ||
+    (path <> "" && path.[String.length path - 1] = '.') in
   if not needs_quote then "@" ^ path ^ (if directory then "/" else "")
   else
     let quote_char = Option.value quote ~default:'"' in
