@@ -1,6 +1,6 @@
 # Mobile development specialization plan
 
-**Status:** Planned, not implemented. `TASKS.md` P7 owns the M01–M24 checkboxes; this document supplies their dependencies, acceptance scenarios and safety limits. Complete and verify one checkbox at a time. R12 remains the active roadmap work; these mobile slices follow it without renumbering R13–R16. This is not a release promise.
+**Status:** Planned, not implemented. The Mobile specialization section of `TASKS.md` owns the M01–M24 checkboxes; this document supplies their dependencies, acceptance scenarios and safety limits. Complete and verify one checkbox at a time. R12 remains the active roadmap work; these mobile slices follow it without renumbering R13–R16. This is not a release promise.
 
 ## Baseline and boundaries
 
