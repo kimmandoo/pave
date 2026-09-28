@@ -224,7 +224,7 @@ The P0–P6 cards above remain the detailed acceptance criteria; this roadmap is
 
 ### R11 — TUI discovery, transcript and status
 
-- [x] Complete P5 model/account chooser, semantic transcript, renderer, status/error and usage-provenance contracts. Preserved route/account identity through reorder, resize, branches and unavailable metadata; forced tests, install build, opam lint and local-only cross-provider, queue/tool-progress, cancellation and auth-handoff PTYs passed.
+- [x] Complete P5 model/account chooser, semantic transcript, renderer, status/error and usage-provenance contracts. Preserved route/account identity through reorder, resize, branches and unavailable metadata; forced tests, install build, opam lint and local-only cross-provider, queue/tool-progress, cancellation and auth-handoff PTYs passed. Corrected the reproduced active-turn elapsed reset in v0.1.57 (`8c885c4`): main CI `36373040904` and release `36373587041` passed; all four native archives passed checksum/member verification, and extracted Darwin arm64 linked only `libSystem` and passed executable smokes.
 
 ### R12 — Slash commands and headless CLI
 
