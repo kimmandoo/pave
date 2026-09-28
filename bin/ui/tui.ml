@@ -227,9 +227,11 @@ let startup_logo version =
     | '#' -> mint | '+' -> shadow | '*' -> cursor | _ -> blank in
   let mark = I.vcat (List.map (fun row ->
     I.hcat (List.init (String.length row) (fun index -> pixel row.[index])))
-    [ "  #####  "; " ####### "; " ##   ## "; " ##   ## ";
-      " ####### "; " ######+ "; " ##++++  "; " ##      ";
-      " ##      "; " ##    * "; "  ++     " ]) in
+    [ "   ######  "; "  ######## "; " ##########";
+      " ###    ###"; " ###    ###"; " ###    ###";
+      " ##########"; " #########+";
+      " ###++++++ "; " ###       "; " ###     * ";
+      "  +++      " ]) in
   I.(mark <-> void 1 1 <->
     string accent ("  P A V E  " ^ version))
 
