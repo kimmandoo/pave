@@ -21,6 +21,13 @@
 - **Solution:** Advanced activity at most once per second, rendered it before clearing only trailing cells even in a three-row terminal, and clipped long phase names at grapheme boundaries to retain the timer. Computed paste capacity after removing selected bytes and reported truncation on excess. Real PTYs displayed consecutive `Thinking · 0s/1s/2s` frames with zero pre-text row erasures, accepted the selected replacement, displayed the truncation notice, completed the local SSE answer, and retained an unsent draft across 100×24→30×3→70×18 resize and cancellation.
 - **Prevention / Reference:** Inspect emitted ANSI bytes as well as the logical row diff; optimized renderers can insert an implicit pre-text erase. Exercise bracketed paste near the byte limit through a real terminal, including an active selection.
 
+### [2026-09-28] Published narrow TUI hid the completed answer
+
+- **Context / Symptom:** The checksum-verified v0.1.58 Darwin arm64 executable rendered `Thinking · 0s/1s/2s` in a real 30×3 PTY but did not display a successfully completed local SSE answer; the activity row simply became empty. This escaped the 24-row answer smoke.
+- **Root Cause:** The compact rendering branch reserved footer and composer rows but filled every spare row with blank padding instead of the existing transcript layout. A three-row terminal had one available row after activity ended.
+- **Solution:** Rendered the latest visible transcript lines (or active chooser title) in compact spare rows, respecting scroll and leaving the footer/editor intact. The corrected source binary displayed `PTY smoke complete` in the first row of a 30×3 terminal without resizing. Kept the v0.1.58 tag immutable and prepared a new corrective release.
+- **Prevention / Reference:** Exercise the *extracted release binary* at minimum supported viewport sizes through completion, not just during the spinner phase; verify both active and idle screen contents.
+
 ### [2026-09-28] NVM-installed JavaScript runtime was not found
 
 - **Context / Symptom:** The persistent-evaluation regression reported that Node.js was unavailable even though Node 24 was installed in the active `NVM_BIN` directory.

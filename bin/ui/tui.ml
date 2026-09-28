@@ -860,9 +860,20 @@ let paint t =
     let candidates = Array.concat [activity_rows; [| footer |]; prompt_rows] in
     if Array.length candidates >= rows then
       Array.sub candidates (Array.length candidates - rows) rows
-    else Array.append
-      (Array.make (rows - Array.length candidates) (I.void cols 1))
-      candidates
+    else
+      let spare = rows - Array.length candidates in
+      Array.append (Array.init spare (fun index ->
+        match t.chooser with
+        | Some chooser when index = spare - 1 ->
+            styled_line cols accent ("  " ^ chooser.title)
+        | Some _ -> I.void cols 1
+        | None when total > 0 ->
+            let source = total - spare - t.scroll + index in
+            if source < 0 || source >= total then I.void cols 1
+            else styled_visual cols (Transcript_view.visual_at layout source)
+        | None when index = spare - 1 ->
+            styled_line cols accent "  PAVE"
+        | None -> I.void cols 1)) candidates
   else Array.concat [
     [| header; location; divider |];
     Array.init body_height (fun row ->

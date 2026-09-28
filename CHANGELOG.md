@@ -2,6 +2,8 @@
 
 ## 2026-09-28
 
+- fix(tui): displayed recent transcript rows instead of blank padding in compact terminals, so a three-row screen showed the completed reply immediately after its activity row cleared.
+- release(distribution): published v0.1.58 from `4c38f99` after main CI `36381675668` and release workflow `36382183992` passed their four native jobs. All five published assets were downloaded, all four checksums matched and archive members were exact; extracted Darwin arm64 linked only `libSystem` and passed CLI smokes. A released 30×3 PTY then exposed an invisible completed reply; kept its tag immutable for a superseding fix.
 - fix(provider): adapted authenticated Codex inference to each account-listed model's Standard or Responses Lite wire format, preserved native tool replay and saved history, and reported unknown formats before posting instead of guessing.
 - fix(provider): normalized nullable Devin tool schemas only for Gemini-assigned backends and retained sanitized Connect failure codes and trace IDs without treating failed partial streams as success.
 - fix(tui): reduced activity animation to a stable one-second cadence, removed pre-text row clearing even in three-row terminals, preserved elapsed time when narrow phase labels were clipped, and accepted selection-replacing bracketed paste at the draft byte limit with visible truncation feedback.
