@@ -1,6 +1,7 @@
 # Changelog
 
 ## 2026-09-28
+- release(distribution): published v0.1.61 from `91eb223c` after main CI `36389098984` passed all four compiler/OS jobs and release workflow `36389713187` passed four native packages, extracted executable checks and publication. Downloaded all five assets, verified four SHA-256 hashes and exact regular archive members; extracted Darwin arm64 linked only `libSystem`, passed CLI smokes, showed `v0.1.61` and the rounded P on launch, kept narrow `Thinking · 1s`/cancellation visible and displayed the final local SSE answer in a 30×3 PTY.
 - feat(tui): displayed the embedded release version or a `source` label on launch, rounded the ASCII P mark, abbreviated long model labels without changing exact selection, and redesigned output around compact user/assistant/tool/error blocks with styled Markdown, bounded expandable tool previews and visible narrow-terminal progress.
 - fix(session): remembered the last interactive model per workspace with exact provider/account/route/model provenance in private atomic state; restored it on a fresh interactive launch without overriding explicit CLI or saved-session selection.
 - fix(ci): ran platform-independent opam lint in one matrix job and removed a redundant macOS helper build after `@install`, while retaining all four matrix suites, native release builds and extracted executable checks.
