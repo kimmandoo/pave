@@ -430,6 +430,26 @@ let () =
         ~provider:descriptor.id ~route:route.name in
       Pave.Model_identity.make ~provider:descriptor.id ?account_id
         ?config_revision ~route:route.name ~upstream_id () in
+    let ambiguous_oauth_accounts
+        (descriptor : Pave.Provider_catalog.descriptor)
+        (route : Pave.Provider_catalog.route) =
+      if descriptor.oauth = None || Cli_auth.api_key descriptor <> None ||
+         Pave.Provider_catalog.custom_route registry ~provider:descriptor.id
+           ~route:route.name <> None then []
+      else match Pave.Oauth_store.accounts
+          ~path:(Pave.Oauth_store.default_path ()) ~provider:descriptor.id with
+        | _ :: _ :: _ as accounts -> accounts
+        | _ -> [] in
+    let infer_account_id ?account_id
+        (descriptor : Pave.Provider_catalog.descriptor)
+        (route : Pave.Provider_catalog.route) =
+      match account_id with
+      | Some _ -> account_id
+      | None when ambiguous_oauth_accounts descriptor route <> [] -> None
+      | None ->
+          Model_picker.credential ~registry ~route_name:route.name descriptor
+          |> Model_picker.credential_account_id ~registry
+               ~provider:descriptor.id ~route:route.name in
     let configured_account_id =
       if environment_key_override then None
       else match !account_id with
@@ -438,10 +458,10 @@ let () =
             configured.default_account_id
         | None -> None in
     let inferred_account_id =
-      Model_picker.credential ~registry ?account_id:configured_account_id
-        ~route_name:route.name descriptor
-      |> Model_picker.credential_account_id ~registry
-           ~provider:descriptor.id ~route:route.name in
+      match explicit_model_selection, saved_model with
+      | Some (_, identity, _), _ when identity.account_id <> None -> None
+      | None, Some identity when identity.account_id <> None -> None
+      | _ -> infer_account_id ?account_id:configured_account_id descriptor route in
     let selected_account_id =
       match explicit_model_selection, saved_model with
       | Some (_, identity, _), _ when identity.account_id <> None ->
@@ -466,7 +486,7 @@ let () =
            | _ -> Some (make_model_identity descriptor route
                ?account_id:selected_account_id model)) in
     let configured_default_usable = model <> "" in
-    let configured_default_selection =
+    let configured_default_selection () =
       let default_provider =
         Option.value ~default:"openai" configured.default_provider in
       match Pave.Provider_catalog.find ~registry default_provider with
@@ -491,14 +511,8 @@ let () =
                 | None when configured_for_provider ->
                     configured.default_account_id
                 | None -> None in
-              let account_id = (match account_id with
-               | Some _ -> account_id
-               | None ->
-                   Model_picker.credential ~registry ?account_id
-                     ~route_name:default_route.name default_descriptor
-                   |> Model_picker.credential_account_id ~registry
-                        ~provider:default_descriptor.id
-                        ~route:default_route.name) in
+              let account_id =
+                infer_account_id ?account_id default_descriptor default_route in
               make_model_identity default_descriptor default_route
                 ?account_id upstream_id) default_model in
             default_descriptor, identity, default_route) default_route in
@@ -530,7 +544,8 @@ let () =
           ["anthropic"; "commandcode"; "devin"; "google"; "openai-codex";
            "openrouter"]) then
         failwith "--context-window auto requires provider-reported metadata from Anthropic, Command Code, Devin, Google, OpenAI Codex, or OpenRouter";
-      let credential = discovery_credential ~route_name:route.name descriptor in
+      let credential = discovery_credential ~route_name:route.name
+        ?account_id:identity.account_id descriptor in
       let listing = match Pave.Model_discovery.discover ~registry
           ~provider:descriptor.id ~route_name:route.name
           ?account_id:identity.account_id ?credential () with
@@ -1404,6 +1419,35 @@ let () =
        | None, Some previous -> retained_history := Pave.Agent.messages previous
        | _ -> ());
       use_selection (descriptor, Some identity, route) in
+    let select_prompt_account text =
+      match !ui, !active_identity with
+      | Some screen, Some identity when identity.account_id = None ->
+          (match ambiguous_oauth_accounts !active_descriptor !active_route with
+           | [] -> true
+           | accounts ->
+               let choices = List.map (fun account ->
+                 Model_picker.saved_account_label account,
+                 account.Pave.Oauth_store.selection_id) accounts in
+               let selected = Option.bind
+                 (Tui.choose screen
+                   ~intro:["Multiple saved sign-ins can access this provider.";
+                     "Select the account allowed to receive this prompt."]
+                   ~title:("Prompt · " ^ !active_descriptor.id ^ " account")
+                   ~choices:(List.map fst choices))
+                 (fun label -> List.assoc_opt label choices) in
+               (match selected with
+                | Some account_id ->
+                    apply_model_selection (!active_descriptor,
+                      { identity with account_id = Some account_id },
+                      !active_route);
+                    true
+                | None ->
+                    if Tui.prepend_prompt screen text then
+                      Tui.alert screen "Account selection cancelled · draft restored"
+                    else
+                      Tui.alert screen "Account selection cancelled · draft could not be restored";
+                    false))
+      | _ -> true in
     let switch_session ?(inherit_active_model = false) next =
       let next = match List.assoc_opt (Pave.Session.session_id next)
           !job_managers with
@@ -1414,7 +1458,7 @@ let () =
         else match saved_model with
           | Some identity -> session_selection (Some identity)
           | None when inherit_active_model -> None
-          | None -> configured_default_selection in
+          | None -> configured_default_selection () in
       let _, identity, _ = match selected with
         | Some choice -> choice
         | None -> !active_descriptor, !active_identity, !active_route in
@@ -1688,10 +1732,7 @@ let () =
           Option.bind selected_route (fun route ->
             Option.bind (Pave.Provider_catalog.find ~registry current_provider)
               (fun descriptor ->
-                Model_picker.credential ~registry ?account_id:account_hint
-                  ~route_name:route.name descriptor
-                |> Model_picker.credential_account_id ~registry
-                     ~provider:descriptor.id ~route:route.name)) in
+                infer_account_id ?account_id:account_hint descriptor route)) in
         let current_account_id = if explicitly_account_scoped then None else
           match active_account_id with
           | Some _ as selected -> selected
@@ -2041,8 +2082,9 @@ let () =
                          notify (restored ^ ".")
                        with exn ->
                          notify ("Error: " ^ Printexc.to_string exn)))) in
-    let start_review_job ~kind ~label ~prompt = match !journal with
+    let start_review_job ~kind ~label ~prompt ~draft = match !journal with
       | None -> notify "Error: reviewed jobs require a private saved session; use /new"
+      | Some _ when not (select_prompt_account draft) -> ()
       | Some session ->
           let current = get_agent () in
           let id = start_child_job ~session ~provider:current.provider
@@ -2113,7 +2155,7 @@ let () =
          | Some choice -> use_selection choice
          | None when explicit_model_override -> agent := None
          | None ->
-             Option.iter use_selection configured_default_selection;
+             Option.iter use_selection (configured_default_selection ());
              agent := None);
         match !ui with
         | Some screen ->
@@ -2207,13 +2249,14 @@ let () =
               | Some screen -> Tui.events screen Tui.hotkeys
               | None -> on_event "Hotkeys require the interactive terminal; use /help for commands")
          | Pave.Interaction.Queue_prompt text ->
-             (match !runner with
-              | Some active -> Pave.Turn_runner.follow_up active text
-              | None -> send text);
-             (match busy, !ui with
-              | true, Some screen ->
-                  Tui.alert screen "Follow-up queued for after the active turn."
-              | _ -> ())
+             if busy || select_prompt_account line then (
+               (match !runner with
+                | Some active -> Pave.Turn_runner.follow_up active text
+                | None -> send text);
+               (match busy, !ui with
+                | true, Some screen ->
+                    Tui.alert screen "Follow-up queued for after the active turn."
+                | _ -> ()))
          | _ when busy && (match command with
              | Pave.Interaction.Prompt _ | Pave.Interaction.Jobs
              | Pave.Interaction.Wait _ | Pave.Interaction.Cancel_job _
@@ -2432,7 +2475,7 @@ let () =
         | Pave.Interaction.Artifact selected -> show_artifact selected
         | Pave.Interaction.Rewind selected -> rewind_workspace selected
         | Pave.Interaction.Delegate { label; task } ->
-            start_review_job ~kind:"delegate" ~label
+            start_review_job ~kind:"delegate" ~label ~draft:line
               ~prompt:("Perform this bounded read-only task. Cite evidence and " ^
                 "uncertainty; do not edit files or execute commands.\n\n" ^ task)
         | Pave.Interaction.Plan supplied ->
@@ -2443,7 +2486,7 @@ let () =
                      "Set a session goal with /goal or provide /plan GOAL." with
                   | None -> ()
                   | Some goal -> start_review_job ~kind:"plan" ~label:"plan"
-                      ~prompt:(workflow_prompt "plan" goal)))
+                      ~draft:line ~prompt:(workflow_prompt "plan" goal)))
         | Pave.Interaction.Goal None ->
             (match !journal with
              | None -> notify "Error: goals require a private saved session; use /new"
@@ -2459,7 +2502,7 @@ let () =
                      "Set a session goal or provide /advisor QUESTION." with
                   | None -> ()
                   | Some goal -> start_review_job ~kind:"advisor" ~label:"advisor"
-                      ~prompt:(workflow_prompt "advisor" goal)))
+                      ~draft:line ~prompt:(workflow_prompt "advisor" goal)))
         | Pave.Interaction.Watchdog supplied ->
             (match !journal with
              | None -> notify "Error: watchdog review requires a private saved session; use /new"
@@ -2468,7 +2511,7 @@ let () =
                      "Set a session goal or provide /watchdog QUESTION." with
                   | None -> ()
                   | Some goal -> start_review_job ~kind:"watchdog" ~label:"watchdog"
-                      ~prompt:(workflow_prompt "watchdog" goal)))
+                      ~draft:line ~prompt:(workflow_prompt "watchdog" goal)))
         | Pave.Interaction.Loop supplied ->
             (match !journal with
              | None -> notify "Error: review loops require a private saved session; use /new"
@@ -2477,7 +2520,7 @@ let () =
                      "Set a session goal or provide /loop GOAL." with
                   | None -> ()
                   | Some goal -> start_review_job ~kind:"loop" ~label:"loop"
-                      ~prompt:(workflow_prompt "loop" goal)))
+                      ~draft:line ~prompt:(workflow_prompt "loop" goal)))
         | Pave.Interaction.Autoresearch supplied ->
             (match !journal with
              | None -> notify "Error: research jobs require a private saved session; use /new"
@@ -2486,7 +2529,7 @@ let () =
                      "Set a session goal or provide /autoresearch QUESTION." with
                   | None -> ()
                   | Some goal -> start_review_job ~kind:"autoresearch"
-                      ~label:"autoresearch"
+                      ~label:"autoresearch" ~draft:line
                       ~prompt:(workflow_prompt "autoresearch" goal)))
         | Pave.Interaction.Rule None ->
             (match !journal with
@@ -2797,7 +2840,9 @@ let () =
                      Pave.Turn_runner.steer active line;
                      Tui.alert screen "Steering queued; interrupting the current turn."
                  | None -> Pave.Turn_runner.submit active line)
-             | Some active -> Pave.Turn_runner.submit active line
+             | Some active when select_prompt_account line ->
+                 Pave.Turn_runner.submit active line
+             | Some _ -> ()
              | None -> send line)
         | Pave.Interaction.Prompt _ -> ()
         with End_of_file -> raise End_of_file

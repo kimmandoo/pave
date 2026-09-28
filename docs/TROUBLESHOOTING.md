@@ -1,5 +1,12 @@
 # Troubleshooting
 
+### [2026-09-28] Scoped Devin model failed when multiple accounts were saved
+
+- **Context / Symptom:** Launching `--model 'devin@connect#ACCOUNT/MODEL'` with two saved Devin grants failed before opening the UI: `Error: multiple saved accounts for devin; pass --account or select an account-scoped model`.
+- **Root Cause:** Startup eagerly resolved an unscoped discovery credential and configured default before applying the selected model's account identity. Even a valid scoped selector or saved workspace model could not bypass that premature ambiguous lookup.
+- **Solution:** Resolved the explicit or saved model account first, inferred only a unique grant, and deferred genuinely ambiguous interactive selections to a chooser before prompt submission. Passed the bound account through automatic context-window discovery too. The selected account is saved with the model; cancelling restores the draft. Headless requests still require `--account` or a scoped selector. An isolated two-grant regression and real TUI verified scoped launch, account selection, credential isolation and fail-closed headless behavior without vendor traffic.
+- **Prevention / Reference:** Never resolve an accountless credential before checking the exact selected model identity; model availability and account ordering are not proof of which credential may receive a prompt.
+
 ### [2026-09-28] A termination signal was swallowed while a command chooser was open
 
 - **Context / Symptom:** During the unsaved-conversation confirmation opened by `/new`, `SIGTERM` dismissed the chooser but left the interactive process running after five seconds rather than exiting and restoring the terminal.

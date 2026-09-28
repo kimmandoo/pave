@@ -111,6 +111,12 @@
  (libraries pave unix yojson))
 
 (test
+ (name test_account_routing)
+ (modules test_account_routing)
+ (libraries pave unix)
+ (action (run %{test} %{exe:../bin/main.exe})))
+
+(test
  (name test_oauth_device)
  (modules test_oauth_device)
  (libraries pave unix yojson))
