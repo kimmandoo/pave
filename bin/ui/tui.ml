@@ -566,7 +566,7 @@ let paint t =
           ?received_bytes ~width:(max 0 (cols - 2)) ()) in
   let activity_rows = match activity_text with
     | None -> [||]
-    | Some text -> [| styled_line cols warning text |] in
+    | Some text -> [| styled_line cols accent text |] in
   let queued = if t.queue = 0 then "" else
     Printf.sprintf "  ·  %d queued" t.queue in
   let usage = match t.activity, t.usage_badge with
@@ -625,6 +625,12 @@ let paint t =
   t.scroll <- min t.scroll (max 0 (total - body_height));
   let first = max 0 (total - body_height - t.scroll) in
   let last = min total (first + body_height) in
+  let visible_first, visible_last =
+    if rows >= 6 then first, last
+    else
+      let spare = max 0 (rows - activity_height - 1 - editor_height) in
+      let start = max 0 (total - spare - t.scroll) in
+      start, min total (start + spare) in
   let body = match t.chooser with
     | Some chooser ->
         let found = matches chooser in
@@ -782,9 +788,7 @@ let paint t =
             number (Array.length found) enter_key status status_page
     | None when hint_height > 0 ->
         let selected = List.nth hints t.hint_selected in
-        let label = selected.name ^ " · " ^ selected.summary in
-        if cols < 45 then "  " ^ label
-        else "  " ^ label ^ "   ·   ↑↓ move · Tab/" ^ enter_key ^ " insert · Esc close"
+        "  " ^ selected.name ^ " · " ^ selected.summary
     | None ->
         let status = match Pave.Composer.search_query t.editor with
           | None -> t.status
@@ -794,21 +798,30 @@ let paint t =
               | None -> "(no match)"
               | Some value -> sanitize (String.split_on_char '\n' value |> List.hd)) ^
               " · Ctrl+R older · " ^ enter_key ^ " recall · Esc cancel" in
+        let status = if status = idle_status && Option.is_some t.activity then
+          if cols < 45 then "Ctrl+C cancel · " ^ enter_key ^ " steer"
+          else "Ctrl+C cancel · " ^ enter_key ^ " steer · " ^
+            meta_key ^ "+" ^ enter_key ^ " queue"
+        else status in
         (if cols < 45 then
           (if status = idle_status then
             (if t.queue > 0 then Printf.sprintf "q%d · " t.queue else "") ^
-            meta_key ^ "+O details · PgUp/Dn scroll"
+            (if cols < 20 then "  PgUp/Dn"
+             else if cols < 29 then "  PgUp/Dn · " ^ meta_key ^ "+O"
+             else "  PgUp/Dn · " ^ meta_key ^ "+O details")
            else status)
         else
           (if total = 0 then "  "
-           else if body_height = 0 then Printf.sprintf "  [0/%d] " total
-           else Printf.sprintf "  [%d-%d/%d] " (first + 1) last total) ^ status) ^
+           else if visible_last = visible_first then
+             Printf.sprintf "  [0/%d] " total
+           else Printf.sprintf "  [%d-%d/%d] "
+             (visible_first + 1) visible_last total) ^ status) ^
         (match t.pending_attachments with
          | [] -> ""
          | names -> Printf.sprintf " · %d media attachment%s ready"
              (List.length names) (if List.length names = 1 then "" else "s")) in
 
-  let footer = styled_line cols text_attr footer_text in
+  let footer = styled_line cols text_attr (shorten_width cols footer_text) in
   let first_line = max 0 (min (editor_row - editor_height + 1)
     (Array.length editor_lines - editor_height)) in
   let prompt_rows, cursor_row, cursor_col =
@@ -907,7 +920,7 @@ let paint t =
       | Some text when row = activity_row ->
           let text = shorten_width cols text in
           Buffer.add_string output (Printf.sprintf "\027[%d;1H\027[0m%s%s\027[0m"
-            (row + 1) (if no_color then "" else "\027[93m") text);
+            (row + 1) (if no_color then "" else "\027[96;1m") text);
           if measure_text text < cols then Buffer.add_string output "\027[K"
       | _ ->
           Buffer.add_string output (Printf.sprintf "\027[%d;1H\027[0m\027[2K"

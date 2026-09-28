@@ -24,6 +24,23 @@ let () =
     = Keybindings.Search);
   assert (Keybindings.focus ~paste:false ~overlay:None ~search:false ~hints:true
     = Keybindings.Hints);
+  let focused ~hints =
+    Keybindings.focus ~paste:false ~overlay:None ~search:false ~hints in
+  List.iter (fun (event, action) ->
+    assert (Keybindings.resolve Keybindings.bindings (focused ~hints:true) event =
+      Some action);
+    assert (Keybindings.resolve Keybindings.bindings (focused ~hints:false) event =
+      Some action)) [
+    (`Key (`Backspace, []), Keybindings.Erase);
+    (`Key (`Backspace, [`Meta]), Keybindings.Erase_word);
+    (`Key (`Backspace, [`Ctrl]), Keybindings.Erase);
+    (`Key (`Arrow `Left, []), Keybindings.Move_left);
+    (`Key (`Delete, []), Keybindings.Delete);
+    (`Key (`ASCII 'Z', [`Ctrl]), Keybindings.Undo) ];
+  assert (Keybindings.resolve Keybindings.bindings Keybindings.Hints
+    (`Key (`Arrow `Down, [])) = Some Keybindings.Move_down);
+  assert (Keybindings.resolve Keybindings.bindings Keybindings.Hints
+    (`Key (`Enter, [])) = Some Keybindings.Accept_hint);
   let valid = Keybindings.override ~target:"composer.ctrl-p"
     ~event:(`Key (`ASCII 'Q', [`Ctrl])) () in
   assert (Result.is_ok (Keybindings.apply_overrides Keybindings.bindings [valid]));

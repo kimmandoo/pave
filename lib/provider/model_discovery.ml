@@ -443,7 +443,8 @@ let discover_codex_models ?http ?cancel credential =
                                         invalid "duplicate model ID"
                                       else (
                                         Hashtbl.add seen name ();
-                                        if hidden then collect tail
+                                        if hidden || extract_field "supported_in_api" row =
+                                            Some (`Bool false) then collect tail
                                         else (
                                           let context_window_tokens =
                                             positive_integer_field

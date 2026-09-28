@@ -1,5 +1,19 @@
 # Troubleshooting
 
+### [2026-09-28] A listed model was not usable for the selected inference route
+
+- **Context / Symptom:** Model selection could offer a Codex row marked `supported_in_api: false` and a Devin row explicitly marked `supportsToolCalls: false`; selecting either for an agent turn failed before the expected answer. A Devin router with no `modelFeatures` field failed the local tool preflight despite upstream allowing tools by default.
+- **Root Cause:** Codex discovery ignored the account listing's API support flag, Devin discovery represented omitted feature metadata as unknown instead of enabled, and the picker did not exclude Devin models explicitly unable to accept Pave's tools.
+- **Solution:** Excluded Codex API-disabled rows from account discovery and explicitly tool-disabled Devin rows from the interactive picker; treated omitted Devin router features as tool-capable while retaining explicit false as denied. An account-list regression failed before the Codex filter; discovery, picker and routed two-turn Devin fixtures passed afterward.
+- **Prevention / Reference:** The upstream Devin router treats an absent `modelFeatures` field as enabled; do not conflate absence with an explicit false. Live listing is not an inference authorization or uptime check.
+
+### [2026-09-28] Slash suggestions swallowed ordinary editing keys
+
+- **Context / Symptom:** With `/model` suggested, pressing Backspace left `/mo` unchanged. Word deletion, cursor movement and undo were also unavailable while the inline hint focus was active.
+- **Root Cause:** The hint keymap handled only selection, insertion and dismissal, while composer editing keys were looked up exclusively under composer focus.
+- **Solution:** Applied hint-specific bindings first, then fell back to the composer keymap for otherwise unhandled hint keystrokes. A real 70×18 PTY showed `/mo` become `/m` while `/model` remained suggested; keybinding regressions covered plain/modified erase, movement, undo and modal Enter precedence. Removed duplicate shortcut text from the hint footer and shortened compact navigation hints.
+- **Prevention / Reference:** Test an actual draft while a live hint overlay owns focus; modal selection must not replace ordinary draft editing.
+
 ### [2026-09-28] Codex account model rejected a standard Responses request
 
 - **Context / Symptom:** Selecting `openai-codex@responses#.../gpt-6-luna` produced `Request error: invalid provider request (HTTP 400)`. The old request path used standard top-level Responses tools for every Codex model.
@@ -11,8 +25,8 @@
 
 - **Context / Symptom:** Devin Connect returned `invalid_argument: an internal error occurred (trace ID: …)` after a model turn. A router assignment can send otherwise valid Pave tool schemas containing `type: ["string","null"]` to a Gemini backend.
 - **Root Cause:** The upstream Devin Gemini tool adapter rejects JSON Schema `type` arrays for nullable tool parameters and reports an opaque Connect error instead of a field-specific validation message. A server-side internal error without tools cannot be attributed to this schema mismatch.
-- **Solution:** Normalized nullable type unions to a single type plus `nullable: true` only for actual Gemini assigned model IDs; retained required fields, non-Gemini schemas and signed replay. Sanitized Connect error diagnostics while keeping the failure and trace ID visible. A routed two-turn fixture verified the transmitted schema, tool result and error trailer.
-- **Prevention / Reference:** Use the router-assigned backend identity for schema compatibility, not the selected router label; do not suppress Connect failures or claim all vendor-side traces are client errors.
+- **Solution:** Normalized nullable type unions to a single type plus `nullable: true` for an actual Gemini-assigned ID or a directly selected Gemini model with an opaque assigned ID; retained required fields, non-Gemini schemas and signed replay. Sanitized Connect error diagnostics while keeping the failure and trace ID visible. A routed two-turn fixture verified the transmitted schema, tool result and error trailer.
+- **Prevention / Reference:** Check both the selected model and router-assigned backend for Gemini schema constraints; do not suppress Connect failures or claim all vendor-side traces are client errors.
 
 ### [2026-09-28] Active row flickered and full draft rejected selected paste
 
@@ -25,7 +39,7 @@
 
 - **Context / Symptom:** The checksum-verified v0.1.58 Darwin arm64 executable rendered `Thinking · 0s/1s/2s` in a real 30×3 PTY but did not display a successfully completed local SSE answer; the activity row simply became empty. This escaped the 24-row answer smoke.
 - **Root Cause:** The compact rendering branch reserved footer and composer rows but filled every spare row with blank padding instead of the existing transcript layout. A three-row terminal had one available row after activity ended.
-- **Solution:** Rendered the latest visible transcript lines (or active chooser title) in compact spare rows, respecting scroll and leaving the footer/editor intact. The corrected source binary displayed `PTY smoke complete` in the first row of a 30×3 terminal without resizing. Kept the v0.1.58 tag immutable and prepared a new corrective release.
+- **Solution:** Rendered the latest visible transcript lines (or active chooser title) in compact spare rows, respecting scroll and leaving the footer/editor intact. Kept the v0.1.58 tag immutable and shipped v0.1.59; the extracted Darwin arm64 binary displayed `PTY smoke complete` in the first row of a 30×3 terminal without resizing.
 - **Prevention / Reference:** Exercise the *extracted release binary* at minimum supported viewport sizes through completion, not just during the spinner phase; verify both active and idle screen contents.
 
 ### [2026-09-28] NVM-installed JavaScript runtime was not found

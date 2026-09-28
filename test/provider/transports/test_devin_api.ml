@@ -34,7 +34,8 @@ let assert_metadata ~jwt ~discovery fs =
     assert (lookup 28 metadata = "chisel"))
 let response f = D.buf f
 let model_config ?(router=false) ?context_window ?tokenizer
-    ?(max_tokens=Some 4096) ?(feature_metadata=true) id label =
+    ?(max_tokens=Some 4096) ?(feature_metadata=true)
+    ?(supports_tools=true) id label =
   response (fun b ->
     D.string b 1 label; D.string b 22 id;
     D.bytes b 23 (response (fun info ->
@@ -44,7 +45,7 @@ let model_config ?(router=false) ?context_window ?tokenizer
       if router then D.number info 22 3;
       if feature_metadata then
         D.bytes info 6 (response (fun features ->
-          D.boolean features 12 true; D.boolean features 21 true)))))
+          D.boolean features 12 supports_tools; D.boolean features 21 true)))))
 let stream_reply ?(gzip=false) payload =
   let value = if gzip then D.gzip payload else payload in
   D.frame (if gzip then 1 else 0) value ^ D.frame 2 "{}"
@@ -83,10 +84,13 @@ let () =
         let wire = response (fun b ->
           D.bytes b 1 (model_config ~context_window:131072
             ~tokenizer:"devin-tokenizer-v1" model_uid "Model from account");
-          D.bytes b 1 (model_config ~router:true router_uid "Router from account");
+          D.bytes b 1 (model_config ~router:true ~feature_metadata:false
+            router_uid "Router from account");
           D.bytes b 1 (model_config ~max_tokens:None
             ~feature_metadata:false ~tokenizer:"bad\nlabel"
-            "unsafe-tokenizer-model" "Unsafe tokenizer label")) in
+            "unsafe-tokenizer-model" "Unsafe tokenizer label");
+          D.bytes b 1 (model_config ~supports_tools:false
+            "explicit-no-tools" "Text only")) in
         on_chunk wire)
       else (
         assert (lookup 1 meta = "windsurf");
@@ -101,12 +105,14 @@ let () =
       supports_parallel_tool_calls = Some true; max_tokens = Some 4096;
       context_window_tokens = Some 131072;
       tokenizer_type = Some "devin-tokenizer-v1"; _};
-     {D.id = second; router = true; context_window_tokens = None;
+     {D.id = second; router = true; supports_tools = Some true;
+      supports_parallel_tool_calls = None; context_window_tokens = None;
       tokenizer_type = None; _};
      {D.id = unsafe; tokenizer_type = None; max_tokens = None;
-      supports_tools = None; supports_parallel_tool_calls = None; _}] ->
+      supports_tools = Some true; supports_parallel_tool_calls = None; _};
+     {D.id = no_tools; supports_tools = Some false; _}] ->
        assert (first = model_uid && second = router_uid &&
-         unsafe = "unsafe-tokenizer-model")
+         unsafe = "unsafe-tokenizer-model" && no_tools = "explicit-no-tools")
   | _ -> fail "dynamic catalog metadata or router flag not retained");
   let duplicate_calls = ref 0 in
   let duplicate_http ~url ~headers:_ ~body:_ ~on_chunk =
@@ -230,6 +236,14 @@ let () =
     `List [`String "string"; `String "null"]);
   assert (P.member "nullable" (P.member "hint" (P.member "properties" plain_schema)) =
     `Null);
+  let routed_gemini = D.request ~api_key:key ~jwt:"jwt-from-account"
+    ~model:"opaque-assigned-uid" ~selected_model:"gemini-3.7"
+    ~cascade_id:cascade messages [tool] in
+  let routed_schema = Yojson.Basic.from_string
+    (lookup 3 (object_field 10 (D.fields routed_gemini))) in
+  let routed_hint = P.member "hint" (P.member "properties" routed_schema) in
+  assert (P.member "type" routed_hint = `String "string");
+  assert (P.member "nullable" routed_hint = `Bool true);
   let image_attempts = ref 0 in
   let image_http ~url:_ ~headers:_ ~body:_ ~on_chunk:_ =
     incr image_attempts; Ok 200 in

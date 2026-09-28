@@ -105,6 +105,17 @@ let () =
     ~provider:"ollama" ~route:"chat" ~ids:["locally-listed"] () in
   assert (ids anonymous (scope "ollama" "chat") anonymous_listing =
     ["locally-listed"]);
+  let devin = descriptor "devin" in
+  let devin_scope = scope ~account_id:"account-a" "devin" "connect" in
+  let devin_listing = listing ~provider:"devin" ~route:"connect"
+    ~account_id:"account-a" ~ids:["router"; "text-only"] () in
+  let devin_listing = { devin_listing with models =
+    List.map (fun (model : Discovery.model) ->
+      if model.identity.upstream_id = "text-only" then
+        { model with capabilities = {
+          model.capabilities with tools = Some false } }
+      else model) devin_listing.models } in
+  assert (ids devin devin_scope devin_listing = ["router"]);
   let umans = descriptor "umans" in
   let umans_listing = listing ~source:Catalog.Provider_listing
     ~provider:"umans" ~route:"chat" ~ids:["public-but-needs-key"] () in

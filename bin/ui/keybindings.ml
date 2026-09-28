@@ -241,14 +241,20 @@ let fallback focus event =
   | _ -> None
 
 let resolve bindings focus event =
-  let rec find = function
-    | [] -> fallback focus event
-    | binding :: rest when binding.focus <> focus -> find rest
+  let rec find owner = function
+    | [] -> None
+    | binding :: rest when binding.focus <> owner -> find owner rest
     | binding :: _ when binding.any_modifiers &&
         same_key binding.event event -> Some binding.action
     | binding :: _ when binding.event = event -> Some binding.action
-    | _ :: rest -> find rest in
-  find bindings
+    | _ :: rest -> find owner rest in
+  match find focus bindings with
+  | Some _ as action -> action
+  | None when focus = Hints ->
+      (match find Composer bindings with
+       | Some _ as action -> action
+       | None -> fallback Hints event)
+  | None -> fallback focus event
 
 let override ~target ~event ?(any_modifiers = false) () =
   { target; event; any_modifiers }

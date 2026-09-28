@@ -97,6 +97,7 @@ let credential_account_id ?registry ~provider ~route = function
 let supports_route ?registry (descriptor : Pave.Provider_catalog.descriptor)
     (model : Pave.Model_discovery.model)
     (route : Pave.Provider_catalog.route) =
+  (descriptor.id <> "devin" || model.capabilities.tools <> Some false) &&
   Pave.Model_discovery.model_supports_endpoint ?registry
     ~provider:descriptor.id model ~endpoint:route.endpoint
 

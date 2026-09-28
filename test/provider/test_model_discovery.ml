@@ -502,7 +502,7 @@ let () =
     "version", "0.155.1";
     "Accept", "application/json" ] in
   let http, calls = fixed_http (List.hd codex_urls) codex_headers
-    (Ok (200, {|{"models":[{"slug":"gpt-6-sol","context_window":196608},{"slug":"internal","visibility":"hide","context_window":1000000},{"id":"gpt-5.1-codex"},{"slug":"gpt-6-sol-next","context_window":999999}]}|})) in
+    (Ok (200, {|{"models":[{"slug":"gpt-6-sol","context_window":196608},{"slug":"internal","visibility":"hide","context_window":1000000},{"slug":"not-api","supported_in_api":false},{"id":"gpt-5.1-codex"},{"slug":"gpt-6-sol-next","context_window":999999}]}|})) in
   let codex_listing = match
       discover ~http ~provider:"openai-codex"
         ~credential:codex_credential () with

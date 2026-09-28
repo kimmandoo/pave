@@ -220,7 +220,7 @@ let model_of_config fs =
           tokenizer
     then Some tokenizer else None in
   let max_tokens = integer 13 info in
-  let tools, parallel_tools = if features = [] then None, None
+  let tools, parallel_tools = if features = [] then Some true, None
     else Some (flag 12 features), Some (flag 21 features) in
   Some { id; name = (let label = String.trim (text 1 fs) in
     if label = "" then id else label);
@@ -432,7 +432,8 @@ let request ?(max_tokens=64000) ?(supports_parallel_tool_calls=false)
   reject_image_tool_results messages;
   if not (valid_id model && valid_uuid cascade_id) then bad "invalid Devin model or cascade ID";
   if max_tokens < 1 || max_tokens > 1_000_000 then bad "invalid Devin max tokens";
-  let google = tools <> [] && gemini_model model in
+  let google = tools <> [] &&
+    (gemini_model model || gemini_model selected_model) in
   buf (fun b ->
     bytes b 1 (metadata ~jwt api_key);
     let system = List.filter_map (fun (m : Protocol.message) ->

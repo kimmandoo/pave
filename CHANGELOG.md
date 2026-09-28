@@ -1,6 +1,9 @@
 # Changelog
 
 ## 2026-09-28
+- fix(provider): excluded Codex models marked unsupported by their account's inference API and explicitly tool-disabled Devin models from the picker, accepted Devin routers with omitted tool-feature metadata, and normalized Gemini-selected schemas even with opaque backend assignments; preserved account-scoped routing and explicit provider errors.
+- fix(tui): restored Backspace, word erase, movement and undo while inline slash hints were visible; gave active progress an accent and context-specific cancellation/steering controls, shortened clipped footer text, and made compact navigation and transcript ranges reflect the displayed rows.
+- release(distribution): published v0.1.59 from `e9f635c` after main CI `36383952055` and release workflow `36384358172` passed four hosted jobs each. Downloaded all four platform archives and `SHA256SUMS`; hashes and exact package members passed, and extracted Darwin arm64 linked only `libSystem`, passed CLI smokes and displayed the completed SSE reply in a 30×3 PTY. Subsequent model-picker and inline editing corrections required a superseding release.
 
 - fix(tui): displayed recent transcript rows instead of blank padding in compact terminals, so a three-row screen showed the completed reply immediately after its activity row cleared.
 - release(distribution): published v0.1.58 from `4c38f99` after main CI `36381675668` and release workflow `36382183992` passed their four native jobs. All five published assets were downloaded, all four checksums matched and archive members were exact; extracted Darwin arm64 linked only `libSystem` and passed CLI smokes. A released 30×3 PTY then exposed an invisible completed reply; kept its tag immutable for a superseding fix.
