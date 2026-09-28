@@ -247,6 +247,11 @@
  (libraries pave unix threads notty-community notty-community.unix uutf))
 
 (test
+ (name test_tui_ux)
+ (modules test_tui_ux tui terminal_input transcript_view keybindings)
+ (libraries pave unix threads notty-community notty-community.unix uutf))
+
+(test
  (name test_keybindings)
  (modules test_keybindings keybindings)
  (libraries notty-community))

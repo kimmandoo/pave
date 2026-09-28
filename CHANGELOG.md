@@ -1,6 +1,9 @@
 # Changelog
 
 ## 2026-09-28
+- feat(mobile): mapped bounded shared-scheme files to exact workspace/project roots, suggested scheme-specific inert build/test commands only for observed files, and left missing/private schemes, targets and destinations unknown.
+- fix(tui): previewed staged media by sanitized filename, MIME type and byte size without exposing payloads; coalesced adjacent streamed deltas into bounded, order-preserving batches and rendered responses at 60 Hz with prompt newline/completion updates.
+
 - feat(mobile): inventoried nested workspace manifests with explicit traversal/output limits, ignored symlinked, generated and ignored roots, withheld commands for oversized manifests, and kept suggested commands inert.
 - release(distribution): published v0.1.63 from `209042b` after main CI `36426249176` passed all four OCaml/macOS/Linux jobs and release workflow `36427056362` passed four native test/build/package/extracted-executable jobs plus publication. Downloaded all five assets, verified four SHA-256 hashes and exact three-member archives; extracted Darwin arm64 linked only `libSystem`, passed CLI smokes, rendered `v0.1.63` and first-run setup in a real 70×18 PTY, and exited 143 on SIGTERM.
 - fix(cli): rejected AAC audio disguised as MP3, preserved punctuation-bearing and quoted `@` paths through completion and attachment, kept multiline code and email-like text literal during mention and shortcut expansion, and corrected Bash/Fish value, model, task voice and subcommand completions.

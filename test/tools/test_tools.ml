@@ -640,6 +640,34 @@ let () =
     directory "ios";
     directory "ios/App.xcodeproj";
     create "ios/App.xcodeproj/project.pbxproj" "// iOS project manifest\n";
+    directory "ios/App.xcodeproj/xcshareddata";
+    directory "ios/App.xcodeproj/xcshareddata/xcschemes";
+    create "ios/App.xcodeproj/xcshareddata/xcschemes/AppShared.xcscheme"
+      "<Scheme version = \"1.7\"></Scheme>\n";
+    create "ios/App.xcodeproj/xcshareddata/xcschemes/Oversized.xcscheme"
+      (String.make (Pave.Workspace_path.max_write_bytes + 1) 'x');
+
+    directory "ios/Core.xcodeproj";
+    create "ios/Core.xcodeproj/project.pbxproj" "// Core project manifest\n";
+    directory "ios/Core.xcodeproj/xcshareddata";
+    directory "ios/Core.xcodeproj/xcshareddata/xcschemes";
+    create "ios/Core.xcodeproj/xcshareddata/xcschemes/CoreShared.xcscheme"
+      "<Scheme version = \"1.7\"></Scheme>\n";
+    directory "ios/Workspace.xcworkspace";
+    create "ios/Workspace.xcworkspace/contents.xcworkspacedata"
+      {|<Workspace version = "1.0"><FileRef location = "group:../App.xcodeproj"/><FileRef location = "group:../Core.xcodeproj"/></Workspace>|};
+    directory "ios/Workspace.xcworkspace/xcshareddata";
+    directory "ios/Workspace.xcworkspace/xcshareddata/xcschemes";
+    create "ios/Workspace.xcworkspace/xcshareddata/xcschemes/WorkspaceFlow.xcscheme"
+      "<Scheme version = \"1.7\"></Scheme>\n";
+    directory "ios/Private.xcodeproj";
+    create "ios/Private.xcodeproj/project.pbxproj" "// Private-only project manifest\n";
+    directory "ios/Private.xcodeproj/xcuserdata";
+    directory "ios/Private.xcodeproj/xcuserdata/alice.xcuserdatad";
+    directory "ios/Private.xcodeproj/xcuserdata/alice.xcuserdatad/xcschemes";
+    create "ios/Private.xcodeproj/xcuserdata/alice.xcuserdatad/xcschemes/Personal.xcscheme"
+      "<Scheme version = \"1.7\"></Scheme>\n";
+
     directory "packages";
     directory "packages/swift";
     create "packages/swift/Package.swift" "// Swift package manifest\n";
@@ -673,6 +701,34 @@ let () =
     then failwith ("mobile inventory missed the iOS manifest:\n" ^ mobile);
     assert (contains mobile
       "cd 'ios' && xcodebuild -list -project 'App.xcodeproj'");
+    assert (contains mobile
+      "Candidate shared scheme: AppShared (ios/App.xcodeproj/xcshareddata/xcschemes/AppShared.xcscheme)");
+    assert (contains mobile (Printf.sprintf
+      "Ignored oversized Xcode shared scheme: ios/App.xcodeproj/xcshareddata/xcschemes/Oversized.xcscheme (exceeds %d-byte limit; no scheme commands suggested)."
+      Pave.Workspace_path.max_write_bytes));
+    assert (not (contains mobile "Candidate shared scheme: Oversized"));
+    assert (not (contains mobile "-scheme 'Oversized'"));
+
+    assert (contains mobile
+      "cd 'ios' && xcodebuild -project 'App.xcodeproj' -scheme 'AppShared' build");
+    assert (contains mobile
+      "cd 'ios' && xcodebuild -project 'App.xcodeproj' -scheme 'AppShared' test");
+    assert (contains mobile
+      "Xcode workspace: ios/Workspace.xcworkspace/contents.xcworkspacedata");
+    assert (contains mobile
+      "cd 'ios' && xcodebuild -workspace 'Workspace.xcworkspace' -scheme 'WorkspaceFlow' test");
+    assert (contains mobile
+      "cd 'ios' && xcodebuild -project 'Core.xcodeproj' -scheme 'CoreShared' build");
+    assert (not (contains mobile
+      "cd 'ios' && xcodebuild -project 'Core.xcodeproj' -scheme 'AppShared'"));
+    assert (not (contains mobile
+      "cd 'ios' && xcodebuild -workspace 'Workspace.xcworkspace' -scheme 'AppShared'"));
+    assert (contains mobile
+      "Candidate shared schemes: none found; private/user schemes remain unknown.");
+    assert (not (contains mobile "Personal.xcscheme"));
+    assert (not (contains mobile "-scheme 'Personal'"));
+    assert (not (contains mobile "<scheme-from-list>"));
+
     assert (contains mobile "Android Gradle: android/settings.gradle.kts");
     assert (contains mobile "cd 'android' && gradle tasks");
     assert (contains mobile "Swift Package Manager: packages/swift/Package.swift");

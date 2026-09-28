@@ -124,7 +124,8 @@ For a one-shot turn, provide exactly one source: `--prompt`, nonempty redirected
 
 Repeat `--image PATH` for checked workspace-relative images. Pave validates file type, MIME signature and size, then rejects routes without native user-media support before authentication or network access.
 
-In the TUI, type `@path` or `@"path with spaces"` in the draft. Completion stays within the checked workspace and honors ignore rules. Text files become labeled prompt text; supported media stays readable in the prompt and is sent as native typed content. Code/email occurrences and unresolved safe references remain literal; unsafe paths or invalid files fail closed.
+In the TUI, type `@path` or `@"path with spaces"` in the draft. Completion stays within the checked workspace and honors ignore rules. Text files become labeled prompt text; supported media stays readable in the prompt and is sent as native typed content. Code/email occurrences and unresolved safe references remain literal; unsafe paths or invalid files fail closed. Staged media from `--image PATH` or `/attach PATH` appears above the composer with its sanitized filename, MIME type and size; sent and restored messages show the same metadata without exposing payload bytes. Graphical image display remains opt-in with `--terminal-images` in a verified Kitty/iTerm2 terminal.
+
 
 `--output jsonl` writes ordered turn, text, tool and outcome records to stdout; diagnostics go to stderr. Completed turns exit 0, provider failures 1, tool failures 2 and cancellation 130. Plain text remains the default. Prose shortcuts are opt-in with `--shortcut NAME` and individually disableable with `--disable-shortcut NAME`; available names are `thinkdeep`, `verifyfirst` and `planfirst`. Pasted text, code, paths and tool output are not expanded. TUI headers use sanitized model display names when available and fall back to the upstream ID; labels never change the exact selector.
 
@@ -469,7 +470,8 @@ The TUI `/thinking LEVEL` command stores branch-local metadata; a route sends on
 | Available | Not yet available |
 | --- | --- |
 | Seven wire payload formats with distinct provider routes; bounded buffered and incremental-stream decoders; model-bound Codex/Gemini state and tested provider reasoning replay | Most provider-specific thinking/usage/multimodal parity and full model catalog |
-| Mobile manifest detection, workspace file read/search/edit/write, bounded agent turns, approved LSP/DAP, read-only child jobs, approved managed worktrees and approved persistent JS/Python eval | Writable parallel workers, skills/plugins/MCP, browser/CDP, and the remaining reference-only tool surfaces |
+| Mobile manifest and Xcode shared-scheme mapping, workspace file read/search/edit/write, bounded agent turns, approved LSP/DAP, read-only child jobs, approved managed worktrees and approved persistent JS/Python eval | Writable parallel workers, skills/plugins/MCP, browser/CDP, and the remaining reference-only tool surfaces |
+
 | Separate task APIs for OpenAI embeddings, image generation, text-to-speech and transcription plus Cohere v2 reranking; these do not add chat routes | OpenAI video generation (Videos/Sora retired; no replacement documented) |
 | Grapheme-aware CJK input, cancellable streaming with queued follow-ups, searchable model picker, branching sessions, explicit-window byte-proxy budgeting with counted media payload bytes, automatic/manual journal-safe summaries, native OpenAI Responses and capability-gated Anthropic compaction | Tokenizer-exact context limits and media token estimates where no verified route metadata exists, plus other documented provider-native compaction |
 

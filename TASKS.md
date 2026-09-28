@@ -7,12 +7,13 @@ Only unchecked, independently verifiable work belongs here. The completed implem
 
 ## Mobile specialization — M01–M24 (after R12)
 
-[The mobile acceptance plan](docs/MOBILE_DEVELOPMENT_PLAN.md) owns each card's full prerequisites, positive/unsafe scenario and platform-tooling limits. Keep each M-number here **exactly once**. Current `mobile_project` suggestions are evidence of manifests, not of an SDK, scheme, variant, simulator, signing identity or passing build. A real unavailable platform blocks its execution/device card, not all discovery work. Reference: the behavioral reference for platform surfaces; Pave's behavior and safety contract is `docs/MOBILE_DEVELOPMENT_PLAN.md`.
+[The mobile acceptance plan](docs/MOBILE_DEVELOPMENT_PLAN.md) owns each card's full prerequisites, positive/unsafe scenario and platform-tooling limits. Keep each M-number here **exactly once**. Current `mobile_project` output is bounded filesystem evidence, including shared-scheme filename candidates, not proof that Xcode accepts/builds/tests a scheme or that an SDK, variant, simulator or signing identity is available. A real unavailable platform blocks its execution/device card, not all discovery work. Reference: the behavioral reference for platform surfaces; Pave's behavior and safety contract is `docs/MOBILE_DEVELOPMENT_PLAN.md`.
 
 ### A — Project evidence and selection
 
 - [x] **M01 — Bounded manifest inventory.** Find checked mobile subprojects, showing truncation and rejecting symlink/generated roots. **Accept:** a monorepo reports its separate manifests; a deceptive symlink never supplies an executable command.
-- [ ] **M02 — Xcode map.** Associate real `.xcworkspace`/`.xcodeproj` entries and shared schemes with their roots. **Depends:** M01. **Accept:** a missing/private scheme remains unknown, not a guessed target.
+- [x] **M02 — Xcode map.** Associate real `.xcworkspace`/`.xcodeproj` entries and shared schemes with their roots. **Depends:** M01. **Accept:** a missing/private scheme remains unknown, not a guessed target.
+
 - [ ] **M03 — SwiftPM map.** Identify packages and candidate test roots without evaluating `Package.swift`. **Depends:** M01. **Accept:** a package beside an Xcode project remains distinct; computed targets stay unknown.
 - [ ] **M04 — Android module map.** Identify declared Gradle modules, wrapper and source roots without executing build scripts. **Depends:** M01. **Accept:** dynamic includes or missing wrapper do not become invented variants.
 - [ ] **M05 — Flutter map.** Distinguish app, package, plugin and plain Dart with only actual native host roots. **Depends:** M01. **Accept:** a Dart-only project is not labeled a buildable Flutter app.

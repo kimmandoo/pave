@@ -732,6 +732,21 @@ type mobile_candidate =
   | Node_manifest of string
   | Oversized_manifest of string
 
+let xcode_scheme_bundle path =
+  let is_xcode_bundle name =
+    Filename.check_suffix name ".xcworkspace" ||
+    Filename.check_suffix name ".xcodeproj" in
+  let rec find prefix = function
+    | bundle :: "xcshareddata" :: "xcschemes" :: scheme :: []
+      when is_xcode_bundle bundle &&
+           String.length scheme > String.length ".xcscheme" &&
+           Filename.check_suffix scheme ".xcscheme" ->
+        Some (String.concat "/" (prefix @ [bundle]))
+    | part :: rest -> find (prefix @ [part]) rest
+    | [] -> None in
+  find [] (String.split_on_char '/' path)
+
+
 let mobile_project ?cancel root =
   let max_candidates = 100 in
   let candidates = ref [] and candidate_count = ref 0
@@ -750,6 +765,33 @@ let mobile_project ?cancel root =
           add_candidate (Oversized_manifest path)
         else add_candidate (candidate path)
     with Unix.Unix_error _ | Workspace_path.Error _ -> () in
+  let schemes_by_bundle = Hashtbl.create 8 in
+  let oversized_schemes = ref [] and scheme_count = ref 0 in
+  let bundle_registered bundle =
+    List.exists (function
+      | Xcode_workspace (path, _) -> path = bundle
+      | Xcode_project (path, _) -> path = bundle
+      | _ -> false) !candidates in
+  let add_shared_scheme path =
+    match xcode_scheme_bundle path with
+    | Some bundle when bundle_registered bundle ->
+        (try
+           let absolute = Workspace_path.checked_path root path in
+           let stat = Unix.lstat absolute in
+           if stat.Unix.st_kind = Unix.S_REG then
+             if !scheme_count >= max_candidates then truncated := true
+             else (
+               incr scheme_count;
+               if stat.Unix.st_size > max_write_bytes then
+                 oversized_schemes := path :: !oversized_schemes
+               else
+                 let previous = Option.value
+                   (Hashtbl.find_opt schemes_by_bundle bundle) ~default:[] in
+                 Hashtbl.replace schemes_by_bundle bundle
+                   (path :: previous))
+         with Unix.Unix_error _ | Workspace_path.Error _ -> ())
+    | _ -> () in
+
   let visit_directory relative _absolute =
     let name = Filename.basename relative in
     if Filename.check_suffix name ".xcworkspace" then (
@@ -765,9 +807,13 @@ let mobile_project ?cancel root =
         add_regular relative (fun _ -> Gradle_manifest relative)
     | "pubspec.yaml" -> add_regular relative (fun _ -> Pubspec_manifest relative)
     | "package.json" -> add_regular relative (fun _ -> Node_manifest relative)
+    | name when Filename.check_suffix name ".xcscheme" ->
+        add_shared_scheme relative
     | _ -> () in
+
   let walk_truncated = walk ~hidden:true ?cancel ~visit_directory
     root "." visit_file in
+
   if walk_truncated then truncated := true;
   let candidates = List.rev !candidates in
   let output = Buffer.create 1024 in
@@ -787,6 +833,12 @@ let mobile_project ?cancel root =
     append (name ^ "\n" ^
       String.concat "" (List.map (fun command -> "  " ^ command ^ "\n") commands)) in
   let add_diagnostic text = append (text ^ "\n") in
+  List.sort String.compare !oversized_schemes |> List.iter (fun path ->
+    add_diagnostic
+      (Printf.sprintf
+        "Ignored oversized Xcode shared scheme: %s (exceeds %d-byte limit; no scheme commands suggested)."
+        path max_write_bytes));
+
   let directory path =
     match Filename.dirname path with "." -> "" | parent -> parent in
   let command_in path command =
@@ -804,12 +856,27 @@ let mobile_project ?cancel root =
   let render_xcode kind flag bundle manifest =
     let name = Filename.basename bundle in
     let target = flag ^ " " ^ shell_quote name in
-    add_stack ("Xcode " ^ kind ^ ": " ^ manifest)
-      [command_in bundle ("xcodebuild -list " ^ target);
-       command_in bundle ("xcodebuild " ^ target ^
-         " -scheme '<scheme-from-list>' build");
-       command_in bundle ("xcodebuild " ^ target ^
-         " -scheme '<scheme-from-list>' test")] in
+    let schemes = Option.value (Hashtbl.find_opt schemes_by_bundle bundle)
+      ~default:[] |> List.sort String.compare in
+    let scheme_name path =
+      let filename = Filename.basename path in
+      String.sub filename 0
+        (String.length filename - String.length ".xcscheme") in
+    let provenance = match schemes with
+      | [] ->
+          "  Candidate shared schemes: none found; private/user schemes remain unknown."
+      | paths ->
+          String.concat "\n" (List.map (fun path ->
+            "  Candidate shared scheme: " ^ scheme_name path ^
+            " (" ^ path ^ ")") paths) in
+    let scheme_commands = List.concat_map (fun path ->
+      let scheme = shell_quote (scheme_name path) in
+      let target = target ^ " -scheme " ^ scheme in
+      [command_in bundle ("xcodebuild " ^ target ^ " build");
+       command_in bundle ("xcodebuild " ^ target ^ " test")]) schemes in
+    add_stack ("Xcode " ^ kind ^ ": " ^ manifest ^ "\n" ^ provenance)
+      (command_in bundle ("xcodebuild -list " ^ target) :: scheme_commands) in
+
   let render_gradle path =
     let parent = directory path in
     if not (Hashtbl.mem rendered_gradle parent) then (

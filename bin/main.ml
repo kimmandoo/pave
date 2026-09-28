@@ -1088,8 +1088,8 @@ let () =
       pending_attachments := attachments;
       match !ui with
       | Some screen ->
-          Tui.set_attachments screen (List.map
-            (fun (item : Pave.Protocol.attachment) -> item.name) attachments)
+          Tui.set_attachments screen attachments
+
       | None -> () in
 
     let announce_shortcuts names =
@@ -3373,9 +3373,7 @@ let () =
         let handle_runner_event = function
           | Pave.Turn_runner.Turn_started { submission; _ } ->
               Tui.set_activity screen (Some "Thinking");
-              Tui.sent ~attachment_names:(List.map
-                (fun (item : Pave.Protocol.attachment) -> item.name)
-                submission.attachments)
+              Tui.sent ~attachments:submission.attachments
                 screen submission.display_prompt
           | Pave.Turn_runner.Transcript_message { text; _ } ->
               Tui.event screen text

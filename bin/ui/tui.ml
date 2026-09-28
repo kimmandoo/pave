@@ -79,6 +79,9 @@ type tool_progress = {
   mutable received_bytes : int option;
 }
 
+type attachment_preview = { name : string; mime_type : string; size : int }
+
+
 type t = {
   mutable term : Notty_unix.Term.t;
   mutable input : Terminal_input.t;
@@ -108,7 +111,8 @@ type t = {
   mutable activity_started : float option;
   mutable active_tool : tool_progress option;
   mutable usage_badge : string option;
-  mutable pending_attachments : string list;
+  mutable pending_attachments : attachment_preview list;
+
   mutable queue : int;
   mutable last_paint : float;
   mutable paste : bool;
@@ -162,14 +166,59 @@ let drain_ui_pipe t =
     | Unix.Unix_error (Unix.EAGAIN, _, _) -> () in
   drain ()
 
+let max_delta_batch_bytes = 16_384
+let max_delta_batch_events = 64
+
+let coalesce_text_deltas first queue =
+  match first with
+  | Agent_event (Pave.Turn_runner.Text_delta { turn_id; text }) ->
+      let length = ref (String.length text) and count = ref 1 in
+      let buffer = ref None in
+      let rec gather () =
+        if !length < max_delta_batch_bytes &&
+           !count < max_delta_batch_events && not (Queue.is_empty queue) then
+          match Queue.peek queue with
+          | Agent_event (Pave.Turn_runner.Text_delta
+              { turn_id = next_turn; text = next_text })
+            when next_turn = turn_id &&
+                 String.length next_text <= max_delta_batch_bytes - !length ->
+              ignore (Queue.take queue);
+              let output = match !buffer with
+                | Some output -> output
+                | None ->
+                    let output = Buffer.create
+                      (min max_delta_batch_bytes
+                        (!length + String.length next_text)) in
+                    Buffer.add_string output text;
+                    buffer := Some output;
+                    output in
+              Buffer.add_string output next_text;
+              length := !length + String.length next_text;
+              incr count;
+              gather ()
+          | _ -> () in
+      gather ();
+      (match !buffer with
+       | None -> first
+       | Some output ->
+           Agent_event (Pave.Turn_runner.Text_delta {
+             turn_id; text = Buffer.contents output
+           }))
+  | _ -> first
+
+let stream_frame_interval = 1. /. 60.
+
 let pop_ui_event t =
   drain_ui_pipe t;
   Mutex.lock t.ui_lock;
   let event =
     if Queue.is_empty t.ui_events then None
-    else Some (Queue.take t.ui_events) in
+    else
+      let first = Queue.take t.ui_events in
+      Some (coalesce_text_deltas first t.ui_events) in
   Mutex.unlock t.ui_lock;
   event
+
 
 let ui_events_pending t =
   Mutex.lock t.ui_lock;
@@ -348,6 +397,41 @@ let received_bytes_text bytes =
   else if bytes < 1024 * 1024 then
     Printf.sprintf "%.1f KiB" (float bytes /. 1024.)
   else Printf.sprintf "%.1f MiB" (float bytes /. (1024. *. 1024.))
+
+let attachment_size data =
+  let length = String.length data in
+  if length = 0 then 0
+  else
+    let padding =
+      if data.[length - 1] <> '=' then 0
+      else if length > 1 && data.[length - 2] = '=' then 2
+      else 1 in
+    max 0 ((length / 4 * 3) - padding)
+
+let preview_attachment (item : Pave.Protocol.attachment) =
+  { name = single_line item.name; mime_type = single_line item.mime_type;
+    size = attachment_size item.data }
+
+let preview_attachments attachments = List.map preview_attachment attachments
+
+let attachment_preview_text preview =
+  let kind = match Pave.Protocol.attachment_kind preview.mime_type with
+    | Some Pave.Protocol.Image_attachment -> "image"
+    | Some Pave.Protocol.Audio_attachment -> "audio"
+    | Some Pave.Protocol.Video_attachment -> "video"
+    | None -> "media" in
+  Printf.sprintf "  [%s] %s · %s · %s" kind preview.name
+    preview.mime_type (received_bytes_text preview.size)
+
+let attachment_block text previews =
+  match previews with
+  | [] -> text
+  | previews ->
+      let details = String.concat "\n"
+        (List.map attachment_preview_text previews) in
+      let block = "[Attached media:\n" ^ details ^ "\n]" in
+      if text = "" then block else text ^ "\n" ^ block
+
 
 let shorten_width width text =
   if width < 2 then "" else
@@ -589,11 +673,20 @@ let paint t =
   let editor_row, editor_col =
     Pave.Composer.position ~measure t.editor editor_lines in
   let activity_height = if Option.is_some t.activity then 1 else 0 in
-  let editor_space = max 1 (rows - 4 - activity_height) in
+  let attachment_height =
+    if rows < 6 || Option.is_some t.chooser ||
+       Option.is_some (Pave.Composer.search_query t.editor) then 0
+    else min (List.length t.pending_attachments)
+      (max 0 (rows - 6 - activity_height)) in
+  let editor_space =
+    max 1 (rows - 4 - activity_height - attachment_height) in
   let editor_height = match t.chooser, Pave.Composer.search_query t.editor with
     | Some _, _ | None, Some _ -> 1
-    | None, None -> min 4 (max 1 (min editor_space (Array.length editor_lines))) in
-  let body_height = max 0 (rows - 4 - editor_height - activity_height) in
+    | None, None ->
+        min 4 (max 1 (min editor_space (Array.length editor_lines))) in
+  let body_height =
+    max 0 (rows - 4 - editor_height - activity_height - attachment_height) in
+
   let hints = hint_matches t in
   let hint_count = List.length hints in
   let hint_height = if body_height < 2 || hint_count = 0 then 0
@@ -620,6 +713,23 @@ let paint t =
   let activity_rows = match activity_text with
     | None -> [||]
     | Some text -> [| styled_line cols accent text |] in
+  let attachment_rows =
+    if attachment_height = 0 then [||]
+    else
+      let hidden = List.length t.pending_attachments - attachment_height in
+      t.pending_attachments
+      |> List.mapi (fun index preview -> index, preview)
+      |> List.filter_map (fun (index, preview) ->
+        if index >= attachment_height then None
+        else
+          let label = if hidden > 0 && index = attachment_height - 1 then
+              let suffix = Printf.sprintf " · +%d more" hidden in
+              shorten_width (max 0 (cols - measure suffix))
+                (attachment_preview_text preview) ^ suffix
+            else shorten_width cols (attachment_preview_text preview) in
+          Some (styled_line cols text_attr label))
+      |> Array.of_list in
+
   let queued = if t.queue = 0 then "" else
     Printf.sprintf "  ·  %d queued" t.queue in
   let usage = match t.activity, t.usage_badge with
@@ -901,10 +1011,14 @@ let paint t =
              Printf.sprintf "  [0/%d] " total
            else Printf.sprintf "  [%d-%d/%d] "
              (visible_first + 1) visible_last total) ^ status) ^
-        (match t.pending_attachments with
+        (if attachment_height > 0 then ""
+         else match t.pending_attachments with
          | [] -> ""
-         | names -> Printf.sprintf " · %d media attachment%s ready"
-             (List.length names) (if List.length names = 1 then "" else "s")) in
+         | first :: rest ->
+             " · " ^ first.name ^
+             (if rest = [] then "" else
+               Printf.sprintf " · +%d more" (List.length rest))) in
+
 
   let footer = styled_line cols text_attr (shorten_width cols footer_text) in
   let first_line = max 0 (min (editor_row - editor_height + 1)
@@ -985,7 +1099,8 @@ let paint t =
         else
           let choice = List.nth hints (t.hint_offset + index - 1) in
           hint_row cols (t.hint_offset + index - 1 = t.hint_selected) choice);
-    activity_rows; [|footer|]; prompt_rows ] in
+    activity_rows; [|footer|]; attachment_rows; prompt_rows ] in
+
   let activity_row =
     if Array.length activity_rows = 0 then -1
     else if rows >= 6 then 3 + body_height
@@ -1231,9 +1346,10 @@ let set_usage t = function
       t.usage_badge <- Some (Printf.sprintf " · %d in/%d out"
         tokens.input_tokens tokens.output_tokens);
       paint t
-let set_attachments t names =
-  t.pending_attachments <- List.map single_line names;
+let set_attachments t attachments =
+  t.pending_attachments <- preview_attachments attachments;
   paint t
+
 
 
 let set_queue t count =
@@ -1259,13 +1375,9 @@ let show_history t (messages : Pave.Protocol.message list) =
     match message.role with
     | "user" ->
         let content = Option.value ~default:"" message.content in
-        let content = match message.attachments with
-          | [] -> content
-          | attachments ->
-              content ^ (if content = "" then "" else "\n") ^
-              "[Attached media: " ^ String.concat ", "
-                (List.map (fun (item : Pave.Protocol.attachment) ->
-                  single_line item.name) attachments) ^ "]" in
+        let content = attachment_block content
+          (preview_attachments message.attachments) in
+
 
         if content <> "" then Transcript_view.sent t.transcript content
     | "assistant" ->
@@ -1309,14 +1421,13 @@ let finish_live t =
   t.status <- idle_status;
   paint t
 
-let sent ?attachment_names t text =
-  let names, clear_pending = match attachment_names with
-    | Some names -> names, false
+let sent ?attachments t text =
+  let previews, clear_pending = match attachments with
+    | Some attachments -> preview_attachments attachments, false
     | None -> t.pending_attachments, true in
-  let text = match names with
-    | [] -> text
-    | names -> text ^ "\n[Attached media: " ^ String.concat ", " names ^ "]" in
+  let text = attachment_block text previews in
   if clear_pending then t.pending_attachments <- [];
+
   change_transcript t (fun () -> Transcript_view.sent t.transcript text);
   t.scroll <- 0;
   t.status <- idle_status;
@@ -1377,7 +1488,9 @@ let events t lines =
 
 let delta t chunk =
   change_transcript t (fun () -> Transcript_view.delta t.transcript chunk);
-  if chunk = "\n" || Unix.gettimeofday () -. t.last_paint > 0.033 then paint t
+  if String.contains chunk '\n' ||
+     Unix.gettimeofday () -. t.last_paint >= stream_frame_interval then paint t
+
 
 let clear_live t =
   change_transcript t (fun () -> Transcript_view.rollback t.transcript);
