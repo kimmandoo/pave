@@ -121,6 +121,7 @@ type t = {
 
   mutable queue : int;
   mutable last_paint : float;
+  mutable stream_pending : bool;
   mutable paste : bool;
   paste_buffer : Buffer.t;
   bindings : Keybindings.binding list;
@@ -385,6 +386,15 @@ let activity_tick = 1.
 let activity_tick_delay elapsed =
   let phase = mod_float (max 0. elapsed) activity_tick in
   if phase = 0. then activity_tick else activity_tick -. phase
+
+let next_tick_timeout ~now ~last_paint ~stream_pending ~activity_started =
+  let activity = Option.map (fun since ->
+    activity_tick_delay (now -. since)) activity_started in
+  if not stream_pending then activity
+  else
+    let frame = max 0. (stream_frame_interval -. (now -. last_paint)) in
+    Some (match activity with None -> frame | Some tick -> min frame tick)
+
 let draft_paste_capacity editor =
   let selected = match Pave.Composer.selection editor with
     | Some (start, stop) -> stop - start
@@ -1205,7 +1215,8 @@ let paint t =
   if Buffer.length output > 0 then (
     Buffer.output_buffer stdout output;
     flush stdout);
-  t.last_paint <- Unix.gettimeofday ()
+  t.last_paint <- Unix.gettimeofday ();
+  t.stream_pending <- false
 
 let paint_resized t =
   (match t.layout_cache, t.body_cache with
@@ -1320,7 +1331,8 @@ let create ?(keybinding_overrides = []) ?(version = "source")
     activity_started = None; usage_badge = None;
     active_tool = None;
     pending_attachments = []; queue = 0;
-    last_paint = 0.; paste = false; paste_buffer = Buffer.create 256;
+    last_paint = 0.; stream_pending = false;
+    paste = false; paste_buffer = Buffer.create 256;
     bindings; signals;
     ui_events = Queue.create (); ui_lock = Mutex.create ();
     ui_read_fd; ui_write_fd; ui_wake_byte = Bytes.of_string "x";
@@ -1557,8 +1569,9 @@ let events t lines =
 
 let delta t chunk =
   change_transcript t (fun () -> Transcript_view.delta t.transcript chunk);
-  if String.contains chunk '\n' ||
-     Unix.gettimeofday () -. t.last_paint >= stream_frame_interval then paint t
+  (* A skipped frame still needs a timer when the provider pauses mid-stream. *)
+  t.stream_pending <- true;
+  if Unix.gettimeofday () -. t.last_paint >= stream_frame_interval then paint t
 
 
 let clear_live t =
@@ -1607,10 +1620,9 @@ let rec next_input ?wake_fd t =
       | `Return `Tick -> paint t; next_input ?wake_fd t
       | `Return event -> event)
   | None ->
-      let timeout = match t.activity_started with
-        | None -> None
-        | Some since ->
-            Some (activity_tick_delay (Unix.gettimeofday () -. since)) in
+      let timeout = next_tick_timeout ~now:(Unix.gettimeofday ())
+        ~last_paint:t.last_paint ~stream_pending:t.stream_pending
+        ~activity_started:t.activity_started in
       let wake_fds = match wake_fd with
         | None -> [t.ui_read_fd]
         | Some fd -> [t.ui_read_fd; fd] in

@@ -1,5 +1,12 @@
 # Troubleshooting
 
+### [2026-09-29] Short streamed replies paused until the activity heartbeat
+
+- **Context / Symptom:** In a real PTY, a local SSE fixture emitted two short text deltas 3 ms apart and then paused; the second delta did not appear for 771 ms, despite already arriving over HTTP.
+- **Root Cause:** `Tui.delta` skipped a repaint when a delta arrived inside the 60 Hz frame interval but did not schedule a later frame. The only remaining timeout was the once-per-second activity heartbeat. Newline-containing chunks bypassed the 60 Hz limit and could instead trigger excessive repaints.
+- **Solution:** Tracked pending stream paint, combined its frame deadline with the activity timeout, and cleared it after any repaint; newline chunks use the same frame pacing, while turn completion still flushes immediately. The same real PTY showed the formerly delayed delta after 14 ms, and a 600-delta multiline SSE run kept its sampled display lag under 16 ms.
+- **Prevention / Reference:** Test a stream that emits a sub-frame delta then stalls before completion. A frame-rate check alone misses an unscheduled final partial frame.
+
 ### [2026-09-29] At-file attachments were invisible until Tab
 
 - **Context / Symptom:** Typing `@` in the interactive editor showed no attachable file choices, although pressing Tab opened a path chooser; staged `/attach` media previews did not solve this selector gap.

@@ -1,6 +1,7 @@
 # Changelog
 
 ## 2026-09-29
+- fix(tui): scheduled a 60 Hz repaint for short streamed deltas even when the provider paused, removed per-newline redraw bursts, and kept immediate completion and ordered output.
 - fix(tui): showed attachable workspace files immediately when typing `@`, filtered nested matches and browsed directories inline, displayed verified MIME and byte-size previews, and excluded unsafe, oversized or invalid files without exposing their contents.
 - release(distribution): published v0.1.64 from `0262b3a` after main CI `36441886694` passed four OCaml/macOS/Linux jobs and release workflow `36442924852` passed four native test/build/package/extracted-executable jobs plus publication. Downloaded all five public assets, verified all four SHA-256 hashes and exact three-member archives; extracted Darwin arm64 linked only `libSystem`, passed CLI help/provider checks, and showed safe text metadata on typing `@` and inserted `@note.txt` with Tab in a real 100×24 PTY.
 

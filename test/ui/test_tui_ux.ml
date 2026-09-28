@@ -85,4 +85,20 @@ let () =
      | Tui.Agent_event (Pave.Turn_runner.Text_delta {
          turn_id = 8; text = "next" }) -> true
      | _ -> false);
+  let frame ~pending ~since =
+    Tui.next_tick_timeout ~now:10.005 ~last_paint:10.
+      ~stream_pending:pending ~activity_started:since in
+  expect "no stream or activity leaves the terminal idle without a timer"
+    (frame ~pending:false ~since:None = None);
+  expect "short streamed deltas schedule a frame before the activity heartbeat"
+    (match frame ~pending:true ~since:(Some 10.) with
+     | Some delay -> delay > 0. && delay < 0.02
+     | None -> false);
+  expect "a due streamed frame wakes immediately even without activity"
+    (Tui.next_tick_timeout ~now:10.05 ~last_paint:10.
+       ~stream_pending:true ~activity_started:None = Some 0.);
+  expect "painted stream state returns to the activity heartbeat"
+    (match frame ~pending:false ~since:(Some 10.) with
+     | Some delay -> delay > 0.9 && delay < 1.
+     | None -> false);
   print_endline "TUI attachment previews and stream batching: ok"
