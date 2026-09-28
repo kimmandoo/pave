@@ -770,6 +770,9 @@ let () =
     let agent : Pave.Agent.t option ref = ref None in
     let retained_history : Pave.Protocol.message list ref = ref [] in
     let ephemeral_usage : Pave.Protocol.usage option ref = ref None in
+    let ephemeral_usage_by_identity :
+      ((string * string option * string * string) *
+        Pave.Protocol.usage) list ref = ref [] in
     let pending_attachments : Pave.Protocol.attachment list ref = ref [] in
     let submitted_attachments :
       (Pave.Protocol.attachment list * bool * bool) option ref = ref None in
@@ -792,6 +795,18 @@ let () =
               Some (attachments, consume_pending, true);
             if consume_pending then pending_attachments := []
         | None -> () in
+    let usage_identity provider account_id route model =
+      let identity = match route with
+        | None -> provider
+        | Some route -> provider ^ "@" ^ route in
+      identity ^ Option.fold ~none:"" ~some:(fun account ->
+        "#" ^ Pave.Model_identity.encode_component account) account_id ^
+      "/" ^ model in
+    let active_usage_identity () =
+      !active_descriptor.id,
+      Option.bind !active_identity
+        (fun (identity : Pave.Model_identity.t) -> identity.account_id),
+      !active_route.name, !active_model in
     let record_usage tokens =
       match !journal with
       | Some current ->
@@ -803,13 +818,15 @@ let () =
       | None ->
           ephemeral_usage := Some (match !ephemeral_usage with
             | None -> tokens
-            | Some previous -> Pave.Protocol.add_usage previous tokens) in
-    let usage_identity provider account_id route model =
-      let identity = match route with
-        | None -> provider
-        | Some route -> provider ^ "@" ^ route in
-      identity ^ Option.fold ~none:"" ~some:(fun account -> "#" ^ account)
-        account_id ^ "/" ^ model in
+            | Some previous -> Pave.Protocol.add_usage previous tokens);
+          let identity = active_usage_identity () in
+          let previous = List.assoc_opt identity !ephemeral_usage_by_identity in
+          let accumulated = match previous with
+            | None -> tokens
+            | Some usage -> Pave.Protocol.add_usage usage tokens in
+          ephemeral_usage_by_identity :=
+            (identity, accumulated) ::
+            List.remove_assoc identity !ephemeral_usage_by_identity in
     let usage_detail_lines (usage : Pave.Protocol.usage) =
       let count label = function
         | None -> None
@@ -836,7 +853,8 @@ let () =
     let refresh_usage screen =
       let tokens = match !journal with
         | Some current -> Pave.Session.usage current
-        | None -> !ephemeral_usage in
+        | None -> List.assoc_opt (active_usage_identity ())
+            !ephemeral_usage_by_identity in
       Tui.set_usage screen tokens in
     let active_secret_mask = ref None in
     let current_secret_mask () =
@@ -1337,10 +1355,11 @@ let () =
       active_route := route;
       endpoint_override := "";
       agent := None;
-      match !ui with
-      | Some screen -> Tui.set_model screen
-          (selection_label descriptor identity route)
-      | None -> () in
+      (match !ui with
+       | Some screen ->
+           Tui.set_model screen (selection_label descriptor identity route);
+           refresh_usage screen
+       | None -> ()) in
     let apply_model_selection
         ((descriptor : Pave.Provider_catalog.descriptor),
          (identity : Pave.Model_identity.t),
@@ -1377,6 +1396,7 @@ let () =
       retained_history := [];
       set_pending_attachments [];
       ephemeral_usage := None;
+      ephemeral_usage_by_identity := [];
       (match !ui with
        | Some screen ->
            Tui.set_session screen true;
@@ -1754,7 +1774,9 @@ let () =
     let clear_conversation () =
       (match !journal with
        | Some current -> ignore (Pave.Session.clear current)
-       | None -> ephemeral_usage := None);
+       | None ->
+           ephemeral_usage := None;
+           ephemeral_usage_by_identity := []);
       agent := None;
       retained_history := [];
       (match !ui with
@@ -2580,12 +2602,23 @@ let () =
           let lines = (match !journal with
             | None ->
                 ["Usage · ephemeral conversation"] @
-                (match !ephemeral_usage with
-                 | None -> ["No provider-reported tokens yet"]
-                 | Some tokens ->
-                     [Printf.sprintf "Reported · %d input / %d output tokens"
-                        tokens.input_tokens tokens.output_tokens] @
-                       usage_detail_lines tokens)
+                (match !ephemeral_usage_by_identity with
+                 | [] -> ["No provider-reported tokens yet"]
+                 | rows ->
+                     let total = match rows with
+                       | (_, first) :: rest ->
+                           List.fold_left (fun summed (_, tokens) ->
+                             Pave.Protocol.add_usage summed tokens) first rest
+                       | [] -> assert false in
+                     [Printf.sprintf "Total · %d input / %d output tokens"
+                        total.input_tokens total.output_tokens] @
+                     usage_detail_lines total @
+                     List.concat_map (fun ((provider, account_id, route, model),
+                         (tokens : Pave.Protocol.usage)) ->
+                       [usage_identity provider account_id (Some route) model;
+                        Printf.sprintf "%d input · %d output"
+                          tokens.input_tokens tokens.output_tokens] @
+                       usage_detail_lines tokens) rows)
             | Some current ->
                 let by_route = Pave.Session.usage_by_route current in
                 ["Usage · selected journal branch"] @

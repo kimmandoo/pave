@@ -57,6 +57,16 @@ let () =
     "openai/gpt-5"] ~details:[]
     ~labels:["openai/gpt-4.1", "GPT 4.1"] ~status:None;
   assert ((Tui.matches chooser).(chooser.selected).value = "openai/gpt-4.1");
+  chooser.filter <- "gpt-4";
+  chooser.filtered <- None;
+  chooser.selected <- 0;
+  assert ((Tui.matches chooser).(chooser.selected).value = "openai/gpt-4.1");
+  Tui.update_chooser chooser ~verified:["openai/gpt-4.2"; "openai/gpt-5";
+    "openai/gpt-4.1"] ~details:[] ~labels:[] ~status:None;
+  assert (chooser.filter = "gpt-4" && chooser.selected = 1 &&
+    (Tui.matches chooser).(chooser.selected).value = "openai/gpt-4.1");
+  chooser.filter <- "";
+  chooser.filtered <- None;
   chooser.selected <- 3;
   Tui.update_chooser chooser ~verified:["openai/gpt-5"] ~details:[]
     ~labels:[] ~status:(Some "One available model");
@@ -87,10 +97,35 @@ let () =
       Notty.I.width (Notty.I.string Notty.A.empty text))
     "Tier: WRITE\nPath: ok" in
   assert (approval_rows = 3);
-  assert (Tui.activity_status ~state:"Thinking" ~elapsed:0 =
+  assert (Tui.activity_status ~state:"Thinking" ~elapsed:0. () =
     "◐ Thinking · 0s");
-  assert (Tui.activity_status ~state:"Tool: read_file" ~elapsed:65 =
-    "◓ Tool: read_file · 1m05s");
+  assert (Tui.activity_status ~state:"Thinking" ~elapsed:0.125 () =
+    "◓ Thinking · 0s");
+  assert (Tui.activity_status ~state:"Tool: read_file" ~elapsed:65. () =
+    "◐ Tool: read_file · 1m05s");
+  let base_status =
+    Tui.activity_status ~state:"Tool: run_command" ~elapsed:1.25 () in
+  let with_bytes = Tui.activity_status ~state:"Tool: run_command"
+    ~elapsed:1.25 ~received_bytes:1536 ~width:80 () in
+  assert (with_bytes = "◑ Tool: run_command · 1s · 1.5 KiB" &&
+    not (String.contains with_bytes '%'));
+  assert (Tui.activity_status ~state:"Tool: run_command" ~elapsed:1.25
+    ~received_bytes:1536 ~width:(Notty.I.width
+      (Notty.I.string Notty.A.empty base_status)) () = base_status);
+  assert (Tui.activity_tick_delay 0. = 0.125 &&
+    abs_float (Tui.activity_tick_delay 0.124 -. 0.001) < 0.000000001);
+  let progress : Tui.tool_progress = {
+    call_id = "call-1"; name = "run_command"; received_bytes = None;
+  } in
+  let active = Some progress in
+  Tui.update_tool_progress active "other-call" "run_command" 512;
+  Tui.update_tool_progress active "call-1" "read_file" 512;
+  assert (progress.received_bytes = None);
+  Tui.update_tool_progress active "call-1" "run_command" 4096;
+  Tui.update_tool_progress active "call-1" "run_command" 1024;
+  assert (progress.received_bytes = Some 4096 &&
+    Tui.reset_tool_progress active "other-call" = active &&
+    Tui.reset_tool_progress active "call-1" = None);
   assert (Tui.transcript_prefix Transcript_view.Heading false = "  ▌ ");
   assert (Tui.transcript_prefix Transcript_view.Heading true = "    ");
   assert (Tui.transcript_prefix Transcript_view.Code false = "    ");

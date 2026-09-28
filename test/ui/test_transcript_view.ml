@@ -107,6 +107,62 @@ let () =
      has "bullet" (lines markdown 20) &&
      has "quote" (lines markdown 20) &&
      not (has "- bullet" (lines markdown 20)));
+  let rich = create () in
+  assistant rich
+    "A **bold** `code` and [docs](https://example.test).\n| Name | Status |\n| ---- | ------ |\n| API | ready |";
+  finish rich;
+  let rich_text = rich.rows.(1) in
+  expect "inline Markdown removes syntax while retaining linked destination"
+    (rich_text.text = "A bold code and docs (https://example.test).");
+  expect "inline bold, code and links keep distinct semantic spans"
+    (Array.exists (fun run -> run.content = "bold" && run.style = Bold)
+       rich_text.runs &&
+     Array.exists (fun run -> run.content = "code" && run.style = Inline_code)
+       rich_text.runs &&
+     Array.exists (fun run -> run.content = "docs" && run.style = Link)
+       rich_text.runs);
+  expect "pipe table promotes header, separator and data rows"
+    (rich.rows.(2).style = Table_header &&
+     rich.rows.(2).text = "Name | Status" &&
+     rich.rows.(3).style = Table_separator &&
+     rich.rows.(4).style = Table_row &&
+     rich.rows.(4).text = "API | ready");
+  let rich_layout = rendered rich 13 in
+  expect "inline styles survive grapheme-safe wrapping"
+    (Array.exists (fun visual ->
+       Array.exists (fun (run : inline_run) -> run.style = Bold) visual.runs) rich_layout &&
+     Array.exists (fun visual ->
+       Array.exists (fun (run : inline_run) -> run.style = Link) visual.runs) rich_layout);
+  let streamed_markdown = create () in
+  delta streamed_markdown
+    "A **bold** `code` [docs](https://example.test).\n| Name | Status |\n| ---- | ------ |\n| API | ready |\nStill **streaming**";
+  let provisional = snapshot streamed_markdown ~columns:40 ~measure in
+  expect "streamed Markdown spans are styled before the turn settles"
+    (Array.exists (fun (entry : entry) ->
+       entry.row.provisional &&
+       Array.exists (fun (run : inline_run) ->
+         run.content = "streaming" && run.style = Bold) entry.row.runs)
+       provisional.entries);
+  finish streamed_markdown;
+  expect "settled streamed prose retains Markdown spans"
+    (Array.exists (fun (run : inline_run) ->
+       run.content = "bold" && run.style = Bold)
+       streamed_markdown.rows.(1).runs &&
+     Array.exists (fun (run : inline_run) ->
+       run.content = "code" && run.style = Inline_code)
+       streamed_markdown.rows.(1).runs &&
+     Array.exists (fun (run : inline_run) ->
+       run.content = "docs" && run.style = Link)
+       streamed_markdown.rows.(1).runs);
+  expect "settled streamed pipe tables remain semantic"
+    (streamed_markdown.rows.(2).style = Table_header &&
+     streamed_markdown.rows.(3).style = Table_separator &&
+     streamed_markdown.rows.(4).style = Table_row);
+  expect "final provisional row settles without losing Markdown"
+    (not streamed_markdown.rows.(5).provisional &&
+     Array.exists (fun (run : inline_run) ->
+       run.content = "streaming" && run.style = Bold)
+       streamed_markdown.rows.(5).runs);
   let settled = create () in
   delta settled "Committed reply";
   finish settled;

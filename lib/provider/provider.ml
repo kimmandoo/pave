@@ -198,7 +198,8 @@ let run_curl ?on_chunk ?is_done ?is_finished ?cancel configuration =
        if not (Sys.file_exists curl_path &&
            (try Unix.access curl_path [Unix.X_OK]; true
             with Unix.Unix_error _ -> false)) then
-         raise (Provider_error "trusted curl executable is unavailable"));
+         raise (Provider_error
+           "Transport error: trusted curl executable is unavailable"));
   let input_read, input_write = Unix.pipe () in
   let output_read, output_write =
     try Unix.pipe ()
@@ -222,7 +223,8 @@ let run_curl ?on_chunk ?is_done ?is_finished ?cancel configuration =
         input_read output_write errors
     with exn ->
       List.iter close_fd [ input_read; input_write; output_read; output_write; errors ];
-      raise (Provider_error ("could not start trusted curl: " ^ Printexc.to_string exn))
+      raise (Provider_error ("Transport error: could not start trusted curl: " ^
+        Printexc.to_string exn))
   in
   close_fd input_read;
   close_fd output_write;
@@ -251,17 +253,19 @@ let run_curl ?on_chunk ?is_done ?is_finished ?cancel configuration =
       match status with
       | Unix.WEXITED 0 when not write_failed -> status_code
       | Unix.WEXITED code ->
-          raise (Provider_error (Printf.sprintf "curl failed (exit status %d)" code))
+          raise (Provider_error (Printf.sprintf
+            "Transport error: curl failed (exit status %d)" code))
       | Unix.WSIGNALED signal | Unix.WSTOPPED signal ->
-          raise (Provider_error (Printf.sprintf "curl terminated (signal %d)" signal)))
+          raise (Provider_error (Printf.sprintf
+            "Transport error: curl terminated (signal %d)" signal)))
 let curl_timeout_message ~streaming ~response_body_seen =
   if not streaming then
-    "provider request timed out before a response was available"
+    "Transport error: provider request timed out before a response was available"
   else
     let phase = if response_body_seen then
       "after response data (stream idle or total request timeout)"
       else "before the first response data byte" in
-    "provider stream timed out " ^ phase
+    "Transport error: provider stream timed out " ^ phase
 
 
 let read_file path =
@@ -299,25 +303,29 @@ let context_limit_error json =
     | _ -> false) candidates
 
 let http_error_reason secret status json =
-  let category = match status with
-    | 400 when context_limit_error json -> "provider context limit exceeded"
-    | 400 -> "invalid provider request"
-    | 401 -> "provider authentication failed"
-    | 403 -> "provider permission denied"
-    | 404 -> "provider model or endpoint not found"
-    | 408 -> "provider request timed out"
-    | 413 -> "provider request exceeds its context or size limit"
-    | 429 -> "provider rate limited"
+  let detail = match error_message secret json with
+    | Some detail -> ": " ^ detail
+    | None -> "" in
+  let classification, reason = match status with
+    | 400 when context_limit_error json ->
+        "Request error", "provider context limit exceeded"
+    | 400 -> "Request error", "invalid provider request"
+    | 401 -> "Authentication error", "provider authentication failed"
+    | 403 -> "Authentication error", "provider permission denied"
+    | 404 -> "Route error", "provider model or route not found"
+    | 408 -> "Transport error", "provider request timed out"
+    | 413 -> "Request error", "provider request exceeds its context or size limit"
+    | 429 -> "Transport error", "provider rate limited"
     | code when code >= 500 && code <= 599 ->
-        "provider unavailable (HTTP " ^ string_of_int code ^ ")"
-    | code -> "HTTP " ^ string_of_int code in
-  let category = match status with
+        "Transport error", "provider unavailable"
+    | code -> "Provider error", "HTTP " ^ string_of_int code in
+  let reason = match status with
     | 400 | 401 | 403 | 404 | 408 | 413 | 429 ->
-        Printf.sprintf "%s (HTTP %d)" category status
-    | _ -> category in
-  match error_message secret json with
-  | Some detail -> category ^ ": " ^ detail
-  | None -> category
+        Printf.sprintf "%s (HTTP %d)" reason status
+    | _ when status >= 500 && status <= 599 ->
+        reason ^ " (HTTP " ^ string_of_int status ^ ")"
+    | _ -> reason in
+  classification ^ ": " ^ reason ^ detail
 
 let gemini_model_path model =
   let model = if String.starts_with ~prefix:"models/" model then
@@ -493,7 +501,7 @@ let post_json ?max_request_bytes ?(local = false) ?cancel
         ^ option "output" response_path
         ^ option "write-out" "%{http_code}" in
       let status = try run_curl ?cancel configuration with
-        | Provider_error "curl failed (exit status 28)" ->
+        | Provider_error "Transport error: curl failed (exit status 28)" ->
             raise (Provider_error (curl_timeout_message ~streaming:false
               ~response_body_seen:false)) in
       check_cancel cancel;
@@ -558,7 +566,7 @@ let post_stream ?max_request_bytes ?(local = false) ?cancel ~endpoint ~headers
       (try ignore (run_curl ~on_chunk:consume ~is_done ~is_finished ?cancel configuration)
        with
        | Stream_complete -> ()
-       | Provider_error "curl failed (exit status 28)" ->
+       | Provider_error "Transport error: curl failed (exit status 28)" ->
            raise (Provider_error (curl_timeout_message ~streaming:true
              ~response_body_seen:!response_body_seen)));
       check_cancel cancel;

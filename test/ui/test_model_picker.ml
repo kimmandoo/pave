@@ -48,6 +48,27 @@ let () =
   assert (ids openai chat other_account = []);
   assert (ids openai (scope ~account_id:"team-b" "openai" "chat")
     other_account = ["other-team-only"]);
+  let shared_a = listing ~provider:"openai" ~route:"chat"
+    ~account_id:"team-a" ~ids:["shared-id"] () in
+  let shared_b = listing ~provider:"openai" ~route:"chat"
+    ~account_id:"team-b" ~ids:["shared-id"] () in
+  let model_a = List.hd (Model_picker.eligible_models openai chat shared_a) in
+  let model_b = List.hd (Model_picker.eligible_models openai
+    (scope ~account_id:"team-b" "openai" "chat") shared_b) in
+  assert (model_a.identity.upstream_id = model_b.identity.upstream_id &&
+    Model_picker.identity_selector model_a <>
+      Model_picker.identity_selector model_b &&
+    Model_picker.identity_label model_a <> Model_picker.identity_label model_b);
+  let slash_listing = listing ~provider:"openai" ~route:"chat"
+    ~account_id:"team-a" ~ids:["org/model"] () in
+  let slash_model = List.hd
+    (Model_picker.eligible_models openai chat slash_listing) in
+  let _, parsed_slash, slash_route = Pave.Interaction.resolve_model
+    ~current_provider:"openai" ~current_route:"responses"
+    ~input:(Model_picker.identity_selector slash_model) () in
+  assert (Identity.equal slash_model.identity parsed_slash &&
+    slash_route.name = "chat" &&
+    parsed_slash.upstream_id = "org/model");
   let off_route : Discovery.listing = { chat_listing with
     models = List.map (fun (model : Discovery.model) ->
       { model with capabilities = {

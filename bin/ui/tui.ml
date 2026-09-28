@@ -68,6 +68,12 @@ type ui_event =
 
 
 
+type tool_progress = {
+  call_id : string;
+  name : string;
+  mutable received_bytes : int option;
+}
+
 type t = {
   mutable term : Notty_unix.Term.t;
   mutable input : Terminal_input.t;
@@ -93,6 +99,7 @@ type t = {
   mutable status : string;
   mutable activity : string option;
   mutable activity_started : float option;
+  mutable active_tool : tool_progress option;
   mutable usage_badge : string option;
   mutable pending_attachments : string list;
   mutable queue : int;
@@ -256,10 +263,22 @@ let style_attr (row : Transcript_view.row) =
   | Transcript_view.Assistant, Transcript_view.Heading -> accent
   | Transcript_view.Tool, Transcript_view.Heading -> warning
   | _, (Transcript_view.Heading | Transcript_view.Subheading) -> accent
+  | _, Transcript_view.Table_header -> accent
+  | _, Transcript_view.Table_row -> text_attr
+  | _, Transcript_view.Table_separator -> muted
   | _, Transcript_view.Code -> text_attr
   | _, Transcript_view.Quote -> text_attr
   | _, Transcript_view.Tool_state -> warning
   | _, _ -> text_attr
+
+let inline_attr = function
+  | Transcript_view.Plain -> A.empty
+  | Transcript_view.Bold -> A.(st bold)
+  | Transcript_view.Inline_code ->
+      if no_color then A.(st bold) else A.(fg lightyellow)
+  | Transcript_view.Link ->
+      if no_color then A.(st underline)
+      else A.(fg lightblue ++ st underline)
 
 let transcript_prefix style continuation =
   match style with
@@ -269,6 +288,9 @@ let transcript_prefix style continuation =
   | Transcript_view.Code -> "    "
   | Transcript_view.Quote -> if continuation then "    " else "  › "
   | Transcript_view.List_item -> if continuation then "    " else "  • "
+  | Transcript_view.Table_header
+  | Transcript_view.Table_row
+  | Transcript_view.Table_separator -> "  "
   | _ -> "  "
 
 let styled_visual cols (visual : Transcript_view.visual) =
@@ -276,16 +298,45 @@ let styled_visual cols (visual : Transcript_view.visual) =
   let prefix = transcript_prefix row.style visual.continuation in
   let attr = style_attr row in
   let prefix = if cols <= I.width (I.string attr prefix) then "" else prefix in
-  I.hsnap ~align:`Left cols (I.string attr (prefix ^ visual.text))
+  let body = if Array.length visual.runs = 0 then
+    I.string attr visual.text
+    else I.hcat (Array.fold_right
+      (fun (run : Transcript_view.inline_run) images ->
+        I.string A.(attr ++ inline_attr run.style) run.content :: images)
+      visual.runs []) in
+  I.hsnap ~align:`Left cols I.(string attr prefix <|> body)
 
 let styled_line width attr text =
   I.hsnap ~align:`Left width (I.string attr text)
-let activity_status ~state ~elapsed =
-  let elapsed = max 0 elapsed in
-  let duration = if elapsed < 60 then Printf.sprintf "%ds" elapsed
-    else Printf.sprintf "%dm%02ds" (elapsed / 60) (elapsed mod 60) in
-  let spinner = [| "◐"; "◓"; "◑"; "◒" |].(elapsed mod 4) in
-  Printf.sprintf "%s %s · %s" spinner state duration
+
+let activity_frames = [| "◐"; "◓"; "◑"; "◒" |]
+let activity_tick = 0.125
+
+let activity_tick_delay elapsed =
+  let phase = mod_float (max 0. elapsed) activity_tick in
+  if phase = 0. then activity_tick else activity_tick -. phase
+
+let received_bytes_text bytes =
+  let bytes = max 0 bytes in
+  if bytes < 1024 then Printf.sprintf "%d B" bytes
+  else if bytes < 1024 * 1024 then
+    Printf.sprintf "%.1f KiB" (float bytes /. 1024.)
+  else Printf.sprintf "%.1f MiB" (float bytes /. (1024. *. 1024.))
+
+let activity_status ?received_bytes ?(width = max_int) ~state ~elapsed () =
+  let elapsed = max 0. elapsed in
+  let seconds = int_of_float elapsed in
+  let duration = if seconds < 60 then Printf.sprintf "%ds" seconds
+    else Printf.sprintf "%dm%02ds" (seconds / 60) (seconds mod 60) in
+  let frame = int_of_float (elapsed *. 8.) mod Array.length activity_frames in
+  let base = Printf.sprintf "%s %s · %s" activity_frames.(frame)
+    state duration in
+  match received_bytes with
+  | None -> base
+  | Some bytes ->
+      let progress = base ^ " · " ^ received_bytes_text bytes in
+      if measure_text progress <= width then progress else base
+
 
 let shorten_width width text =
   if width < 2 then "" else
@@ -478,10 +529,15 @@ let paint t =
     | None -> None
     | Some state ->
         let elapsed = match t.activity_started with
-          | Some since -> max 0 (int_of_float (Unix.gettimeofday () -. since))
-          | None -> 0 in
+          | Some since -> max 0. (Unix.gettimeofday () -. since)
+          | None -> 0. in
+        let received_bytes = match t.active_tool with
+          | Some progress when state = "Tool: " ^ progress.name ->
+              progress.received_bytes
+          | _ -> None in
         Some (styled_line cols warning
-          ("  " ^ activity_status ~state:(single_line state) ~elapsed)) in
+          ("  " ^ activity_status ~state:(single_line state) ~elapsed
+            ?received_bytes ~width:(max 0 (cols - 2)) ())) in
   let activity_rows = match activity_line with
     | None -> [||]
     | Some line -> [| line |] in
@@ -927,6 +983,7 @@ let create ?(keybinding_overrides = []) ~root ~model ~session () =
     previous = None; cursor_position = None;
     status = idle_status; activity = None;
     activity_started = None; usage_badge = None;
+    active_tool = None;
     pending_attachments = []; queue = 0;
     last_paint = 0.; paste = false; paste_buffer = Buffer.create 256;
     bindings; signals;
@@ -1005,11 +1062,13 @@ let set_session t session =
   paint t
 
 let set_activity t activity =
+  (match t.active_tool, activity with
+   | Some progress, Some state when state = "Tool: " ^ progress.name -> ()
+   | Some _, _ -> t.active_tool <- None
+   | None, _ -> ());
   if t.activity <> activity then (
-    (match t.activity, activity with
-     | None, Some _ -> t.activity_started <- Some (Unix.gettimeofday ())
-     | _, None -> t.activity_started <- None
-     | Some _, Some _ -> ());
+    let now = Unix.gettimeofday () in
+    t.activity_started <- Option.map (fun _ -> now) activity;
     t.activity <- activity;
     paint t)
 let set_usage t = function
@@ -1091,6 +1150,9 @@ let show_history t (messages : Pave.Protocol.message list) =
 let finish_live t =
   change_transcript t (fun () -> Transcript_view.finish t.transcript);
   Hashtbl.clear t.tool_groups;
+  t.active_tool <- None;
+  t.activity <- None;
+  t.activity_started <- None;
   t.status <- idle_status;
   paint t
 
@@ -1108,18 +1170,42 @@ let event t text =
   paint t
 
 let tool_started t call_id name =
+  let name = single_line name in
   change_transcript t (fun () ->
     Hashtbl.replace t.tool_groups call_id
       (Transcript_view.start_tool t.transcript name));
-  let activity = Some ("Tool: " ^ single_line name) in
-  if t.activity = activity then paint t else set_activity t activity
+  t.active_tool <- Some { call_id; name; received_bytes = None };
+  t.activity <- Some ("Tool: " ^ name);
+  t.activity_started <- Some (Unix.gettimeofday ());
+  paint t
 
-let tool_updated _t _call_id _name _received_bytes = ()
+let update_tool_progress active call_id name received_bytes =
+  match active with
+  | Some progress when progress.call_id = call_id && progress.name = name ->
+      let received_bytes = max 0 received_bytes in
+      let previous = Option.value ~default:0 progress.received_bytes in
+      progress.received_bytes <- Some (max previous received_bytes)
+  | _ -> ()
+
+let reset_tool_progress active call_id =
+  match active with
+  | Some progress when progress.call_id = call_id -> None
+  | _ -> active
+
+let tool_updated t call_id name received_bytes =
+  update_tool_progress t.active_tool call_id (single_line name) received_bytes
 
 let finish_tool ?(aborted = false) ?(is_error = false)
     t call_id name result =
   let group = Hashtbl.find_opt t.tool_groups call_id in
   Hashtbl.remove t.tool_groups call_id;
+  let finishing_active = match t.active_tool with
+    | Some progress -> progress.call_id = call_id
+    | None -> false in
+  t.active_tool <- reset_tool_progress t.active_tool call_id;
+  if finishing_active then (
+    t.activity <- None;
+    t.activity_started <- None);
   change_transcript t (fun () ->
     Transcript_view.tool_result ?group ~aborted ~is_error
       t.transcript name result);
@@ -1147,6 +1233,9 @@ let delta t chunk =
 let clear_live t =
   change_transcript t (fun () -> Transcript_view.rollback t.transcript);
   Hashtbl.clear t.tool_groups;
+  t.active_tool <- None;
+  t.activity <- None;
+  t.activity_started <- None;
   t.status <- idle_status;
   paint t
 
@@ -1190,8 +1279,7 @@ let rec next_input ?wake_fd t =
       let timeout = match t.activity_started with
         | None -> None
         | Some since ->
-            let elapsed = Unix.gettimeofday () -. since in
-            Some (max 0. (1. -. (elapsed -. floor elapsed))) in
+            Some (activity_tick_delay (Unix.gettimeofday () -. since)) in
       let wake_fds = match wake_fd with
         | None -> [t.ui_read_fd]
         | Some fd -> [t.ui_read_fd; fd] in

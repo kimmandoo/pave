@@ -171,6 +171,8 @@ let serve client step signal_write closed_write =
     | 29 -> assert (has_header "authorization: bearer mock-openai" headers);
         400, "application/json",
         {|{"error":{"type":"invalid_request_error","message":"bad request"}}|}
+    | 30 -> assert (has_header "authorization: bearer mock-openai" headers);
+        408, "application/json", {|{"error":{"message":"request timed out"}}|}
     | _ -> assert false
   in
   if step = 5 then (
@@ -365,14 +367,14 @@ let () =
     assert (reply.content = Some "Inspected.");
     (match Pave.Provider.complete openai [ system; user ] [] with
      | exception Pave.Provider.Provider_error message ->
-         assert (String.starts_with ~prefix:"provider rate limited" message);
+         assert (String.starts_with ~prefix:"Transport error: provider rate limited" message);
          assert (not (leaks_key message))
      | _ -> failwith "expected HTTP error");
     let emitted = ref false in
     (match Pave.Provider.complete ~on_text:(fun _ -> emitted := true)
       openai [ system; user ] [] with
      | exception Pave.Provider.Provider_error message ->
-         assert (String.starts_with ~prefix:"provider rate limited" message);
+         assert (String.starts_with ~prefix:"Transport error: provider rate limited" message);
          assert (not (leaks_key message))
      | _ -> failwith "expected streaming HTTP error");
     assert (not !emitted);
@@ -458,23 +460,24 @@ let () =
           assert (String.starts_with ~prefix:expected message);
           assert (not (leaks_key message))
       | _ -> failwith ("expected classified provider error: " ^ expected)) [
-        "provider authentication failed";
-        "provider permission denied";
-        "provider model or endpoint not found";
-        "provider request exceeds its context or size limit";
-        "provider rate limited";
-        "provider unavailable";
-        "provider context limit exceeded";
-        "invalid provider request" ];
+        "Authentication error: provider authentication failed";
+        "Authentication error: provider permission denied";
+        "Route error: provider model or route not found";
+        "Request error: provider request exceeds its context or size limit";
+        "Transport error: provider rate limited";
+        "Transport error: provider unavailable";
+        "Request error: provider context limit exceeded";
+        "Request error: invalid provider request";
+        "Transport error: provider request timed out" ];
     assert (Pave.Provider.curl_path = "/usr/bin/curl");
     assert (Array.to_list Pave.Provider.curl_environment = ["LANG=C"; "LC_ALL=C"]);
     assert (Pave.Provider.curl_timeout_message ~streaming:false
       ~response_body_seen:false =
-      "provider request timed out before a response was available");
+      "Transport error: provider request timed out before a response was available");
     assert (Pave.Provider.curl_timeout_message ~streaming:true
       ~response_body_seen:false =
-      "provider stream timed out before the first response data byte");
+      "Transport error: provider stream timed out before the first response data byte");
     assert (Pave.Provider.curl_timeout_message ~streaming:true
       ~response_body_seen:true =
-      "provider stream timed out after response data (stream idle or total request timeout)"));
+      "Transport error: provider stream timed out after response data (stream idle or total request timeout)"));
   print_endline "provider HTTP: ok"

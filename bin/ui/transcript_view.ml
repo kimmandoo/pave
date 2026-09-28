@@ -1,26 +1,37 @@
 (* UI-only transcript. History is supplied explicitly; these rows are never journaled. *)
 type kind = User | Assistant | Tool | Notice | Error | Approval
-type style = Heading | Text | Code | Quote | List_item | Subheading | Tool_state | Divider
+type style =
+  Heading | Text | Code | Quote | List_item | Subheading | Tool_state
+  | Divider | Table_header | Table_row | Table_separator
+type inline_style = Plain | Bold | Inline_code | Link
+type inline_run = { content : string; style : inline_style }
 
 type row = {
   kind : kind;
-  style : style;
+  mutable style : style;
   mutable text : string;
+  mutable runs : inline_run array;
   mutable provisional : bool;
   group : int;
   detail : bool;
   preview : bool;
 }
 
-(* The snapshot stores logical rows, never all their wrapped visual lines. *)
-type visual = { source : int; row : row; text : string; continuation : bool }
+type visual = {
+  source : int;
+  row : row;
+  text : string;
+  continuation : bool;
+  runs : inline_run array;
+}
+type wrapped_segment = { rendered : string; start_byte : int; end_byte : int }
 type entry = { source : int; row : row; start : int; length : int }
 type snapshot = {
   entries : entry array;
   total : int;
   columns : int;
   measure : string -> int;
-  mutable recent : (int * string array) option;
+  mutable recent : (int * wrapped_segment array) option;
 }
 
 type t = {
@@ -32,6 +43,7 @@ type t = {
   mutable live : string;
   mutable streaming : bool;
   mutable fenced : bool;
+  mutable table_active : bool;
   mutable revision : int;
   mutable cached : snapshot option;
   mutable dirty : int;
@@ -40,12 +52,12 @@ type t = {
 let max_rows = 10_000
 let max_line_bytes = 4096
 let max_tool_lines = 3000
-let blank = { kind = Notice; style = Text; text = ""; provisional = false;
-  group = 0; detail = false; preview = false }
+let blank = { kind = Notice; style = Text; text = ""; runs = [||];
+  provisional = false; group = 0; detail = false; preview = false }
 
 let create () = { rows = [||]; count = 0; next_group = 1;
   expanded = Hashtbl.create 32; pending_tool = None; live = "";
-  streaming = false; fenced = false; revision = 0;
+  streaming = false; fenced = false; table_active = false; revision = 0;
   cached = None; dirty = 0 }
 
 let sanitize text =
@@ -96,14 +108,128 @@ let add t row =
   t.count <- t.count + 1;
   t.revision <- t.revision + 1
 
+let plain_runs text =
+  if text = "" then [||] else [| { content = text; style = Plain } |]
+let set_text (row : row) text =
+  row.text <- text;
+  row.runs <- plain_runs text
+
+let inline_markdown text =
+  let length = String.length text in
+  let runs : inline_run list ref = ref [] and plain = Buffer.create length in
+  let push style text =
+    if text <> "" then
+      match !runs with
+      | previous :: rest when previous.style = style ->
+          runs := { content = previous.content ^ text; style } :: rest
+      | _ -> runs := { content = text; style } :: !runs in
+  let flush () =
+    if Buffer.length plain > 0 then (
+      push Plain (Buffer.contents plain);
+      Buffer.clear plain) in
+  let starts marker index =
+    let size = String.length marker in
+    index >= 0 && index + size <= length &&
+    (let rec equal offset =
+       offset = size ||
+       (text.[index + offset] = marker.[offset] && equal (offset + 1)) in
+     equal 0) in
+  let find marker start =
+    let size = String.length marker in
+    let rec loop index =
+      if index + size > length then None
+      else if starts marker index then Some index
+      else loop (index + 1) in
+    loop start in
+  let rec scan index =
+    if index >= length then flush ()
+    else if text.[index] = '\\' && index + 1 < length &&
+      String.contains "\\`*[]()|" text.[index + 1] then (
+      Buffer.add_char plain text.[index + 1];
+      scan (index + 2))
+    else if starts "**" index || starts "__" index then (
+      let marker = if text.[index] = '*' then "**" else "__" in
+      match find marker (index + 2) with
+      | Some close when close > index + 2 ->
+          flush ();
+          push Bold (String.sub text (index + 2) (close - index - 2));
+          scan (close + 2)
+      | _ -> Buffer.add_char plain text.[index]; scan (index + 1))
+    else if text.[index] = '`' then
+      (match find "`" (index + 1) with
+       | Some close when close > index + 1 ->
+           flush ();
+           push Inline_code (String.sub text (index + 1) (close - index - 1));
+           scan (close + 1)
+       | _ -> Buffer.add_char plain text.[index]; scan (index + 1))
+    else if text.[index] = '[' then
+      (match find "](" (index + 1) with
+       | Some middle ->
+           (match String.index_from_opt text (middle + 2) ')' with
+            | Some close when middle > index + 1 && close > middle + 2 ->
+                flush ();
+                push Link (String.sub text (index + 1) (middle - index - 1));
+                push Plain (" (" ^ String.sub text (middle + 2)
+                  (close - middle - 2) ^ ")");
+                scan (close + 1)
+            | _ -> Buffer.add_char plain text.[index]; scan (index + 1))
+       | None -> Buffer.add_char plain text.[index]; scan (index + 1))
+    else (
+      Buffer.add_char plain text.[index];
+      scan (index + 1)) in
+  scan 0;
+  let runs = Array.of_list (List.rev !runs) in
+  let visible = Buffer.create length in
+  Array.iter (fun (run : inline_run) ->
+    Buffer.add_string visible run.content) runs;
+  Buffer.contents visible, runs
+
+let table_cells text =
+  if not (String.contains text '|') then None
+  else
+    let cells = List.map String.trim (String.split_on_char '|' text) in
+    let cells = match cells with "" :: rest -> rest | _ -> cells in
+    let cells = match List.rev cells with "" :: rest -> List.rev rest
+      | _ -> cells in
+    if List.length cells >= 2 then Some cells else None
+
+let table_separator cells =
+  List.length cells >= 2 &&
+  List.for_all (fun cell ->
+    let dashes = ref 0 and valid = ref true in
+    String.iter (function
+      | '-' -> incr dashes
+      | ':' -> ()
+      | _ -> valid := false) cell;
+    !valid && !dashes >= 3) cells
+
+let table_row_text cells = String.concat " | " cells
+let table_rule cells =
+  String.concat "+" (List.map (fun cell ->
+    String.make (max 3 (String.length cell)) '-') cells)
+
+let set_row t index ~style ~markdown text =
+  let text = fit text in
+  let text, runs = if markdown then inline_markdown text
+    else text, plain_runs text in
+  let row = t.rows.(index) in
+  mark_dirty t index;
+  row.style <- style;
+  row.text <- text;
+  row.runs <- runs
+
 let add_line t ~kind ~group ~provisional ?(detail = false)
-    ?(preview = false) ?(style = Text) text =
-  add t { kind; style; text = fit text; provisional; group; detail; preview }
+    ?(preview = false) ?(markdown = false) ?(style = Text) text =
+  let text = fit text in
+  let text, runs = if markdown then inline_markdown text
+    else text, plain_runs text in
+  add t { kind; style; text; runs; provisional; group; detail; preview }
 
 let heading t ~kind ~group ~provisional text =
   if t.count > 0 && t.rows.(t.count - 1).style <> Divider then
     add_line t ~kind ~group ~provisional ~style:Divider "";
   t.fenced <- false;
+  t.table_active <- false;
   add_line t ~kind ~group ~provisional ~style:Heading text
 
 let content_line t ~kind ~group ~provisional ?(detail = false) line =
@@ -130,7 +256,41 @@ let content_line t ~kind ~group ~provisional ?(detail = false) line =
       String.starts_with ~prefix:"* " line then
       List_item, String.sub line 2 (String.length line - 2)
     else Text, line in
-  add_line t ~kind ~group ~provisional ~detail ~style line
+  if style <> Text then (
+    t.table_active <- false;
+    add_line t ~kind ~group ~provisional ~detail ~markdown:(style <> Code)
+      ~style line)
+  else
+    match table_cells line with
+    | Some cells when table_separator cells ->
+        let previous = if t.count = 0 then None else
+            Some (t.count - 1, t.rows.(t.count - 1)) in
+        (match previous with
+         | Some (index, row) when row.kind = kind && row.group = group &&
+             row.style = Text ->
+             (match table_cells row.text with
+              | Some header when List.length header = List.length cells ->
+                  set_row t index ~style:Table_header ~markdown:true
+                    (table_row_text header);
+                  t.table_active <- true;
+                  add_line t ~kind ~group ~provisional ~detail
+                    ~style:Table_separator (table_rule cells)
+              | _ ->
+                  t.table_active <- false;
+                  add_line t ~kind ~group ~provisional ~detail ~markdown:true
+                    line)
+         | _ when t.table_active ->
+             add_line t ~kind ~group ~provisional ~detail
+               ~style:Table_separator (table_rule cells)
+         | _ ->
+             t.table_active <- false;
+             add_line t ~kind ~group ~provisional ~detail ~markdown:true line)
+    | Some cells when t.table_active ->
+        add_line t ~kind ~group ~provisional ~detail ~markdown:true
+          ~style:Table_row (table_row_text cells)
+    | _ ->
+        t.table_active <- false;
+        add_line t ~kind ~group ~provisional ~detail ~markdown:true line
 
 let add_block t kind title text =
   let id = group t in
@@ -180,6 +340,7 @@ let tool_result ?group:existing ?(aborted = false) ?(is_error = false) t name re
     | None, _ -> start_tool t name in
   t.pending_tool <- None;
   t.fenced <- false;
+  t.table_active <- false;
   let failed = is_error || String.starts_with ~prefix:"Error:" result in
   let error = failed || aborted in
   let outcome = if aborted then "aborted" else if failed then "failed" else "completed" in
@@ -187,7 +348,7 @@ let tool_result ?group:existing ?(aborted = false) ?(is_error = false) t name re
     let row = t.rows.(i) in
     if row.group = id && row.kind = Tool && row.style = Heading then (
       mark_dirty t i;
-      row.text <- name ^ " · " ^ outcome)
+      set_text row (name ^ " · " ^ outcome))
   done;
   let length = String.fold_left (fun count char ->
     if char = '\n' then count + 1 else count) 1 result in
@@ -262,6 +423,7 @@ let finish t =
   flush_live t;
   t.streaming <- false;
   t.fenced <- false;
+  t.table_active <- false;
   for i = 0 to t.count - 1 do t.rows.(i).provisional <- false done;
   t.revision <- t.revision + 1
 
@@ -270,7 +432,7 @@ let interrupt_tool t name id =
     let row = t.rows.(i) in
     if row.group = id && row.kind = Tool && row.style = Heading then (
       mark_dirty t i;
-      row.text <- name ^ " · interrupted (outcome unknown)")
+      set_text row (name ^ " · interrupted (outcome unknown)"))
   done;
   t.revision <- t.revision + 1
 
@@ -283,6 +445,7 @@ let rollback t =
   | Some (name, id) -> interrupt_tool t name id);
   t.pending_tool <- None;
   t.fenced <- false;
+  t.table_active <- false;
   let kept = ref 0 in
   for i = 0 to t.count - 1 do
     if not t.rows.(i).provisional then (
@@ -300,6 +463,7 @@ let clear t =
   t.live <- "";
   t.streaming <- false;
   t.fenced <- false;
+  t.table_active <- false;
   Hashtbl.clear t.expanded;
   t.revision <- t.revision + 1
 
@@ -327,24 +491,30 @@ let toggle t ~first:_ ~last =
         let row = t.rows.(i) in
         if row.group = id && row.style = Tool_state &&
           String.ends_with ~suffix:" · details hidden" row.text then
-          row.text <- String.sub row.text 0
+          set_text row (String.sub row.text 0
             (String.length row.text - String.length " · details hidden") ^
-            " · details shown"
+            " · details shown")
         else if row.group = id && row.style = Tool_state &&
           String.ends_with ~suffix:" · details shown" row.text then
-          row.text <- String.sub row.text 0
+          set_text row (String.sub row.text 0
             (String.length row.text - String.length " · details shown") ^
-            " · details hidden"
+            " · details hidden")
       done;
       t.revision <- t.revision + 1;
       Some id
 
-let wrap_lines ~columns ~measure ~on_line text =
+let wrap_lines ~columns ~measure ~on_line ?on_range text =
   let columns = max 1 columns in
   let buffer = Buffer.create (min max_line_bytes columns) in
   let used = ref 0 and break_at = ref None in
-  let push () =
+  let line_start = ref 0 and source_end = ref 0 in
+  let notify range_end =
     on_line buffer;
+    Option.iter (fun emit ->
+      emit (Buffer.contents buffer) !line_start range_end) on_range;
+    line_start := range_end in
+  let push () =
+    notify !source_end;
     Buffer.clear buffer;
     used := 0;
     break_at := None in
@@ -355,15 +525,16 @@ let wrap_lines ~columns ~measure ~on_line text =
       used := !used + 1)
     else (
       Buffer.add_string buffer chunk;
-      used := !used + width) in
-  let split_at byte_count prefix_width =
+      used := !used + width);
+    source_end := !source_end + String.length chunk in
+  let split_at byte_count prefix_width prefix_end =
     let content = Buffer.contents buffer in
     let suffix_width = !used - prefix_width in
     let suffix_length = String.length content - byte_count in
     Buffer.clear buffer;
     Buffer.add_substring buffer content 0 byte_count;
     used := prefix_width;
-    on_line buffer;
+    notify prefix_end;
     Buffer.clear buffer;
     Buffer.add_substring buffer content byte_count suffix_length;
     used := suffix_width;
@@ -373,13 +544,13 @@ let wrap_lines ~columns ~measure ~on_line text =
       let width = max 0 (measure chunk) in
       if !used > 0 && !used + width > columns then
         (match !break_at with
-         | Some (byte_count, prefix_width)
+         | Some (byte_count, prefix_width, prefix_end)
            when byte_count < Buffer.length buffer ->
-             split_at byte_count prefix_width
+             split_at byte_count prefix_width prefix_end
          | _ -> push ());
       add_chunk chunk width;
       if chunk = " " || chunk = "\t" then
-        break_at := Some (Buffer.length buffer, !used))
+        break_at := Some (Buffer.length buffer, !used, !source_end))
     () text);
   push ()
 
@@ -389,10 +560,35 @@ let wrap ~columns ~measure text =
     segments := Buffer.contents buffer :: !segments) text;
   Array.of_list (List.rev !segments)
 
+let wrap_ranges ~columns ~measure text =
+  let segments = ref [] in
+  wrap_lines ~columns ~measure ~on_line:(fun _ -> ())
+    ~on_range:(fun text start_byte end_byte ->
+      segments := { rendered = text; start_byte; end_byte } :: !segments) text;
+  Array.of_list (List.rev !segments)
+
 let wrapped_count ~columns ~measure text =
   let count = ref 0 in
   wrap_lines ~columns ~measure ~on_line:(fun _ -> incr count) text;
   !count
+
+let visual_runs (row : row) (segment : wrapped_segment) =
+  let runs : inline_run list ref = ref [] in
+  let position = ref 0 and size = ref 0 in
+  Array.iter (fun (run : inline_run) ->
+    let start = max segment.start_byte !position in
+    let stop = min segment.end_byte (!position + String.length run.content) in
+    if start < stop then (
+      let text = String.sub run.content (start - !position) (stop - start) in
+      runs := { run with content = text } :: !runs;
+      size := !size + String.length text);
+    position := !position + String.length run.content) row.runs;
+  let runs = Array.of_list (List.rev !runs) in
+  if !size = String.length segment.rendered then runs
+  else
+    let style = if Array.length runs = 0 then Plain else runs.(0).style in
+    if segment.rendered = "" then [||]
+    else [| { content = segment.rendered; style } |]
 
 let snapshot t ~columns ~measure =
   let previous = match t.cached with
@@ -432,12 +628,15 @@ let snapshot t ~columns ~measure =
         let style =
           if String.starts_with ~prefix:"```" t.live || t.fenced then Code
           else if String.starts_with ~prefix:"# " t.live ||
-            String.starts_with ~prefix:"## " t.live then Subheading
+            String.starts_with ~prefix:"## " t.live ||
+            String.starts_with ~prefix:"### " t.live then Subheading
           else if String.starts_with ~prefix:"> " t.live then Quote
           else if String.starts_with ~prefix:"- " t.live ||
             String.starts_with ~prefix:"* " t.live then List_item
           else Text in
-        push t.count { kind = Assistant; style; text = t.live;
+        let text, runs = if style = Code then t.live, plain_runs t.live
+          else inline_markdown t.live in
+        push t.count { kind = Assistant; style; text; runs;
           provisional = true; group = t.next_group - 1; detail = false;
           preview = false });
       let suffix = Array.of_list (List.rev !entries) in
@@ -461,14 +660,14 @@ let visual_at layout position =
   let segments = match layout.recent with
     | Some (index, chunks) when index = !low -> chunks
     | _ ->
-        let chunks = wrap ~columns:layout.columns ~measure:layout.measure
+        let chunks = wrap_ranges ~columns:layout.columns ~measure:layout.measure
           entry.row.text in
         layout.recent <- Some (!low, chunks);
         chunks in
   let index = position - entry.start in
-  { source = entry.source; row = entry.row; text = segments.(index);
-    continuation = index > 0 }
-
+  let segment = segments.(index) in
+  { source = entry.source; row = entry.row; text = segment.rendered;
+    continuation = index > 0; runs = visual_runs entry.row segment }
 (* Convenience for focused tests and short transcripts. Tui uses snapshot
    directly and allocates only the viewport's visual rows. *)
 let layout t ~columns ~measure =

@@ -210,6 +210,6 @@ let () =
         | Error (Local.Http_error 302) -> ()
         | _ -> failwith "redirected local listing was followed");
         (match Provider.complete config [Protocol.user "lookup"] [] with
-        | exception Provider.Provider_error "HTTP 302" -> ()
+        | exception Provider.Provider_error "Provider error: HTTP 302" -> ()
         | _ -> failwith "redirected local completion was followed")) providers);
   print_endline "local Chat Completions and model discovery: ok"
