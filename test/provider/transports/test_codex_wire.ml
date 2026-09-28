@@ -143,4 +143,50 @@ let () =
       item "input_text" ["text", `String "describe"];
       item "input_image" ["image_url", `String "data:image/png;base64,aGVsbG8="]]]] in
   assert (encoded_input = expected_input);
+  let lite_listing = `Assoc ["models", `List [
+    `Assoc ["slug", `String "gpt-6-luna";
+      "use_responses_lite", `Bool true; "supported_in_api", `Bool true;
+      "default_reasoning_level", `String "medium"];
+    `Assoc ["slug", `String model; "use_responses_lite", `Bool false]]] in
+  let lite = Codex_wire.model_format ~model:"gpt-6-luna" lite_listing in
+  assert (lite = Codex_wire.Responses_lite (Some "medium"));
+  assert (Codex_wire.model_format ~model lite_listing = Codex_wire.Standard);
+  invalid (fun () -> ignore (Codex_wire.model_format
+    ~model:"not-in-this-account" lite_listing));
+  invalid (fun () -> ignore (Codex_wire.model_format
+    ~model:"gpt-6-luna" (`Assoc ["models", `List [
+      `Assoc ["slug", `String "gpt-6-luna";
+        "use_responses_lite", `Bool true; "supported_in_api", `Bool false]]])));
+  let lite_request = Codex_wire.request ~format:lite ~model:"gpt-6-luna"
+    [system "Be exact"; Protocol.user "Read the file"] [tool] in
+  assert (field "instructions" lite_request = `Null);
+  assert (field "tools" lite_request = `Null);
+  assert (field "reasoning" lite_request =
+    `Assoc ["effort", `String "medium"; "context", `String "all_turns"]);
+  assert (field "parallel_tool_calls" lite_request = `Bool false);
+  assert (field "input" lite_request = `List [
+    item "additional_tools" ["role", `String "developer"; "tools", `List [
+      item "namespace" ["name", `String "functions";
+        "description", `String ""; "tools", `List [
+          item "function" ["name", `String "read_file";
+            "parameters", `Assoc ["type", `String "object"; "properties", `Assoc []];
+            "description", `String "Read a file"]]]]];
+    `Assoc ["role", `String "developer"; "content", `List [
+      item "input_text" ["text", `String "Be exact"]]];
+    `Assoc ["role", `String "user"; "content", `List [
+      item "input_text" ["text", `String "Read the file"]]]]);
+  let lite_answer = Codex_wire.parse_completion ~model:"gpt-6-luna"
+    (completed "gpt-6-luna" [
+      item "function_call" ["id", `String "fc_1";
+        "call_id", `String "call_1"; "namespace", `String "functions";
+        "name", `String "read_file";
+        "arguments", `String {|{"path":"README.md"}|}]]) in
+  let lite_replay = Codex_wire.request ~format:lite ~model:"gpt-6-luna"
+    [Protocol.user "Read"; lite_answer; result; Protocol.user "Summarize"] [tool] in
+  (match field "input" lite_replay with
+  | `List [ _; _; call; output; _ ] ->
+      assert (field "namespace" call = `String "functions");
+      assert (field "call_id" call = `String "call_1");
+      assert (field "call_id" output = `String "call_1")
+  | _ -> failwith "Codex Lite replay dropped a tool call");
   print_endline "Codex wire: ok"

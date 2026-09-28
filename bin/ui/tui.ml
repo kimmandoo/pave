@@ -310,11 +310,17 @@ let styled_line width attr text =
   I.hsnap ~align:`Left width (I.string attr text)
 
 let activity_frames = [| "◐"; "◓"; "◑"; "◒" |]
-let activity_tick = 0.125
+let activity_tick = 1.
 
 let activity_tick_delay elapsed =
   let phase = mod_float (max 0. elapsed) activity_tick in
   if phase = 0. then activity_tick else activity_tick -. phase
+let draft_paste_capacity editor =
+  let selected = match Pave.Composer.selection editor with
+    | Some (start, stop) -> stop - start
+    | None -> 0 in
+  max 0 (16_384 - String.length (Pave.Composer.text editor) + selected)
+
 let activity_started_at started activity now =
   match activity with
   | None -> None
@@ -328,14 +334,35 @@ let received_bytes_text bytes =
     Printf.sprintf "%.1f KiB" (float bytes /. 1024.)
   else Printf.sprintf "%.1f MiB" (float bytes /. (1024. *. 1024.))
 
+let shorten_width width text =
+  if width < 2 then "" else
+  let measure = measure_text in
+  if measure text <= width then text
+  else (Transcript_view.wrap ~columns:(width - 1) ~measure text).(0) ^ "…"
+
+let shorten_activity width text =
+  if measure_text text <= width then text
+  else if width < 2 then "" else
+  let boundaries = Pave.Composer.segment text in
+  let rec fit index used =
+    if index >= Array.length boundaries then boundaries.(index - 1)
+    else
+      let start = boundaries.(index - 1) and stop = boundaries.(index) in
+      let chunk = String.sub text start (stop - start) in
+      let next = used + measure_text chunk in
+      if next >= width then start else fit (index + 1) next in
+  String.sub text 0 (fit 1 0) ^ "…"
+
 let activity_status ?received_bytes ?(width = max_int) ~state ~elapsed () =
   let elapsed = max 0. elapsed in
   let seconds = int_of_float elapsed in
   let duration = if seconds < 60 then Printf.sprintf "%ds" seconds
     else Printf.sprintf "%dm%02ds" (seconds / 60) (seconds mod 60) in
-  let frame = int_of_float (elapsed *. 8.) mod Array.length activity_frames in
-  let base = Printf.sprintf "%s %s · %s" activity_frames.(frame)
-    state duration in
+  let frame = activity_frames.(seconds mod Array.length activity_frames) in
+  let suffix = " · " ^ duration in
+  let available = max 0 (width - measure_text frame - 1 - measure_text suffix) in
+  let state = shorten_activity available state in
+  let base = frame ^ " " ^ state ^ suffix in
   match received_bytes with
   | None -> base
   | Some bytes ->
@@ -343,11 +370,6 @@ let activity_status ?received_bytes ?(width = max_int) ~state ~elapsed () =
       if measure_text progress <= width then progress else base
 
 
-let shorten_width width text =
-  if width < 2 then "" else
-  let measure = measure_text in
-  if measure text <= width then text
-  else (Transcript_view.wrap ~columns:(width - 1) ~measure text).(0) ^ "…"
 let wrap_chooser_text ~columns ~max_rows text =
   if max_rows <= 0 then [||]
   else
@@ -530,7 +552,7 @@ let paint t =
   if hint_page > 0 && t.hint_selected >= t.hint_offset + hint_page then
     t.hint_offset <- t.hint_selected - hint_page + 1;
   t.hint_offset <- min t.hint_offset (max 0 (hint_count - hint_page));
-  let activity_line = match t.activity with
+  let activity_text = match t.activity with
     | None -> None
     | Some state ->
         let elapsed = match t.activity_started with
@@ -540,12 +562,11 @@ let paint t =
           | Some progress when state = "Tool: " ^ progress.name ->
               progress.received_bytes
           | _ -> None in
-        Some (styled_line cols warning
-          ("  " ^ activity_status ~state:(single_line state) ~elapsed
-            ?received_bytes ~width:(max 0 (cols - 2)) ())) in
-  let activity_rows = match activity_line with
+        Some ("  " ^ activity_status ~state:(single_line state) ~elapsed
+          ?received_bytes ~width:(max 0 (cols - 2)) ()) in
+  let activity_rows = match activity_text with
     | None -> [||]
-    | Some line -> [| line |] in
+    | Some text -> [| styled_line cols warning text |] in
   let queued = if t.queue = 0 then "" else
     Printf.sprintf "  ·  %d queued" t.queue in
   let usage = match t.activity, t.usage_badge with
@@ -856,6 +877,12 @@ let paint t =
           let choice = List.nth hints (t.hint_offset + index - 1) in
           hint_row cols (t.hint_offset + index - 1 = t.hint_selected) choice);
     activity_rows; [|footer|]; prompt_rows ] in
+  let activity_row =
+    if Array.length activity_rows = 0 then -1
+    else if rows >= 6 then 3 + body_height
+    else
+      let candidates = Array.length activity_rows + 1 + Array.length prompt_rows in
+      if candidates > rows then -1 else rows - candidates in
   let output = Buffer.create 512 in
   let dirty = ref false in
   for row = 0 to rows - 1 do
@@ -865,8 +892,16 @@ let paint t =
       | _ -> true) then (
       if not !dirty then Buffer.add_string output "\027[?25l";
       dirty := true;
-      Buffer.add_string output (Printf.sprintf "\027[%d;1H\027[0m\027[2K" (row + 1));
-      Render.to_buffer output Cap.ansi (0, 0) (cols, 1) screen.(row))
+      (match activity_text with
+      | Some text when row = activity_row ->
+          let text = shorten_width cols text in
+          Buffer.add_string output (Printf.sprintf "\027[%d;1H\027[0m%s%s\027[0m"
+            (row + 1) (if no_color then "" else "\027[93m") text);
+          if measure_text text < cols then Buffer.add_string output "\027[K"
+      | _ ->
+          Buffer.add_string output (Printf.sprintf "\027[%d;1H\027[0m\027[2K"
+            (row + 1));
+          Render.to_buffer output Cap.ansi (0, 0) (cols, 1) screen.(row)))
   done;
   t.previous <- Some screen;
   let y = if rows < 6 then rows - 1
@@ -1329,15 +1364,20 @@ let read ?wake_fd ?on_wake ?on_interrupt ?on_dequeue ?on_completion t =
     max 1 (if cols <= prefix_width then cols else cols - prefix_width) in
   let changed () = repaint_after_key t in
   let paste_buffer = t.paste_buffer in
+  let paste_truncated = ref false in
   let paste_limit () = match Pave.Composer.search_query t.editor with
-    | None -> 16_384 - String.length (Pave.Composer.text t.editor)
-    | Some query -> 512 - String.length query in
+    | None -> draft_paste_capacity t.editor
+    | Some query -> max 0 (512 - String.length query) in
   let paste_append value =
-    if Buffer.length paste_buffer + String.length value <= paste_limit () then
-      Buffer.add_string paste_buffer value in
+    if not !paste_truncated then (
+      if Buffer.length paste_buffer + String.length value <= paste_limit () then
+        Buffer.add_string paste_buffer value
+      else paste_truncated := true) in
   let paste_append_char char =
-    if Buffer.length paste_buffer < paste_limit () then
-      Buffer.add_char paste_buffer char in
+    if not !paste_truncated then (
+      if Buffer.length paste_buffer < paste_limit () then
+        Buffer.add_char paste_buffer char
+      else paste_truncated := true) in
   let paste_finish () =
     t.paste <- false;
     let value = Buffer.contents paste_buffer in
@@ -1350,6 +1390,8 @@ let read ?wake_fd ?on_wake ?on_interrupt ?on_dequeue ?on_completion t =
     | Some _ -> Pave.Composer.search_insert t.editor value);
     t.hint_draft <- Pave.Composer.text t.editor;
     dismiss_hint t;
+    if !paste_truncated then
+      t.status <- "Paste truncated at input limit";
     paint t in
   let submit follow_up =
     match Pave.Composer.submit t.editor with
@@ -1371,6 +1413,7 @@ let read ?wake_fd ?on_wake ?on_interrupt ?on_dequeue ?on_completion t =
     | `Paste `Start ->
         t.paste <- true;
         Buffer.clear paste_buffer;
+        paste_truncated := false;
         paint t; loop ()
     | `Paste `End when t.paste ->
         paste_finish (); loop ()

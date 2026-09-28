@@ -1516,6 +1516,44 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage
         | _ -> raise (Provider_error "Codex OAuth account ID unavailable") in
       reject_controls "account ID" account_id;
       reject_controls "model" config.model;
+      let model_format =
+        let rec from_listing = function
+          | [] -> raise (Provider_error
+              "Codex account model listing unavailable; cannot determine request format")
+          | url :: rest ->
+              check_cancel cancel;
+              with_temp_file (fun response_path output ->
+                close_out output;
+                let option name value = name ^ " = " ^ quote_config value ^ "\n" in
+                let configuration = "silent\n" ^
+                  option "url" url ^ option "request" "GET" ^
+                  option "output" response_path ^
+                  option "write-out" "%{http_code}" ^
+                  option "connect-timeout" "10" ^
+                  option "max-time" "30" ^
+                  option "max-filesize" "1048576" ^
+                  option "proto" "=https" ^
+                  option "proxy" "" ^
+                  option "header" ("Authorization: Bearer " ^ api_key) ^
+                  option "header" ("chatgpt-account-id: " ^ account_id) ^
+                  option "header" "OpenAI-Beta: responses=experimental" ^
+                  option "header" "originator: pave" ^
+                  option "header" ("version: " ^ Codex_wire.client_version) ^
+                  option "header" "Accept: application/json" in
+                let status = run_curl ?cancel configuration in
+                check_cancel cancel;
+                let code = try int_of_string status with Failure _ ->
+                  raise (Provider_error "invalid Codex model listing HTTP status") in
+                if code = 404 && rest <> [] then from_listing rest
+                else if code < 200 || code >= 300 then
+                  raise (Provider_error
+                    ("Codex account model listing: " ^ http_error_reason api_key code `Null))
+                else
+                  let listing = try Yojson.Basic.from_string (read_file response_path)
+                    with Yojson.Json_error _ ->
+                      raise (Provider_error "invalid Codex account model listing JSON") in
+                  parse (fun () -> Codex_wire.model_format ~model:config.model listing)) in
+        from_listing Codex_wire.models_urls in
       let headers = [
         "Authorization: Bearer " ^ api_key;
         "chatgpt-account-id: " ^ account_id;
@@ -1524,16 +1562,20 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage
         "version: " ^ Codex_wire.client_version;
         "x-codex-routing-hint: model=" ^ config.model;
         "Accept: text/event-stream" ] @
+        (match model_format with
+         | Codex_wire.Standard -> []
+         | Codex_wire.Responses_lite _ ->
+             ["x-openai-internal-codex-responses-lite: true"]) @
         (match credential.residency with
          | None -> []
          | Some residency ->
              reject_controls "Codex residency" residency;
              [ "x-openai-internal-codex-residency: " ^ residency ]) in
       let body = parse (fun () ->
-        Codex_wire.request ~model:config.model messages tools) in
+        Codex_wire.request ~format:model_format ~model:config.model messages tools) in
       let emit = match on_text with Some emit -> emit | None -> fun _ -> () in
       let stream = Codex_stream.create ~model:config.model ~on_text:emit in
-      parse (fun () ->
+      (try parse (fun () ->
         post_stream ?cancel ~endpoint:config.endpoint ~headers ~secret:api_key
           body ~on_chunk:(Codex_stream.feed stream)
           ~is_done:(fun () -> Codex_stream.is_done stream)
@@ -1545,6 +1587,8 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage
              check_cancel cancel;
              Option.iter report (Codex_stream.usage stream));
         reply)
+       with Provider_error reason ->
+         raise (Provider_error (redact account_id reason)))
   in
   check_cancel cancel;
   result

@@ -3,6 +3,44 @@ open Protocol
 let client_version = "0.155.1"
 
 let invalid detail = raise (Invalid_response ("invalid Codex response: " ^ detail))
+let models_urls = List.map (fun path ->
+  "https://chatgpt.com/backend-api" ^ path ^ "?client_version=" ^
+    client_version) ["/codex/models"; "/models"]
+
+type request_format = Standard | Responses_lite of string option
+
+let model_format ~model json =
+  let rows = match member "models" json with
+    | `Null -> member "data" json
+    | rows -> rows in
+  let rows = match rows with
+    | `List rows -> rows
+    | _ -> invalid "model listing has no models array" in
+  let matching = List.filter (fun row ->
+    member "slug" row = `String model ||
+    (member "slug" row = `Null && member "id" row = `String model)) rows in
+  match matching with
+  | [row] ->
+      (match member "visibility" row with
+      | `String ("hide" | "hidden") ->
+          invalid "model is hidden from the account listing"
+      | _ -> ());
+      (match member "supported_in_api" row with
+      | `Bool false -> invalid "model is not supported for API requests"
+      | _ -> ());
+      (match member "use_responses_lite" row with
+      | `Bool true ->
+          let effort = match member "default_reasoning_level" row with
+            | `Null -> None
+            | `String ("none" | "minimal" | "low" | "medium" | "high" |
+                "xhigh" | "max" | "ultra" as value) -> Some value
+            | _ -> invalid "invalid default reasoning level in account listing" in
+          Responses_lite effort
+      | `Bool false | `Null -> Standard
+      | _ -> invalid "invalid model request format in account listing")
+  | [] -> invalid "model is not present in the account listing"
+  | _ -> invalid "duplicate model in account listing"
+
 
 let required_string key json = match member key json with
   | `String text when text <> "" -> text
@@ -162,7 +200,7 @@ let replay_items ~model (msg : message) state =
     | `Assoc fields -> `Assoc (List.remove_assoc "id" fields)
     | _ -> invalid "invalid opaque Codex output item") items
 
-let request ~model messages tools =
+let request ?(format = Standard) ~model messages tools =
   if model = "" then invalid_arg "empty Codex model";
   let input = ref [] and pending = ref [] and instructions = ref None
   and seen_input = ref false in
@@ -225,9 +263,13 @@ let request ~model messages tools =
             | None when calls = [] -> invalid "empty assistant message"
             | None -> ());
             List.iter (fun ((call : tool_call), id) ->
-              emit (`Assoc ["type", `String "function_call"; "call_id", `String id;
-                "name", `String call.name;
-                "arguments", `String (Yojson.Basic.to_string call.arguments)])) calls);
+              let fields = ["type", `String "function_call";
+                "call_id", `String id; "name", `String call.name;
+                "arguments", `String (Yojson.Basic.to_string call.arguments)] in
+              let fields = match format with
+                | Standard -> fields
+                | Responses_lite _ -> fields @ ["namespace", `String "functions"] in
+              emit (`Assoc fields)) calls);
         pending := List.map (fun ((call : tool_call), id) -> call.id, id) calls
     | "tool" ->
         (match msg.content, msg.tool_call_id, msg.tool_calls with
@@ -241,11 +283,31 @@ let request ~model messages tools =
         | _ -> invalid "unpaired or malformed tool result")
     | _ -> invalid "unsupported transcript role") messages;
   if !pending <> [] then invalid "missing tool results";
-  let fields = ["model", `String model; "input", `List (List.rev !input);
+  let input = List.rev !input in
+  let input, fields = match format with
+    | Standard ->
+        let fields = match !instructions with
+          | None -> []
+          | Some text -> ["instructions", `String text] in
+        let fields = if tools = [] then fields else
+          fields @ ["tools", `List (List.map tool_schema tools)] in
+        input, fields
+    | Responses_lite effort ->
+        let tools = List.map tool_schema tools in
+        let tools = if tools = [] then [] else
+          [`Assoc ["type", `String "namespace"; "name", `String "functions";
+            "description", `String ""; "tools", `List tools]] in
+        let additional_tools = `Assoc ["type", `String "additional_tools";
+          "role", `String "developer"; "tools", `List tools] in
+        let instructions = match !instructions with
+          | None -> []
+          | Some text -> [text_item "developer" text] in
+        additional_tools :: (instructions @ input),
+        ["reasoning", `Assoc ((match effort with
+           | None -> []
+           | Some level -> ["effort", `String level]) @
+          ["context", `String "all_turns"]);
+         "tool_choice", `String "auto"; "parallel_tool_calls", `Bool false] in
+  `Assoc (["model", `String model; "input", `List input;
     "store", `Bool false; "stream", `Bool true;
-    "include", `List [`String "reasoning.encrypted_content"]] in
-  let fields = match !instructions with
-    | None -> fields | Some text -> fields @ ["instructions", `String text] in
-  let fields = if tools = [] then fields else
-    fields @ ["tools", `List (List.map tool_schema tools)] in
-  `Assoc fields
+    "include", `List [`String "reasoning.encrypted_content"]] @ fields)

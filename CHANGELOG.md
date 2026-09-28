@@ -2,6 +2,10 @@
 
 ## 2026-09-28
 
+- fix(provider): adapted authenticated Codex inference to each account-listed model's Standard or Responses Lite wire format, preserved native tool replay and saved history, and reported unknown formats before posting instead of guessing.
+- fix(provider): normalized nullable Devin tool schemas only for Gemini-assigned backends and retained sanitized Connect failure codes and trace IDs without treating failed partial streams as success.
+- fix(tui): reduced activity animation to a stable one-second cadence, removed pre-text row clearing even in three-row terminals, preserved elapsed time when narrow phase labels were clipped, and accepted selection-replacing bracketed paste at the draft byte limit with visible truncation feedback.
+- test(tui): verified selected and oversized UTF-8 paste, pasted-command nonexecution, progress redraw bytes, narrow resize, cancellation and unsent-draft preservation in isolated real PTYs; exercised Codex and Devin native two-turn tool fixtures without live vendor credentials.
 - fix(tui): kept active-turn elapsed time continuous across model/tool phases and after tool settlement, while still clearing it at completion, cancellation and failure.
 - test(tui): reproduced the phase reset in a real local PTY, then verified monotonic Thinking→Tool→Thinking elapsed time, 48 KiB byte progress through a 52×14 resize, cross-provider usage identity, and cancellation rollback with an unsent draft. No vendor credentials or external provider traffic were used.
 - release(distribution): published v0.1.57 from `8c885c4` after main CI `36373040904` and release workflow `36373587041` passed all four native macOS/Linux arm64/x86-64 test, packaging and executable-smoke jobs. The public non-draft release contained four platform archives and `SHA256SUMS`; downloaded checksums passed and every archive contained exactly `pave`, `LICENSE` and `THIRD_PARTY_NOTICES`. Extracted Darwin arm64 linked only `libSystem` and passed `--help`, `--providers` and `task --help`. Release: https://github.com/kimmandoo/pave/releases/tag/v0.1.57.

@@ -1,5 +1,26 @@
 # Troubleshooting
 
+### [2026-09-28] Codex account model rejected a standard Responses request
+
+- **Context / Symptom:** Selecting `openai-codex@responses#.../gpt-6-luna` produced `Request error: invalid provider request (HTTP 400)`. The old request path used standard top-level Responses tools for every Codex model.
+- **Root Cause:** The official Codex model metadata marked `gpt-6-luna` with `use_responses_lite: true`. That protocol uses a developer `additional_tools` namespace, developer instructions, all-turn reasoning context and a Lite request header rather than standard Responses tools.
+- **Solution:** Read the exact signed-in account's model format through a bounded pinned HTTPS listing before inference and serialized either Standard or Lite accordingly. Kept native tool replay and existing saved state compatible; rejected absent/unknown formats before posting. An isolated two-turn fake-HTTPS fixture verified account A's Lite request, account B isolation and a redacted HTTP 400 with its diagnostic.
+- **Prevention / Reference:** Inspect `use_responses_lite` in the authenticated model listing rather than guessing from a model name. A fake account listing cannot establish live entitlement; upstream 400 responses may still indicate access or provider failures.
+
+### [2026-09-28] Devin Gemini router rejected nullable tool schemas
+
+- **Context / Symptom:** Devin Connect returned `invalid_argument: an internal error occurred (trace ID: …)` after a model turn. A router assignment can send otherwise valid Pave tool schemas containing `type: ["string","null"]` to a Gemini backend.
+- **Root Cause:** The upstream Devin Gemini tool adapter rejects JSON Schema `type` arrays for nullable tool parameters and reports an opaque Connect error instead of a field-specific validation message. A server-side internal error without tools cannot be attributed to this schema mismatch.
+- **Solution:** Normalized nullable type unions to a single type plus `nullable: true` only for actual Gemini assigned model IDs; retained required fields, non-Gemini schemas and signed replay. Sanitized Connect error diagnostics while keeping the failure and trace ID visible. A routed two-turn fixture verified the transmitted schema, tool result and error trailer.
+- **Prevention / Reference:** Use the router-assigned backend identity for schema compatibility, not the selected router label; do not suppress Connect failures or claim all vendor-side traces are client errors.
+
+### [2026-09-28] Active row flickered and full draft rejected selected paste
+
+- **Context / Symptom:** A delayed model PTY painted eighteen spinner frames and eighty-one full-row erasures in 2.2 seconds. With a 16,384-byte draft, bracket-pasting a replacement over selected text silently dropped it.
+- **Root Cause:** The 125 ms animation cadence redrew the activity row before elapsed seconds changed; both the TUI row clear and Notty's leading erase blanked it before each paint. Paste capacity subtracted the entire draft without crediting bytes that the selected replacement removed.
+- **Solution:** Advanced activity at most once per second, rendered it before clearing only trailing cells even in a three-row terminal, and clipped long phase names at grapheme boundaries to retain the timer. Computed paste capacity after removing selected bytes and reported truncation on excess. Real PTYs displayed consecutive `Thinking · 0s/1s/2s` frames with zero pre-text row erasures, accepted the selected replacement, displayed the truncation notice, completed the local SSE answer, and retained an unsent draft across 100×24→30×3→70×18 resize and cancellation.
+- **Prevention / Reference:** Inspect emitted ANSI bytes as well as the logical row diff; optimized renderers can insert an implicit pre-text erase. Exercise bracketed paste near the byte limit through a real terminal, including an active selection.
+
 ### [2026-09-28] NVM-installed JavaScript runtime was not found
 
 - **Context / Symptom:** The persistent-evaluation regression reported that Node.js was unavailable even though Node 24 was installed in the active `NVM_BIN` directory.

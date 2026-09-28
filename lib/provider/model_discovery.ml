@@ -112,9 +112,7 @@ let nanogpt_url = "https://api.nano-gpt.com/api/v1/models?detailed=true"
 let abliteration_url = "https://api.abliteration.ai/v1/models"
 let gmi_cloud_url = "https://api.gmi-serving.com/v1/models"
 let moonshot_url = "https://api.moonshot.ai/v1/models"
-let codex_urls = List.map (fun path ->
-  "https://chatgpt.com/backend-api" ^ path ^ "?client_version=" ^
-    Codex_wire.client_version) ["/codex/models"; "/models"]
+let codex_urls = Codex_wire.models_urls
 let max_response_bytes = 1_048_576
 let response_limit url =
   if url = openrouter_url || url = huggingface_url || url = nanogpt_url ||

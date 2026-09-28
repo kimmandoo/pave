@@ -7,13 +7,17 @@ let expect_error predicate = function
 let key = "account-session-token"
 let model_uid = "live-discovered-model-uid"
 let router_uid = "account-router-uid"
+let assigned_uid = "MODEL_GOOGLE_GEMINI_3_7_FLASH"
 let cascade = D.cascade_id [P.user "What is six times seven?"]
 let call_id = "call_devin_1"
 let tool = `Assoc ["type", `String "function"; "function", `Assoc [
   "name", `String "multiply_seven";
   "description", `String "Multiply a number by seven";
   "parameters", `Assoc ["type", `String "object";
-    "properties", `Assoc ["number", `Assoc ["type", `String "integer"]]]]]
+    "properties", `Assoc [
+      "number", `Assoc ["type", `String "integer"];
+      "hint", `Assoc ["type", `List [`String "string"; `String "null"]]];
+    "required", `List [`String "number"]]]]
 let lookup field fs = D.text field fs
 let bytes field fs = match D.entries field fs with
   | `Bytes bytes :: _ -> bytes | _ -> fail ("missing protobuf field " ^ string_of_int field)
@@ -140,7 +144,7 @@ let () =
       assert (lookup 3 (object_field 5 fs) = "What is six times seven?");
       on_chunk (response (fun b -> D.bytes b 1 (response (fun assign ->
         D.string assign 1 "signed-router-assignment";
-        D.string assign 2 model_uid)))); Ok 200)
+        D.string assign 2 assigned_uid)))); Ok 200)
     else if url = D.chat_url then (
       assert (List.mem ("Connect-Content-Encoding", "gzip") headers);
       assert (Char.code body.[0] = 1);
@@ -148,7 +152,7 @@ let () =
       assert (length > 0);
       let fs = D.fields (D.gzip ~decode:true (String.sub body 5 length)) in
       assert_metadata ~jwt:"jwt-from-account" ~discovery:false fs;
-      assert (lookup 21 fs = model_uid);
+      assert (lookup 21 fs = assigned_uid);
       assert (lookup 16 fs = cascade);
       assert (D.integer 7 fs = 5);
       assert (D.integer 2 (object_field 8 fs) = 4096);
@@ -156,6 +160,11 @@ let () =
       assert (lookup 26 fs = "signed-router-assignment");
       assert (lookup 1 (object_field 12 fs) = "auto");
       assert (lookup 1 (object_field 10 fs) = "multiply_seven");
+      let schema = Yojson.Basic.from_string (lookup 3 (object_field 10 fs)) in
+      let hint = P.member "hint" (P.member "properties" schema) in
+      assert (P.member "type" hint = `String "string");
+      assert (P.member "nullable" hint = `Bool true);
+      assert (P.member "required" schema = `List [`String "number"]);
       let prompts = D.submessages 3 fs in
       let value = if !turn = 1 then (
         assert (List.length prompts = 1);
@@ -191,7 +200,7 @@ let () =
     | Ok (message, _) -> message | Error _ -> fail "first turn failed" in
   assert (first.tool_calls = [{P.id = call_id; name = "multiply_seven";
     arguments = `Assoc ["number", `Int 6]}]);
-  assert (P.member "actual_model" (Option.get first.provider_state) = `String model_uid);
+  assert (P.member "actual_model" (Option.get first.provider_state) = `String assigned_uid);
   assert (P.member "cascade_id" (Option.get first.provider_state) = `String cascade);
   let continued = messages @ [first; P.tool_result call_id {|{"product":42}|}] in
   let resumed_cascade = D.cascade_id continued in
@@ -213,6 +222,14 @@ let () =
   assert (second.content = Some "Six times seven is 42.");
   assert (D.cascade_id (continued @ [second]) = cascade);
   assert (!turn = 2);
+  let plain = D.request ~api_key:key ~jwt:"jwt-from-account"
+    ~model:model_uid ~selected_model:model_uid ~cascade_id:cascade messages [tool] in
+  let plain_schema = Yojson.Basic.from_string
+    (lookup 3 (object_field 10 (D.fields plain))) in
+  assert (P.member "type" (P.member "hint" (P.member "properties" plain_schema)) =
+    `List [`String "string"; `String "null"]);
+  assert (P.member "nullable" (P.member "hint" (P.member "properties" plain_schema)) =
+    `Null);
   let image_attempts = ref 0 in
   let image_http ~url:_ ~headers:_ ~body:_ ~on_chunk:_ =
     incr image_attempts; Ok 200 in
@@ -256,7 +273,26 @@ let () =
      "https://server.codeium.com@evil.example"];
   expect_error (function D.Invalid_response _ -> true | _ -> false)
     (D.protect (fun () -> Ok (D.parse_stream ("\001\255\255\255\255"))));
-  let trailer_error = D.frame 2 {|{"error":{"code":"invalid_argument","message":"rejected"}}|} in
-  expect_error (function D.Invalid_response _ -> true | _ -> false)
-    (D.protect (fun () -> Ok (D.parse_stream trailer_error)));
+  let trailer_error = D.frame 2
+    {|{"error":{"code":"invalid_argument","message":"an internal error occurred (trace ID: 800c570aa8eb6576879b5fb52211a521) private-token","details":[{"debug":"private-token"}]}}|} in
+  let error_steps = ref [] in
+  let error_http ~url ~headers:_ ~body:_ ~on_chunk =
+    error_steps := url :: !error_steps;
+    if url = D.auth_url then
+      on_chunk (response (fun b -> D.string b 1 "jwt-from-account"))
+    else if url = D.chat_url then
+      on_chunk (D.frame 0 (response (fun b -> D.string b 3 "partial answer")) ^
+        trailer_error)
+    else fail "trailer error escaped pinned auth/chat endpoints";
+    Ok 200 in
+  expect_error (function D.Invalid_response message ->
+    message = "Devin Connect error invalid_argument: an internal error occurred" ^
+      " (trace ID: 800c570aa8eb6576879b5fb52211a521)" | _ -> false)
+    (D.complete ~http:error_http ~api_key:key ~model:model_uid
+      ~cascade_id:cascade ~router:false messages []);
+  assert (List.rev !error_steps = [D.auth_url; D.chat_url]);
+  expect_error (function D.Invalid_response message ->
+    message = "Devin Connect error unknown" | _ -> false)
+    (D.protect (fun () -> Ok (D.parse_stream (D.frame 2
+      {|{"error":{"code":"invalid_argument\nprivate-token","message":"private-token"}}|}))));
   print_endline "Devin Connect dynamic models, routed two-turn tool result, hostile host: ok"

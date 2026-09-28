@@ -100,20 +100,25 @@ let () =
   assert (Tui.activity_status ~state:"Thinking" ~elapsed:0. () =
     "◐ Thinking · 0s");
   assert (Tui.activity_status ~state:"Thinking" ~elapsed:0.125 () =
-    "◓ Thinking · 0s");
+    "◐ Thinking · 0s");
   assert (Tui.activity_status ~state:"Tool: read_file" ~elapsed:65. () =
-    "◐ Tool: read_file · 1m05s");
+    "◓ Tool: read_file · 1m05s");
   let base_status =
     Tui.activity_status ~state:"Tool: run_command" ~elapsed:1.25 () in
   let with_bytes = Tui.activity_status ~state:"Tool: run_command"
     ~elapsed:1.25 ~received_bytes:1536 ~width:80 () in
-  assert (with_bytes = "◑ Tool: run_command · 1s · 1.5 KiB" &&
+  assert (with_bytes = "◓ Tool: run_command · 1s · 1.5 KiB" &&
     not (String.contains with_bytes '%'));
   assert (Tui.activity_status ~state:"Tool: run_command" ~elapsed:1.25
     ~received_bytes:1536 ~width:(Notty.I.width
       (Notty.I.string Notty.A.empty base_status)) () = base_status);
-  assert (Tui.activity_tick_delay 0. = 0.125 &&
-    abs_float (Tui.activity_tick_delay 0.124 -. 0.001) < 0.000000001);
+  let compact = Tui.activity_status ~state:"Tool: run_command"
+    ~elapsed:1.25 ~received_bytes:1536 ~width:18 () in
+  assert (Notty.I.width (Notty.I.string Notty.A.empty compact) <= 18);
+  assert (String.starts_with ~prefix:"◓ Tool: run" compact);
+  assert (String.ends_with ~suffix:" · 1s" compact);
+  assert (Tui.activity_tick_delay 0. = 1. &&
+    abs_float (Tui.activity_tick_delay 0.125 -. 0.875) < 0.000000001);
   let turn_started =
     Tui.activity_started_at None (Some "Thinking") 100. in
   let tool_started =
@@ -125,6 +130,16 @@ let () =
   let idle = Tui.activity_started_at model_resumed None 105. in
   assert (idle = None &&
     Tui.activity_started_at idle (Some "Thinking") 110. = Some 110.);
+  let full_draft = Pave.Composer.create () in
+  Pave.Composer.insert full_draft (String.make 16_384 'x');
+  assert (Tui.draft_paste_capacity full_draft = 0);
+  Pave.Composer.select_left full_draft;
+  assert (Tui.draft_paste_capacity full_draft = 1);
+  Pave.Composer.begin_paste full_draft;
+  Pave.Composer.insert full_draft "Y";
+  Pave.Composer.end_paste full_draft;
+  assert (String.length (Pave.Composer.text full_draft) = 16_384 &&
+    String.ends_with ~suffix:"Y" (Pave.Composer.text full_draft));
   let progress : Tui.tool_progress = {
     call_id = "call-1"; name = "run_command"; received_bytes = None;
   } in

@@ -361,7 +361,40 @@ let prompts ~cascade_id ~selected_model messages =
         prompt ~message_id:id ~source:4 ~call_id
           (Option.value ~default:"" message.content)
     | _ -> bad "unsupported Devin transcript role") messages
-let tool_definition json =
+(* Devin forwards tool schemas to the assigned backend. Its Gemini backend
+   rejects JSON Schema type arrays (including nullable parameters) with an
+   opaque Connect invalid_argument. Keep other model families' schemas intact. *)
+let gemini_model id =
+  String.starts_with ~prefix:"gemini-" id ||
+  String.starts_with ~prefix:"MODEL_GOOGLE_GEMINI_" id
+let rec gemini_tool_schema = function
+  | `Assoc fields ->
+      let child key value = match key, value with
+        | ("properties" | "patternProperties" | "$defs" | "definitions"),
+            `Assoc properties ->
+            `Assoc (List.map (fun (name, schema) ->
+              name, gemini_tool_schema schema) properties)
+        | ("items" | "additionalProperties" | "not" | "if" | "then" |
+           "else" | "contains"), _ -> gemini_tool_schema value
+        | ("anyOf" | "oneOf" | "allOf"), `List schemas ->
+            `List (List.map gemini_tool_schema schemas)
+        | _ -> value in
+      let fields = List.map (fun (key, value) -> key, child key value) fields in
+      (match List.assoc_opt "type" fields with
+      | Some (`List types) ->
+          let non_null = List.filter (fun value -> value <> `String "null") types in
+          (match non_null with
+          | [`String kind] when List.length types = 2 ->
+              `Assoc (("type", `String kind) :: ("nullable", `Bool true) ::
+                List.filter (fun (key, _) -> key <> "type" && key <> "nullable") fields)
+          | [`String kind] when List.length types = 1 ->
+              `Assoc (("type", `String kind) ::
+                List.remove_assoc "type" fields)
+          | _ -> bad "unsupported Devin Gemini tool schema type union")
+      | _ -> `Assoc fields)
+  | other -> other
+
+let tool_definition ~google json =
   let member = Protocol.member in
   let fn = member "function" json in
   let value field = match member field fn with `String value -> value
@@ -371,6 +404,7 @@ let tool_definition json =
   let schema = match member "parameters" fn with
     | `Null -> `Assoc ["type", `String "object"; "properties", `Assoc []]
     | schema -> schema in
+  let schema = if google then gemini_tool_schema schema else schema in
   buf (fun b -> string b 1 name; string b 2 (value "description");
     string b 3 (Yojson.Basic.to_string schema);
     boolean b 12 (member "strict" fn = `Bool true))
@@ -398,6 +432,7 @@ let request ?(max_tokens=64000) ?(supports_parallel_tool_calls=false)
   reject_image_tool_results messages;
   if not (valid_id model && valid_uuid cascade_id) then bad "invalid Devin model or cascade ID";
   if max_tokens < 1 || max_tokens > 1_000_000 then bad "invalid Devin max tokens";
+  let google = tools <> [] && gemini_model model in
   buf (fun b ->
     bytes b 1 (metadata ~jwt api_key);
     let system = List.filter_map (fun (m : Protocol.message) ->
@@ -414,7 +449,7 @@ let request ?(max_tokens=64000) ?(supports_parallel_tool_calls=false)
         ["<|user|>"; "<|bot|>"; "<|context_request|>";
           "<|endoftext|>"; "<|end_of_turn|>"]));
     boolean b 11 (not supports_parallel_tool_calls);
-    List.iter (fun tool -> bytes b 10 (tool_definition tool)) tools;
+    List.iter (fun tool -> bytes b 10 (tool_definition ~google tool)) tools;
     bytes b 12 (buf (fun c -> string c 1 "auto"));
     bytes b 13 (buf (fun c -> number c 1 1));
     string b 16 cascade_id; number b 20 1;
@@ -428,6 +463,32 @@ let frame flag payload =
   for i = 0 to 3 do Bytes.set b (i+1)
     (Char.chr ((n lsr ((3-i)*8)) land 255)) done;
   Bytes.blit_string payload 0 b 5 n; Bytes.unsafe_to_string b
+let safe_connect_code = function
+  | `String code when code <> "" && String.length code <= 64 &&
+      String.for_all (function 'a'..'z' | '0'..'9' | '_' -> true | _ -> false) code ->
+      code
+  | _ -> "unknown"
+let connect_trace_id message =
+  let prefix = "trace ID: " in
+  let n = String.length message and size = String.length prefix in
+  let rec find i =
+    if i + size + 32 > n then None
+    else if String.sub message i size = prefix then (
+      let id = String.sub message (i + size) 32 in
+      if String.for_all (function
+        | '0'..'9' | 'a'..'f' | 'A'..'F' -> true | _ -> false) id then Some id
+      else find (i + 1))
+    else find (i + 1) in
+  find 0
+let connect_error error =
+  let code = safe_connect_code (Protocol.member "code" error) in
+  let message = match Protocol.member "message" error with
+    | `String text -> text | _ -> "" in
+  let internal = String.starts_with ~prefix:"an internal error occurred" message in
+  let detail = if internal then ": an internal error occurred" else "" in
+  let trace = match connect_trace_id message with
+    | Some id -> " (trace ID: " ^ id ^ ")" | None -> "" in
+  "Devin Connect error " ^ code ^ detail ^ trace
 let parse_stream ?(assigned_model="") ?(selected_model="") ?(cascade_id="") body =
   let offset = ref 0 and output_text = Buffer.create 256 and thinking = Buffer.create 256 in
   let calls = Hashtbl.create 4 and order = ref [] in
@@ -456,12 +517,7 @@ let parse_stream ?(assigned_model="") ?(selected_model="") ?(cascade_id="") body
             with Yojson.Json_error _ -> bad "invalid Connect trailer" in
           match Protocol.member "error" json with
           | `Null -> ()
-          | error ->
-              let code = Protocol.member "code" error in
-              let message = Protocol.member "message" error in
-              let text = (match code with `String s -> s | _ -> "unknown") ^
-                ": " ^ (match message with `String s -> s | _ -> "unknown") in
-              bad ("Devin Connect error " ^ String.sub text 0 (min 1024 (String.length text))))
+          | error -> bad (connect_error error))
         else (
           let fs = fields data in
           if text 1 fs <> "" then message_id := text 1 fs;
