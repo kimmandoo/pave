@@ -133,26 +133,35 @@ let () =
       Notty.I.width (Notty.I.string Notty.A.empty text))
     "Tier: WRITE\nPath: ok" in
   assert (approval_rows = 3);
-  assert (Tui.activity_status ~state:"Thinking" ~elapsed:0. () =
-    "◐ Thinking · 0s");
-  assert (Tui.activity_status ~state:"Thinking" ~elapsed:0.125 () =
-    "◐ Thinking · 0s");
-  assert (Tui.activity_status ~state:"Tool: read_file" ~elapsed:65. () =
-    "◓ Tool: read_file · 1m05s");
+  let glyph status = String.sub status 0 (String.index status ' ') in
+  let idle_progress = Tui.activity_status ~state:"Thinking" ~elapsed:0. () in
+  let frames = List.init 10 (fun second ->
+    glyph (Tui.activity_status ~state:"Thinking"
+      ~elapsed:(float_of_int second) ())) in
+  assert (idle_progress =
+    Tui.activity_status ~state:"Thinking" ~elapsed:0.125 () &&
+    String.ends_with ~suffix:"Thinking · 0s" idle_progress &&
+    String.ends_with ~suffix:"Tool: read_file · 1m05s"
+      (Tui.activity_status ~state:"Tool: read_file" ~elapsed:65. ()) &&
+    List.length (List.sort_uniq String.compare frames) >= 4 &&
+    List.for_all (fun frame ->
+      measure frame = 1 &&
+      not (List.mem frame ["◐"; "◓"; "◑"; "◒"])) frames);
   let base_status =
     Tui.activity_status ~state:"Tool: run_command" ~elapsed:1.25 () in
   let with_bytes = Tui.activity_status ~state:"Tool: run_command"
     ~elapsed:1.25 ~received_bytes:1536 ~width:80 () in
-  assert (with_bytes = "◓ Tool: run_command · 1s · 1.5 KiB" &&
-    not (String.contains with_bytes '%'));
+  assert (String.ends_with ~suffix:"Tool: run_command · 1s · 1.5 KiB"
+    with_bytes && not (String.contains with_bytes '%'));
   assert (Tui.activity_status ~state:"Tool: run_command" ~elapsed:1.25
-    ~received_bytes:1536 ~width:(Notty.I.width
-      (Notty.I.string Notty.A.empty base_status)) () = base_status);
+    ~received_bytes:1536 ~width:(measure base_status) () = base_status);
   let compact = Tui.activity_status ~state:"Tool: run_command"
     ~elapsed:1.25 ~received_bytes:1536 ~width:18 () in
-  assert (Notty.I.width (Notty.I.string Notty.A.empty compact) <= 18);
-  assert (String.starts_with ~prefix:"◓ Tool: ru" compact);
-  assert (String.ends_with ~suffix:" · 1s" compact);
+  assert (measure compact <= 18 &&
+    String.ends_with ~suffix:" · 1s" compact &&
+    String.starts_with ~prefix:"Tool: ru"
+      (String.sub compact (String.length (glyph compact) + 1)
+        (String.length compact - String.length (glyph compact) - 1)));
   assert (Tui.activity_tick_delay 0. = 1. &&
     abs_float (Tui.activity_tick_delay 0.125 -. 0.875) < 0.000000001);
   let turn_started =

@@ -1792,7 +1792,9 @@ let () =
              with exn ->
                on_event ("Default saved, but setup status was not saved: " ^
                  error_message exn ^ ". Run /setup to retry."))) in
-    let report_error exn = on_event ("Error: " ^ error_message exn) in
+    let report_error = function
+      | Tui.Terminal_signal _ as signal -> raise signal
+      | exn -> on_event ("Error: " ^ error_message exn) in
     let notify message = match !ui with
       | Some screen -> Tui.alert screen message
       | None -> on_event message in

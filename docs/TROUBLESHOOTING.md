@@ -1,5 +1,12 @@
 # Troubleshooting
 
+### [2026-09-28] A termination signal was swallowed while a command chooser was open
+
+- **Context / Symptom:** During the unsaved-conversation confirmation opened by `/new`, `SIGTERM` dismissed the chooser but left the interactive process running after five seconds rather than exiting and restoring the terminal.
+- **Root Cause:** The interactive command dispatch caught every exception from a slash command, including the TUI's `Terminal_signal`, and routed it through the ordinary user-facing error reporter. The outer terminal-cleanup handler never received it.
+- **Solution:** Re-raised terminal signals from command error reporting. An isolated 52×14 PTY reopened the unsaved `/new` confirmation, sent `SIGTERM`, observed exit 143, and confirmed canonical/input/echo modes were restored. Darwin can set the transient `PENDIN` bit when restoring termios; compare functional modes rather than requiring that bit to match.
+- **Prevention / Reference:** Exercise shutdown with an active chooser, not only from the idle editor; a user-facing command error handler must never turn a terminal signal into an ordinary notice.
+
 ### [2026-09-28] A selected model reverted after relaunch
 
 - **Context / Symptom:** An interactive `/model` selection sent the chosen ID to local Chat inference, but closing Pave and relaunching in the same workspace restored the configured default instead.

@@ -1,6 +1,8 @@
 # Changelog
 
 ## 2026-09-28
+- fix(tui): replaced the semicircular activity spinner with a single-cell dot animation while retaining phase, elapsed time and cancellation hints; spelled out compact saved state and offered prompt/help guidance on an empty screen.
+- fix(tui): let terminal shutdown signals escape command error reporting, so closing Pave during an unsaved-conversation chooser restored terminal modes and exited rather than returning to the editor.
 - fix(tui): thickened the startup P's stem and bowl while rounding its stepped outline; preserved its mint/shadow/cursor pixels and the compact `NO_COLOR` fallback.
 - release(distribution): published v0.1.61 from `91eb223c` after main CI `36389098984` passed all four compiler/OS jobs and release workflow `36389713187` passed four native packages, extracted executable checks and publication. Downloaded all five assets, verified four SHA-256 hashes and exact regular archive members; extracted Darwin arm64 linked only `libSystem`, passed CLI smokes, showed `v0.1.61` and the rounded P on launch, kept narrow `Thinking · 1s`/cancellation visible and displayed the final local SSE answer in a 30×3 PTY.
 - feat(tui): displayed the embedded release version or a `source` label on launch, rounded the ASCII P mark, abbreviated long model labels without changing exact selection, and redesigned output around compact user/assistant/tool/error blocks with styled Markdown, bounded expandable tool previews and visible narrow-terminal progress.

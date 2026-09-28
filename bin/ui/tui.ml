@@ -317,7 +317,8 @@ let styled_visual cols (visual : Transcript_view.visual) =
 let styled_line width attr text =
   I.hsnap ~align:`Left width (I.string attr text)
 
-let activity_frames = [| "◐"; "◓"; "◑"; "◒" |]
+let activity_frames =
+  [| "⠋"; "⠙"; "⠹"; "⠸"; "⠼"; "⠴"; "⠦"; "⠧"; "⠇"; "⠏" |]
 let activity_tick = 1.
 
 let activity_tick_delay elapsed =
@@ -647,7 +648,7 @@ let paint t =
         else
           let badge = if cols < 60 then "  MODEL " else "  [MODEL] " in
           let state = if cols < 45 then
-            (if t.session then " · S" else " · U")
+            (if t.session then " · SAVED" else " · UNSAVED")
           else if t.session then "  ·  SAVED" else "  ·  UNSAVED" in
           let space = max 0 (cols - measure badge - measure state) in
           let root = if cols < 60 then "" else
@@ -873,7 +874,10 @@ let paint t =
         (if cols < 45 then
           (if status = idle_status then
             (if t.queue > 0 then Printf.sprintf "q%d · " t.queue else "") ^
-            (if cols < 20 then "  PgUp/Dn"
+            (if total = 0 then
+              (if cols < 20 then "  /help"
+               else "  Type a prompt · /help")
+             else if cols < 20 then "  PgUp/Dn"
              else if cols < 29 then "  PgUp/Dn · " ^ meta_key ^ "+O"
              else "  PgUp/Dn · " ^ meta_key ^ "+O details")
            else status)
