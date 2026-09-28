@@ -18,7 +18,12 @@ type completion_context = {
   quote : char option;
 }
 
-type candidate = { path : string; is_directory : bool }
+type candidate = {
+  path : string;
+  is_directory : bool;
+  preview : (string * int) option;
+}
+
 type listing = { candidates : candidate list; truncated : bool }
 
 let max_references = 32
@@ -299,6 +304,18 @@ let completion_context text cursor =
 let has_parent_component path =
   List.exists (( = ) "..") (String.split_on_char '/' path)
 
+let candidate ~root path is_directory =
+  if not (Session_attachment.valid_utf8 path) ||
+     not (String.for_all (fun char ->
+       let code = Char.code char in code >= 32 && code <> 127) path)
+  then None
+  else if is_directory then Some { path; is_directory; preview = None }
+  else
+    try Option.map (fun detail ->
+      { path; is_directory; preview = Some detail })
+      (Session_attachment.inspect_reference ~root path)
+    with Unix.Unix_error _ | Workspace_path.Error _ -> None
+
 let complete_paths ~root prefix =
   if prefix <> "" &&
      (not (Filename.is_relative prefix) || has_parent_component prefix) then
@@ -314,12 +331,12 @@ let complete_paths ~root prefix =
     let directory = if directory = "" then "." else directory in
     let found = ref [] and overflow = ref false in
     let add path is_directory =
-      if Session_attachment.valid_utf8 path &&
-         Filename.dirname path = directory &&
+      if Filename.dirname path = directory &&
          String.starts_with ~prefix:partial (Filename.basename path) then
-        if List.length !found < max_candidates then
-          found := { path; is_directory } :: !found
-        else overflow := true in
+        if List.length !found >= max_candidates then overflow := true
+        else Option.iter (fun item -> found := item :: !found)
+          (candidate ~root path is_directory) in
+
     let walked = try
       if (Unix.lstat (Workspace_path.checked_path root directory)).Unix.st_kind
          <> Unix.S_DIR then false
@@ -328,8 +345,35 @@ let complete_paths ~root prefix =
         root directory (fun path _ -> add path false)
     with Unix.Unix_error ((Unix.ENOENT | Unix.ENOTDIR), _, _) -> false in
     { candidates = List.sort (fun left right ->
-        String.compare left.path right.path) !found;
+        match left.is_directory, right.is_directory with
+        | true, false -> -1
+        | false, true -> 1
+        | _ -> String.compare left.path right.path) !found;
       truncated = walked || !overflow }
+
+let suggest_paths ~root prefix =
+  if String.length prefix < 2 || String.length prefix > 256 ||
+     String.contains prefix '/' ||
+     not (Filename.is_relative prefix) ||
+     has_parent_component prefix ||
+     not (Session_attachment.valid_utf8 prefix) then
+    complete_paths ~root prefix
+  else
+    let root = Workspace_path.root_path root in
+    let json = Yojson.Basic.from_string (Tools.fuzzy_file_search root
+      (`Assoc ["query", `String prefix;
+               "max_results", `Int max_candidates])) in
+    let open Yojson.Basic.Util in
+    let matches = match member "matches" json with
+      | `List matches -> matches
+      | _ -> [] in
+    let candidates = List.filter_map (fun match_ ->
+      match member "path" match_, member "is_directory" match_ with
+      | `String path, `Bool directory ->
+          candidate ~root path directory
+      | _ -> None) matches in
+    if candidates = [] then complete_paths ~root prefix
+    else { candidates; truncated = member "truncated" json = `Bool true }
 
 let render_reference ?quote ~directory path =
   let needs_quote = quote <> None ||

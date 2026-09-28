@@ -1,5 +1,8 @@
 # Changelog
 
+## 2026-09-29
+- fix(tui): showed attachable workspace files immediately when typing `@`, filtered nested matches and browsed directories inline, displayed verified MIME and byte-size previews, and excluded unsafe, oversized or invalid files without exposing their contents.
+
 ## 2026-09-28
 - feat(mobile): mapped bounded shared-scheme files to exact workspace/project roots, suggested scheme-specific inert build/test commands only for observed files, and left missing/private schemes, targets and destinations unknown.
 - fix(tui): previewed staged media by sanitized filename, MIME type and byte size without exposing payloads; coalesced adjacent streamed deltas into bounded, order-preserving batches and rendered responses at 60 Hz with prompt newline/completion updates.

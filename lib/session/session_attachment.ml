@@ -86,6 +86,29 @@ let valid_utf8 text =
     | `Uchar _ -> ()) () text);
   !valid
 
+let inspect_reference ~root path =
+  let absolute = Workspace_path.regular_path root path in
+  let size = (Unix.stat absolute).Unix.st_size in
+  if is_media_path path then (
+    if size <= 0 || size > max_file_bytes then None
+    else
+      let header = Workspace_path.with_fd absolute [Unix.O_RDONLY] 0
+        (fun fd ->
+          let bytes = Bytes.create 16 in
+          let rec read offset =
+            if offset = Bytes.length bytes then offset
+            else
+              let length = Unix.read fd bytes offset
+                (Bytes.length bytes - offset) in
+              if length = 0 then offset else read (offset + length) in
+          Bytes.sub_string bytes 0 (read 0)) in
+      try Some (mime_type path header, size) with Invalid_argument _ -> None)
+  else if size > Workspace_path.max_read_bytes then None
+  else
+    let text = Workspace_path.read_bounded absolute Workspace_path.max_read_bytes in
+    if String.contains text '\000' || not (valid_utf8 text) then None
+    else Some ("text/plain", size)
+
 let load_reference ~root path =
   if is_media_path path then Media (load ~root path)
   else (

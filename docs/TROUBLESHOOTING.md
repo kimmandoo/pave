@@ -1,5 +1,19 @@
 # Troubleshooting
 
+### [2026-09-29] At-file attachments were invisible until Tab
+
+- **Context / Symptom:** Typing `@` in the interactive editor showed no attachable file choices, although pressing Tab opened a path chooser; staged `/attach` media previews did not solve this selector gap.
+- **Root Cause:** The inline hint list only handled slash commands. Workspace file completion lived behind the explicit Tab callback, so it never painted while composing an `@` reference.
+- **Solution:** Reused checked workspace candidates in an inline `@` selector, filtered files through bounded UTF-8 or media-signature inspection, and kept Tab/Enter insertion, directory chaining and Escape dismissal separate from prompt submission. Verified a real PTY displayed choices before Tab and sent a selected image as native provider content.
+- **Prevention / Reference:** Smoke the *interactive composer before submission*, not only the staged attachment display or completion modal; assert that invalid and escaping paths are absent.
+
+### [2026-09-29] Nested at-file search rejected macOS temporary workspaces
+
+- **Context / Symptom:** The nested-file regression failed with `Pave.Workspace_path.Error("path escapes workspace: .")` when searching a temporary workspace.
+- **Root Cause:** The fuzzy search received a workspace root beneath macOS `/var`, whose canonical path is `/private/var`; the checked path walker compares canonical paths to its root argument.
+- **Solution:** Canonicalized the root before calling the existing bounded fuzzy search. The nested image query and exact mention insertion then passed both regression and a real PTY smoke.
+- **Prevention / Reference:** Pass `Workspace_path.root_path root` to checked recursive traversals, including in fixtures created under `/var`.
+
 ### [2026-09-28] Nested Xcode projects were omitted from mobile inventory
 
 - **Context / Symptom:** `mobile_project` listed nested Gradle settings but omitted a valid `ios/App.xcodeproj/project.pbxproj` in the same workspace.

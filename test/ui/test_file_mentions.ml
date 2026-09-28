@@ -203,6 +203,42 @@ let () =
     expect "completion finds exact workspace paths"
       (List.exists (fun item -> item.Pave.File_mentions.path = "src/notes.md")
         listing.candidates);
+    expect "selectable text exposes its bounded preview"
+      (List.exists (fun item ->
+        item.Pave.File_mentions.path = "src/notes.md" &&
+        item.preview = Some ("text/plain", String.length "hello 世界\n"))
+        listing.candidates);
+    let images = Pave.File_mentions.complete_paths ~root "src/pho" in
+    expect "selectable image exposes verified MIME and byte count"
+      (List.exists (fun item ->
+        item.Pave.File_mentions.path = "src/photo.png" &&
+        item.preview = Some ("image/png", String.length png))
+        images.candidates);
+    let fuzzy = Pave.File_mentions.suggest_paths ~root "pho" in
+    expect "typing @pho surfaces nested attachable image without Tab"
+      (List.exists (fun item ->
+        item.Pave.File_mentions.path = "src/photo.png" &&
+        item.preview = Some ("image/png", String.length png))
+        fuzzy.candidates);
+    expect "invalid media stays absent from fuzzy suggestions"
+      (not (List.exists (fun item ->
+        item.Pave.File_mentions.path = "src/wrong.png")
+        (Pave.File_mentions.suggest_paths ~root "wrong").candidates));
+
+    List.iter (fun path ->
+      expect ("unattachable file omitted from selector: " ^ path)
+        (not (List.exists (fun item -> item.Pave.File_mentions.path = path)
+          (Pave.File_mentions.complete_paths ~root
+            (Filename.concat "src" (Filename.basename path))).candidates)))
+      ["src/wrong.png"; "src/binary.txt"; "src/invalid.txt";
+       "src/oversized.txt"; "src/escape.txt"];
+    let control_path = "src/bad\nname.txt" in
+    write (Filename.concat root control_path) "not a safe mention";
+    expect "control-character filenames cannot enter the selector"
+      (not (List.exists (fun item ->
+        item.Pave.File_mentions.path = control_path)
+        (Pave.File_mentions.complete_paths ~root "src/bad").candidates));
+
     expect "unfinished nonexistent directory has no completions"
       ((Pave.File_mentions.complete_paths ~root "src/not-yet/").candidates = []);
     expect "file cannot be completed as directory"
@@ -218,6 +254,11 @@ let () =
       (List.exists (fun item -> item.Pave.File_mentions.path = "src" &&
         item.is_directory)
         (Pave.File_mentions.complete_paths ~root "s").candidates);
+    expect "root selector shows directories before file attachments"
+      (match (Pave.File_mentions.suggest_paths ~root "").candidates with
+       | first :: _ -> first.is_directory
+       | [] -> false);
+
     expect "traversal completion returns no candidates"
       ((Pave.File_mentions.complete_paths ~root "../" ).candidates = []);
     expect "quoted completion closes path and escapes delimiter"

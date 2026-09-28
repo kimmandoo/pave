@@ -80,7 +80,10 @@ type tool_progress = {
 }
 
 type attachment_preview = { name : string; mime_type : string; size : int }
-
+type inline_hint =
+  | Command_hint of Pave.Interaction.shortcut
+  | File_hint of Pave.File_mentions.completion_context *
+      Pave.File_mentions.candidate
 
 type t = {
   mutable term : Notty_unix.Term.t;
@@ -97,6 +100,9 @@ type t = {
   mutable chooser : chooser option;
   mutable overlays : overlay_focus list;
   mutable hint_draft : string;
+  mutable hint_cursor : int;
+  mutable hint_results : inline_hint list;
+  mutable hint_truncated : bool;
   mutable hint_selected : int;
   mutable hint_offset : int;
   mutable hint_suppressed : string option;
@@ -601,19 +607,38 @@ let view_height t =
    A dismissed/inserted draft remains quiet until the user edits it again. *)
 let hint_matches t =
   let draft = Pave.Composer.text t.editor in
-  if t.hint_draft <> draft then (
+  let cursor = Pave.Composer.cursor t.editor in
+  if t.hint_draft <> draft || t.hint_cursor <> cursor then (
     t.hint_draft <- draft;
+    t.hint_cursor <- cursor;
     t.hint_selected <- 0;
     t.hint_offset <- 0;
-    t.hint_suppressed <- None);
+    t.hint_suppressed <- None;
+    t.hint_truncated <- false;
+    t.hint_results <-
+      if t.paste || t.overlays <> [] ||
+         Pave.Composer.search_query t.editor <> None ||
+         Option.is_some (Pave.Composer.selection t.editor) then []
+      else match Pave.File_mentions.completion_context draft cursor with
+        | Some context when cursor = String.length draft ->
+            let listing = Pave.File_mentions.suggest_paths ~root:t.root
+              context.prefix in
+            t.hint_truncated <- listing.truncated;
+            List.map (fun candidate -> File_hint (context, candidate))
+              listing.candidates
+        | _ when cursor = String.length draft &&
+                 not (String.exists
+                   (fun c -> c = ' ' || c = '\t' || c = '\n') draft) ->
+            List.map (fun item -> Command_hint item)
+              (Pave.Interaction.suggestions
+                ~session:t.session ~interactive:true draft)
+        | _ -> []);
   if t.paste || t.overlays <> [] ||
-    Pave.Composer.search_query t.editor <> None ||
-    t.hint_suppressed = Some draft ||
-    Pave.Composer.cursor t.editor <> String.length draft ||
-    String.exists (fun c -> c = ' ' || c = '\t' || c = '\n') draft
-  then []
-  else Pave.Interaction.suggestions
-    ~session:t.session ~interactive:true draft
+     Pave.Composer.search_query t.editor <> None ||
+     Option.is_some (Pave.Composer.selection t.editor) ||
+     t.hint_suppressed = Some draft then []
+  else t.hint_results
+
 
 let hint_room t =
   let cols, rows = Notty_unix.Term.size t.term in
@@ -644,22 +669,49 @@ let selected_hint t =
 let dismiss_hint t =
   t.hint_suppressed <- Some (Pave.Composer.text t.editor)
 
-let insert_hint t (item : Pave.Interaction.shortcut) =
-  let draft = Pave.Composer.text t.editor in
-  Pave.Composer.finish t.editor;
-  Pave.Composer.insert t.editor
-    (String.sub item.name (String.length draft)
-      (String.length item.name - String.length draft));
-  t.hint_draft <- Pave.Composer.text t.editor;
-  dismiss_hint t
+let insert_hint t = function
+  | Command_hint item ->
+      let draft = Pave.Composer.text t.editor in
+      Pave.Composer.finish t.editor;
+      Pave.Composer.insert t.editor
+        (String.sub item.name (String.length draft)
+          (String.length item.name - String.length draft));
+      t.hint_draft <- Pave.Composer.text t.editor;
+      t.hint_cursor <- Pave.Composer.cursor t.editor;
+      dismiss_hint t
+  | File_hint (context, candidate) ->
+      let value = Pave.File_mentions.render_reference
+        ?quote:context.quote ~directory:candidate.is_directory
+        candidate.path in
+      if Pave.Composer.replace_range t.editor ~start:context.start
+           ~stop:context.stop ~value then (
+        if candidate.is_directory then t.hint_draft <- ""
+        else (
+          t.hint_draft <- Pave.Composer.text t.editor;
+          t.hint_cursor <- Pave.Composer.cursor t.editor;
+          dismiss_hint t))
+      else t.status <- "Completion exceeds the composer input limit"
 
-let hint_row cols selected (item : Pave.Interaction.shortcut) =
-  let marker = if selected then "  ❯ " else "    " in
-  let usage = Pave.Interaction.usage item in
-  let usage = if usage = "" then "" else " " ^ usage in
-  I.hsnap ~align:`Left cols I.(
-    string (if selected then accent else text_attr) (marker ^ item.name) <|>
-    string (if selected then text_attr else muted) (usage ^ " · " ^ item.summary))
+let hint_row cols selected = function
+  | Command_hint item ->
+      let marker = if selected then "  ❯ " else "    " in
+      let usage = Pave.Interaction.usage item in
+      let usage = if usage = "" then "" else " " ^ usage in
+      I.hsnap ~align:`Left cols I.(
+        string (if selected then accent else text_attr) (marker ^ item.name) <|>
+        string (if selected then text_attr else muted)
+          (usage ^ " · " ^ item.summary))
+  | File_hint (_, candidate) ->
+      let marker = if selected then "  ❯ " else "    " in
+      let label = single_line candidate.path ^
+        (if candidate.is_directory then "/" else "") in
+      let detail = match candidate.preview with
+        | None -> "directory"
+        | Some (mime, size) ->
+            single_line mime ^ " · " ^ received_bytes_text size in
+      I.hsnap ~align:`Left cols I.(
+        string (if selected then accent else text_attr) (marker ^ label) <|>
+        string (if selected then text_attr else muted) (" · " ^ detail))
 
 let paint t =
   let cols, rows = Notty_unix.Term.size t.term in
@@ -979,8 +1031,15 @@ let paint t =
           Printf.sprintf "  %d/%d · ↑↓/PgUp/PgDn move · %s select · Esc cancel%s%s"
             number (Array.length found) enter_key status status_page
     | None when hint_height > 0 ->
-        let selected = List.nth hints t.hint_selected in
-        "  " ^ selected.name ^ " · " ^ selected.summary
+        (match List.nth hints t.hint_selected with
+         | Command_hint selected ->
+             "  " ^ selected.name ^ " · " ^ selected.summary
+         | File_hint (_, selected) ->
+             let detail = match selected.preview with
+               | None -> "directory"
+               | Some (mime, size) ->
+                   single_line mime ^ " · " ^ received_bytes_text size in
+             "  @" ^ single_line selected.path ^ " · " ^ detail)
     | None ->
         let status = match Pave.Composer.search_query t.editor with
           | None -> t.status
@@ -1095,7 +1154,15 @@ let paint t =
         let index = row - (body_height - hint_height) in
         if index = 0 then
           styled_line cols accent
-            ("  / Commands · ↑↓ move · Tab/" ^ enter_key ^ " insert · Esc close")
+            (match List.hd hints with
+             | Command_hint _ ->
+                 "  / Commands · ↑↓ move · Tab/" ^ enter_key ^
+                   " insert · Esc close"
+             | File_hint _ ->
+                 "  @ Files" ^
+                 (if t.hint_truncated then " · incomplete" else "") ^
+                 " · ↑↓ move · Tab/" ^ enter_key ^
+                   " insert · Esc close")
         else
           let choice = List.nth hints (t.hint_offset + index - 1) in
           hint_row cols (t.hint_offset + index - 1 = t.hint_selected) choice);
@@ -1243,7 +1310,9 @@ let create ?(keybinding_overrides = []) ?(version = "source")
     transcript = Transcript_view.create (); tool_groups = Hashtbl.create 8;
     scroll = 0; chooser = None; overlays = [];
     hint_suppressed = None;
-    hint_draft = ""; hint_selected = 0; hint_offset = 0;
+    hint_draft = ""; hint_cursor = 0; hint_results = [];
+    hint_truncated = false;
+    hint_selected = 0; hint_offset = 0;
     revision = 0; body_cache = None; layout_cache = None;
     location_cache = None;
     previous = None; cursor_position = None;
@@ -1619,6 +1688,8 @@ let read ?wake_fd ?on_wake ?on_interrupt ?on_dequeue ?on_completion t =
         Pave.Composer.end_paste t.editor
     | Some _ -> Pave.Composer.search_insert t.editor value);
     t.hint_draft <- Pave.Composer.text t.editor;
+    t.hint_cursor <- Pave.Composer.cursor t.editor;
+
     dismiss_hint t;
     if !paste_truncated then
       t.status <- "Paste truncated at input limit";
@@ -1722,8 +1793,9 @@ let read ?wake_fd ?on_wake ?on_interrupt ?on_dequeue ?on_completion t =
     | Some Keybindings.Accept_hint ->
         let matches = hint_matches t in
         let draft = Pave.Composer.text t.editor in
-        if List.exists (fun (item : Pave.Interaction.shortcut) ->
-            item.name = draft) matches then submit_result false
+        if List.exists (function
+          | Command_hint item -> item.name = draft
+          | File_hint _ -> false) matches then submit_result false
         else (
           if t.hint_selected < List.length matches then
             insert_hint t (List.nth matches t.hint_selected);
@@ -1755,8 +1827,9 @@ let read ?wake_fd ?on_wake ?on_interrupt ?on_dequeue ?on_completion t =
         let matches = hint_matches t in
         if matches <> [] && hint_room t then
           let draft = Pave.Composer.text t.editor in
-          if List.exists (fun (item : Pave.Interaction.shortcut) ->
-              item.name = draft) matches then submit_result false
+          if List.exists (function
+            | Command_hint item -> item.name = draft
+            | File_hint _ -> false) matches then submit_result false
           else (
             if t.hint_selected < List.length matches then
               insert_hint t (List.nth matches t.hint_selected);
