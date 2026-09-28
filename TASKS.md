@@ -172,11 +172,51 @@ For the account/model/terminal work, complete contracts before new providers: P1
 - [ ] Add self-hosted GitHub issue/PR triage automation only after safe RPC, worktrees, credential isolation and webhook verification; do not assume a pre-existing bot service. Reference: `python/issue-automation/README.md`.
 - [ ] Add opt-in edit/tool/model evaluation and reproducible fixture benchmarks without making upstream container/VM tooling a user dependency. Reference: `packages/evaluation-harness/README.md`, `packages/typescript-edit-benchmark/`.
 
+### P7 — Mobile-development specialization (planned)
+
+The [mobile specialization plan](docs/MOBILE_DEVELOPMENT_PLAN.md) specifies dependencies, safety boundaries and acceptance evidence for each M-card. The existing mobile prompt and root-manifest command suggestions are a baseline, not proof that an SDK, scheme, variant, simulator or signed build works. Keep each checkbox independently shippable; after R12, do not close one from another platform's fixture.
+
+#### A — Project evidence and selection
+
+- [ ] **M01 — Manifest inventory:** discover bounded mobile subprojects with verified paths and explicit truncation; reject deceptive symlinks and generated/dependency roots.
+- [ ] **M02 — Xcode map:** report verified Xcode workspaces/projects and shared schemes without inventing a private scheme or destination.
+- [ ] **M03 — SwiftPM map:** identify package/test-target evidence without evaluating `Package.swift` or guessing computed targets.
+- [ ] **M04 — Android module map:** identify Gradle settings, declared modules and source roots without executing build scripts or inventing variants.
+- [ ] **M05 — Flutter map:** separate Flutter apps/packages/plugins from plain Dart and identify only existing native host roots.
+- [ ] **M06 — React Native/Expo map:** identify declared scripts, lockfile/package-manager evidence and actual native host roots without running `npx`.
+- [ ] **M07 — Mixed-stack selection:** require an exact subroot and platform when credible manifests overlap; never route a command to a neighboring app.
+
+#### B — Focused build and test paths
+
+- [ ] **M08 — Xcode preflight:** choose an actual scheme/destination through approved discovery, then run one separately approved non-signing focused build/test.
+- [ ] **M09 — SwiftPM tests:** run one approved selected target/filter in an available package; never count missing toolchains or filters as passes.
+- [ ] **M10 — Gradle tasks:** discover concrete module/variant tasks under approval and separately approve one selected build/test without a default-task fallback.
+- [ ] **M11 — Flutter checks:** approve and run one project-scoped analysis or targeted test without implicit `pub get` or an iOS build.
+- [ ] **M12 — RN/Expo scripts:** approve one existing declared test/lint script for the selected package manager; refuse ambiguous lockfiles and undeclared scripts.
+
+#### C — Source-linked failure diagnosis
+
+- [ ] **M13 — Swift diagnostics:** map real Xcode/SwiftPM compiler/test failures to checked workspace paths and retain scheme, line and exit provenance.
+- [ ] **M14 — Android diagnostics:** map Gradle/Kotlin failures to the actual module/variant and keep unrelated stack frames out of workspace edits.
+- [ ] **M15 — Flutter diagnostics:** locate Dart analyzer/widget-test failures inside the selected package and report incomplete logs as incomplete.
+- [ ] **M16 — RN/Metro diagnostics:** link JS/TS script failures to checked source paths without trusting dependency frames or terminal escapes.
+
+#### D — Devices and mobile-specific change safety
+
+- [ ] **M17 — Apple simulator inventory:** list real available runtimes/devices with an approved probe; never boot or assume a destination.
+- [ ] **M18 — Android device inventory:** distinguish real ready, offline and unauthorized ADB/AVD choices under approval without implicitly installing an SDK.
+- [ ] **M19 — iOS simulator test:** select a compatible simulator and approve the exact test command; no physical-device deploy or hidden signing.
+- [ ] **M20 — Android emulator test:** select a ready emulator and approved variant/task; keep boot/install separate and report the real test result.
+- [ ] **M21 — iOS signing diff guard:** require distinct review of entitlements, bundle/deployment and signing configuration edits without accessing private keychain identities.
+- [ ] **M22 — Android permission diff guard:** review manifest permission, SDK-level and keystore-configuration edits without exposing signing material.
+- [ ] **M23 — Flutter platform channels:** check edited Dart/native channel contracts against actual iOS/Android handlers and run existing focused tests.
+- [ ] **M24 — RN native bridge/Expo config:** check edited JS/TS/native/config contracts against existing declarations without implicit prebuild or package installs.
+
 Do not mark a phase complete merely because its module compiles. The full product plan has not been achieved.
 
 ## Release roadmap
 
-The P0–P6 cards above remain the detailed acceptance criteria; this roadmap is the ship order for the unchecked work. Release labels R1–R16 are planning scopes, not promised dates or tag names. A release closes only when every referenced card and its stated runtime verification pass. R0 v0.1.42 was published after all four native target jobs and the release job succeeded.
+The P0–P7 cards above remain the detailed acceptance criteria; this roadmap is the ship order for the unchecked work. Release labels R1–R16 are planning scopes, not promised dates or tag names. P7's M01–M24 cards form an incremental mobile track after R12, not a new release label. A release closes only when every referenced card and its stated runtime verification pass. R0 v0.1.42 was published after all four native target jobs and the release job succeeded.
 
 ### R0 — v0.1.42: exact context budgets and safe compaction
 
@@ -230,6 +270,10 @@ The P0–P6 cards above remain the detailed acceptance criteria; this roadmap is
 
 - [ ] Complete P5 slash registry/focus/availability, scoped completion, headless input/output and opt-in instruction shortcuts. Every advertised command must have a working handler and safe non-TTY behavior.
 
+### Mobile specialization track — incremental work after R12
+
+Implement the independent P7 M01–M24 checkboxes using [their acceptance plan](docs/MOBILE_DEVELOPMENT_PLAN.md). A missing SDK, device or signing identity blocks only that execution slice; never mark the entire track complete from manifest detection or fixture-only device output. Existing R13–R16 scopes keep their numbering and may proceed separately.
+
 ### R13 — Skills, plugins and tool protocol extensions
 
 - [ ] Complete P6 skills, custom commands/tools, plugin lifecycle and MCP stdio/HTTP. Enforce source attribution, trust/sandbox policy, bounded resources, cancellation and disposal.
@@ -246,4 +290,4 @@ The P0–P6 cards above remain the detailed acceptance criteria; this roadmap is
 
 - [ ] Complete P0 Windows/musl/native-binding evaluation, the final dependency-graph review and product-level idle CPU/memory/subprocess/redraw bounds. Advertise only platforms that pass packaged-binary and update verification.
 
-Order: R1 → R2/R3/R4 → R5/R6 → R7/R8/R9 → R10/R11/R12 → R13/R14/R15 → R16. Provider-specific R5 work may ship as independently verified increments; blocked registrations are not release blockers and must not be bypassed.
+Order: R1 → R2/R3/R4 → R5/R6 → R7/R8/R9 → R10/R11/R12 → P7 M01–M24 (independent slices) → R13/R14/R15 → R16. Provider-specific R5 work may ship as independently verified increments; blocked registrations are not release blockers and must not be bypassed.
