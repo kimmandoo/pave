@@ -1,6 +1,12 @@
 type completion = Completed | Cancelled | Failed of exn
+type submission = {
+  prompt : string;
+  display_prompt : string;
+  attachments : Protocol.attachment list;
+  paste_ranges : (int * int) list;
+}
 type event =
-  | Turn_started of { turn_id : int; prompt : string }
+  | Turn_started of { turn_id : int; submission : submission }
   | Transcript_message of { turn_id : int; text : string }
   | Text_delta of { turn_id : int; text : string }
   | Activity_phase of { turn_id : int; phase : Agent.phase }
@@ -14,7 +20,7 @@ type submission_kind = Steering | Follow_up
 
 type queued_submission = {
   kind : submission_kind;
-  prompt : string;
+  submission : submission;
 }
 
 type turn = {
@@ -53,7 +59,7 @@ type t = {
   mutable active_turn : turn option;
   mutable next_turn_id : int;
   mutable closed : bool;
-  run : cancel:(unit -> bool) -> string -> unit;
+  run : cancel:(unit -> bool) -> submission -> unit;
   on_event : event -> unit;
   on_approve : string -> bool;
   on_approve_tool : Approval.request -> bool;
@@ -207,11 +213,11 @@ let approve_tool t approval_request =
   if cancel () then raise Provider.Cancelled;
   result
 
-let start t text =
+let start t submission =
   if t.closed then invalid_arg "turn runner closed";
   let turn_id = t.next_turn_id in
   t.next_turn_id <- t.next_turn_id + 1;
-  t.on_event (Turn_started { turn_id; prompt = text });
+  t.on_event (Turn_started { turn_id; submission });
   let turn = { id = turn_id; cancelled = Atomic.make false;
     thread_id = None } in
   with_guard t (fun () -> t.active_turn <- Some turn);
@@ -220,7 +226,7 @@ let start t text =
        with_guard t (fun () -> turn.thread_id <- Some (Thread.id (Thread.self ())));
        let cancel () = Atomic.get turn.cancelled in
        let outcome = try
-         t.run ~cancel text;
+         t.run ~cancel submission;
          if cancel () then Cancelled else Completed
        with
        | Provider.Cancelled -> Cancelled
@@ -233,12 +239,19 @@ let start t text =
        | _ -> ());
      emit_finish t turn.id (Failed exn))
 
-let follow_up t text =
+let make_submission ?display_prompt ?(attachments = []) ?(paste_ranges = [])
+    prompt =
+  let display_prompt = Option.value display_prompt ~default:prompt in
+  { prompt; display_prompt; attachments; paste_ranges }
+
+let follow_up t ?display_prompt ?(attachments = []) ?(paste_ranges = []) text =
   if t.closed then invalid_arg "turn runner closed";
+  let submission = make_submission ?display_prompt ~attachments
+      ~paste_ranges text in
   if busy t then (
-    Queue.add { kind = Follow_up; prompt = text } t.follow_ups;
+    Queue.add { kind = Follow_up; submission } t.follow_ups;
     t.on_queued (queued_count t))
-  else start t text
+  else start t submission
 
 let submit = follow_up
 
@@ -248,13 +261,15 @@ let cancel t =
     t.approvals) in
   List.iter (fun request -> answer request false) requests
 
-let steer t text =
+let steer t ?display_prompt ?(attachments = []) ?(paste_ranges = []) text =
   if t.closed then invalid_arg "turn runner closed";
+  let submission = make_submission ?display_prompt ~attachments
+      ~paste_ranges text in
   if busy t then (
-    Queue.add { kind = Steering; prompt = text } t.steering;
+    Queue.add { kind = Steering; submission } t.steering;
     t.on_queued (queued_count t);
     cancel t)
-  else start t text
+  else start t submission
 
 let pop_last queue =
   if Queue.is_empty queue then None
@@ -357,7 +372,7 @@ let drain t =
                   Some (Queue.take t.follow_ups)
                 else None in
               Option.iter (fun queued ->
-                start t queued.prompt;
+                start t queued.submission;
                 t.on_queued (queued_count t)) queued));
         handle () in
   handle ()

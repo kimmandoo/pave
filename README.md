@@ -118,6 +118,19 @@ pave --provider google --model "$GEMINI_MODEL_ID" --context-window auto
 pave --provider openai --api responses --model "$MODEL_ID" --context-window "$CONTEXT_WINDOW" --session /private/path/pave.jsonl
 ```
 
+### Prompts, attachments and shell completions
+
+For a one-shot turn, provide exactly one source: `--prompt`, nonempty redirected stdin (bounded to 1 MiB), or `--prompt-file`. Prompt-file paths are workspace-relative to `--root`, checked, and bounded UTF-8 text; their contents are prompt data, never parsed as slash commands. Empty or conflicting sources fail before a provider request.
+
+Repeat `--image PATH` for checked workspace-relative images. Pave validates file type, MIME signature and size, then rejects routes without native user-media support before authentication or network access.
+
+In the TUI, type `@path` or `@"path with spaces"` in the draft. Completion stays within the checked workspace and honors ignore rules. Text files become labeled prompt text; supported media stays readable in the prompt and is sent as native typed content. Code/email occurrences and unresolved safe references remain literal; unsafe paths or invalid files fail closed.
+
+`--output jsonl` writes ordered turn, text, tool and outcome records to stdout; diagnostics go to stderr. Completed turns exit 0, provider failures 1, tool failures 2 and cancellation 130. Plain text remains the default. Prose shortcuts are opt-in with `--shortcut NAME` and individually disableable with `--disable-shortcut NAME`; available names are `thinkdeep`, `verifyfirst` and `planfirst`. Pasted text, code, paths and tool output are not expanded. TUI headers use sanitized model display names when available and fall back to the upstream ID; labels never change the exact selector.
+
+`pave completions bash|zsh|fish` prints a script generated from CLI metadata. Model and session candidates come from authorized local state only; completion does not contact providers.
+
+
 ### Non-chat model tasks
 
 `pave task` invokes task-specific APIs directly; it does not use or add a Chat route, does not affect `pave --providers`, and never creates or modifies a conversation, session, or route identity. Each task requires the exact `--model` ID you choose. Credentials are read only from `OPENAI_API_KEY` for OpenAI tasks and `COHERE_API_KEY` for rerank. No default model, custom endpoint, OAuth credential, or fallback is used. Model access and entitlement are controlled by the provider account; Pave does not infer task support from a model name.

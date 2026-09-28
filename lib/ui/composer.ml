@@ -38,15 +38,22 @@ type t = {
   mutable journal : journal;
   mutable draft_journal : journal option;
   mutable paste : (string * int * int option) option;
+  mutable pasted : (int * int) list;
+  mutable paste_touched : bool;
+  mutable paste_uncertain : bool;
   mutable kill : string;
 }
 
 let create () = { text = ""; cursor = 0; anchor = None; boundaries = [| 0 |];
   boundary_count = 1; history = []; recall = None; draft = "";
   draft_cursor = 0; draft_anchor = None; preferred_column = None; search = None;
-  journal = empty_journal (); draft_journal = None; paste = None; kill = "" }
+  journal = empty_journal (); draft_journal = None; paste = None;
+  pasted = []; paste_touched = false; paste_uncertain = false; kill = "" }
 let text t = t.text
 let cursor t = t.cursor
+let pasted_ranges t =
+  if t.paste_uncertain && t.text <> "" then [0, String.length t.text]
+  else t.pasted
 let selection t = match t.anchor with
   | Some anchor when anchor <> t.cursor ->
       Some (min anchor t.cursor, max anchor t.cursor)
@@ -81,8 +88,45 @@ let previous t =
 let next t =
   let index = at_or_after t.boundaries t.boundary_count t.cursor in
   t.boundaries.(min (t.boundary_count - 1) (index + 1))
+let merge_ranges ranges =
+  List.sort compare ranges
+  |> List.fold_left (fun acc (start, stop) ->
+    match acc with
+    | (previous_start, previous_stop) :: rest
+      when start <= previous_stop ->
+        (previous_start, max previous_stop stop) :: rest
+    | _ -> (start, stop) :: acc) []
+  |> List.rev
 
-let set_at t text pos =
+let transform_pasted_ranges t ~start ~old_stop ~new_stop =
+  if t.pasted <> [] then (
+    let delta = new_stop - old_stop in
+    t.pasted <- List.concat_map (fun (range_start, range_stop) ->
+      let before = if range_start < start then
+        [range_start, min range_stop start] else [] in
+      let after_start = max range_start old_stop in
+      let after = if after_start < range_stop then
+        [after_start + delta, range_stop + delta] else [] in
+      before @ after) t.pasted
+      |> List.filter (fun (range_start, range_stop) ->
+        range_start < range_stop)
+      |> merge_ranges)
+let mark_pasted t ~start ~stop =
+  if start < stop then (
+    t.paste_touched <- true;
+    t.pasted <- merge_ranges ((start, stop) :: t.pasted))
+
+let restore_pasted_ranges t ranges =
+  let boundaries = segment t.text in
+  let is_boundary position = Array.exists ((=) position) boundaries in
+  List.iter (fun (start, stop) ->
+    if start < 0 || stop < start || stop > String.length t.text ||
+       not (is_boundary start && is_boundary stop) then
+      invalid_arg "invalid pasted-range restoration") ranges;
+  List.iter (fun (start, stop) -> mark_pasted t ~start ~stop) ranges
+
+let install_at t text pos ~start ~old_stop ~new_stop =
+  transform_pasted_ranges t ~start ~old_stop ~new_stop;
   let boundaries = segment text in
   t.text <- text;
   t.boundaries <- boundaries;
@@ -91,8 +135,33 @@ let set_at t text pos =
   clear_selection t;
   t.preferred_column <- None
 
+let set_at t text pos =
+  if t.text = text then (
+    let boundaries = t.boundaries in
+    t.cursor <- boundaries.(at_or_after boundaries t.boundary_count pos);
+    clear_selection t;
+    t.preferred_column <- None)
+  else (
+    if t.paste_touched then t.paste_uncertain <- true;
+    let old_length = String.length t.text
+    and new_length = String.length text in
+    let start = ref 0 in
+    while !start < old_length && !start < new_length
+      && t.text.[!start] = text.[!start] do incr start done;
+    let old_stop = ref old_length and new_stop = ref new_length in
+    while !old_stop > !start && !new_stop > !start
+      && t.text.[!old_stop - 1] = text.[!new_stop - 1] do
+      decr old_stop;
+      decr new_stop
+    done;
+    install_at t text pos ~start:!start ~old_stop:!old_stop
+      ~new_stop:!new_stop)
+
 let set t text =
   set_at t text (String.length text);
+  t.pasted <- [];
+  t.paste_touched <- false;
+  t.paste_uncertain <- false;
   t.journal <- empty_journal ()
 
 let clear t =
@@ -104,7 +173,6 @@ let clear t =
   t.draft_journal <- None;
   t.paste <- None;
   t.search <- None
-
 let inserted_length change = match change.pending with
   | None -> String.length change.inserted
   | Some buffer -> Buffer.length buffer
@@ -165,8 +233,10 @@ let record ?(before_selection = None) t ~start ~removed ~inserted ~before =
   journal.grouping <- true;
   trim_journal journal
 let replace t ~start ~stop ~value ~position =
-  set_at t (String.sub t.text 0 start ^ value
-    ^ String.sub t.text stop (String.length t.text - stop)) position
+  let text = String.sub t.text 0 start ^ value
+    ^ String.sub t.text stop (String.length t.text - stop) in
+  install_at t text position ~start ~old_stop:stop
+    ~new_stop:(start + String.length value)
 
 let undo t =
   let journal = t.journal in
@@ -175,6 +245,7 @@ let undo t =
   | [] -> ()
   | change :: rest ->
       journal.undo <- rest;
+      if t.paste_touched then t.paste_uncertain <- true;
       journal.count <- journal.count - 1;
       let inserted = inserted_text change in
       replace t ~start:change.start
@@ -190,6 +261,7 @@ let redo t =
   | [] -> ()
   | change :: rest ->
       journal.redo <- rest;
+      if t.paste_touched then t.paste_uncertain <- true;
       journal.count <- journal.count + 1;
       replace t ~start:change.start
         ~stop:(change.start + String.length change.removed)
@@ -251,7 +323,12 @@ let end_paste t =
         record ~before_selection t ~start:!start
           ~removed:(String.sub before !start (!old_stop - !start))
           ~inserted:(String.sub t.text !start (!new_stop - !start))
-          ~before:cursor));
+          ~before:cursor;
+        mark_pasted t ~start:!start ~stop:!new_stop)
+      else match before_selection with
+        | Some anchor ->
+            mark_pasted t ~start:(min anchor cursor) ~stop:(max anchor cursor)
+        | None -> ());
   t.journal.grouping <- false
 
 let insert t value =
@@ -285,6 +362,29 @@ let insert t value =
           ~position:(start + String.length value);
       if t.paste = None then
         record ~before_selection t ~start ~removed ~inserted:value ~before)
+
+let is_boundary t position =
+  let rec find index =
+    index < t.boundary_count &&
+    (t.boundaries.(index) = position || find (index + 1)) in
+  find 0
+
+let replace_range t ~start ~stop ~value =
+  if start < 0 || stop < start || stop > String.length t.text ||
+     not (is_boundary t start && is_boundary t stop) then
+    invalid_arg "composer replacement range is not on grapheme boundaries";
+  let value = safe_input value in
+  if String.length t.text - (stop - start) + String.length value > 16_384
+  then false
+  else if start = stop && value = "" then true
+  else (
+    let before = t.cursor and before_selection = selection_snapshot t in
+    let removed = String.sub t.text start (stop - start) in
+    t.journal.grouping <- false;
+    replace t ~start ~stop ~value ~position:(start + String.length value);
+    record ~before_selection t ~start ~removed ~inserted:value ~before;
+    t.journal.grouping <- false;
+    true)
 let prepend t value =
   let value = safe_input value in
   let inserted = String.length value in

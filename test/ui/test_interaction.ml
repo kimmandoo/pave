@@ -2,9 +2,58 @@ let fail label = failwith label
 let invalid label f =
   try ignore (f ()); fail (label ^ ": accepted invalid selector")
   with Invalid_argument _ -> ()
+let invalid_with_suffix label suffix f =
+  match f () with
+  | _ -> fail (label ^ ": accepted malformed input")
+  | exception Invalid_argument message when
+      String.ends_with ~suffix message -> ()
+  | exception Invalid_argument message ->
+      fail (label ^ ": missing shared usage: " ^ message)
+
 
 let () =
   let open Pave.Interaction in
+  let has_help help name =
+    List.exists (fun line ->
+      line = name || String.starts_with ~prefix:(name ^ " ") line)
+      help in
+  let check_capabilities ~session ~interactive =
+    let help = help ~session ~interactive () in
+    List.iter (fun item ->
+      let enabled = available ~session ~interactive item in
+      if has_help help item.name <> enabled then
+        fail ("help capability mismatch for " ^ item.name);
+      if List.mem item (suggestions ~session ~interactive item.name) <> enabled
+      then fail ("completion capability mismatch for " ^ item.name))
+      commands in
+  check_capabilities ~session:false ~interactive:true;
+  check_capabilities ~session:true ~interactive:true;
+  check_capabilities ~session:true ~interactive:false;
+  (match parse "/login", parse ~interactive:false "/login",
+      parse ~interactive:false "/setup", parse ~interactive:false "/hotkeys",
+      parse ~session:false "/entries", parse "/exit" with
+   | Login, Unknown _, Unknown _, Unknown _, Unknown _, Unknown _ -> ()
+   | _ -> fail "interactive/session capabilities or removed alias mismatch");
+  let queue_item = List.find (fun item -> item.name = "/queue") commands in
+  let queue_usage = queue_item.name ^ " " ^ usage queue_item in
+  let queue_help = List.find (fun line ->
+    String.starts_with ~prefix:(queue_item.name ^ " ") line)
+      (help ()) in
+  if not (String.starts_with ~prefix:(queue_usage ^ " ·") queue_help) then
+    fail "help and parser do not share the queue usage";
+  invalid_with_suffix "queue usage" (" (usage: " ^ queue_usage ^ ")")
+    (fun () -> parse "/queue");
+  let tool_item = List.find (fun item -> item.name = "/tool") commands in
+  let tool_usage = tool_item.name ^ " " ^ usage tool_item in
+  invalid_with_suffix "tool usage" (" (usage: " ^ tool_usage ^ ")")
+    (fun () -> parse "/tool enable");
+  invalid_with_suffix "tool detail usage" " (usage: /tools [NAME])"
+    (fun () -> parse "/tools read file");
+  invalid_with_suffix "thinking usage" " (usage: /thinking [LEVEL|default])"
+    (fun () -> parse "/thinking high extra");
+  invalid_with_suffix "approval usage"
+    " (usage: /approval [always-ask|write|yolo|default])"
+    (fun () -> parse "/approval yolo extra");
   (match parse "/model" with Model None -> () | _ -> fail "model selector missing");
   (match parse "/model openrouter/openai/gpt-4o" with
    | Model (Some "openrouter/openai/gpt-4o") -> ()

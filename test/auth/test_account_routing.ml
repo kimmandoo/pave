@@ -54,12 +54,12 @@ let () =
            account_id = Some id; metadata = [] } : Store.credential) in
     put "account-a" "fixture-account-a" ["other", "https://example.test/other"];
     put "account-b" "devin-session-token$" ["connect", route.endpoint];
-    let run args =
-      let input = child base "input"
+    let run ?(input_text = "") args =
+      let input_path = child base "input"
       and output = child base "output"
       and errors = child base "errors" in
-      write input "/quit\n";
-      let stdin = Unix.openfile input [Unix.O_RDONLY] 0
+      write input_path input_text;
+      let stdin = Unix.openfile input_path [Unix.O_RDONLY] 0
       and stdout = Unix.openfile output [Unix.O_WRONLY; Unix.O_CREAT; Unix.O_TRUNC] 0o600
       and stderr = Unix.openfile errors [Unix.O_WRONLY; Unix.O_CREAT; Unix.O_TRUNC] 0o600 in
       let env = Unix.environment ()
@@ -73,20 +73,23 @@ let () =
       List.iter Unix.close [stdin; stdout; stderr];
       let _, status = Unix.waitpid [] pid in
       status, read output, read errors in
-    let expect_success args = match run args with
-      | Unix.WEXITED 0, _, _ -> ()
-      | _, _, errors -> failwith ("expected startup to succeed: " ^ errors) in
     let expect_failure args message = match run args with
       | Unix.WEXITED 1, _, errors when contains errors message -> ()
-      | _, _, errors -> failwith ("unexpected routing result: " ^ errors) in
-    expect_success ["--model"; "devin@connect#account-a/fixture-model"];
-    expect_success ["--provider"; "devin"; "--model"; "fixture-model"];
+      | status, _, errors ->
+          let status = match status with
+            | Unix.WEXITED code -> "exit " ^ string_of_int code
+            | Unix.WSIGNALED signal -> "signal " ^ string_of_int signal
+            | Unix.WSTOPPED signal -> "stopped " ^ string_of_int signal in
+          failwith ("unexpected routing result (" ^ status ^ ") for " ^
+            String.concat " " args ^ ": " ^ errors) in
+    expect_failure [] "redirected stdin prompt is empty";
     expect_failure ["--provider"; "devin"; "--model"; "fixture-model";
       "--prompt"; "hello"] "multiple saved accounts for devin";
     expect_failure ["--model"; "devin@connect#account-b/fixture-model";
       "--prompt"; "hello"] "Devin session credential is invalid";
     expect_failure ["--model"; "devin@connect#account-b/fixture-model";
-      "--context-window"; "auto"] "Devin session credential is invalid";
+      "--context-window"; "auto"; "--prompt"; "hello"]
+      "Devin session credential is invalid";
     expect_failure ["--provider"; "devin"; "--account"; "account-a";
       "--model"; "fixture-model"; "--prompt"; "hello"]
       "saved credential is not authorized";
@@ -95,12 +98,10 @@ let () =
       {|{"default_provider":"devin","default_model":"fixture-model","default_api":"connect"}|};
     let identity = Pave.Model_identity.make ~provider:"devin"
       ~account_id:"account-b" ~route:"connect" ~upstream_id:"fixture-model" () in
-    Pave.Recent_model.save ~root:workspace identity;
-    expect_success [];
     let journal_path = child workspace "conversation.jsonl" in
     let journal = Pave.Session.open_file ~cwd:workspace journal_path in
     Pave.Session.set_model journal identity;
-    expect_success ["--session"; journal_path];
+    expect_failure ["--session"; journal_path] "redirected stdin prompt is empty";
     Store.remove_account ~path ~provider:"devin" ~account_id:(Some "account-b");
     expect_failure ["--provider"; "devin"; "--model"; "fixture-model";
       "--prompt"; "hello"] "saved credential is not authorized");

@@ -9,7 +9,8 @@ let () =
   let seen_turn_ids = Hashtbl.create 8 in
   let require_owner turn_id = assert (!active_turn_id = Some turn_id) in
   let caller_thread = Thread.id (Thread.self ()) in
-  let run ~cancel text =
+  let run ~cancel submission =
+    let text = submission.Pave.Turn_runner.prompt in
     let runner = Option.get !runner_ref in
     match text with
     | "hang" ->
@@ -82,17 +83,47 @@ let () =
           side_effects_may_have_occurred = false
         });
         raise Pave.Provider.Cancelled
+    | "payload-one" ->
+        assert (submission.display_prompt = "display one");
+        assert (submission.paste_ranges = [8, 11]);
+        assert (submission.attachments = [{
+          Pave.Protocol.name = "one.png";
+          mime_type = "image/png";
+          data = "one-data"
+        }]);
+        Pave.Turn_runner.message runner "payload-one-ran"
+    | "payload-two" ->
+        assert (submission.display_prompt = "display two");
+        assert (submission.paste_ranges = [8, 11]);
+        assert (submission.attachments = [{
+          Pave.Protocol.name = "two.png";
+          mime_type = "image/png";
+          data = "two-data"
+        }]);
+        Pave.Turn_runner.message runner "payload-two-ran"
     | _ -> failwith "unexpected turn" in
   let runner = Pave.Turn_runner.create ~run
     ~on_event:(fun turn_event ->
       assert (Thread.id (Thread.self ()) = caller_thread);
       match turn_event with
-      | Pave.Turn_runner.Turn_started { turn_id; prompt } ->
+      | Pave.Turn_runner.Turn_started { turn_id; submission } ->
           assert (!active_turn_id = None);
           assert (not (Hashtbl.mem seen_turn_ids turn_id));
           Hashtbl.add seen_turn_ids turn_id ();
           active_turn_id := Some turn_id;
-          event ("start:" ^ prompt)
+          event ("start:" ^ submission.display_prompt);
+          (match submission.prompt with
+           | "payload-one" ->
+               assert (submission.attachments = [{
+                 Pave.Protocol.name = "one.png"; mime_type = "image/png";
+                 data = "one-data"
+               }])
+           | "payload-two" ->
+               assert (submission.attachments = [{
+                 Pave.Protocol.name = "two.png"; mime_type = "image/png";
+                 data = "two-data"
+               }])
+           | _ -> ())
       | Pave.Turn_runner.Transcript_message { turn_id; text } ->
           require_owner turn_id;
           event ("message:" ^ text)
@@ -179,6 +210,29 @@ let () =
     assert (chronological = ["start:hang"; "message:working";
       "queued:1"; "cancelled"; "start:approve"; "queued:0";
       "approved-request"; "delta:approved"; "completed"]);
+    Pave.Turn_runner.submit runner "hang";
+    until "message:working";
+    let one = [{
+      Pave.Protocol.name = "one.png"; mime_type = "image/png";
+      data = "one-data"
+    }] in
+    let two = [{
+      Pave.Protocol.name = "two.png"; mime_type = "image/png";
+      data = "two-data"
+    }] in
+    Pave.Turn_runner.follow_up runner ~display_prompt:"display one"
+      ~attachments:one ~paste_ranges:[8, 11] "payload-one";
+    Pave.Turn_runner.submit runner ~display_prompt:"display two"
+      ~attachments:two ~paste_ranges:[8, 11] "payload-two";
+    Pave.Turn_runner.cancel runner;
+    until_idle ();
+    let chronological = List.rev !events in
+    assert (List.mem "start:display one" chronological);
+    assert (List.mem "start:display two" chronological);
+    assert (position "start:display one" chronological <
+      position "start:display two" chronological);
+    assert (List.mem "message:payload-one-ran" chronological);
+    assert (List.mem "message:payload-two-ran" chronological);
     Pave.Turn_runner.submit runner "cancel-late";
     until "message:late-ready";
     Pave.Turn_runner.cancel runner;
@@ -263,7 +317,8 @@ let () =
     Pave.Turn_runner.steer runner "dequeue-removed";
     let removed = Option.get (Pave.Turn_runner.dequeue_last runner) in
     assert (removed.kind = Pave.Turn_runner.Steering);
-    assert (removed.prompt = "dequeue-removed");
+    assert (removed.submission.prompt = "dequeue-removed");
+    assert (removed.submission.display_prompt = "dequeue-removed");
     Pave.Turn_runner.restore_dequeued runner removed;
     let removed_again = Option.get (Pave.Turn_runner.dequeue_last runner) in
     assert (removed_again = removed);

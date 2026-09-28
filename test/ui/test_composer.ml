@@ -305,4 +305,38 @@ let () =
   assert (Pave.Composer.selection editor = Some (0, 1));
   Pave.Composer.clear editor;
 
+  Pave.Composer.insert editor "Review @src/no after";
+  let before_completion = Pave.Composer.text editor in
+  let first = String.length "Review " and last =
+    String.length "Review @src/no" in
+  assert (Pave.Composer.replace_range editor ~start:first ~stop:last
+    ~value:"@src/notes.md");
+  assert (Pave.Composer.text editor = "Review @src/notes.md after");
+  assert (Pave.Composer.cursor editor =
+    first + String.length "@src/notes.md");
+  Pave.Composer.undo editor;
+  assert (Pave.Composer.text editor = before_completion);
+  Pave.Composer.redo editor;
+  assert (Pave.Composer.text editor = "Review @src/notes.md after");
+  Pave.Composer.clear editor;
+  Pave.Composer.insert editor "e\204\129";
+  (match Pave.Composer.replace_range editor ~start:1 ~stop:2 ~value:"x" with
+   | _ -> failwith "range replacement split a grapheme cluster"
+   | exception Invalid_argument _ -> ());
+
+  let pasted_editor = Pave.Composer.create () in
+  Pave.Composer.insert pasted_editor "typed ";
+  Pave.Composer.begin_paste pasted_editor;
+  Pave.Composer.insert pasted_editor "thinkdeep";
+  Pave.Composer.end_paste pasted_editor;
+  assert (Pave.Composer.pasted_ranges pasted_editor =
+    [String.length "typed ", String.length "typed thinkdeep"]);
+  Pave.Composer.home pasted_editor;
+  Pave.Composer.insert pasted_editor "prefix ";
+  assert (Pave.Composer.pasted_ranges pasted_editor =
+    [String.length "prefix typed ",
+     String.length "prefix typed thinkdeep"]);
+  Pave.Composer.undo pasted_editor;
+  assert (Pave.Composer.pasted_ranges pasted_editor =
+    [0, String.length "typed thinkdeep"]);
   print_endline "terminal composer: ok"

@@ -1,5 +1,27 @@
 # Troubleshooting
 
+
+### [2026-09-28] Fish completion left dynamic model candidates unevaluated
+
+- **Context / Symptom:** Generated fish completion wrapped the model/session lookup in a single-quoted argument, so fish would register the command substitution as literal text instead of running it.
+- **Root Cause:** Fish single quotes suppress expansions; the generated dynamic `-a` argument was quoted as a whole. No fish parser was installed, so source review against fish's quoting rules exposed the defect before release.
+- **Solution:** Kept the executable and command arguments individually quoted but emitted the surrounding command substitution unquoted. Bash/zsh completion syntax remained valid; fish syntax could not be parser-checked in this environment.
+- **Prevention / Reference:** Keep fish command substitutions outside single-quoted literals; see [fish quoting rules](https://fishshell.com/docs/current/language.html#quotes).
+
+### [2026-09-28] TUI path completion rejected a canonical macOS workspace
+
+- **Context / Symptom:** Completing a path below a temporary workspace failed with `Workspace_path.Error("path escapes workspace: src")` on macOS.
+- **Root Cause:** `Unix.realpath` canonicalizes Darwin temporary paths from `/var/folders/...` to `/private/var/folders/...`; `Tools.walk` requires its workspace root to be canonical, but file-mention completion passed the lexical root.
+- **Solution:** Canonicalized the root with `Workspace_path.root_path` before walking completion candidates. The focused file-mention test then completed paths under the canonical root while preserving traversal and symlink checks.
+- **Prevention / Reference:** Pass canonical workspace roots to `Workspace_path.checked_path` and `Tools.walk`; macOS temporary-directory aliases expose lexical/canonical mismatches.
+
+### [2026-09-28] macOS rejected a malformed UTF-8 filename fixture
+
+- **Context / Symptom:** The file-completion test stopped at `Sys_error(".../invalid-\\255.txt: Illegal byte sequence")` before candidate filtering ran.
+- **Root Cause:** The macOS filesystem/path layer refused to create a filename containing invalid UTF-8 bytes.
+- **Solution:** Kept the malformed-name candidate assertion on filesystems that permit the fixture and skipped only the exact `Illegal byte sequence` creation failure. Other filesystem errors still fail the test.
+- **Prevention / Reference:** Make malformed-byte path fixtures conditional on filesystem support; do not treat an OS-level `EILSEQ` as a path-completion result.
+
 ### [2026-09-28] Scoped Devin model failed when multiple accounts were saved
 
 - **Context / Symptom:** Launching `--model 'devin@connect#ACCOUNT/MODEL'` with two saved Devin grants failed before opening the UI: `Error: multiple saved accounts for devin; pass --account or select an account-scoped model`.

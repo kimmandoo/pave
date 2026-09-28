@@ -1,5 +1,7 @@
 (* Discovery runs on cancellable workers. Only fresh, route-compatible IDs
    from a registered provider's successful listing become model choices. *)
+type selection = { selector : string; display_name : string option }
+
 let saved_account_label (account : Pave.Oauth_store.account) =
   match account.credential.account_id with
   | Some id -> "Account ID: " ^ Printf.sprintf "%S" id
@@ -168,20 +170,30 @@ let listing_status ?registry (descriptor : Pave.Provider_catalog.descriptor)
 let identity_selector (model : Pave.Model_discovery.model) =
   Pave.Model_identity.selector model.identity
 
+let visible_model_name (model : Pave.Model_discovery.model) =
+  let sanitize value = value |> Tui.single_line |> String.trim in
+  let fallback = sanitize model.identity.upstream_id in
+  match model.display_name with
+  | None -> fallback
+  | Some name ->
+      let name = sanitize name in
+      if name = "" then fallback else name
+
 let identity_label (model : Pave.Model_discovery.model) =
   let identity = model.identity in
-  identity.provider ^ "@" ^ identity.route ^
+  visible_model_name model ^ " · " ^ identity.provider ^ "@" ^ identity.route ^
   (match identity.account_id with
    | None -> ""
-   | Some account -> "#" ^ Pave.Model_identity.encode_component account) ^
-  " · " ^ identity.upstream_id
-
+   | Some account -> "#" ^ Pave.Model_identity.encode_component account)
 
 let model_detail ?registry (descriptor : Pave.Provider_catalog.descriptor)
     (model : Pave.Model_discovery.model) =
   let capabilities = model.capabilities in
-  let display_name = Option.map
-    (fun value -> "display name " ^ value) model.display_name in
+  let display_name = match model.display_name with
+    | None -> None
+    | Some name ->
+        let name = Tui.single_line name |> String.trim in
+        if name = "" then None else Some ("display name " ^ name) in
   let context = Option.map
     (fun tokens -> Printf.sprintf "context %d tokens" tokens)
     capabilities.context_window_tokens in
@@ -258,6 +270,7 @@ let choose ?registry screen ~(descriptor : Pave.Provider_catalog.descriptor)
     ?account_id:selected_account_id ~title () =
   let registry = Option.value ~default:Pave.Provider_catalog.builtin_registry registry in
   let route_name = Option.value ~default:descriptor.default_route route_name in
+  let display_names = Hashtbl.create 16 in
   let custom_account_id = Option.bind
     (Pave.Provider_catalog.custom_route registry ~provider:descriptor.id
       ~route:route_name)
@@ -327,6 +340,9 @@ let choose ?registry screen ~(descriptor : Pave.Provider_catalog.descriptor)
             ~status:(Some (scope_label scope ^ ": checking live model availability")) ()
       | [{ scope; status = Ready listing }] ->
           let routed_models = eligible_models ~registry descriptor scope listing in
+          List.iter (fun model ->
+            Hashtbl.replace display_names (identity_selector model)
+              model.display_name) routed_models;
           let values = List.map identity_selector routed_models in
           let details = model_details ~registry descriptor routed_models in
           let labels = List.map (fun model ->
@@ -345,17 +361,20 @@ let choose ?registry screen ~(descriptor : Pave.Provider_catalog.descriptor)
       ~wake_fd:(Pave.Model_discovery_coordinator.read_fd coordinator)
       ~on_wake ~title ~choices:[] in
     Option.map (fun input ->
-      try
-        let _, identity, _ = Pave.Interaction.resolve_model ~registry
-          ~current_provider:descriptor.id ~current_route:route_name
-          ?current_account_id:account_id ~input () in
-        Pave.Model_identity.selector identity
-      with Invalid_argument _ -> input) selected)
+      let selector =
+        try
+          let _, identity, _ = Pave.Interaction.resolve_model ~registry
+            ~current_provider:descriptor.id ~current_route:route_name
+            ?current_account_id:account_id ~input () in
+          Pave.Model_identity.selector identity
+        with Invalid_argument _ -> input in
+      { selector; display_name = Option.join
+          (Hashtbl.find_opt display_names selector) }) selected)
 
 (* Each registered route/account has its own discovery scope. A model discovered
    for one route or sign-in never gets reused under another identity. *)
-let choose_all ?registry screen ~(active : Pave.Provider_catalog.descriptor)
-    ~current_route () =
+let choose_all ?registry ?initial_filter screen
+    ~(active : Pave.Provider_catalog.descriptor) ~current_route () =
   let registry = Option.value ~default:Pave.Provider_catalog.builtin_registry registry in
   let providers = active :: List.filter
     (fun (entry : Pave.Provider_catalog.descriptor) -> entry.id <> active.id)
@@ -438,6 +457,7 @@ let choose_all ?registry screen ~(active : Pave.Provider_catalog.descriptor)
   let coordinator = Pave.Model_discovery_coordinator.start
     ~max_workers:4 ~timeout_seconds:20. requests in
   let ready_cache = Array.make (List.length requests) None in
+  let display_names = Hashtbl.create 32 in
   Fun.protect ~finally:(fun () ->
     Pave.Model_discovery_coordinator.close coordinator) (fun () ->
     let on_wake () =
@@ -461,6 +481,9 @@ let choose_all ?registry screen ~(active : Pave.Provider_catalog.descriptor)
                     | None -> assert false in
                   let models = eligible_models ~registry descriptor
                     snapshot.scope listing in
+                  List.iter (fun model ->
+                    Hashtbl.replace display_names (identity_selector model)
+                      model.display_name) models;
                   let cached = (
                     List.map identity_selector models,
                     model_details ~registry descriptor models,
@@ -485,7 +508,7 @@ let choose_all ?registry screen ~(active : Pave.Provider_catalog.descriptor)
       Tui.update_choices screen ~verified:(List.rev !verified)
         ~details:(List.rev !details) ~labels:(List.rev !labels)
         ~status_pages:state_text ~status:(Some status) () in
-    Tui.choose screen
+    let selected = Tui.choose ?initial_filter screen
       ~intro:["Only freshly listed, route-compatible IDs appear here.";
         "Listing does not guarantee inference permission; failures are on the status pages.";
         "Selection changes this conversation only."]
@@ -494,4 +517,7 @@ let choose_all ?registry screen ~(active : Pave.Provider_catalog.descriptor)
         else Printf.sprintf "Checking %d registered route/account listings…"
           (List.length requests))
       ~wake_fd:(Pave.Model_discovery_coordinator.read_fd coordinator)
-      ~on_wake ~title:"Models · available routes" ~choices:[])
+      ~on_wake ~title:"Models · available routes" ~choices:[] in
+    Option.map (fun selector ->
+      { selector; display_name = Option.join
+          (Hashtbl.find_opt display_names selector) }) selected)

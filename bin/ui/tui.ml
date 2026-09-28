@@ -32,7 +32,12 @@ type chooser = {
 
 type overlay_focus = Chooser_overlay | Approval_overlay
 
-type submission = { text : string; follow_up : bool }
+type submission = {
+  text : string;
+  follow_up : bool;
+  paste_ranges : (int * int) list;
+}
+type completion = { start : int; stop : int; value : string }
 exception Terminal_signal of int
 type listing_update = {
   verified : string list;
@@ -80,6 +85,7 @@ type t = {
   root : string;
   version : string;
   mutable model : string;
+  mutable model_display_name : string option;
   mutable session : bool;
   editor : Pave.Composer.t;
   transcript : Transcript_view.t;
@@ -474,7 +480,7 @@ let matches chooser =
           (String.sub value pos m = query || find (pos + 1)) in
         find 0 in
       let found = ref [] and models = ref 0 in
-      Array.iter (fun item ->
+      Array.iter (fun (item : candidate) ->
         if includes item.value || includes item.label then (
           if chooser.dynamic && not item.action then incr models;
           found := item :: !found)) chooser.choices;
@@ -485,7 +491,8 @@ let matches chooser =
         chooser.filter <> "" &&
         chooser.filter.[String.length chooser.filter - 1] <> '/' &&
         (String.contains chooser.filter '/' || found = []) &&
-        not (List.exists (fun item -> item.value = chooser.filter) found) in
+        not (List.exists (fun (item : candidate) ->
+          item.value = chooser.filter) found) in
       let found = Array.of_list (if manual then
         { value = chooser.filter; label = chooser.filter; custom = true;
           verified = false; action = false; detail = None } :: found
@@ -521,7 +528,8 @@ let hint_matches t =
     Pave.Composer.cursor t.editor <> String.length draft ||
     String.exists (fun c -> c = ' ' || c = '\t' || c = '\n') draft
   then []
-  else Pave.Interaction.suggestions draft
+  else Pave.Interaction.suggestions
+    ~session:t.session ~interactive:true draft
 
 let hint_room t =
   let cols, rows = Notty_unix.Term.size t.term in
@@ -563,7 +571,8 @@ let insert_hint t (item : Pave.Interaction.shortcut) =
 
 let hint_row cols selected (item : Pave.Interaction.shortcut) =
   let marker = if selected then "  ❯ " else "    " in
-  let usage = if item.usage = "" then "" else " " ^ item.usage in
+  let usage = Pave.Interaction.usage item in
+  let usage = if usage = "" then "" else " " ^ usage in
   I.hsnap ~align:`Left cols I.(
     string (if selected then accent else text_attr) (marker ^ item.name) <|>
     string (if selected then text_attr else muted) (usage ^ " · " ^ item.summary))
@@ -631,17 +640,16 @@ let paint t =
     | Some (width, image) when width = cols -> image
     | _ ->
       let model = single_line t.model in
-      let display_model width =
-        match String.index_opt model '/' with
-        | None -> shorten_middle width model
+      let model_id, model_scope = match String.index_opt model '/' with
+        | None -> model, ""
         | Some split ->
-            let scope = String.sub model 0 split in
-            let upstream = String.sub model (split + 1)
-              (String.length model - split - 1) in
-            let scope = shorten_middle (min (max 0 ((width - 1) / 3))
-              (measure scope)) scope in
-            scope ^ "/" ^ shorten_middle
-              (max 0 (width - 1 - measure scope)) upstream in
+            String.sub model (split + 1) (String.length model - split - 1),
+            String.sub model 0 split in
+      let model_name = Option.value ~default:model_id t.model_display_name
+        |> single_line |> String.trim in
+      let model_name = if model_name = "" then single_line model_id
+        else model_name in
+      let display_model width = shorten_middle width model_name in
       let image =
         if cols < 28 then styled_line cols accent
           (" " ^ display_model (cols - 1))
@@ -656,12 +664,18 @@ let paint t =
             prefix ^ shorten_middle
               (min (cols / 4) (max 0 (space - measure prefix - 12)))
               (single_line t.root) in
-          let name_width = max 0 (space - measure root) in
+          let identity_space = max 0 (min (space / 3)
+            (space - measure root - 20)) in
+          let detail = if cols < 72 || model_scope = "" ||
+              identity_space < 12 then ""
+            else "  ·  " ^ shorten_middle (min 28 identity_space) model_scope in
+          let name_width = max 0 (space - measure root - measure detail) in
           I.hsnap ~align:`Left cols I.(
             string accent badge <|>
             string text_attr (display_model name_width) <|>
             string muted state <|>
-            string muted root) in
+            string muted root <|>
+            string muted detail) in
       t.location_cache <- Some (cols, image);
       image in
   let divider = I.uchar muted (Uchar.of_int 0x2500) cols 1 in
@@ -1091,7 +1105,7 @@ let close t =
       Fun.protect (fun () -> Notty_unix.Term.release t.term)
         ~finally:(fun () -> restore_terminal_signals t.signals))
 let create ?(keybinding_overrides = []) ?(version = "source")
-    ~root ~model ~session () =
+    ?model_display_name ~root ~model ~session () =
   let bindings =
     match Keybindings.apply_overrides Keybindings.bindings
       keybinding_overrides with
@@ -1109,7 +1123,7 @@ let create ?(keybinding_overrides = []) ?(version = "source")
     raise exn in
   let t = try {
     term; input = Terminal_input.create term;
-    root; version = single_line version; model; session;
+    root; version = single_line version; model; model_display_name; session;
     editor = Pave.Composer.create ();
     transcript = Transcript_view.create (); tool_groups = Hashtbl.create 8;
     scroll = 0; chooser = None; overlays = [];
@@ -1188,8 +1202,9 @@ let reset_status t =
   t.status <- idle_status;
   paint t
 
-let set_model t model =
+let set_model ?display_name t model =
   t.model <- model;
+  t.model_display_name <- display_name;
   t.location_cache <- None;
   reset_status t
 
@@ -1224,10 +1239,11 @@ let set_attachments t names =
 let set_queue t count =
   t.queue <- max 0 count;
   paint t
-let prepend_prompt t text =
+let prepend_prompt ?(paste_ranges = []) t text =
   let draft = Pave.Composer.text t.editor in
   let prefix = text ^ (if draft = "" then "" else "\n\n") in
   if Pave.Composer.prepend t.editor prefix then (
+    Pave.Composer.restore_pasted_ranges t.editor paste_ranges;
     t.hint_draft <- Pave.Composer.text t.editor;
     dismiss_hint t;
     paint t;
@@ -1293,11 +1309,14 @@ let finish_live t =
   t.status <- idle_status;
   paint t
 
-let sent t text =
-  let text = match t.pending_attachments with
+let sent ?attachment_names t text =
+  let names, clear_pending = match attachment_names with
+    | Some names -> names, false
+    | None -> t.pending_attachments, true in
+  let text = match names with
     | [] -> text
     | names -> text ^ "\n[Attached media: " ^ String.concat ", " names ^ "]" in
-  t.pending_attachments <- [];
+  if clear_pending then t.pending_attachments <- [];
   change_transcript t (fun () -> Transcript_view.sent t.transcript text);
   t.scroll <- 0;
   t.status <- idle_status;
@@ -1462,6 +1481,7 @@ let read ?wake_fd ?on_wake ?on_interrupt ?on_dequeue ?on_completion t =
   let changed () = repaint_after_key t in
   let paste_buffer = t.paste_buffer in
   let paste_truncated = ref false in
+  let history_provenance_uncertain = ref false in
   let paste_limit () = match Pave.Composer.search_query t.editor with
     | None -> draft_paste_capacity t.editor
     | Some query -> max 0 (512 - String.length query) in
@@ -1491,11 +1511,16 @@ let read ?wake_fd ?on_wake ?on_interrupt ?on_dequeue ?on_completion t =
       t.status <- "Paste truncated at input limit";
     paint t in
   let submit follow_up =
+    let text = Pave.Composer.text t.editor in
+    let paste_ranges =
+      if !history_provenance_uncertain && text <> "" then
+        [0, String.length text]
+      else Pave.Composer.pasted_ranges t.editor in
     match Pave.Composer.submit t.editor with
     | None -> None
     | Some text ->
         paint t;
-        Some { text; follow_up } in
+        Some { text; follow_up; paste_ranges } in
   let key_action event = Keybindings.resolve t.bindings (key_focus t) event in
   let rec loop () =
     match next_input ?wake_fd t with
@@ -1560,6 +1585,7 @@ let read ?wake_fd ?on_wake ?on_interrupt ?on_dequeue ?on_completion t =
         Pave.Composer.search_cancel t.editor;
         changed (); loop ()
     | Some Keybindings.Accept_search ->
+        history_provenance_uncertain := true;
         Pave.Composer.search_accept t.editor;
         changed (); loop ()
     | Some Keybindings.Search_older ->
@@ -1597,21 +1623,20 @@ let read ?wake_fd ?on_wake ?on_interrupt ?on_dequeue ?on_completion t =
           (t.hint_selected + 1);
         changed (); loop ()
     | Some Keybindings.Complete ->
-        (match on_completion with
-        | None -> ()
-        | Some complete ->
+        (match on_completion, Pave.Composer.selection t.editor with
+        | Some complete, None ->
             let draft = Pave.Composer.text t.editor in
-            if String.starts_with ~prefix:"/" draft &&
-              not (String.exists (fun char ->
-                char = ' ' || char = '\n' || char = '\t') draft) then
-              (match complete draft with
-               | Some selected when String.starts_with ~prefix:draft selected ->
-                   Pave.Composer.finish t.editor;
-                   Pave.Composer.insert t.editor
-                     (String.sub selected (String.length draft)
-                       (String.length selected - String.length draft));
-                   changed ()
-               | _ -> ()));
+            let cursor = Pave.Composer.cursor t.editor in
+            (match complete draft cursor with
+             | Some completion ->
+                 if Pave.Composer.replace_range t.editor
+                   ~start:completion.start ~stop:completion.stop
+                   ~value:completion.value then changed ()
+                 else (
+                   t.status <- "Completion exceeds the composer input limit";
+                   paint t)
+             | None -> ())
+        | _ -> ());
         loop ()
     | Some Keybindings.Submit ->
         let matches = hint_matches t in
@@ -1645,21 +1670,29 @@ let read ?wake_fd ?on_wake ?on_interrupt ?on_dequeue ?on_completion t =
         paint t; loop ()
     | Some Keybindings.Restore_or_history ->
         if t.queue > 0 then Option.iter (fun dequeue -> dequeue ()) on_dequeue
-        else Pave.Composer.older t.editor;
+        else (
+          history_provenance_uncertain := true;
+          Pave.Composer.older t.editor);
         changed (); loop ()
     | Some Keybindings.History_older ->
+        history_provenance_uncertain := true;
         Pave.Composer.older t.editor;
         changed (); loop ()
     | Some Keybindings.History_newer ->
+        history_provenance_uncertain := true;
         Pave.Composer.newer t.editor;
         changed (); loop ()
     | Some Keybindings.Vertical_up ->
         if not (Pave.Composer.vertical ~columns:(field_width ()) ~measure
-            t.editor (-1)) then Pave.Composer.older t.editor;
+            t.editor (-1)) then (
+          history_provenance_uncertain := true;
+          Pave.Composer.older t.editor);
         changed (); loop ()
     | Some Keybindings.Vertical_down ->
         if not (Pave.Composer.vertical ~columns:(field_width ()) ~measure
-            t.editor 1) then Pave.Composer.newer t.editor;
+            t.editor 1) then (
+          history_provenance_uncertain := true;
+          Pave.Composer.newer t.editor);
         changed (); loop ()
     | Some Keybindings.Select_up ->
         Pave.Composer.select_vertical ~columns:(field_width ()) ~measure
@@ -1816,7 +1849,7 @@ let update_choices t ~verified
     verified; details; labels; status; status_pages })
 
 let choose ?(allow_custom = false) ?(intro = []) ?(plain = [])
-    ?initial_status ?wake_fd ?on_wake ?dynamic t ~title ~choices =
+    ?initial_status ?initial_filter ?wake_fd ?on_wake ?dynamic t ~title ~choices =
   let dynamic = Option.value dynamic ~default:(Option.is_some wake_fd) in
   let initial = if dynamic then Array.of_list plain
     else Array.of_list choices in
@@ -1827,7 +1860,7 @@ let choose ?(allow_custom = false) ?(intro = []) ?(plain = [])
         action = dynamic; detail = None }) initial;
     allow_custom; dynamic; status = initial_status;
     status_pages = [||]; status_page = 0;
-    filter = ""; selected = 0; offset = 0; touched = false;
+    filter = Option.value ~default:"" initial_filter; selected = 0; offset = 0; touched = false;
     filtered = None; matched_models = 0 } in
   let old_scroll = t.scroll in
   let selected () =

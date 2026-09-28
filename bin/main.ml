@@ -15,6 +15,48 @@ let () =
   let stream = ref false in
   let session = ref "" and prompt = ref "" and prompt_supplied = ref false
     and allow_shell = ref false in
+  let prompt_file = ref None and image_paths = ref [] in
+  let output_format = ref "text" in
+  let shortcut_enabled = ref [] and shortcut_disabled = ref [] in
+  let jsonl_sequence = ref 0 and jsonl_outcome_sent = ref false
+    and jsonl_lock = Mutex.create () in
+  let jsonl_emit fields =
+    if !output_format = "jsonl" then (
+      Mutex.lock jsonl_lock;
+      Fun.protect ~finally:(fun () -> Mutex.unlock jsonl_lock) (fun () ->
+        incr jsonl_sequence;
+        let fields = [
+          "turn_id", `String "turn-1";
+          "sequence", `Int !jsonl_sequence
+        ] @ fields in
+        print_endline (Yojson.Basic.to_string (`Assoc fields));
+        flush stdout)) in
+  let jsonl_outcome status exit_code =
+    if not !jsonl_outcome_sent then (
+      jsonl_emit [
+        "type", `String "outcome";
+        "status", `String status;
+        "exit_code", `Int exit_code
+      ];
+      jsonl_outcome_sent := true) in
+  let jsonl_delta text =
+    let length = String.length text in
+    let is_continuation char =
+      let code = Char.code char in code >= 0x80 && code <= 0xbf in
+    let rec emit start =
+      if start < length then (
+        let stop = ref (min length (start + 4096)) in
+        if !stop < length then
+          while !stop > start && is_continuation text.[!stop] do
+            decr stop
+          done;
+        if !stop = start then stop := min length (start + 4);
+        jsonl_emit [
+          "type", `String "text_delta";
+          "text", `String (String.sub text start (!stop - start))
+        ];
+        emit !stop) in
+    emit 0 in
   let approval_mode_override = ref None in
   let explicit_selection = ref false and explicit_provider = ref false
     and session_supplied = ref false in
@@ -27,6 +69,11 @@ let () =
     and enable_security_scan = ref false and terminal_images = ref false in
   let custom_prompt = ref None and prompt_template = ref None
     and append_prompt = ref None in
+  let set_shortcut destination value =
+    if not (List.mem value Pave.Prompt_shortcuts.names) then
+      raise (Arg.Bad ("unknown shortcut " ^ value ^ "; choose " ^
+        String.concat ", " Pave.Prompt_shortcuts.names));
+    destination := value :: !destination in
   let options = [
     "--root", Arg.Set_string root, "Workspace directory (default: current directory)";
     "--model", Arg.String (fun value ->
@@ -60,6 +107,17 @@ let () =
       "Save and restore conversation at this file";
     "--prompt", Arg.String (fun text -> prompt := text; prompt_supplied := true),
       "Send one prompt, then exit";
+    "--prompt-file", Arg.String (fun path -> prompt_file := Some path),
+      "Read a bounded UTF-8 prompt from a checked workspace-relative file";
+    "--image", Arg.String (fun path -> image_paths := path :: !image_paths),
+      "Attach a workspace-relative, magic-checked image to the next prompt (repeatable)";
+    "--output", Arg.Symbol (["text"; "jsonl"],
+      (fun value -> output_format := value)),
+      "Output format (text or jsonl; JSONL is automation-safe)";
+    "--shortcut", Arg.String (set_shortcut shortcut_enabled),
+      "Opt in to one prose shortcut (repeatable)";
+    "--disable-shortcut", Arg.String (set_shortcut shortcut_disabled),
+      "Disable one prose shortcut (repeatable; overrides --shortcut)";
     "--approval-mode", Arg.String (fun value ->
       match Pave.Approval.mode_of_string value with
       | Some mode -> approval_mode_override := Some mode
@@ -92,7 +150,85 @@ let () =
             "--context-window must be auto or between 8192 and 20000000")),
       "Context-window tokens, or auto for a live provider-reported exact model/API limit";
   ] in
+  let completion_options = List.map (fun (name, spec, _) ->
+    let takes_value = match spec with
+      | Arg.Unit _ | Arg.Bool _ | Arg.Set _ | Arg.Clear _ -> false
+      | _ -> true in
+    let choices = match spec with
+      | Arg.Symbol (values, _) -> values
+      | _ -> match name with
+          | "--approval-mode" -> ["always-ask"; "write"; "yolo"]
+          | "--context-window" -> ["auto"]
+          | "--shortcut" | "--disable-shortcut" ->
+              Pave.Prompt_shortcuts.names
+          | _ -> [] in
+    Cli_completion.{ name; takes_value; choices }) options in
   try
+    if Array.length Sys.argv > 1 && Sys.argv.(1) = "completions" then (
+      (match Array.length Sys.argv with
+       | 3 ->
+           print_string (Cli_completion.generate ~shell:Sys.argv.(2)
+             ~executable:"pave" ~options:completion_options
+             ~task_operations:Task_cli.operations);
+           flush stdout
+       | _ -> failwith "usage: pave completions bash|zsh|fish");
+      exit 0);
+    if Array.length Sys.argv > 1 && Sys.argv.(1) = "__complete" then (
+      let candidates kind =
+        let root = Unix.realpath "." in
+        match kind with
+        | "session" ->
+            (try Pave.Session_store.recent ~root
+              |> List.map (fun (item : Pave.Session_store.recent) -> item.path)
+             with _ -> [])
+        | "model" ->
+            (try
+               let settings = Pave.Settings.load ~root in
+               let registry = match Pave.Provider_catalog.create_registry
+                   settings.values.custom_providers with
+                 | Ok registry -> registry
+                 | Error _ -> Pave.Provider_catalog.builtin_registry in
+               match Pave.Recent_model.load ~root with
+               | Some identity ->
+                   (match Pave.Provider_catalog.find ~registry identity.provider with
+                    | Some descriptor ->
+                        let route = Pave.Provider_catalog.route descriptor
+                          identity.route in
+                        let revision = Pave.Provider_catalog.custom_revision
+                          registry ~provider:identity.provider
+                          ~route:identity.route in
+                        let custom = Pave.Provider_catalog.custom_route registry
+                          ~provider:identity.provider ~route:identity.route in
+                        let account_valid = match custom,
+                            identity.account_id with
+                          | Some route, account_id ->
+                              route.account_id = account_id
+                          | None, None -> true
+                          | None, Some account_id ->
+                              Option.is_some (Pave.Oauth_store.account
+                                ~path:(Pave.Oauth_store.default_path ())
+                                ~provider:identity.provider
+                                ~account_id:(Some account_id)) in
+                        if Option.is_some route &&
+                           identity.config_revision = revision &&
+                           account_valid then
+                          [Pave.Model_identity.selector identity]
+                        else []
+                    | None -> [])
+               | None -> []
+             with _ -> [])
+        | _ -> [] in
+      (match Sys.argv with
+       | [| _; "__complete"; kind; prefix |] ->
+           candidates kind
+           |> List.filter (fun value ->
+             not (String.exists (fun char ->
+               Char.code char <= 32 || Char.code char = 127) value))
+           |> Cli_completion.filter_candidates ~prefix
+           |> List.iter print_endline;
+           flush stdout
+       | _ -> ());
+      exit 0);
     if Array.length Sys.argv > 1 && Sys.argv.(1) = "task" then (
       Task_cli.run (Array.sub Sys.argv 2 (Array.length Sys.argv - 2));
       exit 0);
@@ -104,6 +240,18 @@ let () =
       exit 0);
     Arg.parse options (fun arg -> raise (Arg.Bad ("unexpected argument: " ^ arg)))
       "pave [task OPERATION [OPTIONS] | update [--check] | --providers | --provider ID --model ID --prompt TEXT | --root DIRECTORY --session FILE]";
+    let has_explicit_prompt = !prompt_supplied || Option.is_some !prompt_file in
+    if !prompt_supplied && Option.is_some !prompt_file then
+      failwith "--prompt and --prompt-file are conflicting input sources";
+    if !prompt_supplied && String.trim !prompt = "" then
+      failwith "prompt input must not be empty";
+    let has_input_options = has_explicit_prompt || !image_paths <> [] in
+    if (!list_providers || !list_models) &&
+       (has_input_options || !output_format <> "text") then
+      failwith "prompt and output options cannot be combined with listing modes";
+    if (!login <> "" || !login_manual <> "" || !login_device <> "" ||
+        !logout <> "") && has_input_options then
+      failwith "prompt input cannot be combined with credential actions";
     if !list_providers then (
       let root = Unix.realpath !root in
       if not (Sys.is_directory root) then failwith "workspace root must be a directory";
@@ -140,6 +288,71 @@ let () =
          ~login_device:!login_device ~logout:!logout () then exit 0;
     let root = Unix.realpath !root in
     if not (Sys.is_directory root) then failwith "workspace root must be a directory";
+    let validate_prompt_text source text =
+      if String.contains text '\000' ||
+         not (Pave.Session_attachment.valid_utf8 text) ||
+         String.exists (fun char ->
+           let code = Char.code char in
+           (code < 32 && char <> '\n' && char <> '\r' && char <> '\t') ||
+           code = 127) text then
+        invalid_arg (source ^ " must contain plain UTF-8 text");
+      if String.trim text = "" then
+        invalid_arg (source ^ " must not be empty");
+      text in
+    if !prompt_supplied then prompt :=
+      validate_prompt_text "--prompt" !prompt;
+    let read_stdin_bounded limit =
+      let chunk = Bytes.create 8192 in
+      let content = Buffer.create 8192 in
+      let rec loop () =
+        let remaining = limit + 1 - Buffer.length content in
+        if remaining <= 0 then failwith
+          (Printf.sprintf "stdin prompt exceeds %d-byte limit" limit);
+        let rec read () =
+          try Unix.read Unix.stdin chunk 0 (min 8192 remaining)
+          with Unix.Unix_error (Unix.EINTR, _, _) -> read () in
+        let count = read () in
+        if count > 0 then (
+          Buffer.add_subbytes content chunk 0 count;
+          if Buffer.length content > limit then failwith
+            (Printf.sprintf "stdin prompt exceeds %d-byte limit" limit);
+          loop ()) in
+      loop ();
+      Buffer.contents content in
+    let file_prompt = Option.map (fun path ->
+      match Pave.Session_attachment.load_reference ~root path with
+      | Pave.Session_attachment.Text text ->
+          validate_prompt_text "--prompt-file" text
+      | Pave.Session_attachment.Media _ ->
+          invalid_arg "--prompt-file requires a text file") !prompt_file in
+    let cli_images = List.rev_map (Pave.Session_attachment.load ~root)
+      !image_paths in
+    if List.exists (fun (item : Pave.Protocol.attachment) ->
+      not (String.starts_with ~prefix:"image/" item.mime_type)) cli_images then
+      invalid_arg "--image accepts image files only";
+    Pave.Protocol.validate_attachments cli_images;
+    let read_stdin = not (Unix.isatty Unix.stdin) && not !list_models in
+    let piped_prompt = if not read_stdin then None else
+      let text = read_stdin_bounded 1_048_576 in
+      if String.trim text = "" then None
+      else Some (validate_prompt_text "stdin prompt" text) in
+    (match !prompt_supplied, file_prompt, piped_prompt, read_stdin with
+     | true, _, Some _, _ -> failwith
+         "redirected stdin conflicts with --prompt; provide one prompt source"
+     | _, Some _, Some _, _ -> failwith
+         "redirected stdin conflicts with --prompt-file; provide one prompt source"
+     | true, _, _, _ -> ()
+     | false, Some text, _, _ -> prompt := text; prompt_supplied := true
+     | false, None, Some text, _ -> prompt := text; prompt_supplied := true
+     | false, None, None, true -> failwith "redirected stdin prompt is empty"
+     | false, None, None, false -> ());
+    let interactive_tui = !output_format = "text" && not !prompt_supplied &&
+      Unix.isatty Unix.stdin && Unix.isatty Unix.stdout &&
+      Sys.getenv_opt "TERM" <> Some "dumb" in
+    if not interactive_tui then Sys.catch_break true;
+
+    if !output_format = "jsonl" && not !prompt_supplied then
+      failwith "--output jsonl requires --prompt, --prompt-file, or redirected stdin";
     if !list_models && !endpoint <> "" then
       failwith "--models uses a provider's pinned listing endpoint; remove --endpoint";
     let settings = Pave.Settings.load ~root in
@@ -424,6 +637,8 @@ let () =
       | Some value -> value
       | None -> failwith ("unsupported API for " ^
           descriptor.id ^ "; specify --api to override") in
+    if cli_images <> [] && not (Pave.Provider.supports_user_media route.wire) then
+      failwith "this provider route does not support user media attachments";
     let make_model_identity (descriptor : Pave.Provider_catalog.descriptor)
         (route : Pave.Provider_catalog.route) ?account_id upstream_id =
       let config_revision = Pave.Provider_catalog.custom_revision registry
@@ -523,7 +738,8 @@ let () =
       | None -> descriptor.id ^ "@" ^ route.name ^ "/(not selected)" in
     let active_descriptor = ref descriptor and active_model = ref model
       and active_identity = ref initial_identity
-      and active_route = ref route and endpoint_override = ref !endpoint in
+      and active_route = ref route and endpoint_override = ref !endpoint
+      and active_model_display_name = ref None in
     let context_window_source = ref None in
     let context_window_tokenizer = ref None in
     let context_window_max_output_tokens = ref None in
@@ -615,12 +831,15 @@ let () =
       | _ -> None in
     let ui = ref None in
     let runner : Pave.Turn_runner.t option ref = ref None in
+    let jsonl_tool_failed = ref false in
     let ui_thread = Thread.id (Thread.self ()) in
-    let on_event message = match !ui with
-      | Some screen when Thread.id (Thread.self ()) <> ui_thread ->
-          Tui.post_message screen message
-      | Some screen -> Tui.event screen message
-      | None -> print_endline message; flush stdout in
+    let on_event message =
+      if !output_format = "jsonl" then prerr_endline message
+      else match !ui with
+        | Some screen when Thread.id (Thread.self ()) <> ui_thread ->
+            Tui.post_message screen message
+        | Some screen -> Tui.event screen message
+        | None -> print_endline message; flush stdout in
     let job_managers :
         (string * (Pave.Session.t * Pave.Session_jobs.t)) list ref = ref [] in
     let process_managers :
@@ -679,9 +898,11 @@ let () =
         try Pave.Workspace_process.close_manager manager with exn ->
           prerr_endline ("Error stopping managed processes: " ^
             Printexc.to_string exn)) !process_managers);
-    let on_delta delta = match !ui with
-      | Some screen -> Tui.delta screen delta
-      | None -> print_string delta; flush stdout in
+    let on_delta delta =
+      if !output_format = "jsonl" then jsonl_delta delta
+      else match !ui with
+        | Some screen -> Tui.delta screen delta
+        | None -> print_string delta; flush stdout in
     let approve_command command =
       if not (Unix.isatty Unix.stdin) then false
       else match !ui with
@@ -723,20 +944,56 @@ let () =
           ignore (Pave.Session.record_tool_aborted current ~call_id ~name
             ~side_effects_may_have_occurred)
       | _, Pave.Agent.Tool_updated _ | None, _ -> () in
+    let emit_json_tool_event = function
+      | Pave.Agent.Tool_started { name; _ } ->
+          jsonl_emit [
+            "type", `String "tool"; "name", `String name;
+            "state", `String "started"
+          ]
+      | Pave.Agent.Tool_updated { name; received_bytes; _ } ->
+          let received_bytes =
+            min 1_000_000_000 (max 0 received_bytes) in
+          jsonl_emit [
+            "type", `String "tool"; "name", `String name;
+            "state", `String "updated";
+            "received_bytes", `Int received_bytes
+          ]
+      | Pave.Agent.Tool_settled { name; is_error; _ } ->
+          jsonl_emit [
+            "type", `String "tool"; "name", `String name;
+            "state", `String "settled"; "is_error", `Bool is_error
+          ]
+      | Pave.Agent.Tool_aborted {
+          name; side_effects_may_have_occurred; _ } ->
+          jsonl_emit [
+            "type", `String "tool"; "name", `String name;
+            "state", `String "aborted";
+            "side_effects_may_have_occurred",
+            `Bool side_effects_may_have_occurred
+          ] in
     let worker_tool_event event =
       persist_tool_event event;
-      match !ui with
-      | Some screen when Thread.id (Thread.self ()) = ui_thread ->
-          render_tool_event screen event
-      | Some _ ->
-          Option.iter (fun current -> Pave.Turn_runner.tool current event) !runner
-      | None ->
-          (match event with
-           | Pave.Agent.Tool_started { name; _ } -> on_event ("[" ^ name ^ "]")
-           | Pave.Agent.Tool_updated _ -> ()
-           | Pave.Agent.Tool_settled { name; result; _ }
-           | Pave.Agent.Tool_aborted { name; result; _ } ->
-               on_event ("[" ^ name ^ "] " ^ result)) in
+      (match event with
+       | Pave.Agent.Tool_settled { is_error = true; _ } ->
+           jsonl_tool_failed := true
+       | _ -> ());
+      if !output_format = "jsonl" then emit_json_tool_event event
+      else match !ui with
+        | Some screen when Thread.id (Thread.self ()) = ui_thread ->
+            render_tool_event screen event
+        | Some _ ->
+            Option.iter (fun current -> Pave.Turn_runner.tool current event) !runner
+        | None ->
+            let report = match event with
+              | Pave.Agent.Tool_started { name; _ } ->
+                  "[" ^ name ^ "]"
+              | Pave.Agent.Tool_updated _ -> ""
+              | Pave.Agent.Tool_settled { name; result; _ }
+              | Pave.Agent.Tool_aborted { name; result; _ } ->
+                  "[" ^ name ^ "] " ^ result in
+            if report <> "" then
+              if !prompt_supplied then prerr_endline report
+              else on_event report in
     let worker_event message = match !runner with
       | Some current -> Pave.Turn_runner.message current message
       | None -> on_event message in
@@ -815,7 +1072,8 @@ let () =
     let ephemeral_usage_by_identity :
       ((string * string option * string * string) *
         Pave.Protocol.usage) list ref = ref [] in
-    let pending_attachments : Pave.Protocol.attachment list ref = ref [] in
+    let pending_attachments : Pave.Protocol.attachment list ref =
+      ref cli_images in
     let submitted_attachments :
       (Pave.Protocol.attachment list * bool * bool) option ref = ref None in
     let retry_attachments : Pave.Protocol.attachment list option ref = ref None in
@@ -829,6 +1087,41 @@ let () =
           Tui.set_attachments screen (List.map
             (fun (item : Pave.Protocol.attachment) -> item.name) attachments)
       | None -> () in
+
+    let announce_shortcuts names =
+      if names <> [] then (
+        let details = Pave.Prompt_shortcuts.lexicon
+          |> List.filter_map (fun
+            (shortcut : Pave.Prompt_shortcuts.shortcut) ->
+            if List.mem shortcut.name names then
+              Some (shortcut.name ^ " → " ^ shortcut.prose)
+            else None)
+          |> String.concat "; " in
+        let message = "Shortcut expansion: " ^ details in
+        match !ui with
+        | Some screen -> Tui.alert screen message
+        | None -> prerr_endline message) in
+    let expand_shortcuts display_prompt paste_ranges =
+      let prompt, names = Pave.Prompt_shortcuts.expand
+        ~enabled:(List.rev !shortcut_enabled)
+        ~disabled:(List.rev !shortcut_disabled)
+        ~paste_ranges display_prompt in
+      announce_shortcuts names;
+      prompt, names in
+    let prepare_tui_submission ?(paste_ranges = []) display_prompt =
+      let shortcut_prompt, _ = expand_shortcuts display_prompt paste_ranges in
+      let expansion = Pave.File_mentions.expand ~root shortcut_prompt in
+      let same (left : Pave.Protocol.attachment)
+          (right : Pave.Protocol.attachment) =
+        left.name = right.name && left.mime_type = right.mime_type &&
+        left.data = right.data in
+      let attachments = List.fold_left (fun acc item ->
+        if List.exists (same item) acc then acc else acc @ [item])
+        !pending_attachments expansion.attachments in
+      Pave.Protocol.validate_attachments attachments;
+      set_pending_attachments [];
+      ({ prompt = expansion.prompt; display_prompt; attachments; paste_ranges }
+        : Pave.Turn_runner.submission) in
     let mark_user_message (message : Pave.Protocol.message) =
       if message.role = "user" then
         match !submitted_attachments with
@@ -1321,7 +1614,7 @@ let () =
         ~allow_shell:!allow_shell
         ~tool_available
         ~delegate_task
-        ~stream:(!stream || Option.is_some !ui)
+        ~stream:(!stream || Option.is_some !ui || !output_format = "jsonl")
         ~approval_mode:!effective_approval_mode
         ~tool_approval:configured.tool_approval
         ~command_patterns:configured.command_patterns
@@ -1329,16 +1622,30 @@ let () =
         ~before_request
         ~on_usage:record_usage
         ?on_phase:(if Option.is_some !ui then Some worker_phase else None)
-        ?on_tool_event:(if Option.is_some !ui || Option.is_some !journal
+        ?on_tool_event:(if Option.is_some !ui || Option.is_some !journal ||
+          !output_format = "jsonl" || not interactive_tui
           then Some worker_tool_event else None)
         ?on_workspace_effect
         ~history ~on_change ~on_event:worker_event ~on_delta:worker_delta () in
     let get_agent () = match !agent with
       | Some current -> current
       | None -> let current = make_agent () in agent := Some current; current in
-    let submit_direct ?attachments ?(consume_pending = true) text =
+    let submit_direct ?attachments ?(consume_pending = true)
+        ?(apply_shortcuts = true) text =
+      let original_text = text in
+      let text, shortcut_names = if apply_shortcuts then
+          expand_shortcuts text []
+        else text, [] in
       let attachments = match attachments with
         | Some items -> items | None -> !pending_attachments in
+      jsonl_tool_failed := false;
+      if !output_format = "jsonl" then
+        jsonl_emit [
+          "type", `String "turn"; "state", `String "started";
+          "prompt_bytes", `Int (String.length original_text);
+          "attachment_count", `Int (List.length attachments);
+          "shortcuts", `List (List.map (fun name -> `String name) shortcut_names)
+        ];
       submitted_attachments := Some (attachments, consume_pending, false);
       (try
          ignore (Pave.Agent.run ~max_turns ~attachments (get_agent ()) text);
@@ -1389,7 +1696,7 @@ let () =
       effective_approval_mode := if explicit_approval_mode then
         Option.value ~default:configured_approval_mode !approval_mode_override
       else Option.value ~default:configured_approval_mode saved_mode in
-    let use_selection (descriptor, identity, route) =
+    let use_selection ?display_name (descriptor, identity, route) =
       active_descriptor := descriptor;
       active_identity := identity;
       active_model := Option.fold ~none:""
@@ -1397,16 +1704,18 @@ let () =
       active_route := route;
       endpoint_override := "";
       agent := None;
+      active_model_display_name := display_name;
       (match !ui with
        | Some screen ->
-           Tui.set_model screen (selection_label descriptor identity route);
+           Tui.set_model ?display_name screen
+             (selection_label descriptor identity route);
            refresh_usage screen;
            Option.iter (fun selected ->
              try Pave.Recent_model.save ~root selected with exn ->
                on_event ("Recent model was not saved: " ^ error_message exn))
              identity
        | None -> ()) in
-    let apply_model_selection
+    let apply_model_selection ?display_name
         ((descriptor : Pave.Provider_catalog.descriptor),
          (identity : Pave.Model_identity.t),
          (route : Pave.Provider_catalog.route)) =
@@ -1418,8 +1727,8 @@ let () =
       (match !journal, !agent with
        | None, Some previous -> retained_history := Pave.Agent.messages previous
        | _ -> ());
-      use_selection (descriptor, Some identity, route) in
-    let select_prompt_account text =
+      use_selection ?display_name (descriptor, Some identity, route) in
+    let select_prompt_account ?(paste_ranges = []) text =
       match !ui, !active_identity with
       | Some screen, Some identity when identity.account_id = None ->
           (match ambiguous_oauth_accounts !active_descriptor !active_route with
@@ -1437,12 +1746,14 @@ let () =
                  (fun label -> List.assoc_opt label choices) in
                (match selected with
                 | Some account_id ->
-                    apply_model_selection (!active_descriptor,
-                      { identity with account_id = Some account_id },
-                      !active_route);
+                    apply_model_selection
+                      ?display_name:!active_model_display_name
+                      (!active_descriptor,
+                       { identity with account_id = Some account_id },
+                       !active_route);
                     true
                 | None ->
-                    if Tui.prepend_prompt screen text then
+                    if Tui.prepend_prompt ~paste_ranges screen text then
                       Tui.alert screen "Account selection cancelled · draft restored"
                     else
                       Tui.alert screen "Account selection cancelled · draft could not be restored";
@@ -1646,6 +1957,7 @@ let () =
             on_event "Compacted conversation; full journal preserved."
            with exn -> on_event ("Error: " ^ error_message exn)) in
     let choose_model ?preferred selected =
+      let display_name = ref None in
       let selector = match selected with
         | Some selector -> selector
         | None ->
@@ -1669,7 +1981,12 @@ let () =
                          ?account_id:selected_account_id
                          ~title:("Model · " ^ descriptor.id ^ " (current conversation)")
                          () in
-                 Option.value ~default:"" picked
+                 display_name := Option.bind picked
+                  (fun (selection : Model_picker.selection) ->
+                    selection.display_name);
+                 Option.value ~default:""
+                  (Option.map (fun (selection : Model_picker.selection) ->
+                    selection.selector) picked)
              | None ->
                  let providers = Pave.Interaction.selectable_providers ~registry () in
                  on_event ("Current model: " ^
@@ -1690,11 +2007,15 @@ let () =
               | None when configured.default_provider = Some descriptor.id ->
                   configured.default_account_id
               | None -> None in
+            let picked = Model_picker.choose ~registry screen ~descriptor
+              ~route_name:route.name ?account_id:selected_account_id
+              ~title:("Model · " ^ descriptor.id ^ "@" ^ route.name) () in
+            display_name := Option.bind picked
+              (fun (selection : Model_picker.selection) ->
+                selection.display_name);
             Option.value ~default:""
-              (Model_picker.choose ~registry screen ~descriptor
-                ~route_name:route.name ?account_id:selected_account_id
-                ~title:("Model · " ^ descriptor.id ^ "@" ^ route.name)
-                ())
+              (Option.map (fun (selection : Model_picker.selection) ->
+                selection.selector) picked)
         | Some _, None -> ""
         | None, _ -> selector in
       if selector <> "" then (
@@ -1746,7 +2067,8 @@ let () =
           with exn ->
             (match !ui with Some screen -> Tui.reset_status screen | None -> ());
             raise exn in
-        apply_model_selection (descriptor, identity, route);
+        apply_model_selection ?display_name:!display_name
+          (descriptor, identity, route);
         on_event ("Active model: " ^ Pave.Model_identity.selector identity ^
           ". /setup saves a cross-workspace default.")
       ) else match !ui with
@@ -1804,8 +2126,10 @@ let () =
                on_event ("Setup skip was not saved: " ^ error_message exn ^
                  ". Run /setup to return.")))
           else on_event "Setup cancelled; your saved default is unchanged."
-      | Setup_view.Selected (descriptor, identity, route, missing_key) ->
-          apply_model_selection (descriptor, identity, route);
+      | Setup_view.Selected (descriptor, identity, route, missing_key,
+          display_name) ->
+          apply_model_selection ?display_name
+            (descriptor, identity, route);
           let saved =
             try
               ignore (Pave.Settings.update_user (fun current -> {
@@ -2163,23 +2487,126 @@ let () =
             refresh_usage screen;
             Tui.alert screen ("Branch: " ^ target)
         | None -> on_event ("Branch: " ^ target) in
-      let complete_command ?wake_fd ?on_wake screen prefix =
-        let choices = Pave.Interaction.suggestions prefix in
-        if choices = [] then (
-          Tui.alert screen "No matching command";
-          None)
-        else
-          let names = List.map (fun (item : Pave.Interaction.shortcut) ->
-            item.name) choices in
-          match Tui.choose ?wake_fd ?on_wake ~dynamic:false screen
-            ~title:("Commands · search, " ^ Tui.enter_key ^ " insert, Esc keep draft")
-            ~choices:names with
-          | None -> None
-          | Some name ->
-              Option.map (fun (item : Pave.Interaction.shortcut) ->
-                item.name ^ (if item.usage = "" then "" else " "))
-                (List.find_opt (fun (item : Pave.Interaction.shortcut) ->
-                  item.name = name) choices) in
+      let complete_command ?wake_fd ?on_wake screen draft cursor =
+        match Pave.File_mentions.completion_context draft cursor with
+        | Some context ->
+            let listing = Pave.File_mentions.complete_paths ~root context.prefix in
+            let choices = List.map (fun (candidate : Pave.File_mentions.candidate) ->
+              candidate.path ^ (if candidate.is_directory then "/" else ""))
+              listing.candidates in
+            if choices = [] then (
+              Tui.alert screen (if listing.truncated then
+                "Workspace path search was truncated; narrow the path"
+                else "No matching workspace path");
+              None)
+            else
+              let status = if listing.truncated then
+                Some "Workspace path results are incomplete; refine the prefix"
+              else None in
+              let title = if listing.truncated then
+                "Workspace paths · truncated results · " ^ Tui.enter_key ^
+                  " insert, Esc keep draft"
+              else "Workspace paths · " ^ Tui.enter_key ^
+                " insert, Esc keep draft" in
+              Option.map (fun choice ->
+                let directory = String.ends_with ~suffix:"/" choice in
+                let path = if directory then String.sub choice 0
+                  (String.length choice - 1) else choice in
+                let candidate = List.find (fun
+                    (item : Pave.File_mentions.candidate) -> item.path = path)
+                    listing.candidates in
+                { Tui.start = context.start; stop = context.stop;
+                  value = Pave.File_mentions.render_reference
+                    ?quote:context.quote ~directory:candidate.is_directory path })
+                (Tui.choose ?wake_fd ?on_wake ~dynamic:false screen
+                  ?initial_status:status ~title ~choices)
+        | None ->
+            let is_space = Pave.Interaction.is_whitespace_or_control in
+            let token_end start =
+              let stop = ref start in
+              while !stop < String.length draft && not (is_space draft.[!stop]) do
+                incr stop
+              done;
+              !stop in
+            if not (String.starts_with ~prefix:"/" draft) then None
+            else
+              let command_end = token_end 0 in
+              if cursor <= command_end then
+                let prefix = String.sub draft 0 cursor in
+                let choices = Pave.Interaction.suggestions
+                  ~session:(Option.is_some !journal)
+                  ~interactive:(Option.is_some !ui) prefix in
+                if choices = [] then (
+                  Tui.alert screen "No matching command";
+                  None)
+                else
+                  let names = List.map
+                    (fun (item : Pave.Interaction.shortcut) -> item.name)
+                    choices in
+                  (match Tui.choose ?wake_fd ?on_wake ~dynamic:false screen
+                    ~title:("Commands · search, " ^ Tui.enter_key ^
+                      " insert, Esc keep draft") ~choices:names with
+                   | None -> None
+                   | Some name ->
+                       Option.map (fun (item : Pave.Interaction.shortcut) ->
+                         { Tui.start = 0; stop = command_end;
+                           value = item.name ^
+                             (if Pave.Interaction.usage item <> "" &&
+                                 command_end = String.length draft
+                              then " " else "") })
+                         (List.find_opt (fun
+                           (item : Pave.Interaction.shortcut) ->
+                             item.name = name) choices))
+              else if String.sub draft 0 command_end = "/model" then
+                let argument_start = ref command_end in
+                while !argument_start < String.length draft &&
+                  is_space draft.[!argument_start] do incr argument_start done;
+                let selector_stop = token_end !argument_start in
+                if cursor < !argument_start || cursor > selector_stop then None
+                else
+                  let initial_filter = String.sub draft !argument_start
+                    (cursor - !argument_start) in
+                  (match Model_picker.choose_all ~initial_filter ~registry screen
+                    ~active:!active_descriptor
+                    ~current_route:!active_route.name () with
+                   | None -> None
+                   | Some (selection : Model_picker.selection) ->
+                       Some { Tui.start = !argument_start;
+                         stop = selector_stop; value = selection.selector })
+              else None in
+      let submit_tui_prompt ?(follow_up = false) ?(paste_ranges = [])
+          active text =
+        let staged = !pending_attachments in
+        try
+          let submission = match !ui with
+            | Some _ -> prepare_tui_submission ~paste_ranges text
+            | None ->
+                let prompt, _ = expand_shortcuts text paste_ranges in
+                { Pave.Turn_runner.prompt = prompt; display_prompt = text;
+                  attachments = []; paste_ranges } in
+          if follow_up then
+            Pave.Turn_runner.follow_up active
+              ~display_prompt:submission.display_prompt
+              ~attachments:submission.attachments
+              ~paste_ranges:submission.paste_ranges submission.prompt
+          else
+            Pave.Turn_runner.steer active
+              ~display_prompt:submission.display_prompt
+              ~attachments:submission.attachments
+              ~paste_ranges:submission.paste_ranges submission.prompt;
+          true
+        with exn ->
+          (match !ui with
+           | Some screen ->
+               if !pending_attachments <> staged then
+                 set_pending_attachments staged;
+               let restored = Tui.prepend_prompt ~paste_ranges screen text in
+               Tui.alert screen (if restored then
+                 "Attachment error · draft restored: " ^ error_message exn
+                 else "Attachment error · draft could not be restored: " ^
+                   error_message exn)
+           | None -> on_event ("Error: " ^ error_message exn));
+          false in
       let input () = match !ui, !runner with
         | Some screen, Some active ->
             let wake_fd = Pave.Turn_runner.fd active in
@@ -2196,28 +2623,35 @@ let () =
                 match Pave.Turn_runner.dequeue_last active with
                 | None -> Tui.alert screen "No queued prompt to restore"
                 | Some queued ->
-                    if Tui.prepend_prompt screen queued.prompt then
+                    if Tui.prepend_prompt
+                        ~paste_ranges:queued.submission.paste_ranges screen
+                        queued.submission.display_prompt then (
+                      set_pending_attachments queued.submission.attachments;
                       Tui.alert screen ("Restored queued prompt · " ^
                         Tui.meta_key ^ "+" ^ Tui.enter_key ^
-                        " to queue, " ^ Tui.enter_key ^ " to steer")
+                        " to queue, " ^ Tui.enter_key ^ " to steer"))
                     else (
                       Pave.Turn_runner.restore_dequeued active queued;
                       Tui.alert screen "Draft is full · queued prompt remains pending"))
               with
-             | Some submission -> submission.text, submission.follow_up
+             | Some submission -> submission
              | None -> raise End_of_file)
         | Some screen, None ->
             (match Tui.read screen
               ~on_completion:(complete_command screen) with
-             | Some submission -> submission.text, submission.follow_up
+             | Some submission -> submission
              | None -> raise End_of_file)
         | None, _ ->
             print_string "pave> "; flush stdout;
-            read_line (), true in
+            { Tui.text = read_line (); follow_up = true; paste_ranges = [] } in
       try while true do
-        let line, follow_up = input () in
         (try
-         let command = Pave.Interaction.parse line in
+        let input = input () in
+        let line = input.text and follow_up = input.follow_up
+        and paste_ranges = input.paste_ranges in
+         let command = Pave.Interaction.parse
+           ~session:(Option.is_some !journal)
+           ~interactive:(Option.is_some !ui) line in
          let busy = match !runner with
            | Some active -> Pave.Turn_runner.busy active
            | None -> false in
@@ -2240,23 +2674,31 @@ let () =
                  Tui.meta_key ^ "+↑ restores the last queued prompt")
              else (
                let lines = "Commands · type / then Tab to search" ::
-                 Pave.Interaction.help () in
+                Pave.Interaction.help ~session:(Option.is_some !journal)
+                  ~interactive:(Option.is_some !ui) () in
                match !ui with
                | Some screen -> Tui.events screen (lines @ Tui.hotkeys)
                | None -> List.iter on_event lines)
+         | Pave.Interaction.Login ->
+             (match !ui with
+              | Some screen -> choose_login screen
+              | None -> assert false)
          | Pave.Interaction.Hotkeys ->
              (match !ui with
               | Some screen -> Tui.events screen Tui.hotkeys
               | None -> on_event "Hotkeys require the interactive terminal; use /help for commands")
          | Pave.Interaction.Queue_prompt text ->
-             if busy || select_prompt_account line then (
+             if busy || select_prompt_account ~paste_ranges text then (
                (match !runner with
-                | Some active -> Pave.Turn_runner.follow_up active text
-                | None -> send text);
-               (match busy, !ui with
-                | true, Some screen ->
-                    Tui.alert screen "Follow-up queued for after the active turn."
-                | _ -> ()))
+                | Some active ->
+                    if submit_tui_prompt ~follow_up:true ~paste_ranges
+                        active text && busy then
+                      (match !ui with
+                       | Some screen ->
+                           Tui.alert screen
+                             "Follow-up queued for after the active turn."
+                       | None -> ())
+                | None -> send text))
          | _ when busy && (match command with
              | Pave.Interaction.Prompt _ | Pave.Interaction.Jobs
              | Pave.Interaction.Wait _ | Pave.Interaction.Cancel_job _
@@ -2346,10 +2788,11 @@ let () =
             match !runner with
             | Some active ->
                 retry_attachments := Some message.attachments;
-                Pave.Turn_runner.submit active text
+                Pave.Turn_runner.submit active ~display_prompt:text
+                  ~attachments:message.attachments text
             | None ->
                 submit_direct ~attachments:message.attachments
-                  ~consume_pending:false text in
+                  ~consume_pending:false ~apply_shortcuts:false text in
           (match !journal with
            | Some current ->
                (match Pave.Session.retry_candidate current with
@@ -2431,19 +2874,24 @@ let () =
                 with exn -> report_error exn))
         | Pave.Interaction.Tools selected ->
           let current = get_agent () in
-          let definitions = Pave.Tools.available ~allow_shell:true in
+          let definitions = Pave.Tools.available_for ~allow_shell:!allow_shell
+            ~enabled:current.tool_available in
           let definitions = if current.tool_available "task" &&
               Option.is_some current.delegate_task then
             definitions @ [Pave.Agent.task_definition] else definitions in
-          let entries = List.filter_map (fun json ->
+          let entries definitions = List.filter_map (fun json ->
             let function_json = Pave.Protocol.member "function" json in
             match Pave.Protocol.member "name" function_json,
               Pave.Protocol.member "description" function_json with
             | `String name, `String description -> Some (name, description)
             | _ -> None) definitions in
-          let is_enabled name = not (List.mem name !disabled_tools) &&
-            (name <> "run_command" || !allow_shell) in
-          let enabled = List.filter (fun (name, _) -> is_enabled name) entries in
+          let enabled = entries definitions in
+          let all_definitions = Pave.Tools.available ~allow_shell:true in
+          let all_definitions = if Option.is_some !journal &&
+              Option.is_some current.delegate_task then
+            all_definitions @ [Pave.Agent.task_definition] else all_definitions in
+          let all_entries = entries all_definitions in
+          let is_enabled name = List.mem_assoc name enabled in
           let lines = match selected with
             | None ->
                 ["Enabled tools · /tools NAME for details"] @
@@ -2454,7 +2902,7 @@ let () =
                 [if !allow_shell then "Shell requires approval; not sandboxed"
                  else "Shell disabled; restart with --allow-shell to enable"]
             | Some name ->
-                (match List.assoc_opt name entries with
+                (match List.assoc_opt name all_entries with
                  | None -> ["Unknown tool: " ^ name]
                  | Some description ->
                      ["Tool: " ^ name;
@@ -2832,16 +3280,15 @@ let () =
         | Pave.Interaction.Prompt text when text <> "" ->
             (match !runner with
              | Some active when busy ->
-                 (match !ui with
-                 | Some screen when follow_up ->
-                     Pave.Turn_runner.follow_up active line;
-                     Tui.alert screen "Follow-up queued for after this turn."
-                 | Some screen ->
-                     Pave.Turn_runner.steer active line;
-                     Tui.alert screen "Steering queued; interrupting the current turn."
-                 | None -> Pave.Turn_runner.submit active line)
-             | Some active when select_prompt_account line ->
-                 Pave.Turn_runner.submit active line
+                 if submit_tui_prompt ~follow_up ~paste_ranges active line then
+                   (match !ui with
+                    | Some screen when follow_up ->
+                        Tui.alert screen "Follow-up queued for after this turn."
+                    | Some screen ->
+                        Tui.alert screen "Steering queued; interrupting the current turn."
+                    | None -> ())
+             | Some active when select_prompt_account ~paste_ranges line ->
+                 ignore (submit_tui_prompt ~follow_up ~paste_ranges active line)
              | Some _ -> ()
              | None -> send line)
         | Pave.Interaction.Prompt _ -> ()
@@ -2857,10 +3304,35 @@ let () =
         settings.diagnostics;
       List.iter (fun diagnostic -> prerr_endline ("Instructions: " ^ diagnostic))
         instruction_diagnostics;
-      send !prompt)
+      if !output_format = "jsonl" then
+        (try
+           send !prompt;
+           if !jsonl_tool_failed then (
+             jsonl_outcome "tool_error" 2;
+             exit 2)
+           else (
+             jsonl_outcome "completed" 0;
+             exit 0)
+         with
+         | Pave.Provider.Cancelled | Sys.Break ->
+             jsonl_outcome "cancelled" 130;
+             prerr_endline "Cancelled";
+             exit 130
+         | Tui.Terminal_signal 2 ->
+             jsonl_outcome "cancelled" 130;
+             prerr_endline "Cancelled";
+             exit 130
+         | exn ->
+             jsonl_outcome "failed" 1;
+             prerr_endline ("Error: " ^ error_message exn);
+             exit 1)
+      else (
+        send !prompt;
+        if !jsonl_tool_failed then exit 2))
     else if Unix.isatty Unix.stdin && Unix.isatty Unix.stdout
       && Sys.getenv_opt "TERM" <> Some "dumb" then (
       let screen = Tui.create ~root ~version:Embedded_installer.version
+        ?model_display_name:!active_model_display_name
         ~model:(selection_label !active_descriptor !active_identity !active_route)
         ~session:(!session <> "") () in
       Fun.protect ~finally:(fun () ->
@@ -2871,6 +3343,7 @@ let () =
         ui := None;
         Tui.close screen) (fun () ->
         ui := Some screen;
+        set_pending_attachments !pending_attachments;
         (match !journal with
          | Some current -> Tui.show_history screen (Pave.Session.history current)
          | None -> ());
@@ -2894,23 +3367,12 @@ let () =
              deliver_job_results ()
          | None -> ());
         let handle_runner_event = function
-          | Pave.Turn_runner.Turn_started { prompt; _ } ->
-              let staged = !pending_attachments in
-              let attachments, consume_pending = match !retry_attachments with
-                | Some items -> retry_attachments := None; items, false
-                | None -> staged, true in
-              submitted_attachments :=
-                Some (attachments, consume_pending, false);
-              if consume_pending then pending_attachments := [];
+          | Pave.Turn_runner.Turn_started { submission; _ } ->
               Tui.set_activity screen (Some "Thinking");
-              if not consume_pending then
-                Tui.set_attachments screen (List.map
-                  (fun (item : Pave.Protocol.attachment) -> item.name)
-                  attachments);
-              Tui.sent screen prompt;
-              if not consume_pending then
-                Tui.set_attachments screen (List.map
-                  (fun (item : Pave.Protocol.attachment) -> item.name) staged)
+              Tui.sent ~attachment_names:(List.map
+                (fun (item : Pave.Protocol.attachment) -> item.name)
+                submission.attachments)
+                screen submission.display_prompt
           | Pave.Turn_runner.Transcript_message { text; _ } ->
               Tui.event screen text
           | Pave.Turn_runner.Text_delta { text; _ } ->
@@ -2961,12 +3423,20 @@ let () =
               Tui.event screen ("Error: " ^ error_message error) in
         Tui.set_agent_event_handler screen handle_runner_event;
         let active = Pave.Turn_runner.create
-          ~run:(fun ~cancel text ->
-            let attachments = match !submitted_attachments with
-              | Some (items, _, _) -> items
-              | None -> [] in
-            ignore (Pave.Agent.run ~cancel ~max_turns ~attachments
-              (get_agent ()) text))
+          ~run:(fun ~cancel (submission : Pave.Turn_runner.submission) ->
+            let restore_attachments =
+              match !retry_attachments with
+              | Some items when items = submission.attachments ->
+                  retry_attachments := None;
+                  false
+              | _ ->
+                  retry_attachments := None;
+                  true in
+            submitted_attachments :=
+              Some (submission.attachments, restore_attachments, false);
+            ignore (Pave.Agent.run ~cancel ~max_turns
+              ~attachments:submission.attachments (get_agent ())
+              submission.prompt))
           ~on_event:(Tui.publish_agent_event screen)
           ~on_approve:(Tui.confirm screen)
           ~on_approve_tool:(Tui.confirm_tool screen)
@@ -2982,8 +3452,18 @@ let () =
   with
   | Tui.Terminal_signal signal ->
       exit_kind := Pave.Session.Fatal;
-      exit (128 + signal)
+      let status, code = if signal = 2 then "cancelled", 130
+        else "failed", 128 + signal in
+      jsonl_outcome status code;
+      if signal = 2 then prerr_endline "Cancelled";
+      exit code
+  | (Pave.Provider.Cancelled | Sys.Break) ->
+      exit_kind := Pave.Session.Fatal;
+      jsonl_outcome "cancelled" 130;
+      prerr_endline "Cancelled";
+      exit 130
   | exn ->
       exit_kind := Pave.Session.Fatal;
+      jsonl_outcome "failed" 1;
       prerr_endline ("Error: " ^ error_message exn);
       exit 1

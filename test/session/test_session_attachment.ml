@@ -57,8 +57,47 @@ let () =
     write (child root "clip.webm") ("\026E\223\163" ^ String.make 8 '\000');
     let webm = Pave.Session_attachment.load ~root "clip.webm" in
     assert (webm.mime_type = "video/webm");
+    write (child root "note.txt") "Hello, 世界";
+    (match Pave.Session_attachment.load_reference ~root "note.txt" with
+     | Pave.Session_attachment.Text text -> assert (text = "Hello, 世界")
+     | Pave.Session_attachment.Media _ -> failwith "text reference was loaded as media");
+    write (child root "empty.txt") "";
+    (match Pave.Session_attachment.load_reference ~root "empty.txt" with
+     | Pave.Session_attachment.Text text -> assert (text = "")
+     | Pave.Session_attachment.Media _ -> failwith "empty text reference was loaded as media");
+    (match Pave.Session_attachment.load_reference ~root "sample.PNG" with
+     | Pave.Session_attachment.Media attachment ->
+         assert (attachment.Pave.Protocol.mime_type = "image/png")
+     | Pave.Session_attachment.Text _ -> failwith "media reference was loaded as text");
+    write (child root "invalid-utf8.txt") "\255";
+    rejected (fun () ->
+      Pave.Session_attachment.load_reference ~root "invalid-utf8.txt");
+    write (child root "nul.txt") "before\000after";
+    rejected (fun () -> Pave.Session_attachment.load_reference ~root "nul.txt");
+    let text_limit = Pave.Workspace_path.max_read_bytes in
+    write (child root "text-boundary.txt") (String.make text_limit 'x');
+    (match Pave.Session_attachment.load_reference ~root "text-boundary.txt" with
+     | Pave.Session_attachment.Text text ->
+         assert (String.length text = text_limit)
+     | Pave.Session_attachment.Media _ -> failwith "text reference was loaded as media");
+    write (child root "text-oversize.txt") (String.make (text_limit + 1) 'x');
+    rejected (fun () ->
+      Pave.Session_attachment.load_reference ~root "text-oversize.txt");
 
+    rejected (fun () ->
+      Pave.Session_attachment.load_reference ~root "../outside.png");
     write (child outside "outside.png") png;
+    Unix.symlink (child outside "outside.png") (child root "escape-reference.png");
+    rejected (fun () ->
+      Pave.Session_attachment.load_reference ~root "escape-reference.png");
+
+    write (child outside "outside.txt") "outside";
+    rejected (fun () ->
+      Pave.Session_attachment.load_reference ~root "../outside.txt");
+    Unix.symlink (child outside "outside.txt") (child root "escape-reference.txt");
+    rejected (fun () ->
+      Pave.Session_attachment.load_reference ~root "escape-reference.txt");
+
     rejected (fun () -> Pave.Session_attachment.load ~root "../outside.png");
     rejected (fun () -> Pave.Session_attachment.load ~root (child root "sample.PNG"));
     Unix.symlink (child outside "outside.png") (child root "escape.png");

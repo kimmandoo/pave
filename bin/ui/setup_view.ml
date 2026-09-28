@@ -1,7 +1,7 @@
 type result =
   | Skipped
   | Selected of Pave.Provider_catalog.descriptor * Pave.Model_identity.t *
-      Pave.Provider_catalog.route * string option
+      Pave.Provider_catalog.route * string option * string option
 
 let provider_choices registry =
   List.map (fun (entry : Pave.Provider_catalog.descriptor) ->
@@ -226,23 +226,25 @@ let run screen ~registry =
         "Choose from models available on this account and API route.";
         "If none appear, check credentials or the provider listing."]
       ~title:"SETUP · Select model" () with
-    | None | Some "Skip setup" -> skip
-    | Some choice when choice = back ->
+    | None -> skip
+    | Some selection when selection.selector = "Skip setup" -> skip
+    | Some selection when selection.selector = back ->
         if local_without_key then provider () else authentication descriptor
-    | Some choice ->
+    | Some selection ->
         (try
            let selected, identity, route = Pave.Interaction.resolve_model
              ~registry ~current_route:route_name
-             ?current_account_id:account_id
-             ~current_provider:descriptor.id ~input:choice () in
+             ?current_account_id:account_id ~current_provider:descriptor.id
+             ~input:selection.selector () in
            if selected.id <> descriptor.id then
              invalid_arg "choose a model from the selected provider";
            finish selected identity route missing_key account_id
+             selection.display_name
          with (Invalid_argument _ | Failure _) as exn ->
            Tui.alert screen ("Model unavailable: " ^ Printexc.to_string exn);
            model ~account_id descriptor missing_key)
   and finish descriptor identity (route : Pave.Provider_catalog.route)
-      missing_key account_id =
+      missing_key account_id display_name =
     let label = Pave.Model_identity.selector identity in
     let title = match missing_key with
       | Some env -> "SETUP · Set " ^ env ^ " before prompts"
@@ -254,7 +256,7 @@ let run screen ~registry =
       ~title
       ~choices:["Save " ^ label; "Back · models"; "Skip setup"] with
     | Some selected when selected = "Save " ^ label ->
-        Selected (descriptor, identity, route, missing_key)
+        Selected (descriptor, identity, route, missing_key, display_name)
     | Some "Back · models" -> model ~account_id descriptor missing_key
     | _ -> skip in
   welcome ()

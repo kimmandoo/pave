@@ -59,6 +59,26 @@ let () =
     Model_picker.identity_selector model_a <>
       Model_picker.identity_selector model_b &&
     Model_picker.identity_label model_a <> Model_picker.identity_label model_b);
+  let named_a = { model_a with Catalog.display_name = Some "GPT-4o" }
+  and named_b = { model_b with Catalog.display_name = Some "GPT-4o" } in
+  let exact_a = Model_picker.identity_selector named_a
+  and exact_b = Model_picker.identity_selector named_b in
+  assert (String.starts_with ~prefix:"GPT-4o · openai@chat#team-a"
+      (Model_picker.identity_label named_a) &&
+    String.starts_with ~prefix:"GPT-4o · openai@chat#team-b"
+      (Model_picker.identity_label named_b) &&
+    exact_a <> exact_b &&
+    exact_a = Pave.Model_identity.selector named_a.identity &&
+    exact_b = Pave.Model_identity.selector named_b.identity);
+  let terminal_name = { named_a with
+    Catalog.display_name = Some "GPT-4o\027[31m" } in
+  let empty_name = { named_a with Catalog.display_name = Some "  " } in
+  assert (not (String.contains (Model_picker.identity_label terminal_name) '\027') &&
+    String.starts_with ~prefix:"shared-id ·"
+      (Model_picker.identity_label empty_name) &&
+    (match Model_picker.model_detail openai terminal_name with
+     | Some details -> not (String.contains details '\027')
+     | None -> false));
   let slash_listing = listing ~provider:"openai" ~route:"chat"
     ~account_id:"team-a" ~ids:["org/model"] () in
   let slash_model = List.hd
@@ -77,8 +97,7 @@ let () =
   let exact = Model_picker.identity_selector scoped_model in
   let label = Model_picker.identity_label scoped_model in
   let detail = Model_picker.model_detail openai scoped_model in
-  assert (String.ends_with ~suffix:scoped_id label &&
-    String.starts_with ~prefix:"openai@chat#team-a · " label &&
+  assert (String.starts_with ~prefix:(scoped_id ^ " · openai@chat#team-a") label &&
     Option.fold ~none:false ~some:(fun text ->
       String.starts_with ~prefix:("exact identity " ^ exact) text) detail);
   let off_route : Discovery.listing = { chat_listing with

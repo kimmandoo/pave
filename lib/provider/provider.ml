@@ -579,6 +579,27 @@ let post_stream ?max_request_bytes ?(local = false) ?cancel ~endpoint ~headers
         raise (Provider_error (http_error_reason secret code error)));
       if Buffer.length pending <> 0 then on_chunk (Buffer.contents pending)))
 
+let supports_user_media = function
+  | Openai_completions | Local_chat | Anthropic_messages | Openai_responses
+  | Azure_responses | Azure_chat | Bedrock_mantle_responses | Ollama_chat
+  | Gemini_direct | Vertex_generate | Bedrock_converse
+  | Bedrock_converse_stream | Xai_chat | Nvidia_chat
+  | Siliconflow_chat | Siliconflow_cn_chat | Stepfun_chat | Novita_chat
+  | Coreweave_chat | Synthetic_chat | Zai_chat | Zenmux_chat | Wafer_chat
+  | Qianfan_chat | Xiaomi_chat | Kilo_chat | Alibaba_coding_chat
+  | Singularity_dev_chat | Opencode_go_chat | Charm_hyper_chat
+  | Singularity_tech_chat | Firepass_chat | Yolo_auto_chat
+  | Xiaomi_token_ams_chat | Xiaomi_token_cn_chat | Xiaomi_token_sgp_chat
+  | Minimax_code_chat | Minimax_code_cn_chat | Vercel_ai_gateway_chat
+  | Cloudflare_ai_gateway_chat | Commandcode_chat | Commandcode_messages
+  | Commandcode_responses | Gitlab_duo_messages | Gitlab_duo_responses
+  | Gitlab_duo_chat | Codex_responses | Copilot_chat | Opencode_zen_responses
+  | Meta_responses | Minimax_chat | Deepseek_chat | Mistral_chat
+  | Openrouter_chat | Umans_chat | Umans_messages | Cline_pass_chat
+  | Alibaba_token_plan_chat | Kimi_code_chat | Kimi_code_cn_chat
+  | Kimi_code_messages | Kimi_code_cn_messages | Fireworks_chat -> true
+  | Vertex_anthropic | Devin_connect | Apple_foundation_models -> false
+
 let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage
     ?thinking ?cancel ?apple_helper_path config messages tools =
   check_cancel cancel;
@@ -592,28 +613,7 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage
       try Protocol.validate_attachments message.attachments
       with Protocol.Invalid_response reason -> raise (Provider_error reason)
     )) messages;
-  if !has_attachments &&
-     not (match config.api with
-       | Openai_completions | Local_chat | Anthropic_messages | Openai_responses
-       | Azure_responses | Azure_chat | Bedrock_mantle_responses | Ollama_chat
-       | Gemini_direct | Vertex_generate | Bedrock_converse
-       | Bedrock_converse_stream | Xai_chat | Nvidia_chat
-       | Siliconflow_chat | Siliconflow_cn_chat | Stepfun_chat | Novita_chat
-       | Coreweave_chat
-       | Synthetic_chat | Zai_chat | Zenmux_chat | Wafer_chat | Qianfan_chat
-       | Xiaomi_chat | Kilo_chat | Alibaba_coding_chat | Singularity_dev_chat
-       | Opencode_go_chat | Charm_hyper_chat | Singularity_tech_chat | Firepass_chat
-       | Yolo_auto_chat | Xiaomi_token_ams_chat | Xiaomi_token_cn_chat
-       | Xiaomi_token_sgp_chat | Minimax_code_chat | Minimax_code_cn_chat
-       | Vercel_ai_gateway_chat | Cloudflare_ai_gateway_chat | Commandcode_chat
-       | Commandcode_messages | Commandcode_responses | Gitlab_duo_messages
-       | Gitlab_duo_responses | Gitlab_duo_chat | Codex_responses | Copilot_chat
-       | Opencode_zen_responses | Meta_responses | Minimax_chat | Deepseek_chat
-       | Mistral_chat | Openrouter_chat | Umans_chat | Umans_messages
-       | Cline_pass_chat | Alibaba_token_plan_chat | Kimi_code_chat
-       | Kimi_code_cn_chat | Kimi_code_messages | Kimi_code_cn_messages
-       | Fireworks_chat -> true
-       | Vertex_anthropic | Devin_connect | Apple_foundation_models -> false) then
+  if !has_attachments && not (supports_user_media config.api) then
     raise (Provider_error "this provider route does not support user media attachments");
   let has_audio_video = List.exists (fun (message : Protocol.message) ->
     List.exists (fun (attachment : Protocol.attachment) ->

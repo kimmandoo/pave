@@ -66,3 +66,29 @@ let load ~root path =
   } in
   Protocol.validate_attachments [attachment];
   attachment
+type reference = Text of string | Media of Protocol.attachment
+
+let is_media_path path =
+  match String.lowercase_ascii (Filename.extension path) with
+  | ".png" | ".jpg" | ".jpeg" | ".webp" | ".wav" | ".mp3" | ".aac"
+  | ".ogg" | ".opus" | ".flac" | ".m4a" | ".mp4" | ".webm" -> true
+  | _ -> false
+
+let valid_utf8 text =
+  let valid = ref true in
+  ignore (Uutf.String.fold_utf_8 (fun () _ -> function
+    | `Malformed _ -> valid := false
+    | `Uchar _ -> ()) () text);
+  !valid
+
+let load_reference ~root path =
+  if is_media_path path then Media (load ~root path)
+  else (
+    if not (Filename.is_relative path) || path = "" then
+      invalid_arg "text attachment path must be workspace-relative";
+    let root = Unix.realpath root in
+    let absolute = Workspace_path.regular_path root path in
+    let text = Workspace_path.read_bounded absolute Workspace_path.max_read_bytes in
+    if String.contains text '\000' || not (valid_utf8 text) then
+      invalid_arg "text attachment must be valid UTF-8 without NUL bytes";
+    Text text)

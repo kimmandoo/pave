@@ -1,3 +1,5 @@
+let operations = ["embed"; "image"; "speak"; "transcribe"; "rerank"]
+
 let general_help =
   "Usage: pave task OPERATION --model EXACT_ID [options]\n\n" ^
   "Non-chat API tasks (not provider chat routes):\n" ^
@@ -159,7 +161,7 @@ let run args =
     let operation = args.(0) in
     if Array.length args > 1 && (args.(1) = "--help" || args.(1) = "-h") then
       print_endline (help operation)
-    else if not (List.mem operation ["embed"; "image"; "speak"; "transcribe"; "rerank"]) then
+    else if not (List.mem operation operations) then
       failwith ("unknown task operation " ^ operation ^ "\n\n" ^ general_help)
     else
       let options = new_options () in

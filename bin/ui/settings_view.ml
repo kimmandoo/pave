@@ -79,7 +79,8 @@ let open_view screen ~root ~registry =
              ?account_id:values.default_account_id
              ~title:"Default model · available on this route" () with
            | None -> ()
-           | Some selector ->
+           | Some selection ->
+               let selector = selection.selector in
                let descriptor, identity, route = Pave.Interaction.resolve_model
                  ~registry ~current_route:route_name
                  ?current_account_id:values.default_account_id

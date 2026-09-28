@@ -86,6 +86,11 @@
  (libraries pave unix yojson))
 
 (test
+ (name test_file_mentions)
+ (modules test_file_mentions)
+ (libraries pave unix))
+
+(test
  (name test_openai_responses_wire)
  (modules test_openai_responses_wire)
  (libraries pave unix yojson))
@@ -114,6 +119,12 @@
  (name test_account_routing)
  (modules test_account_routing)
  (libraries pave unix)
+ (action (run %{test} %{exe:../bin/main.exe})))
+
+(test
+ (name test_cli_prompt)
+ (modules test_cli_prompt)
+ (libraries pave unix yojson threads)
  (action (run %{test} %{exe:../bin/main.exe})))
 
 (test
@@ -218,6 +229,17 @@
 (copy_files ../bin/ui/transcript_view.ml)
 (copy_files ../bin/cli_auth.ml)
 (copy_files ../bin/ui/model_picker.ml)
+(copy_files ../bin/cli_completion.ml)
+
+(test
+ (name test_cli_completion)
+ (modules test_cli_completion cli_completion)
+ (libraries unix))
+
+(test
+ (name test_prompt_shortcuts)
+ (modules test_prompt_shortcuts)
+ (libraries pave))
 
 (test
  (name test_chooser_dynamic)
