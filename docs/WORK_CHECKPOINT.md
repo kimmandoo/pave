@@ -1,10 +1,10 @@
 # Work checkpoint
 
 - **Date:** 2026-09-28
-- **Active task:** Completed mobile roadmap card M01, bounded workspace manifest inventory. The first remaining mobile card is M02; do not infer its scheme-map work from M01.
+- **Active task:** Completed mobile roadmap card M01, bounded workspace manifest inventory. Commit `be1d3bc` passed hosted main CI run `36432608324` on all four OCaml/macOS/Linux jobs. The first remaining mobile card is M02; do not infer its scheme-map work from M01.
 - **Changed files this session:** `CHANGELOG.md`, `TASKS.md`, `docs/{DESIGN_RULES.md,MOBILE_DEVELOPMENT_PLAN.md,TROUBLESHOOTING.md,WORK_CHECKPOINT.md}`, `lib/tools/tools.ml`, `test/tools/test_tools.ml`. No strategy code/default/selection changed; no backtest applies.
-- **Verification:** `opam exec -- dune exec test/test_tools.exe`, `opam exec -- dune runtest --force -j 1`, `opam exec -- dune build @install`, `opam lint pave.opam` and `git diff --check` passed. Direct `Pave.Tools.execute` smoke inventoried nested Xcode, Android Gradle, SwiftPM, Flutter and React Native manifests in an isolated workspace, generated scoped commands without executing them, excluded ignored/generated/symlinked roots, rejected an oversized manifest and explicitly marked truncation within the output bound.
-- **Next action:** Commit and push the verified M01 implementation with this checkpoint. On a new request, continue with M02's Xcode project/scheme map; no mobile build, signing or device test was part of M01.
+- **Verification:** `opam exec -- dune exec test/test_tools.exe`, `opam exec -- dune runtest --force -j 1`, `opam exec -- dune build @install`, `opam lint pave.opam` and `git diff --check` passed. Direct `Pave.Tools.execute` smoke inventoried nested Xcode, Android Gradle, SwiftPM, Flutter and React Native manifests in an isolated workspace, generated scoped commands without executing them, excluded ignored/generated/symlinked roots, rejected an oversized manifest and explicitly marked truncation within the output bound. Hosted main CI `36432608324` passed four compiler/OS jobs for `be1d3bc`.
+- **Next action:** On a new request, continue M02's Xcode project/scheme map; no mobile build, signing or device test was part of M01.
 - **Blockers / limits:** None for M01. No Xcode or Android SDK builds, simulator/device, signing identity or deployment were tested or claimed. No manifest or suggested command was executed.
 
 - **Previous mobile planning date:** 2026-09-28
