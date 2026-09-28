@@ -1,6 +1,7 @@
 # Changelog
 
 ## 2026-09-28
+- release(distribution): published v0.1.62 from `c1564d8` after main CI `36393472252` passed all four OCaml/macOS/Linux jobs and release workflow `36394191915` passed four native suite/build/package/extracted-executable jobs plus publication. Downloaded all five assets, verified four SHA-256 hashes and exact three-member archives; extracted Darwin arm64 linked only `libSystem`, passed CLI smokes, rendered the fatter P and `v0.1.62`, showed dot-pattern progress and completed output at 30×10/30×3, and exited 143 with terminal modes restored from a live `/new` confirmation.
 - fix(tui): replaced the semicircular activity spinner with a single-cell dot animation while retaining phase, elapsed time and cancellation hints; spelled out compact saved state and offered prompt/help guidance on an empty screen.
 - fix(tui): let terminal shutdown signals escape command error reporting, so closing Pave during an unsaved-conversation chooser restored terminal modes and exited rather than returning to the editor.
 - fix(tui): thickened the startup P's stem and bowl while rounding its stepped outline; preserved its mint/shadow/cursor pixels and the compact `NO_COLOR` fallback.
