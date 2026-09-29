@@ -44,6 +44,11 @@ jobs:
           name: test-diagnostics-${{ matrix.os }}-${{ matrix.ocaml }}
           path: test-results.log
           if-no-files-found: error
+      - name: Annotate test failure
+        if: failure() && runner.os == 'macOS'
+        run: |
+          printf '::error title=macOS test failure::%s\n' \
+            "$(tail -n 18 test-results.log | tr '\n' ' ' | cut -c1-3000)"
       - name: Build installation artifacts
         run: opam exec -- dune build @install
       - name: Smoke CLI help
