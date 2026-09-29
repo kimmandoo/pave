@@ -1,5 +1,19 @@
 # Troubleshooting
 
+### [2026-09-29] Idle MCP connection approval was routed through an inactive turn
+
+- **Context / Symptom:** The live `/mcp connect demo` PTY returned `MCP approval denied` without showing an approval prompt, even though an interactive TUI was active.
+- **Root Cause:** The MCP callback used `Turn_runner.approve_tool` whenever a runner object existed. The idle runner rejected an approval not owned by an active model turn; `/mcp connect` originates on the UI thread, while later model-issued tool effects originate on the worker thread.
+- **Solution:** Routed UI-thread connection approvals directly through `Tui.confirm_tool` and retained turn-owned `Turn_runner.approve_tool` for worker-thread tool effects. A live fake stdio server prompted before launch and listed its tool after `y`; a loopback Streamable HTTP server observed no requests before approval and then initialize, initialized notification and tools/list.
+- **Prevention / Reference:** Preserve the distinction between interactive command consent and turn-owned tool consent when integrating new transports.
+
+### [2026-09-29] Private plugin registry rejected a disposable smoke config
+
+- **Context / Symptom:** A live PTY launch with an isolated R13 fixture exited before the TUI with `Plugin registry: plugin directory is not private and user-owned: /tmp/pave-r13-smoke-p8UOkC/config/pave`.
+- **Root Cause:** `mkdir -p -m 700` applied the mode only to the final directory, leaving intermediate config directories mode 0755. The plugin registry correctly rejected a non-private config root.
+- **Solution:** Set owner-only mode 0700 on the config directory and its `pave` child, then reran the PTY and observed the logo, MCP listing, explicit skill activation and draft-only prompt command insertion.
+- **Prevention / Reference:** Create each user config ancestor with private permissions before writing plugin manifests; keep rejecting world-readable registry roots.
+
 ### [2026-09-29] Responses stream required a redundant item-done event
 
 - **Context / Symptom:** A complete OpenAI Responses event fixture with an item-added event, text delta and full `response.completed.output` failed with `invalid Responses stream: completed output message mismatch` when `response.output_item.done` was omitted. A complete function-call fixture failed similarly.

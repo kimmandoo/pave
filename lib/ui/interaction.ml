@@ -42,6 +42,10 @@ type command =
   | Queue_prompt of string
   | Quit
   | Prompt of string
+  | Skill of string
+  | Prompt_command of string
+  | Plugin of string option
+  | Mcp of string option
   | Unknown of string
 
 type action =
@@ -51,6 +55,10 @@ type action =
   | A_hotkeys | A_branch | A_fork | A_compact | A_retry | A_help | A_quit
   | A_jobs | A_wait | A_cancel_job | A_artifact | A_rewind | A_delegate
   | A_plan | A_goal | A_advisor | A_watchdog | A_loop | A_autoresearch | A_rule
+  | A_skill of string | A_prompt_command of string
+  | A_plugin
+  | A_mcp
+  | A_mcp_connect of string
 
 type grammar =
   | No_arguments
@@ -98,7 +106,11 @@ let commands = [
   command "/cancel" No_arguments "Cancel the active turn" A_cancel;
   command "/retry" No_arguments "Retry the last turn only if no tools ran" A_retry;
   command "/tools" (Optional_word "NAME") "List or inspect enabled tools" A_tools;
+  command "/plugin" (Optional_text "list|enable NAME|disable NAME|reload")
+    "Inspect or manage private local plugin capabilities" A_plugin;
   command "/context" No_arguments "Inspect active model and saved context" A_context;
+  command "/mcp" (Optional_text "list|connect SERVER|tools SERVER|resources SERVER|prompts SERVER|read SERVER URI|get SERVER NAME|reload")
+    "Inspect and explicitly connect configured MCP servers" A_mcp;
   command "/usage" No_arguments "Inspect reported token usage by model" A_usage;
   command ~interactive_only:true "/hotkeys" No_arguments "Show interactive terminal shortcuts" A_hotkeys;
   command ~session_only:true "/entries" No_arguments "List journal entries" A_entries;
@@ -139,14 +151,16 @@ let available ?(session = true) ?(interactive = true) item =
   (not item.session_only || session) &&
   (not item.interactive_only || interactive)
 
-let suggestions ?(session = true) ?(interactive = true) prefix =
+let suggestions ?(session = true) ?(interactive = true)
+    ?(external_commands = []) prefix =
   if not (String.starts_with ~prefix:"/" prefix) then []
   else List.filter (fun item ->
     available ~session ~interactive item &&
-    String.starts_with ~prefix item.name) commands
+    String.starts_with ~prefix item.name) (commands @ external_commands)
 
-let help ?(session = true) ?(interactive = true) () =
-  List.filter (available ~session ~interactive) commands
+let help ?(session = true) ?(interactive = true)
+    ?(external_commands = []) () =
+  List.filter (available ~session ~interactive) (commands @ external_commands)
   |> List.map (fun item ->
     let usage = usage item in
     item.name ^ (if usage = "" then "" else " " ^ usage) ^
@@ -248,7 +262,8 @@ let parse_arguments name grammar argument =
   | Required_word_and_text _, None ->
       invalid_arg (name ^ " requires two arguments")
 
-let parse ?(session = true) ?(interactive = true) line =
+let parse ?(session = true) ?(interactive = true)
+    ?(external_commands = []) line =
   let line = String.trim line in
   if not (String.starts_with ~prefix:"/" line) then Prompt line
   else
@@ -261,7 +276,8 @@ let parse ?(session = true) ?(interactive = true) line =
         let text = String.trim (String.sub line !offset
           (String.length line - !offset)) in
         if text = "" then None else Some text in
-    match List.find_opt (fun item -> item.name = name) commands with
+    match List.find_opt (fun item -> item.name = name)
+      (commands @ external_commands) with
     | None -> Unknown line
     | Some item when not (available ~session ~interactive item) -> Unknown line
     | Some item ->
@@ -290,7 +306,10 @@ let parse ?(session = true) ?(interactive = true) line =
         | A_rename, Required_argument title -> Rename title
         | A_label, Optional_argument label -> Label label
         | A_pin, No_argument -> Pin
+        | A_plugin, Optional_argument operation -> Plugin operation
         | A_approval, Optional_argument value -> Approval value
+        | A_mcp, Optional_argument operation -> Mcp operation
+        | A_mcp_connect name, No_argument -> Mcp (Some ("connect " ^ name))
         | A_thinking, Optional_argument value -> Thinking value
         | A_tool, Pair_argument (operation, tool_name) ->
             Tool_toggle { name = tool_name; enabled = operation = "enable" }
@@ -321,6 +340,8 @@ let parse ?(session = true) ?(interactive = true) line =
         | A_loop, Optional_argument goal -> Loop goal
         | A_autoresearch, Optional_argument question -> Autoresearch question
         | A_rule, Optional_argument text -> Rule text
+        | A_skill name, No_argument -> Skill name
+        | A_prompt_command name, No_argument -> Prompt_command name
         | _ -> invalid_arg
             ("interaction: command descriptor has incompatible grammar: " ^
               name)

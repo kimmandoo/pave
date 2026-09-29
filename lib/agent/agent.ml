@@ -24,6 +24,12 @@ type t = {
   workspace_context : Tools.session_context option;
   allow_shell : bool;
   tool_available : string -> bool;
+  external_tools : Yojson.Basic.t list;
+  execute_external : (name:string -> args:Yojson.Basic.t ->
+    cancel:(unit -> bool) -> (string, string) result) option;
+  validate_external_tool : (name:string -> args:Yojson.Basic.t ->
+    (unit, string) result) option;
+  external_approval_details : (string -> string list) option;
   delegate_task : (cancel:(unit -> bool) -> label:string -> task:string -> string) option;
   stream : bool;
   approval_mode : Approval.mode;
@@ -50,6 +56,8 @@ let create ~provider ~root ~system ?workspace_context
     ?resolve_credential ?secret_mask ?before_request ?(history = [])
     ?(thinking = fun () -> None) ?(allow_shell = false)
     ?(tool_available = fun _ -> true) ?delegate_task ?(stream = false)
+    ?(external_tools = []) ?execute_external ?validate_external_tool
+    ?external_approval_details
     ?(approval_mode = Approval.Ask_exec) ?(tool_approval = [])
     ?(command_patterns = []) ?(approve_command = fun _ -> false)
     ?approve_tool ?on_usage ?on_phase ?on_tool_event ?on_workspace_effect
@@ -60,7 +68,9 @@ let create ~provider ~root ~system ?workspace_context
     | None -> Fun.id in
   { provider; authentication; resolve_credential; thinking; root; workspace_context;
     system; secret_mask;
-    allow_shell; tool_available; delegate_task; stream; approval_mode;
+    allow_shell; tool_available; external_tools; execute_external;
+    validate_external_tool; external_approval_details;
+    delegate_task; stream; approval_mode;
     tool_approval; command_patterns; approve_command; approve_tool; before_request;
     history_rev = List.rev history; scoped_pending = [];
     on_change; on_delta = (fun text -> on_delta (redact text));
@@ -221,6 +231,12 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
     let definitions = match t.delegate_task with
       | Some _ when t.tool_available "task" -> definitions @ [task_definition]
       | _ -> definitions in
+    let definitions = definitions @ List.filter (fun definition ->
+      match Protocol.member "function" definition with
+      | `Assoc fields -> (match List.assoc_opt "name" fields with
+          | Some (`String name) -> t.tool_available name
+          | _ -> false)
+      | _ -> false) t.external_tools in
     let system : Protocol.message =
       { role = "system"; content = Some system_text; tool_calls = [];
         tool_call_id = None; tool_result_content = None; provider_state = None;
@@ -361,6 +377,29 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
                         Tool_scheduler.Run
                     | _ -> complete
                         "Error: task requires a single-line label and a nonempty task of at most 8192 bytes")
+              else if List.exists (fun definition ->
+                Protocol.member "name" (Protocol.member "function" definition) =
+                  `String call.name) t.external_tools then
+                (match t.execute_external with
+                 | None -> complete "Error: external tool is unavailable"
+                 | Some _ when not (t.tool_available call.name) ->
+                     complete "Error: external tool is no longer available"
+                 | Some execute ->
+                     (match t.validate_external_tool with
+                      | None -> complete "Error: external tool validator is unavailable"
+                      | Some validate ->
+                          (match validate ~name:call.name ~args:call.arguments with
+                           | Error message -> complete ("Error: " ^ message)
+                           | Ok () ->
+                               prepared := Some (fun ?cancel ?on_progress:_
+                                   ?approved:_ () ->
+                                 match execute ~name:call.name ~args:call.arguments
+                                   ~cancel:(Option.value
+                                     ~default:(fun () -> false) cancel) with
+                                 | Ok text -> [Protocol.Text text]
+                                 | Error message ->
+                                     [Protocol.Text ("Error: " ^ message)]);
+                               Tool_scheduler.Run)))
               else
                 match Tools.prepare ?cancel ?context:t.workspace_context
                   ~root:t.root ~name:call.name ~args:call.arguments () with
@@ -432,13 +471,25 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
                     | Approval.Allowed -> decision.reason
                     | Approval.Denied _ -> assert false in
                   let delegate = call.name = "task" in
-                  let explicit_prompt = Tools.requires_explicit_approval
+                  let external_tool = List.exists (fun definition ->
+                    Protocol.member "name" (Protocol.member "function" definition) =
+                      `String call.name) t.external_tools in
+                  let explicit_prompt = external_tool || Tools.requires_explicit_approval
                     ~name:call.name ~args:call.arguments in
                   let prompt_required = delegate || shell || explicit_prompt ||
                     (match resolved with
                      | Approval.Requires_prompt _ -> true
                      | _ -> false) in
-                  let request = if delegate then
+                  let request = if external_tool then
+                    { Approval.tool_name = call.name; tier = Approval.Exec;
+                      impact = "Runs an explicitly selected external tool; process or network effects may be non-reversible.";
+                      details = ["Workspace: " ^ t.root] @
+                        Option.fold ~none:[] ~some:(fun describe ->
+                          describe call.name) t.external_approval_details @
+                        ["Arguments: " ^ Tools.preview_text
+                          (Yojson.Basic.to_string call.arguments)];
+                      reason = Some "External tools require per-call interactive approval." }
+                  else if delegate then
                     { Approval.tool_name = "task"; tier = Approval.Exec;
                       impact = "Starts a bounded read-only child agent; provider usage may be billed.";
                       details = [
@@ -470,7 +521,8 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
                       "Error: command not approved"
                       else "Error: tool approval denied")]
                   else (
-                    if Tools.non_reversible_tool ~name:call.name ~args:call.arguments then (
+                    if external_tool || Tools.non_reversible_tool
+                      ~name:call.name ~args:call.arguments then (
                       let action = match Protocol.member "action" call.arguments with
                         | `String action -> " (" ^ action ^ ")"
                         | _ -> "" in

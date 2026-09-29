@@ -79,6 +79,7 @@ let serve_client client step ~allow_shell ~first_reply =
 
 let with_agent ~root ~name ~arguments ~allow_shell ~approval_mode
     ~tool_approval ~command_patterns ?approve_tool ?delegate_task
+    ?(external_tools = []) ?execute_external ?validate_external_tool
     ?on_workspace_effect ?workspace_context () =
   let socket = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
   Unix.bind socket (Unix.ADDR_INET (Unix.inet_addr_loopback, 0));
@@ -116,6 +117,7 @@ let with_agent ~root ~name ~arguments ~allow_shell ~approval_mode
     let agent = Pave.Agent.create ~provider ~root ~system:"approval integration"
       ?workspace_context ~allow_shell ~approval_mode ~tool_approval ~command_patterns
       ?approve_tool ?delegate_task ?on_workspace_effect
+      ~external_tools ?execute_external ?validate_external_tool
       ~on_event:(fun event -> events := event :: !events) () in
     let result = Pave.Agent.run agent "Exercise approval policy" in
     completed := true;
@@ -351,6 +353,46 @@ let () =
         incr invalid_task_calls; "unused") ());
     expect "task schema rejects unknown arguments before approval or delegation"
       (!invalid_task_calls = 0 && !invalid_task_prompts = 0);
+    let external_schema = `Assoc ["type", `String "function";
+      "function", `Assoc [
+        "name", `String "local_review";
+        "description", `String "Private local review";
+        "parameters", `Assoc [
+          "type", `String "object";
+          "properties", `Assoc ["text", `Assoc [
+            "type", `String "string"; "maxLength", `Int 64]];
+          "required", `List [`String "text"];
+          "additionalProperties", `Bool false]]] in
+    let external_calls = ref 0 and external_prompts = ref 0 in
+    let execute_external ~name:_ ~args:_ ~cancel:_ =
+      incr external_calls; Ok "reviewed" in
+    let validate_external_tool ~name:_ ~args =
+      match Pave.Protocol.member "text" args with
+      | `String value when String.length value <= 64 -> Ok ()
+      | _ -> Error "invalid private tool input" in
+    let call arguments approve_tool =
+      with_agent ~root ~name:"local_review" ~arguments
+        ~allow_shell:false ~approval_mode:A.Auto_all ~tool_approval:[]
+        ~command_patterns:[] ~external_tools:[external_schema]
+        ~execute_external ~validate_external_tool ~approve_tool () in
+    let _, invalid_external = call (`Assoc ["other", `String "x"])
+      (fun _ -> incr external_prompts; true) in
+    expect "invalid extension arguments settle before approval or execution"
+      (!external_prompts = 0 && !external_calls = 0 &&
+       List.exists (String.starts_with ~prefix:
+         "[local_review] Error: invalid private tool input") invalid_external);
+    let _, denied_external = call (`Assoc ["text", `String "review"])
+      (fun _ -> incr external_prompts; false) in
+    expect "per-call external approval cannot be skipped by yolo"
+      (!external_prompts = 1 && !external_calls = 0 &&
+       List.exists (String.starts_with ~prefix:
+         "[local_review] Error: tool approval denied") denied_external);
+    let _, approved_external = call (`Assoc ["text", `String "review"])
+      (fun _ -> incr external_prompts; true) in
+    expect "approved extension settles one canonical provider result"
+      (!external_prompts = 2 && !external_calls = 1 &&
+       List.exists (String.starts_with ~prefix:
+         "[local_review] reviewed") approved_external);
     let compound_calls = ref 0 in
     ignore (with_agent ~root ~name:"run_command"
       ~arguments:(`Assoc ["command", `String

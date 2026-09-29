@@ -93,6 +93,7 @@ type t = {
   mutable model : string;
   mutable model_display_name : string option;
   mutable session : bool;
+  mutable external_commands : Pave.Interaction.shortcut list;
   editor : Pave.Composer.t;
   transcript : Transcript_view.t;
   tool_groups : (string, int) Hashtbl.t;
@@ -293,29 +294,29 @@ let idle_status =
 
 let hotkeys = Keybindings.hotkeys Keybindings.bindings
 
-(* Each cell represents one 8px square of assets/pave-mark.svg. *)
+(* Widen the SVG's P at terminal scale; the tile stays transparent. *)
 let startup_logo version =
-  let tile = I.string muted ".." and mint = I.string accent "##"
-  and shadow = I.string frame_attr "++"
+  let mint = I.string accent "##" and shadow = I.string frame_attr "++"
   and cursor = I.string warning "**" and blank = I.string A.empty "  " in
   let pixel = function
-    | '#' -> mint | '+' -> shadow | '*' -> cursor
-    | '.' -> tile | _ -> blank in
+    | '#' -> mint | '+' -> shadow | '*' -> cursor | _ -> blank in
   let mark = I.vcat (List.map (fun row ->
     I.hcat (List.init (String.length row) (fun index -> pixel row.[index])))
-    [ "  ............  "; " ................";
-      "................"; "....#######.....";
-      "....########...."; "....##....##+...";
-      "....##....##+...";
-      "....##....##+...";
-      "....##....##+...";
-      "....########+...";
-      "....#######++...";
-      "....##++++++....";
-      "....##.........."; "....##......*...";
-      " ................"; "  ............  " ]) in
+    [ "    ##########    ";
+      "    ############  ";
+      "    ############+ ";
+      "    ####    ####+ ";
+      "    ####    ####+ ";
+      "    ####    ####+ ";
+      "    ############+ ";
+      "    ############+ ";
+      "    ##########+++ ";
+      "    ####++++++++  ";
+      "    ####          ";
+      "    ####          ";
+      "    ####        * " ]) in
   I.(mark <-> void 1 1 <->
-    string accent ("       P A V E  " ^ version))
+    string accent ("        P A V E  " ^ version))
 
 let sanitize = Transcript_view.sanitize
 let single_line = Transcript_view.single_line
@@ -743,7 +744,8 @@ let hint_matches t =
                    (fun c -> c = ' ' || c = '\t' || c = '\n') draft) ->
             List.map (fun item -> Command_hint item)
               (Pave.Interaction.suggestions
-                ~session:t.session ~interactive:true draft)
+                ~session:t.session ~interactive:true
+                ~external_commands:t.external_commands draft)
         | _ -> []);
   if t.paste || t.overlays <> [] ||
      Pave.Composer.search_query t.editor <> None ||
@@ -1405,7 +1407,7 @@ let close t =
       Fun.protect (fun () -> Notty_unix.Term.release t.term)
         ~finally:(fun () -> restore_terminal_signals t.signals))
 let create ?(keybinding_overrides = []) ?(version = "source")
-    ?model_display_name ~root ~model ~session () =
+    ?(external_commands = []) ?model_display_name ~root ~model ~session () =
   let bindings =
     match Keybindings.apply_overrides Keybindings.bindings
       keybinding_overrides with
@@ -1424,6 +1426,7 @@ let create ?(keybinding_overrides = []) ?(version = "source")
   let t = try {
     term; input = Terminal_input.create term;
     root; version = single_line version; model; model_display_name; session;
+    external_commands;
     editor = Pave.Composer.create ();
     transcript = Transcript_view.create (); tool_groups = Hashtbl.create 8;
     scroll = 0; chooser = None; overlays = [];
@@ -1453,6 +1456,12 @@ let create ?(keybinding_overrides = []) ?(version = "source")
     raise exn in
   (try paint t with exn -> close t; raise exn);
   t
+let set_external_commands t commands =
+  t.external_commands <- commands;
+  t.hint_draft <- "";
+  t.hint_results <- [];
+  paint t
+
 
 
 let suspend t callback =

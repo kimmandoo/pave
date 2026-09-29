@@ -29,6 +29,29 @@ let () =
   check_capabilities ~session:false ~interactive:true;
   check_capabilities ~session:true ~interactive:true;
   check_capabilities ~session:true ~interactive:false;
+  let external_commands = [
+    command "/skill:review" No_arguments "Review [user skill]" (A_skill "review");
+    command "/summarize" No_arguments "Summarize [project command]"
+      (A_prompt_command "summarize") ] in
+  (match parse ~external_commands "/skill:review",
+         parse ~external_commands "/summarize",
+         parse "/skill:review" with
+   | Skill "review", Prompt_command "summarize", Unknown _ -> ()
+   | _ -> fail "dynamic command parsing crossed its snapshot");
+  invalid "dynamic command arguments"
+    (fun () -> parse ~external_commands "/skill:review extra");
+  if not (has_help (help ~external_commands ()) "/skill:review") ||
+     suggestions ~external_commands "/sk" = [] ||
+     has_help (help ()) "/summarize" then
+    fail "external command help and suggestions diverged";
+  let mcp_command = command ~interactive_only:true "/mcp:local" No_arguments
+    "Connect local server" (A_mcp_connect "local") in
+  (match parse ~external_commands:[mcp_command] "/mcp:local",
+         parse ~external_commands:[mcp_command]
+           ~interactive:false "/mcp:local",
+         parse "/mcp:local" with
+   | Mcp (Some "connect local"), Unknown _, Unknown _ -> ()
+   | _ -> fail "MCP disabled-server and noninteractive suggestions diverged");
   (match parse "/login", parse ~interactive:false "/login",
       parse ~interactive:false "/setup", parse ~interactive:false "/hotkeys",
       parse ~session:false "/entries", parse "/exit" with

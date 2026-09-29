@@ -1,6 +1,10 @@
 # Changelog
 
 ## 2026-09-29
+- feat(extensions): discovered bounded user/project skills and declarative prompt commands with explicit session activation and draft-only insertion; added private approved custom tools, opt-in lifecycle hooks and owned plugin enable/disable/reload with immediate capability filtering.
+- feat(mcp): added validated user/project MCP config, private secret references and deny overrides; explicitly approved stdio and Streamable HTTP connections, per-effect approval, bounded tool/resource/prompt handling, source-attributed draft insertion and disconnecting reload. Left remote marketplace, legacy SSE and managed OAuth unavailable pending their external prerequisites.
+- feat(tui): widened the filled startup P and removed its tile background while preserving the transparent canvas, offset shadow, amber cursor and compact label fallback.
+- release(distribution): published v0.1.67 with four checksum-verified macOS/Linux native archives after the hosted release workflow passed; installed and checked the isolated Linux binary, then removed it with `pave uninstall`.
 - feat(mobile): highlighted checked workspace Swift error locations from failed approved Xcode and SwiftPM commands while retaining the selected scheme, actual exit, bounded raw output and incomplete-log warnings.
 - feat(mobile): mapped failed approved Gradle, Flutter and RN/Expo output to checked module/package source locations without promoting external, dependency or control-bearing frames; retained command exit, task provenance and raw output.
 - feat(distribution): added installer-owned `pave uninstall` while preserving user data, and displayed a clearer version-and-path summary after successful updates.

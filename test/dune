@@ -1,6 +1,21 @@
 (include_subdirs unqualified)
 
 (test
+ (name test_local_content)
+ (modules test_local_content)
+ (libraries pave unix yojson))
+
+(test
+ (name test_local_tools)
+ (modules test_local_tools)
+ (libraries pave unix yojson))
+
+(test
+ (name test_extensions)
+ (modules test_extensions)
+ (libraries pave unix yojson))
+
+(test
  (name test_protocol)
  (modules test_protocol)
  (libraries pave unix yojson))
