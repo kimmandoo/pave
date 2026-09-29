@@ -8,6 +8,7 @@ let () =
   let root = Filename.temp_file "pave-swiftpm-" "" in
   Sys.remove root;
   Unix.mkdir root 0o700;
+  let root = Unix.realpath root in
   Fun.protect ~finally:(fun () ->
     Sys.remove (Filename.concat root "Package.swift"); Unix.rmdir root)
     (fun () ->
@@ -29,6 +30,15 @@ let () =
       assert (try ignore (Pave.Workspace_swiftpm_focus.tests
         "warning: no tests\n"); false
         with Pave.Workspace_swiftpm_focus.Error _ -> true);
+      assert (Pave.Workspace_swiftpm_focus.no_tests
+        "Test Suite 'Selected tests' passed. Executed 0 tests, with 0 failures.\n");
+      assert (not (Pave.Workspace_swiftpm_focus.no_tests
+        "Test Suite 'Selected tests' passed. Executed 1 test, with 0 failures.\n"));
+      Unix.symlink root (Filename.concat root "linked");
+      assert (try ignore (Pave.Workspace_swiftpm_focus.command
+        ~root ~subroot:"linked" ~action:"discover" ~target:""); false
+        with Pave.Workspace_swiftpm_focus.Error _ -> true);
+      Unix.unlink (Filename.concat root "linked");
       save "// swift-tools-version: 6.0\nlet deps = [.package(url: \"https://example.invalid/dep\", from: \"1.0.0\")]\n";
       assert (try ignore (Pave.Workspace_swiftpm_focus.command
         ~root ~subroot:"" ~action:"discover" ~target:""); false

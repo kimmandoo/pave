@@ -1556,6 +1556,7 @@ let mobile_manifest ~root ~stack ~subroot =
 let mobile_check ~approved ?cancel ?on_progress ?context root args =
   if not approved then fail "mobile project code requires explicit interactive approval";
   let context = require_session_context context in
+  let root = Workspace_path.root_path root in
   let stack = required_string "stack" args
   and action = required_string "action" args
   and subroot = required_string "subroot" args in
@@ -1602,8 +1603,14 @@ let mobile_check ~approved ?cancel ?on_progress ?context root args =
         choices };
       "Mobile " ^ stack ^ " discovery: " ^ outcome ^ "\nTasks:\n" ^
         String.concat "\n" choices)
-    else "Mobile " ^ stack ^ " " ^ action ^ ": " ^ outcome ^
-      (if result.truncated then " (output truncated; no task saved)" else "") ^
+    else
+      let note =
+        if stack = "swiftpm" && action = "run" &&
+           Workspace_swiftpm_focus.no_tests result.output then
+          " (zero matching tests executed; not a pass)"
+        else if result.truncated then " (output truncated; incomplete result)"
+        else "" in
+      "Mobile " ^ stack ^ " " ^ action ^ ": " ^ outcome ^ note ^
       "\n" ^ result.output)
 
 let string_list name args =

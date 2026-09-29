@@ -24,17 +24,28 @@ let regular_file path =
     | _ -> fail ("not a regular file (or is a symlink): " ^ path)
   with Unix.Unix_error (Unix.ENOENT, _, _) -> false
 
+let selected_directory root subroot =
+  let root = Workspace_path.root_path root in
+  if subroot = "" || subroot = "." then root
+  else (
+    if not (Filename.is_relative subroot) ||
+       String.contains subroot '\000' then fail "invalid project root";
+    let parts = String.split_on_char '/' subroot in
+    if List.exists (fun part -> part = "" || part = "." || part = "..") parts
+    then fail "path must select an exact project root";
+    List.fold_left (fun directory part ->
+      let path = Filename.concat directory part in
+      if (Unix.lstat path).Unix.st_kind <> Unix.S_DIR then
+        fail "project root contains a symlink or non-directory";
+      path) root parts)
+
 let command ~root ~subroot ~action ~manager =
   try
     if action <> "test" && action <> "lint" then fail "unsupported node script action";
     if manager <> "" && manager <> "npm" && manager <> "yarn" && manager <> "pnpm" then
       fail "unsupported package manager";
-    let root = Workspace_path.root_path root in
-    let directory = Workspace_path.checked_path root subroot in
-    if (Unix.lstat directory).Unix.st_kind <> Unix.S_DIR then
-      fail "subroot is not a directory";
-    let manifest = Workspace_path.checked_path root
-      (Filename.concat subroot "package.json") in
+    let directory = selected_directory root subroot in
+    let manifest = Filename.concat directory "package.json" in
     if not (regular_file manifest) then fail "package.json is missing";
     let text = Workspace_path.read_bounded manifest Workspace_path.max_write_bytes in
     let json = try Yojson.Basic.from_string text
@@ -53,12 +64,11 @@ let command ~root ~subroot ~action ~manager =
     (match List.assoc_opt action scripts with
      | Some (`String _) -> ()
      | _ -> fail ("undeclared or non-string script: " ^ action));
-    let cwd = Filename.dirname manifest in
+    let cwd = directory in
     let locks = ["npm", "package-lock.json"; "npm", "npm-shrinkwrap.json";
                  "yarn", "yarn.lock"; "pnpm", "pnpm-lock.yaml"] in
     let choices = List.filter_map (fun (kind, name) ->
-      let path = Workspace_path.checked_path root
-        (Filename.concat subroot name) in
+      let path = Filename.concat directory name in
       if regular_file path then Some kind else None) locks
       |> List.sort_uniq String.compare in
     let selected = match manager, choices with

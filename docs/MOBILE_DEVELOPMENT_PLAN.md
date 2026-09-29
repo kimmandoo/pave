@@ -1,8 +1,8 @@
 # Mobile development specialization plan
 
-**Status:** M01–M07 and M12 completed; M08–M11 and M13–M24 remain open. The Mobile specialization section of `TASKS.md` owns the M01–M24 checkboxes; this document supplies their dependencies, acceptance scenarios and safety limits. Complete and verify each checkbox against its own scenario. This is not a release promise.
+**Status:** M01–M07 and M10–M12 completed; M08–M09 and M13–M24 remain open. The Mobile specialization section of `TASKS.md` owns the M01–M24 checkboxes; this document supplies their dependencies, acceptance scenarios and safety limits. Complete and verify each checkbox against its own scenario. This is not a release promise.
 
-**M08–M11 implementation state:** Approved `xcode_preflight` and `mobile_check` phases are in source. The Linux workstation has no native Xcode, SwiftPM or Gradle, and its Windows-mounted Flutter launcher cannot execute in Linux. Hosted macOS/Linux real disposable-project acceptance runs are configured in CI; leave each platform card unchecked until the corresponding real run reports its selected command and actual exit. Fake-executable tests establish refusal and state binding, not platform acceptance. M12 passed an actual disposable RN npm test and failing lint script with their real exits.
+**M08–M09 implementation state:** Approved `xcode_preflight` and `mobile_check` phases are in source. Local Linux has no Xcode or SwiftPM; the first hosted macOS CI run failed during the existing test suite before real-toolchain acceptance, so neither card is checked. The hosted Ubuntu job passed a real disposable Gradle selected debug task and Flutter analysis, and the local RN npm fixture reported real test exit 0 and lint exit 4. Fake-executable tests establish refusal and state binding, not platform acceptance.
 
 ## Baseline and boundaries
 

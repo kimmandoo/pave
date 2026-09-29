@@ -24,6 +24,7 @@ let () =
       let root = Filename.temp_file "pave-real-mobile-" "" in
       Sys.remove root;
       mkdir root;
+      let root = Unix.realpath root in
       let context = Pave.Tools.create_session_context ~owner:"mobile-real"
         ~root ~process_manager:(Pave.Workspace_process.create_manager ())
         ~read_artifact:(fun _ -> None)

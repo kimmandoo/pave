@@ -34,6 +34,7 @@ let () =
   let root = Filename.temp_file "pave-node-scripts-" "" in
   Sys.remove root;
   Unix.mkdir root 0o700;
+  let root = Unix.realpath root in
   Fun.protect ~finally:(fun () -> remove_tree root) (fun () ->
     let app = Filename.concat root "mobile app" in
     Unix.mkdir app 0o700;
@@ -92,6 +93,9 @@ let () =
       String.make Pave.Workspace_path.max_write_bytes 'x' ^ "\"}");
     expect_error "oversized package" "exceeds" command;
     write package valid;
+    Unix.symlink app (Filename.concat root "linked");
+    expect_error "symlinked selected root" "symlink" (fun () ->
+      command ~subroot:"linked" ());
     Unix.unlink npm;
     Unix.symlink package npm;
     expect_error "symlinked lock" "symlink" command;

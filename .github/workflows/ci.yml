@@ -32,6 +32,18 @@ jobs:
       - name: Check opam package
         if: matrix.os == 'ubuntu-24.04' && matrix.ocaml == '5.5.1'
         run: opam lint pave.opam
+      - name: Check mobile tool integration on macOS
+        if: runner.os == 'macOS'
+        run: opam exec -- dune runtest test/test_tools.exe
+      - name: Check SwiftPM focus on macOS
+        if: runner.os == 'macOS'
+        run: opam exec -- dune runtest test/test_workspace_swiftpm_focus.exe
+      - name: Check Gradle focus on macOS
+        if: runner.os == 'macOS'
+        run: opam exec -- dune runtest test/test_workspace_gradle_focus.exe
+      - name: Check Node scripts on macOS
+        if: runner.os == 'macOS'
+        run: opam exec -- dune runtest test/test_workspace_node_scripts.exe
       - name: Run tests
         run: opam exec -- dune runtest --force -j 1
       - name: Build installation artifacts

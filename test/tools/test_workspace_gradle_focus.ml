@@ -60,6 +60,7 @@ let () =
   let root = Filename.temp_file "pave-gradle-focus-" "" in
   Unix.unlink root;
   Unix.mkdir root 0o700;
+  let root = Unix.realpath root in
   Fun.protect ~finally:(fun () -> remove_tree root) (fun () ->
     let android = Filename.concat root "android" in
     Unix.mkdir android 0o700;

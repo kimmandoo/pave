@@ -1,9 +1,25 @@
 exception Error of string
 let fail text = raise (Error text)
 
+let selected_directory root subroot =
+  let root = Workspace_path.root_path root in
+  if subroot = "" || subroot = "." then root
+  else (
+    if not (Filename.is_relative subroot) ||
+       String.contains subroot '\000' then fail "invalid Swift package root";
+    let parts = String.split_on_char '/' subroot in
+    if List.exists (fun part -> part = "" || part = "." || part = "..") parts
+    then fail "select an exact Swift package root";
+    List.fold_left (fun directory part ->
+      let path = Filename.concat directory part in
+      if (Unix.lstat path).Unix.st_kind <> Unix.S_DIR then
+        fail "Swift package root contains a symlink or non-directory";
+      path) root parts)
+
 let command ~root ~subroot ~action ~target =
   let subroot = if subroot = "" then "." else subroot in
-  let package = Workspace_path.checked_path root (Filename.concat subroot "Package.swift") in
+  let cwd = selected_directory root subroot in
+  let package = Filename.concat cwd "Package.swift" in
   let stat = Unix.lstat package in
   if stat.Unix.st_kind <> Unix.S_REG ||
      stat.Unix.st_size > Workspace_path.max_write_bytes then
@@ -32,8 +48,6 @@ let command ~root ~subroot ~action ~target =
     if offset + 2 > String.length contents ||
        String.sub contents offset 2 <> "[]" then
       fail "Swift package dependencies must be statically empty for offline test discovery");
-  let cwd = if subroot = "." then Workspace_path.root_path root
-    else Workspace_path.checked_path root subroot in
   if (Unix.lstat cwd).Unix.st_kind <> Unix.S_DIR then
     fail "selected Swift package root is not a directory";
   match action with
@@ -65,3 +79,13 @@ let tests output =
   if rows = [] || List.length rows > 500 then
     fail "SwiftPM did not return a bounded concrete test list";
   rows
+
+let no_tests output =
+  let contains fragment =
+    let rec find i =
+      i + String.length fragment <= String.length output &&
+      (String.sub output i (String.length fragment) = fragment ||
+       find (i + 1)) in
+    find 0 in
+  List.exists contains ["Executed 0 tests"; "0 tests passed";
+    "No matching test cases were run"; "No matching tests were run"]

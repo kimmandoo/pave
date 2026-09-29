@@ -85,6 +85,7 @@ let fake_lsp_manager () =
 let () =
   let root = Filename.temp_file "pave-tools-" "" in
   Sys.remove root; Unix.mkdir root 0o700;
+  let root = Unix.realpath root in
   let outside = Filename.temp_file "pave-outside-" ".swift" in
   let outside_mobile = Filename.temp_file "pave-outside-mobile-" "" in
   Sys.remove outside_mobile; Unix.mkdir outside_mobile 0o700;
@@ -1037,10 +1038,34 @@ esac
         "not in the approved discovery");
       assert (contains (mobile "swiftpm" "run" "focus/swift" target true)
         "selected-test-ok");
+      create "focus/bin/swift" {|#!/bin/sh
+printf '%s\n' 'Test Suite Selected tests passed. Executed 0 tests, with 0 failures.'
+|};
+      assert (contains (mobile "swiftpm" "run" "focus/swift" target true)
+        "zero matching tests executed; not a pass");
       create "focus/swift/Package.swift"
         "// swift-tools-version: 6.0\nimport PackageDescription\nlet package = Package(name: \"Changed\", targets: [.testTarget(name: \"FixtureTests\")])\n";
       assert (contains (mobile "swiftpm" "run" "focus/swift" target true)
-        "manifest changed since task discovery"));
+        "manifest changed since task discovery");
+      directory "focus/gradle";
+      create "focus/gradle/settings.gradle.kts"
+        "rootProject.name = \"Fixture\"\ninclude(\":app\")\n";
+      create "focus/bin/gradle" {|#!/bin/sh
+case " $* " in
+  *" tasks --all "*) printf '%s\n' "Tasks runnable from root project 'Fixture'" '------------------------------------------------------------' 'Build tasks' '-----------' 'app:assembleDebug - selected variant' '' 'BUILD SUCCESSFUL in 1s' ;;
+  *" :app:assembleDebug "*) printf '%s\n' 'selected variant failed'; exit 7 ;;
+  *) exit 9 ;;
+esac
+|};
+      Unix.chmod (Filename.concat root "focus/bin/gradle") 0o700;
+      assert (contains (mobile "gradle" "tasks" "focus/gradle" [] true)
+        ":app:assembleDebug");
+      assert (contains (mobile "gradle" "run" "focus/gradle"
+        ["target", `String ":app:assembleRelease"] true)
+        "not in the approved discovery");
+      assert (contains (mobile "gradle" "run" "focus/gradle"
+        ["target", `String ":app:assembleDebug"] true)
+        "Mobile gradle run: exit 7"));
     directory "many";
     for index = 0 to 100 do
       let project = Printf.sprintf "many/Project%03d.xcodeproj" index in
