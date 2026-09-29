@@ -1,6 +1,7 @@
 # Changelog
 
 ## 2026-09-29
+- fix(ci): removed automatic Xcode simulator build and xcodegen installation from CI after manual-only acceptance was required; retained fake-Xcode refusal tests and left M08 open.
 - fix(mobile): rejected symlinked selected SwiftPM and RN/Expo project roots, distinguished SwiftPM zero-test exits from passing tests, and normalized disposable project paths for macOS CI; retained exact task and tool exits.
 - feat(mobile): added individually approved, session-bound focused SwiftPM and offline Gradle task discovery/execution, Flutter analysis/targeted tests without `pub get`, and declared React Native/Expo scripts with explicit lockfile-manager selection; preserved real exits and configured disposable toolchain checks in CI. Local npm fixture passed; native platform checks awaited hosted runners.
 - feat(mobile): added individually approved Xcode scheme/destination discovery and non-signing simulator build/test with session-bound choices, bounded output and preserved command exits; removed speculative Xcode build/test suggestions from static inventory. Real Xcode execution remained unverified on this Linux host.
