@@ -1120,7 +1120,7 @@ let () =
     let mcp_http : (string * Pave.Mcp_http.t) list ref = ref [] in
     let mcp_tools : (string * string * string * Yojson.Basic.t) list ref = ref [] in
     let mcp_connected = ref [] in
-    let mcp_approve server effect =
+    let mcp_approve server action =
       let present = Option.is_some !ui in
       let approve = if Thread.id (Thread.self ()) = ui_thread then
         approve_tool_request else worker_tool_approval in
@@ -1132,7 +1132,7 @@ let () =
           "Source: " ^ (match server.source with
             | Pave.Mcp_config.User -> "private user configuration"
             | Pave.Mcp_config.Project -> "workspace configuration");
-          "Action: " ^ effect];
+          "Action: " ^ action];
         reason = Some "MCP requires explicit interactive approval." } in
     let mcp_authorize = function
       | Pave.Mcp_client.Start server -> mcp_approve server "Start server"

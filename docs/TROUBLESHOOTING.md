@@ -1,5 +1,12 @@
 # Troubleshooting
 
+### [2026-09-29] Release matrix rejected an OCaml 5.5 reserved identifier
+
+- **Context / Symptom:** v0.1.68 Release run 36538729396 failed every platform at `Run tests`. A local CI-matched OCaml 5.5.1 switch reproduced `File "bin/main.ml", line 1123, characters 27-33: Error: Syntax error` on `let mcp_approve server effect =`; the local development compiler was OCaml 5.2.1.
+- **Root Cause:** `effect` was parsed as a keyword by the release compiler but had been used as a parameter name in the new MCP approval callback. The earlier local 5.2.1 build did not detect the incompatibility.
+- **Solution:** Renamed the parameter to `action` without changing approval behavior, then ran the full tests and install build with the release's OCaml 5.5.1/no-compression switch.
+- **Prevention / Reference:** Check release-bound changes under the workflow compiler version before tagging; public GitHub job logs require sign-in, so an exact local compiler switch provides actionable parser diagnostics.
+
 ### [2026-09-29] Idle MCP connection approval was routed through an inactive turn
 
 - **Context / Symptom:** The live `/mcp connect demo` PTY returned `MCP approval denied` without showing an approval prompt, even though an interactive TUI was active.
