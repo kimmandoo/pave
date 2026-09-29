@@ -1,9 +1,10 @@
 # Changelog
 
 ## 2026-09-29
+- release(distribution): prepared v0.1.66 with verified SwiftPM, Gradle, Flutter and RN/Expo focused checks and simulator-free CI; left M08's real Xcode acceptance open with explicit user approval.
 - fix(ci): removed automatic Xcode simulator build and xcodegen installation from CI after manual-only acceptance was required; retained fake-Xcode refusal tests and left M08 open.
 - fix(mobile): rejected symlinked selected SwiftPM and RN/Expo project roots, distinguished SwiftPM zero-test exits from passing tests, and normalized disposable project paths for macOS CI; retained exact task and tool exits.
-- feat(mobile): added individually approved, session-bound focused SwiftPM and offline Gradle task discovery/execution, Flutter analysis/targeted tests without `pub get`, and declared React Native/Expo scripts with explicit lockfile-manager selection; preserved real exits and configured disposable toolchain checks in CI. Local npm fixture passed; native platform checks awaited hosted runners.
+- feat(mobile): added individually approved, session-bound focused SwiftPM and offline Gradle task discovery/execution, Flutter analysis/targeted tests without `pub get`, and declared React Native/Expo scripts with explicit lockfile-manager selection; preserved real exits. Hosted SwiftPM, Gradle and Flutter disposable checks and a local npm fixture passed.
 - feat(mobile): added individually approved Xcode scheme/destination discovery and non-signing simulator build/test with session-bound choices, bounded output and preserved command exits; removed speculative Xcode build/test suggestions from static inventory. Real Xcode execution remained unverified on this Linux host.
 - feat(mobile): required an exact mobile subroot and platform for focused command previews, retained separate mixed-stack evidence and withheld commands for mismatched, ambiguous, canceled or framework-owned native hosts.
 - feat(mobile): mapped declared React Native/Expo scripts, observed lockfiles and native host roots, and withheld command suggestions when package managers conflicted or no lockfile existed; removed implicit `npx expo export`.
