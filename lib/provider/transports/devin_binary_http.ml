@@ -1,6 +1,6 @@
 (* Pinned binary Connect requests need a curl executor independent of Provider's
    JSON transport; otherwise Devin_api and Provider form a compile-time cycle. *)
-exception Failed
+exception Failed of string
 exception Cancelled
 
 let with_temp_file f =
@@ -12,7 +12,7 @@ let with_temp_file f =
 
 let quote value =
   if String.exists (fun c -> Char.code c < 32 || Char.code c = 127) value then
-    raise Failed;
+    raise (Failed "invalid curl configuration value");
   let buffer = Buffer.create (String.length value + 2) in
   Buffer.add_char buffer '"';
   String.iter (function
@@ -40,8 +40,20 @@ let read_limited path max_bytes =
   let input = open_in_bin path in
   Fun.protect ~finally:(fun () -> close_in_noerr input) (fun () ->
     let length = in_channel_length input in
-    if length > max_bytes then raise Failed;
+    if length > max_bytes then raise (Failed "response exceeds size limit");
     really_input_string input length)
+
+let curl_failure = function
+  | 6 -> "could not resolve pinned host"
+  | 7 -> "could not connect to pinned host"
+  | 28 -> "request timed out (remote acceptance unknown)"
+  | 35 -> "TLS handshake failed"
+  | 52 -> "pinned host sent an empty reply"
+  | 55 -> "failed to send request"
+  | 56 -> "connection closed while receiving response"
+  | 60 -> "TLS certificate verification failed"
+  | 63 -> "response exceeds size limit"
+  | code -> Printf.sprintf "curl failed (exit status %d)" code
 
 let run ?cancel configuration =
   let executable, environment = match !Test.curl_helper with
@@ -49,7 +61,8 @@ let run ?cancel configuration =
     | None ->
         if not (Sys.file_exists curl_path &&
             (try Unix.access curl_path [Unix.X_OK]; true
-             with Unix.Unix_error _ -> false)) then raise Failed;
+             with Unix.Unix_error _ -> false)) then
+          raise (Failed "trusted curl executable unavailable");
         curl_path, curl_environment in
   let reader, writer = Unix.pipe () in
   let output_read, output_write = Unix.pipe () in
@@ -72,30 +85,49 @@ let run ?cancel configuration =
       (try ignore (Unix.waitpid [] pid) with Unix.Unix_error _ -> ())))
     (fun () ->
       let rec send position =
+        (match cancel with Some check when check () -> raise Cancelled | _ -> ());
         if position < String.length configuration then (
-          let count = Unix.write_substring writer configuration position
-            (String.length configuration - position) in
-          if count = 0 then raise Failed;
+          let count = try Unix.write_substring writer configuration position
+            (String.length configuration - position)
+            with Unix.Unix_error (Unix.EPIPE, _, _) ->
+              raise (Failed "curl closed its configuration input") in
+          if count = 0 then raise (Failed "curl did not accept its configuration");
           send (position + count)) in
       send 0;
       close_fd writer;
-      let result = Bytes.create 16 in
-      let rec read_status () =
+      let result = Bytes.create 4 in
+      let rec read_status position =
         (match cancel with Some check when check () -> raise Cancelled | _ -> ());
         let ready, _, _ = Unix.select [output_read] [] [] 0.1 in
-        if ready = [] then read_status ()
-        else Unix.read output_read result 0 (Bytes.length result) in
-      let count = read_status () in
+        if ready = [] then read_status position
+        else
+          let count = Unix.read output_read result position (4 - position) in
+          if count = 0 then position
+          else if position + count = 4 then
+            raise (Failed "curl returned an invalid HTTP status")
+          else read_status (position + count) in
+      let count = read_status 0 in
       close_fd output_read;
       let rec await () =
         (match cancel with Some check when check () -> raise Cancelled | _ -> ());
         match Unix.waitpid [Unix.WNOHANG] pid with
         | 0, _ -> ignore (Unix.select [] [] [] 0.1); await ()
         | _, status -> waited := true; status in
-      (match await () with Unix.WEXITED 0 -> () | _ -> raise Failed);
-      if count <> 3 then raise Failed;
-      try int_of_string (Bytes.sub_string result 0 count)
-      with Failure _ -> raise Failed)
+      let status = await () in
+      (match status with
+      | Unix.WEXITED 0 -> ()
+      | Unix.WEXITED code -> raise (Failed (curl_failure code))
+      | Unix.WSIGNALED signal | Unix.WSTOPPED signal ->
+          raise (Failed (Printf.sprintf "curl terminated (signal %d)" signal)));
+      if count <> 3 then raise (Failed "curl returned an invalid HTTP status");
+      let hundreds = Bytes.get result 0
+      and tens = Bytes.get result 1
+      and ones = Bytes.get result 2 in
+      if hundreds < '1' || hundreds > '5' ||
+         tens < '0' || tens > '9' || ones < '0' || ones > '9' then
+        raise (Failed "curl returned an invalid HTTP status");
+      (Char.code hundreds - 48) * 100 +
+      (Char.code tens - 48) * 10 + Char.code ones - 48)
 
 let post ?cancel ~url ~headers ~body ~max_bytes () =
   with_temp_file (fun body_path body_output ->

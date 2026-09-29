@@ -172,7 +172,8 @@ let () =
     assert (List.rev !outcome_order = ["started"; "settled"; "result"]);
     assert (List.length (Pave.Agent.messages agent) = 4);
     (match List.rev !tool_events with
-     | [ Pave.Agent.Tool_started { call_id = "call-mobile"; name = "read_file" };
+     | [ Pave.Agent.Tool_started { call_id = "call-mobile"; name = "read_file";
+           target = Some "App.swift" };
          Pave.Agent.Tool_settled {
            call_id = "call-mobile"; name = "read_file"; result; is_error = false
          } ] ->
@@ -211,7 +212,8 @@ let () =
            | None -> false)
      | _ -> failwith "canceled tool turn was not persisted with a paired result");
     (match List.rev !cancel_events with
-     | [ Pave.Agent.Tool_started { call_id = "write-mobile"; name = "write_file" };
+     | [ Pave.Agent.Tool_started { call_id = "write-mobile"; name = "write_file";
+           target = None };
          Pave.Agent.Tool_aborted {
            call_id = "write-mobile"; side_effects_may_have_occurred = false; result; _
          } ] ->
@@ -245,9 +247,11 @@ let () =
            | None -> false)
      | _ -> failwith "cancelled tool sequence left a dangling tool call");
     (match List.rev !partial_events with
-     | [ Pave.Agent.Tool_started { call_id = "read-once"; name = "read_file" };
+     | [ Pave.Agent.Tool_started { call_id = "read-once"; name = "read_file";
+           target = Some "App.swift" };
          Pave.Agent.Tool_settled { call_id = "read-once"; is_error = false; _ };
-         Pave.Agent.Tool_started { call_id = "write-twice"; name = "write_file" };
+         Pave.Agent.Tool_started { call_id = "write-twice"; name = "write_file";
+           target = None };
          Pave.Agent.Tool_aborted {
            call_id = "write-twice"; side_effects_may_have_occurred = false; _
          } ] -> ()
@@ -275,7 +279,8 @@ let () =
            | None -> false)
      | _ -> failwith "cancelled command did not settle the tool call");
     (match List.rev !shell_events with
-     | Pave.Agent.Tool_started { call_id = "shell-wait"; name = "run_command" } :: tail ->
+     | Pave.Agent.Tool_started { call_id = "shell-wait"; name = "run_command";
+         target = None } :: tail ->
          assert (List.exists (function
            | Pave.Agent.Tool_updated {
                call_id = "shell-wait"; received_bytes; _
@@ -326,11 +331,13 @@ let () =
      | _ -> failwith "dynamic tool turn did not preserve call/result ordering");
     assert (not (Sys.file_exists (Filename.concat root "MUST_NOT_EXIST")));
     (match List.rev !dynamic_events with
-     | [ Pave.Agent.Tool_started { call_id = "dynamic-first"; name = "read_file" };
+     | [ Pave.Agent.Tool_started { call_id = "dynamic-first"; name = "read_file";
+           target = Some "App.swift" };
          Pave.Agent.Tool_settled {
            call_id = "dynamic-first"; is_error = false; _
          };
-         Pave.Agent.Tool_started { call_id = "dynamic-stale"; name = "write_file" };
+         Pave.Agent.Tool_started { call_id = "dynamic-stale"; name = "write_file";
+           target = None };
          Pave.Agent.Tool_settled {
            call_id = "dynamic-stale"; is_error = true; _
          } ] -> ()
@@ -377,8 +384,10 @@ let () =
          assert (final.role = "assistant")
      | _ -> failwith "parallel tool results did not preserve provider order");
     (match List.rev !parallel_events with
-     | [ Pave.Agent.Tool_started { call_id = "parallel-first"; name = "read_file" };
-         Pave.Agent.Tool_started { call_id = "parallel-second"; name = "read_file" };
+     | [ Pave.Agent.Tool_started { call_id = "parallel-first"; name = "read_file";
+           target = Some "App.swift" };
+         Pave.Agent.Tool_started { call_id = "parallel-second"; name = "read_file";
+           target = Some "App.swift" };
          Pave.Agent.Tool_settled {
            call_id = "parallel-first"; is_error = false; _
          };

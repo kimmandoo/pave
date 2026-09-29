@@ -129,12 +129,36 @@ let () =
   expect "terminal rendering preserves the original deletion and gutter"
     (contains (Buffer.contents output) "-old" &&
      contains (Buffer.contents output) "│");
+  let reads = Transcript_view.create () in
+  let group = Transcript_view.start_tool ~target:"docs/one.md" reads
+    "read_file" in
+  Transcript_view.tool_result ~group reads "read_file"
+    "---\n# A readable heading\nbody";
+  let read = Option.get (Array.find_opt (fun (visual : Transcript_view.visual) ->
+    visual.row.style = Transcript_view.Tool_summary)
+    (Transcript_view.layout reads ~columns:60
+      ~measure:(fun text -> Notty.I.width
+        (Notty.I.string Notty.A.empty text)))) in
+  let rendered_read = Buffer.create 160 in
+  Notty.Render.to_buffer rendered_read Notty.Cap.ansi (0, 0) (60, 1)
+    (Tui.styled_visual 60 read);
+  expect "settled file-read card uses one identifiable line, not a raw preview"
+    (contains (Buffer.contents rendered_read) "●" &&
+     contains (Buffer.contents rendered_read) "docs/one.md" &&
+     not (contains (Buffer.contents rendered_read) "⎿") &&
+     not (contains (Buffer.contents rendered_read) "---"));
   (match Sys.getenv_opt "PAVE_REAL_DIFF_TUI" with
    | Some "1" ->
        let screen = Tui.create ~root:(Unix.getcwd ()) ~model:"diff-smoke"
          ~session:false () in
        Fun.protect ~finally:(fun () -> Tui.close screen) (fun () ->
          Tui.sent screen "Show changed lines";
+         Tui.tool_started ~target:"docs/one.md" screen "read-one" "read_file";
+         Tui.tool_settled screen "read-one" "read_file"
+           "---\n# One\nbody" false;
+         Tui.tool_started ~target:"docs/two.md" screen "read-two" "read_file";
+         Tui.tool_settled screen "read-two" "read_file"
+           "---\n# Two\nbody" false;
          Tui.event screen
            "[run_command] Status: exit 0\ndiff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new";
          ignore (Transcript_view.toggle screen.transcript ~first:0
@@ -143,6 +167,22 @@ let () =
            "```diff\n@@ -1 +1 @@\n-before\n+after\n```";
          Transcript_view.finish screen.transcript;
          Tui.paint screen;
-         Thread.delay 1.)
+         Thread.delay 0.2;
+         let call : Pave.Protocol.tool_call = {
+           id = "restored-read"; name = "read_file";
+           arguments = `Assoc ["path", `String "docs/restored.md"] } in
+         let assistant : Pave.Protocol.message = {
+           role = "assistant"; content = None; tool_result_content = None;
+           tool_calls = [call]; tool_call_id = None; provider_state = None;
+           attachments = [] } in
+         Tui.show_history screen [assistant;
+           Pave.Protocol.tool_result call.id "---\n# Restored\ncontent"];
+         expect "session replay restores the named compact file-read row"
+           (Array.exists (fun (entry : Transcript_view.visual) ->
+             entry.text = "read_file · docs/restored.md · 3 lines · collapsed")
+             (Transcript_view.layout screen.transcript ~columns:80
+               ~measure:(fun text -> Notty.I.width
+                 (Notty.I.string Notty.A.empty text))));
+         Thread.delay 0.8)
    | _ -> ());
   print_endline "TUI attachment, stream and diff rendering: ok"

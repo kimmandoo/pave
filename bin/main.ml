@@ -1032,8 +1032,8 @@ let () =
                | None -> "\n");
             (match read_line () with "y" | "Y" | "yes" -> true | _ -> false) in
     let render_tool_event screen = function
-      | Pave.Agent.Tool_started { call_id; name } ->
-          Tui.tool_started screen call_id name
+      | Pave.Agent.Tool_started { call_id; name; target } ->
+          Tui.tool_started ?target screen call_id name
       | Pave.Agent.Tool_updated { call_id; name; received_bytes } ->
           Tui.tool_updated screen call_id name received_bytes
       | Pave.Agent.Tool_settled { call_id; name; result; is_error } ->
@@ -1041,7 +1041,7 @@ let () =
       | Pave.Agent.Tool_aborted { call_id; name; result; _ } ->
           Tui.tool_aborted screen call_id name result in
     let persist_tool_event event = match !journal, event with
-      | Some current, Pave.Agent.Tool_started { call_id; name } ->
+      | Some current, Pave.Agent.Tool_started { call_id; name; _ } ->
           ignore (Pave.Session.record_tool_started current ~call_id ~name)
       | Some current, Pave.Agent.Tool_settled { call_id; name; is_error; _ } ->
           ignore (Pave.Session.record_tool_settled current ~call_id ~name ~is_error)

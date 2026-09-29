@@ -889,9 +889,9 @@ let discover_devin_models ?http ?cancel credential =
         with Devin_binary_http.Cancelled -> raise Provider.Cancelled) with
        | Ok rows -> Ok rows
        | Error Devin_api.Invalid_credential -> Error Invalid_credential
-       | Error Devin_api.Transport_error ->
-           Error (Transport_error "Devin Connect request failed")
-       | Error (Devin_api.Http_error status) -> Error (Http_error status)
+       | Error (Devin_api.Transport_error reason) ->
+           Error (Transport_error ("Devin Connect request failed: " ^ reason))
+       | Error (Devin_api.Http_error (status, _)) -> Error (Http_error status)
        | Error (Devin_api.Invalid_response reason) ->
            Error (Invalid_response reason))
   | Some _ -> Error Invalid_credential

@@ -2,7 +2,7 @@
 type kind = User | Assistant | Tool | Notice | Error | Approval
 type style =
   Heading | Text | Code | Quote | List_item | Subheading | Tool_state
-  | Divider | Table_header | Table_row | Table_separator
+  | Tool_summary | Divider | Table_header | Table_row | Table_separator
   | Diff_header | Diff_hunk | Diff_add | Diff_remove | Diff_context | Diff_meta
 type inline_style = Plain | Bold | Inline_code | Link
 type inline_run = { content : string; style : inline_style }
@@ -382,12 +382,24 @@ let parse_tool text =
       else None
   | _ -> None
 
-let start_tool t name =
+let start_tool ?target t name =
   let name = single_line name in
+  let label = match name, target with
+    | "read_file", Some path when path <> "" &&
+        Filename.is_relative path && not (String.contains path ':') ->
+        let path = single_line path in
+        let path = if String.length path <= 96 then path else (
+          let size = ref 96 in
+          while !size > 0 && Char.code path.[!size] land 0xc0 = 0x80 do
+            decr size
+          done;
+          String.sub path 0 !size ^ "…") in
+        name ^ " · " ^ path
+    | _ -> name in
   let id = group t in
   t.pending_tool <- Some (name, id);
   heading t ~kind:Tool ~group:id ~provisional:false
-    (name ^ " · running");
+    (label ^ " · running");
   id
 
 let tool_result ?group:existing ?(aborted = false) ?(is_error = false) t name result =
@@ -404,19 +416,29 @@ let tool_result ?group:existing ?(aborted = false) ?(is_error = false) t name re
   let failed = is_error || String.starts_with ~prefix:"Error:" result in
   let error = failed || aborted in
   let outcome = if aborted then "aborted" else if failed then "failed" else "completed" in
+  let length = String.fold_left (fun count char ->
+    if char = '\n' then count + 1 else count) 1 result in
+  let compact_read = name = "read_file" && not error in
   for i = 0 to t.count - 1 do
     let row = t.rows.(i) in
     if row.group = id && row.kind = Tool && row.style = Heading then (
       mark_dirty t i;
+      let label = if String.ends_with ~suffix:" · running" row.text then
+        String.sub row.text 0 (String.length row.text -
+          String.length " · running")
+        else name in
       if error then row.kind <- Error;
-      set_text row name)
+      if compact_read then (
+        row.style <- Tool_summary;
+        set_text row (Printf.sprintf "%s · %d %s · collapsed"
+          label length (if length = 1 then "line" else "lines")))
+      else set_text row label)
   done;
-  let length = String.fold_left (fun count char ->
-    if char = '\n' then count + 1 else count) 1 result in
-  add_line t ~kind:(if error then Error else Tool) ~group:id
-    ~provisional:false ~style:Tool_state
-    (Printf.sprintf "%s · %d %s · collapsed" outcome length
-      (if length = 1 then "line" else "lines"));
+  if not compact_read then
+    add_line t ~kind:(if error then Error else Tool) ~group:id
+      ~provisional:false ~style:Tool_state
+      (Printf.sprintf "%s · %d %s · collapsed" outcome length
+        (if length = 1 then "line" else "lines"));
   let position = ref 0 and previewed = ref false in
   let status_preview = ref None in
   let starts_at text index prefix =
@@ -446,7 +468,7 @@ let tool_result ?group:existing ?(aborted = false) ?(is_error = false) t name re
           set_row t index ~style:Diff_header ~markdown:false (excerpt line);
           status_preview := None
       | None -> ());
-    if not !previewed && String.trim line <> "" &&
+    if not compact_read && not !previewed && String.trim line <> "" &&
       not (String.starts_with ~prefix:"```" line) then (
       previewed := true;
       let style, preview =
@@ -578,11 +600,15 @@ let visible t row =
     ~default:false in
   (not row.detail || expanded) && (not row.preview || not expanded)
 
+let expandable_style = function
+  | Tool_state | Tool_summary -> true
+  | _ -> false
+
 let toggle t ~first:_ ~last =
   let chosen = ref None in
   for i = 0 to t.count - 1 do
     let row = t.rows.(i) in
-    if row.style = Tool_state && i <= last then chosen := Some row.group
+    if expandable_style row.style && i <= last then chosen := Some row.group
   done;
   match !chosen with
   | None -> None
@@ -595,12 +621,12 @@ let toggle t ~first:_ ~last =
       done;
       for i = 0 to t.count - 1 do
         let row = t.rows.(i) in
-        if row.group = id && row.style = Tool_state &&
+        if row.group = id && expandable_style row.style &&
           String.ends_with ~suffix:" · collapsed" row.text then
           set_text row (String.sub row.text 0
             (String.length row.text - String.length " · collapsed") ^
             " · expanded")
-        else if row.group = id && row.style = Tool_state &&
+        else if row.group = id && expandable_style row.style &&
           String.ends_with ~suffix:" · expanded" row.text then
           set_text row (String.sub row.text 0
             (String.length row.text - String.length " · expanded") ^

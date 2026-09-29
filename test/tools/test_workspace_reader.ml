@@ -143,6 +143,11 @@ let () =
     else if sqlite_ready then
       ignore (expect_error "SQLite helper unavailable or unsafe" "helper" (fun () -> read ~root "items.sqlite:schema"));
 
+    create "tail.txt" (String.make 65_537 'x' ^ "\nlast\n");
+    expect "tail ignores oversized earlier lines" (read ~root "tail.txt:-1" = "last\n");
+    ignore (expect_error "tail rejects oversized selected line" "output limit"
+      (fun () -> read ~root "tail.txt:-2"));
+
     let large = String.make 65_537 'x' in
     create "large.txt" large;
     ignore (expect_error "output bound" "output limit" (fun () -> read ~root "large.txt"));

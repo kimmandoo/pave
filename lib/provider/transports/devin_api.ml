@@ -10,8 +10,8 @@ let max_frame = 16 * 1024 * 1024
 let max_body = 32 * 1024 * 1024
 let max_models = 4096
 
-type error = Invalid_credential | Transport_error | Http_error of int
-  | Invalid_response of string
+type error = Invalid_credential | Transport_error of string
+  | Http_error of int * string option | Invalid_response of string
 type model = { id : string; name : string; router : bool;
   context_window_tokens : int option; tokenizer_type : string option;
   max_tokens : int option; supports_tools : bool option;
@@ -162,6 +162,23 @@ let allowed_url url =
 
 (* The injected HTTP callback has the same pinning obligation as the default
    executor; the module itself NEVER accepts caller-defined URLs. *)
+let safe_connect_code = function
+  | `String ("cancelled" | "unknown" | "invalid_argument"
+    | "deadline_exceeded" | "not_found" | "already_exists"
+    | "permission_denied" | "resource_exhausted" | "failed_precondition"
+    | "aborted" | "out_of_range" | "unimplemented" | "internal"
+    | "unavailable" | "data_loss" | "unauthenticated" as code) -> code
+  | _ -> "unknown"
+let http_connect_code body =
+  if String.length body > 4096 then None
+  else try
+    let json = Yojson.Basic.from_string body in
+    let error = Protocol.member "error" json in
+    let error = if error = `Null then json else error in
+    let code = safe_connect_code (Protocol.member "code" error) in
+    if code = "unknown" then None else Some code
+  with Yojson.Json_error _ -> None
+
 let default_http ?cancel ~url ~headers ~body ~on_chunk () =
   if not (allowed_url url) then Error (Invalid_response "untrusted Devin API endpoint")
   else try
@@ -169,7 +186,7 @@ let default_http ?cancel ~url ~headers ~body ~on_chunk () =
       ~url ~headers ~body ~max_bytes:max_body () in
     on_chunk response;
     Ok status
-  with Devin_binary_http.Failed -> Error Transport_error
+  with Devin_binary_http.Failed reason -> Error (Transport_error reason)
 let rpc ?http ?cancel ~url ~headers ~body () =
   if not (allowed_url url) then Error (Invalid_response "untrusted Devin API endpoint")
   else let received = Buffer.create 4096 in
@@ -183,12 +200,14 @@ let rpc ?http ?cancel ~url ~headers ~body () =
         default_http ?cancel ~url ~headers ~body ~on_chunk () in
   match call ~url ~headers ~body ~on_chunk with
   | Error reason -> Error reason
-  | Ok status when status < 200 || status >= 300 -> Error (Http_error status)
+  | Ok status when status < 200 || status >= 300 ->
+      Error (Http_error (status, http_connect_code (Buffer.contents received)))
   | Ok _ -> Ok (Buffer.contents received)
 let protect f = try f () with
   | Bad_wire text -> Error (Invalid_response text)
   | Invalid_argument text -> Error (Invalid_response text)
-  | Unix.Unix_error _ | Sys_error _ -> Error Transport_error
+  | Unix.Unix_error _ | Sys_error _ ->
+      Error (Transport_error "local request I/O failed")
   | Protocol.Invalid_response text -> Error (Invalid_response text)
 
 let authenticate ?http ?cancel ~api_key () = protect (fun () ->
@@ -464,11 +483,6 @@ let frame flag payload =
   for i = 0 to 3 do Bytes.set b (i+1)
     (Char.chr ((n lsr ((3-i)*8)) land 255)) done;
   Bytes.blit_string payload 0 b 5 n; Bytes.unsafe_to_string b
-let safe_connect_code = function
-  | `String code when code <> "" && String.length code <= 64 &&
-      String.for_all (function 'a'..'z' | '0'..'9' | '_' -> true | _ -> false) code ->
-      code
-  | _ -> "unknown"
 let connect_trace_id message =
   let prefix = "trace ID: " in
   let n = String.length message and size = String.length prefix in

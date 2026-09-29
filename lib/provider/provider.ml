@@ -327,6 +327,20 @@ let http_error_reason secret status json =
     | _ -> reason in
   classification ^ ": " ^ reason ^ detail
 
+let devin_http_error stage status code =
+  let reason = match status with
+    | 400 -> "invalid request"
+    | 401 -> "session credential rejected"
+    | 403 -> "account access denied"
+    | 404 -> "model or route not found"
+    | 408 -> "request timed out (remote acceptance unknown)"
+    | 413 -> "request exceeds size limit"
+    | 429 -> "rate limited"
+    | status when status >= 500 && status <= 599 -> "provider unavailable"
+    | _ -> "request failed" in
+  let detail = match code with None -> "" | Some code -> " (Connect " ^ code ^ ")" in
+  Printf.sprintf "%s HTTP %d: %s%s" stage status reason detail
+
 let gemini_model_path model =
   let model = if String.starts_with ~prefix:"models/" model then
     String.sub model 7 (String.length model - 7) else model in
@@ -1038,10 +1052,11 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage
         | Ok models -> models
         | Error Devin_api.Invalid_credential ->
             raise (Provider_error "invalid Devin session credential")
-        | Error Devin_api.Transport_error ->
-            raise (Provider_error "Devin model discovery transport failed")
-        | Error (Devin_api.Http_error status) ->
-            raise (Provider_error (Printf.sprintf "Devin model discovery HTTP %d" status))
+        | Error (Devin_api.Transport_error reason) ->
+            raise (Provider_error ("Devin model discovery transport failed: " ^ reason))
+        | Error (Devin_api.Http_error (status, code)) ->
+            raise (Provider_error (devin_http_error
+              "Devin model discovery" status code))
         | Error (Devin_api.Invalid_response reason) ->
             raise (Provider_error reason))
         with Devin_binary_http.Cancelled -> raise Cancelled in
@@ -1063,10 +1078,11 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage
         | Ok completion -> completion
         | Error Devin_api.Invalid_credential ->
             raise (Provider_error "invalid Devin session credential")
-        | Error Devin_api.Transport_error ->
-            raise (Provider_error "Devin Connect transport failed")
-        | Error (Devin_api.Http_error status) ->
-            raise (Provider_error (Printf.sprintf "Devin Connect HTTP %d" status))
+        | Error (Devin_api.Transport_error reason) ->
+            raise (Provider_error ("Devin Connect transport failed: " ^ reason))
+        | Error (Devin_api.Http_error (status, code)) ->
+            raise (Provider_error (devin_http_error
+              "Devin Connect" status code))
         | Error (Devin_api.Invalid_response reason) ->
             raise (Provider_error reason))
         with Devin_binary_http.Cancelled -> raise Cancelled in

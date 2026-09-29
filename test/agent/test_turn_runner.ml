@@ -73,7 +73,7 @@ let () =
     | "fail" -> failwith "expected turn failure"
     | "cancel-abort" ->
         Pave.Turn_runner.tool runner (Pave.Agent.Tool_started {
-          call_id = "aborted-call"; name = "read_file"
+          call_id = "aborted-call"; name = "read_file"; target = None
         });
         Pave.Turn_runner.message runner "cancel-abort-ready";
         while not (cancel ()) do Thread.delay 0.001 done;
@@ -138,7 +138,7 @@ let () =
       | Pave.Turn_runner.Tool_event { turn_id; event = tool_event } ->
           require_owner turn_id;
           (match tool_event with
-           | Pave.Agent.Tool_started { call_id; name } ->
+           | Pave.Agent.Tool_started { call_id; name; _ } ->
                event ("tool-start:" ^ call_id ^ ":" ^ name)
            | Pave.Agent.Tool_updated { call_id; received_bytes; _ } ->
                event (Printf.sprintf "tool-update:%s:%d" call_id received_bytes)

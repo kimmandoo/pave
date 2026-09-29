@@ -1,5 +1,26 @@
 # Troubleshooting
 
+### [2026-09-30] Devin Connect failures hid their transport cause
+
+- **Context / Symptom:** A model turn ended with `Error: Devin Connect transport failed`, leaving DNS, TLS, timeout and a malformed response indistinguishable. A valid subprocess response could also fail when the three-byte curl HTTP status arrived in separate pipe reads.
+- **Root Cause:** `Devin_binary_http.run` assumed one `Unix.read` returned all three status bytes and discarded nonzero curl exit codes. The provider reduced every transport error to the same message; non-2xx Connect responses lost allowlisted structured error codes.
+- **Solution:** Read the entire bounded status through EOF, validated a three-digit HTTP code, mapped allowlisted curl exits and HTTP/Connect codes to safe diagnostics without echoing secrets, bodies or headers, and retained cancellation and no automatic completion replay. A subprocess fixture split status bytes and checked successful replies, timeout, TLS, HTTP and cancellation paths.
+- **Prevention / Reference:** Do not equate pipe read boundaries with message boundaries; test a real child-process boundary with fragmented writes. A timeout cannot prove whether the remote server accepted a completion. The user's particular remote failure was not identified without its curl exit code or HTTP response.
+
+### [2026-09-30] Tail reads failed on lines outside the selected result
+
+- **Context / Symptom:** Reading `tail.txt:-1` failed with an output-limit error when an earlier line had 65,537 bytes, even though the only requested line was short.
+- **Root Cause:** The tail scanner buffered every line and rejected oversized text before evicting lines outside the requested tail.
+- **Solution:** Tracked oversized tail lines without storing additional bytes and raised the output-limit error only when a selected tail line remained oversized. The fixture accepts the final short line via `:-1` and rejects `:-2`, which includes the oversized line.
+- **Prevention / Reference:** Preserve the overall scan cap, NUL rejection and cancellation checks; test both exclusion and inclusion of the oversized line.
+
+### [2026-09-30] Repeated file reads crowded the transcript
+
+- **Context / Symptom:** Consecutive `read_file` results appeared as repeated tool titles, `completed · N lines · collapsed` rows and unhelpful `---` first-line previews, without showing which file had been read.
+- **Root Cause:** All tools shared the same heading/status/first-content preview layout, and live tool-start events carried only a name and call ID.
+- **Solution:** Passed a sanitized workspace-relative read target on the typed start event and rendered successful reads as one file-and-line-count row, keeping per-call expansion and restored history. Failed and aborted calls kept explicit error status and content. Colored and `NO_COLOR` PTY paints showed distinct file names without the `---` preview.
+- **Prevention / Reference:** Keep generic tool/diff cards and file-read failure visibility as controls in transcript and TUI tests; do not surface absolute paths or URL query strings in the compact title.
+
 ### [2026-09-29] Standalone shell command ignored installer environment
 
 - **Context / Symptom:** A v0.1.70 installation meant for a private release-upgrade directory instead printed `Installed pave to /Users/mingyu/.local/bin/pave`; the expected private executable was absent.

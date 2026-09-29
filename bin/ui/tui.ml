@@ -368,6 +368,8 @@ let style_attr (row : Transcript_view.row) =
   | _, Transcript_view.Code ->
       if no_color then text_attr else A.(fg lightgreen)
   | _, Transcript_view.Quote -> muted
+  | Transcript_view.Tool, Transcript_view.Tool_summary ->
+      A.(text_attr ++ st bold)
   | _, Transcript_view.Tool_state -> muted
   | _, _ -> text_attr
 
@@ -385,6 +387,8 @@ let transcript_prefix style continuation =
   | Transcript_view.Heading -> if continuation then "    " else "  ● "
   | Transcript_view.Divider -> ""
   | Transcript_view.Tool_state -> "  ⎿ "
+  | Transcript_view.Tool_summary ->
+      if continuation then "    " else "  ● "
   | Transcript_view.Code -> "  │ "
   | Transcript_view.Quote -> if continuation then "    " else "  │ "
   | Transcript_view.Diff_header -> if continuation then "  │ " else "  ╭ "
@@ -418,6 +422,7 @@ let row_surface (row : Transcript_view.row) =
 let styled_visual cols (visual : Transcript_view.visual) =
   let row = visual.row in
   let surface = row_surface row in
+  let compact_read = row.style = Transcript_view.Tool_summary in
   let heading = row.style = Transcript_view.Heading && not visual.continuation in
   let prefix = match row.style, row.kind, visual.continuation with
     | Transcript_view.Heading, Transcript_view.User, false -> "  ❯ "
@@ -425,6 +430,7 @@ let styled_visual cols (visual : Transcript_view.visual) =
     | _ -> transcript_prefix row.style visual.continuation in
   let attr = style_attr row in
   let marker_attr = match row.kind with
+    | Transcript_view.Tool when compact_read -> success
     | Transcript_view.Tool when heading &&
         String.ends_with ~suffix:running_suffix row.text -> warning
     | Transcript_view.Tool when heading -> success
@@ -1603,7 +1609,13 @@ let show_history t (messages : Pave.Protocol.message list) =
             Transcript_view.assistant t.transcript content
         | _ -> ());
         List.iter (fun (call : Pave.Protocol.tool_call) ->
-          let group = Transcript_view.start_tool t.transcript call.name in
+          let target = if call.name = "read_file" then
+            match Pave.Protocol.member "path" call.arguments with
+            | `String path -> Some path
+            | _ -> None
+            else None in
+          let group = Transcript_view.start_tool ?target
+            t.transcript call.name in
           Hashtbl.replace names call.id (call.name, group))
           message.tool_calls
     | "tool" ->
@@ -1653,11 +1665,11 @@ let event t text =
   change_transcript t (fun () -> Transcript_view.event t.transcript text);
   paint t
 
-let tool_started t call_id name =
+let tool_started ?target t call_id name =
   let name = single_line name in
   change_transcript t (fun () ->
     Hashtbl.replace t.tool_groups call_id
-      (Transcript_view.start_tool t.transcript name));
+      (Transcript_view.start_tool ?target t.transcript name));
   t.active_tool <- Some { call_id; name; received_bytes = None };
   let activity = Some ("Tool: " ^ name) in
   if t.activity = activity then paint t else set_activity t activity

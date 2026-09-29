@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-09-30
+- fix(tui): condensed successful `read_file` calls into one named path-and-line row while retaining independent expansion, replayed history and visible failures.
+- fix(io): allowed tail reads to skip oversized earlier lines while still rejecting oversized selected lines and preserving scan and binary limits.
+- fix(provider): accepted fragmented Devin HTTP status output and reported safe curl/Connect failure causes instead of a bare transport error without replaying ambiguous completions.
+
 ## 2026-09-29
 - release(distribution): published v0.1.71 after four hosted CI and four native release jobs passed; verified all four downloaded checksums and archive members, exercised the macOS executable, and updated an isolated v0.1.70 installation to v0.1.71 before uninstalling it.
 - feat(tui): styled fenced and printed unified diffs with distinct file, hunk, addition, removal and context rows; preserved patch markers in monochrome and previewed changed files instead of command status in collapsed tool cards.

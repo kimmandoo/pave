@@ -221,12 +221,14 @@ let read_local_file ?cancel path selector =
       | Some limit when Queue.length tail_lines > limit -> ignore (Queue.take tail_lines)
       | _ -> ()
     in
+    let tail_line_too_long = ref false in
     let is_tail = Option.is_some tail_count in
     let finish_line has_newline =
-      let text = Buffer.contents buffer in
+      if is_tail then (
+        push_tail (if !tail_line_too_long then None else Some (Buffer.contents buffer)) has_newline;
+        tail_line_too_long := false)
+      else if selected !line_no then add_line (Buffer.contents buffer) has_newline;
       Buffer.clear buffer;
-      if is_tail then push_tail text has_newline
-      else if selected !line_no then add_line text has_newline;
       incr line_no
     in
     let fd_buffer = Bytes.create 8192 in
@@ -237,7 +239,7 @@ let read_local_file ?cancel path selector =
         if not !stop then (
           let count = Unix.read fd fd_buffer 0 (Bytes.length fd_buffer) in
           if count = 0 then (
-            if Buffer.length buffer > 0 then finish_line false
+            if Buffer.length buffer > 0 || !tail_line_too_long then finish_line false
           ) else (
             total_bytes := !total_bytes + count;
             if !total_bytes > max_scan_bytes then
@@ -250,11 +252,13 @@ let read_local_file ?cancel path selector =
               if byte = '\n' then (
                 finish_line true;
                 if not is_tail && !line_no > last_requested then stop := true
-              ) else if is_tail || selected !line_no then (
+              ) else if is_tail then (
+                if Buffer.length buffer < max_output_bytes then Buffer.add_char buffer byte
+                else tail_line_too_long := true
+              ) else if selected !line_no then (
                 if Buffer.length buffer >= max_output_bytes then
                   fail (Printf.sprintf "selected text exceeds %d-byte output limit" max_output_bytes);
-                Buffer.add_char buffer byte
-              );
+                Buffer.add_char buffer byte);
               incr index
             done;
             if not !stop then loop ()))
@@ -262,7 +266,10 @@ let read_local_file ?cancel path selector =
       loop ());
     (match tail_count with
      | None -> ()
-     | Some _ -> Queue.iter (fun (text, newline) -> add_line text newline) tail_lines);
+     | Some _ -> Queue.iter (fun (text, newline) ->
+         match text with
+         | Some text -> add_line text newline
+         | None -> fail (Printf.sprintf "selected text exceeds %d-byte output limit" max_output_bytes)) tail_lines);
     Buffer.contents output
 let read_raw_file path = Workspace_path.read_bounded path max_output_bytes
 

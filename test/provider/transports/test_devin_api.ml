@@ -4,6 +4,12 @@ let fail what = failwith ("Devin fixture: " ^ what)
 let expect_error predicate = function
   | Error error when predicate error -> ()
   | _ -> fail "expected protocol rejection"
+let contains text part =
+  let size = String.length part in
+  let rec scan index =
+    index + size <= String.length text &&
+    (String.sub text index size = part || scan (index + 1)) in
+  scan 0
 let key = "account-session-token"
 let model_uid = "live-discovered-model-uid"
 let router_uid = "account-router-uid"
@@ -67,6 +73,52 @@ let make_reply product = stream_reply (response (fun b ->
   D.number b 5 2;
   D.bytes b 7 (response (fun usage ->
     D.number usage 2 76; D.number usage 3 12))))
+(* Exercise the real subprocess/HTTP boundary, not an injected RPC callback.
+   The fixture receives curl's config on stdin and never prints it. *)
+let fake_curl () =
+  let output = ref "" and url = ref "" in
+  (try while true do
+    let line = input_line stdin in
+    if String.starts_with ~prefix:"output = " line then
+      output := Scanf.sscanf line "output = %S" Fun.id;
+    if String.starts_with ~prefix:"url = " line then
+      url := Scanf.sscanf line "url = %S" Fun.id
+  done with End_of_file -> ());
+  if !output = "" then exit 2;
+  let mode = Option.value ~default:"valid" (Sys.getenv_opt "PAVE_DEVIN_FIXTURE") in
+  let status, payload =
+    if !url = D.models_url then (
+      if mode = "discovery28" then exit 28;
+      200, response (fun b ->
+        D.bytes b 1 (model_config model_uid "Live account model")))
+    else if !url = D.auth_url then
+      200, response (fun b -> D.string b 1 "jwt-from-account")
+    else if !url = D.chat_url then (
+      match mode with
+      | "exit28" -> exit 28
+      | "exit60" -> exit 60
+      | "cancel" ->
+          let marker = open_out (Sys.getenv "PAVE_DEVIN_CANCEL_MARKER") in
+          close_out marker;
+          Unix.sleepf 4.; exit 28
+      | "http429" -> 429, {|{"code":"resource_exhausted","message":"private-token"}|}
+      | "http400" -> 400, {|{"code":"private-token","message":"private-token"}|}
+      | _ -> 200, make_reply 42)
+    else exit 2 in
+  let channel = open_out_bin !output in
+  output_string channel payload;
+  close_out channel;
+  let status = Printf.sprintf "%03d" status in
+  output_char stdout status.[0]; flush stdout;
+  Unix.sleepf 0.02;
+  output_string stdout (String.sub status 1 2);
+  flush stdout
+
+let () =
+  if Array.length Sys.argv >= 3 && Sys.argv.(1) = "--disable" &&
+     Sys.argv.(2) = "--config" then (
+    fake_curl (); exit 0)
+
 let () =
   assert (Pave.Devin_binary_http.curl_path = "/usr/bin/curl");
   assert (Array.to_list Pave.Devin_binary_http.curl_environment =
@@ -309,4 +361,58 @@ let () =
     message = "Devin Connect error unknown" | _ -> false)
     (D.protect (fun () -> Ok (D.parse_stream (D.frame 2
       {|{"error":{"code":"invalid_argument\nprivate-token","message":"private-token"}}|}))));
+  Pave.Devin_binary_http.Test.use_curl_helper Sys.executable_name;
+  let config : Pave.Provider.config = {
+    api = Pave.Provider.Devin_connect; endpoint = D.chat_url;
+    api_key = key; model = model_uid } in
+  let run () = Pave.Provider.complete config messages [] in
+  Unix.putenv "PAVE_DEVIN_FIXTURE" "valid";
+  let completed = run () in
+  assert (completed.content = Some "Six times seven is 42.");
+  Unix.putenv "PAVE_DEVIN_FIXTURE" "exit28";
+  (match run () with
+   | exception Pave.Provider.Provider_error reason ->
+       assert (contains reason "Devin Connect transport failed" &&
+         contains reason "timed out" &&
+         contains reason "remote acceptance unknown")
+   | _ -> fail "timed-out completion was accepted");
+  Unix.putenv "PAVE_DEVIN_FIXTURE" "exit60";
+  (match run () with
+   | exception Pave.Provider.Provider_error reason ->
+       assert (contains reason "Devin Connect transport failed" &&
+         contains reason "TLS certificate verification failed")
+   | _ -> fail "TLS failure was accepted");
+  Unix.putenv "PAVE_DEVIN_FIXTURE" "http429";
+  (match run () with
+   | exception Pave.Provider.Provider_error reason ->
+       assert (contains reason "Devin Connect HTTP 429" &&
+         contains reason "rate limited" &&
+         contains reason "resource_exhausted" &&
+         not (contains reason "private-token"))
+   | _ -> fail "HTTP 429 was accepted");
+  Unix.putenv "PAVE_DEVIN_FIXTURE" "http400";
+  (match run () with
+   | exception Pave.Provider.Provider_error reason ->
+       assert (contains reason "Devin Connect HTTP 400" &&
+         not (contains reason "private-token"))
+   | _ -> fail "HTTP 400 was accepted");
+  Unix.putenv "PAVE_DEVIN_FIXTURE" "discovery28";
+  (match run () with
+   | exception Pave.Provider.Provider_error reason ->
+       assert (contains reason "Devin model discovery transport failed" &&
+         contains reason "timed out" &&
+         contains reason "remote acceptance unknown")
+   | _ -> fail "failed model discovery was accepted");
+  Unix.putenv "PAVE_DEVIN_FIXTURE" "cancel";
+  let marker = Filename.temp_file "pave-devin-cancel-" ".marker" in
+  Sys.remove marker;
+  Unix.putenv "PAVE_DEVIN_CANCEL_MARKER" marker;
+  Fun.protect ~finally:(fun () ->
+    if Sys.file_exists marker then Sys.remove marker)
+    (fun () ->
+      match Pave.Provider.complete ~cancel:(fun () ->
+        Sys.file_exists marker) config messages [] with
+      | exception Pave.Provider.Cancelled -> ()
+      | _ -> fail "in-flight Devin completion did not cancel");
+  Unix.putenv "PAVE_DEVIN_FIXTURE" "valid";
   print_endline "Devin Connect dynamic models, routed two-turn tool result, hostile host: ok"

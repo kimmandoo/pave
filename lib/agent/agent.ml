@@ -2,7 +2,7 @@ type workspace_effect = Session_rewind.workspace_effect
 type phase = Model | Tool of string
 
 type tool_event =
-  | Tool_started of { call_id : string; name : string }
+  | Tool_started of { call_id : string; name : string; target : string option }
   | Tool_updated of { call_id : string; name : string; received_bytes : int }
   | Tool_settled of {
       call_id : string; name : string; result : string; is_error : bool
@@ -78,8 +78,9 @@ let create ~provider ~root ~system ?workspace_context
     on_usage; on_phase;
     on_tool_event = Option.map (fun notify event ->
       let event = match event with
-        | Tool_started { call_id; name } -> Tool_started {
-            call_id = redact call_id; name = redact name }
+        | Tool_started { call_id; name; target } -> Tool_started {
+            call_id = redact call_id; name = redact name;
+            target = Option.map redact target }
         | Tool_updated { call_id; name; received_bytes } -> Tool_updated {
             call_id = redact call_id; name = redact name; received_bytes }
         | Tool_settled { call_id; name; result; is_error } -> Tool_settled {
@@ -333,8 +334,13 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
           let complete message =
             Tool_scheduler.Complete [Protocol.Text message] in
           let prepare () =
+            let target = if call.name = "read_file" then
+              match Protocol.member "path" call.arguments with
+              | `String path -> Some path
+              | _ -> None
+              else None in
             emit_tool_event t (Tool_started {
-              call_id = call.id; name = call.name
+              call_id = call.id; name = call.name; target
             });
             Provider.check_cancel cancel;
             (match t.on_phase with

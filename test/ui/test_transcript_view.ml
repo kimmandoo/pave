@@ -57,6 +57,48 @@ let () =
   expect "tool collapse restores compact result"
     (Option.is_some (toggle transcript ~first:0 ~last:(transcript.count - 1)));
   expect "collapsed result hidden again" (not (has "secret later line" (lines transcript 64)));
+  let read_cards = create () in
+  let first_read = start_tool ~target:"src/one.md" read_cards "read_file" in
+  let second_read = start_tool ~target:"src/two.md" read_cards "read_file" in
+  tool_result ~group:second_read read_cards "read_file" "---\n# Two\nbody";
+  tool_result ~group:first_read read_cards "read_file" "---\n# One\nbody";
+  let compact = rendered read_cards 80 in
+  let read_rows = Array.to_list compact
+    |> List.filter (fun (visual : visual) ->
+      visual.row.style <> Divider) in
+  expect "repeated successful file reads show one distinguishable row each"
+    (List.length read_rows = 2 &&
+     List.exists (fun (visual : visual) ->
+       visual.text = "read_file · src/one.md · 3 lines · collapsed" &&
+       visual.row.style = Tool_summary) read_rows &&
+     List.exists (fun (visual : visual) ->
+       visual.text = "read_file · src/two.md · 3 lines · collapsed" &&
+       visual.row.style = Tool_summary) read_rows &&
+     not (has "---" (lines read_cards 80)));
+  expect "last read remains independently expandable"
+    (Option.value ~default:0
+      (toggle read_cards ~first:0 ~last:(read_cards.count - 1)) =
+       second_read &&
+     has "Two" (lines read_cards 80) &&
+     not (has "One" (lines read_cards 80)));
+  ignore (toggle read_cards ~first:0 ~last:(read_cards.count - 1));
+  expect "collapsed reads hide returned text again"
+    (not (has "Two" (lines read_cards 80)));
+  let failed_read = start_tool ~target:"src/missing.md" read_cards
+    "read_file" in
+  tool_result ~group:failed_read ~is_error:true read_cards "read_file"
+    "Error: missing file";
+  expect "failed read keeps its file identity and visible error"
+    (has "read_file · src/missing.md" (lines read_cards 80) &&
+     has "Error: missing file" (lines read_cards 80));
+  let public_url = create () in
+  let url_read = start_tool ~target:"https://example.test/file?token=secret"
+    public_url "read_file" in
+  tool_result ~group:url_read public_url "read_file" "safe content";
+  expect "compact file reads do not expose URL query strings as targets"
+    (has "read_file · 1 line · collapsed" (lines public_url 80) &&
+     not (List.exists (fun line -> String.contains line '?')
+       (lines public_url 80)));
   rollback transcript;
   let after = lines transcript 64 in
   expect "cancel retracts both assistant segments" (heading_count transcript Assistant = 0 &&
