@@ -1,6 +1,6 @@
 # Mobile development specialization plan
 
-**Status:** M01–M07 and M09–M12 completed; M08 and M13–M24 remain open. The Mobile specialization section of `TASKS.md` owns the M01–M24 checkboxes; this document supplies their dependencies, acceptance scenarios and safety limits. Complete and verify each checkbox against its own scenario. This is not a release promise.
+**Status:** M01–M07, M09–M16 completed; M08 and M17–M24 remain open. The Mobile specialization section of `TASKS.md` owns the M01–M24 checkboxes; this document supplies their dependencies, acceptance scenarios and safety limits. Complete and verify each checkbox against its own scenario. This is not a release promise.
 
 **M08 implementation state:** Approved `xcode_preflight` phases are in source, but M08 stays open. A hosted macOS CI attempt at a disposable Xcode simulator build failed; real Xcode execution was removed from CI at the user's request. The user explicitly authorized this release with M08 unchecked. Future acceptance requires a manual run on an authorized Mac with separate approvals; local Linux has no Xcode and fake-executable regressions do not prove a real build. M09–M12 passed real focused SwiftPM, Gradle, Flutter and RN/Expo checks respectively.
 

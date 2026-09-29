@@ -921,6 +921,22 @@ other.include(":not-a-gradle-module")
     assert (Pave.Workspace_xcode.destinations
       "Available destinations:\n  { platform:iOS Simulator, id:12345678-1234-1234-1234-123456789abc, name:Phone }\nIneligible destinations:\n  { platform:iOS Simulator, id:aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa, error:runtime }\n" =
       ["12345678-1234-1234-1234-123456789abc"]);
+    create "ios/Source.swift" "let value = unknown\n";
+    let diagnostic_output =
+      "Source.swift:1:13: error: cannot find 'unknown'\n" ^
+      "../../outside.swift:1:2: error: external\n" ^
+      "/tmp/elsewhere.swift:1:2: error: external\n" ^
+      "Source.swift:0:2: error: invalid row\n" ^
+      "Source.swift:1:13: error: cannot find 'unknown'\n" in
+    let locations = Pave.Workspace_swift_diagnostics.locations ~root
+      ~cwd:(Filename.concat root "ios") diagnostic_output in
+    assert (locations = ["ios/Source.swift:1:13: cannot find 'unknown'"]);
+    Unix.symlink (Filename.concat root "ios/Source.swift")
+      (Filename.concat root "ios/Linked.swift");
+    files := Filename.concat root "ios/Linked.swift" :: !files;
+    assert (Pave.Workspace_swift_diagnostics.locations ~root
+      ~cwd:(Filename.concat root "ios")
+      "Linked.swift:1:1: error: linked\nSource.swift:1:1: error: \027[31mred\027[0m\n" = []);
     let xcode_args action more = `Assoc
       (["action", `String action;
         "subroot", `String "ios/App.xcodeproj"] @ more) in
@@ -956,7 +972,7 @@ other.include(":not-a-gradle-module")
 case " $* " in
   *" -list -json "*) printf '%s\n' '{"project":{"schemes":["AppShared"]}}' ;;
   *" -showdestinations "*) printf '%s\n' 'Available destinations for the \"AppShared\" scheme:' '  { platform:iOS Simulator, id:12345678-1234-1234-1234-123456789abc, OS:17.0, name:iPhone }' 'Ineligible destinations for the \"AppShared\" scheme:' '  { platform:iOS Simulator, id:aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa, error:missing runtime }' ;;
-  *" build "*) printf '%s\n' 'fixture build failed'; exit 7 ;;
+  *" build "*) printf '%s\n' 'Source.swift:1:13: error: cannot find unknown' 'fixture build failed'; exit 7 ;;
   *) printf '%s\n' 'unexpected xcodebuild invocation'; exit 8 ;;
 esac
 |};
@@ -978,6 +994,8 @@ esac
         "destination was not discovered");
       let build = xcode ~approved:true "build" (scheme @ destination) in
       assert (contains build "Xcode build: exit 7" &&
+        contains build "scheme AppShared" &&
+        contains build "Checked Swift errors:\nios/Source.swift:1:13" &&
         contains build "fixture build failed");
       create "ios/App.xcodeproj/project.pbxproj" "// changed Xcode manifest\n";
       assert (contains (xcode ~approved:true "build" (scheme @ destination))
@@ -987,8 +1005,10 @@ esac
     directory "focus";
     directory "focus/node";
     create "focus/node/package.json"
-      {|{"dependencies":{"react-native":"1"},"scripts":{"test":"node -e 'process.stdout.write(\"mobile-script-ok\\n\")'","lint":"node -e 'process.exit(4)'"}}|};
+      {|{"dependencies":{"react-native":"1"},"scripts":{"test":"node -e 'process.stdout.write(\"mobile-script-ok\\n\")'","lint":"node -e 'console.log(\"at render (src/App.tsx:2:5)\"); console.log(\"at module (node_modules/pkg/index.js:1:1)\"); process.exit(4)'"}}|};
     create "focus/node/package-lock.json" "{}";
+    directory "focus/node/src";
+    create "focus/node/src/App.tsx" "export const App = () => null\n";
     let mobile stack action subroot extra approved =
       Pave.Tools.execute ~root ~context:tool_context ~approved
         ~name:"mobile_check" ~args:(`Assoc
@@ -1010,10 +1030,31 @@ esac
     let node_result = mobile "node" "test" "focus/node" [] true in
     assert (contains node_result "exit 0" &&
       contains node_result "mobile-script-ok");
-    assert (contains (mobile "node" "lint" "focus/node" [] true) "exit 4");
+    let failed_node = mobile "node" "lint" "focus/node" [] true in
+    assert (contains failed_node "Mobile node lint: exit 4" &&
+      contains failed_node "Checked JS/TS errors:\nfocus/node/src/App.tsx:2:5" &&
+      not (contains failed_node "Checked JS/TS errors:\nnode_modules"));
+    directory "focus/flutter";
+    directory "focus/flutter/lib";
+    create "focus/flutter/pubspec.yaml"
+      "name: fixture\ndependencies:\n  flutter:\n    sdk: flutter\n";
+    create "focus/flutter/lib/main.dart" "void main() { missing(); }\n";
+    let dart_output =
+      "error • Undefined name • lib/main.dart:1:15 • undefined_identifier\n" ^
+      "ERROR|COMPILE_TIME_ERROR|UNDEFINED|../outside.dart|1|1|1|outside\n" ^
+      "lib/main.dart:1:15: \027[31mcolored\027[0m\n" in
+    assert (Pave.Workspace_flutter_diagnostics.locations ~root
+      ~cwd:(Filename.concat root "focus/flutter") ~subroot:"focus/flutter"
+      dart_output =
+      ["focus/flutter/lib/main.dart:1:15: Undefined name"]);
+    assert (Pave.Workspace_flutter_diagnostics.locations ~root
+      ~cwd:(Filename.concat root "focus/flutter") ~subroot:"focus/flutter"
+      "#0 lib/main.dart 1:15 widget failure\n" =
+      ["focus/flutter/lib/main.dart:1:15"]);
     directory "focus/swift";
     create "focus/swift/Package.swift"
       "// swift-tools-version: 6.0\nimport PackageDescription\nlet package = Package(name: \"Fixture\", targets: [.testTarget(name: \"FixtureTests\")])\n";
+    create "focus/swift/Source.swift" "let value = missing\n";
     directory "focus/bin";
     create "focus/bin/swift" {|#!/bin/sh
 case " $* " in
@@ -1023,11 +1064,21 @@ case " $* " in
 esac
 |};
     Unix.chmod (Filename.concat root "focus/bin/swift") 0o700;
+    create "focus/bin/flutter" {|#!/bin/sh
+printf '%s\n' 'error • Undefined name • lib/main.dart:1:15 • undefined_identifier' 'ERROR|COMPILE_TIME_ERROR|UNDEFINED|../outside.dart|1|1|1|outside'
+exit 8
+|};
+    Unix.chmod (Filename.concat root "focus/bin/flutter") 0o700;
     let path_before = Sys.getenv_opt "PATH" in
     Fun.protect ~finally:(fun () ->
       Unix.putenv "PATH" (Option.value path_before ~default:"")) (fun () ->
       Unix.putenv "PATH" (Filename.concat root "focus/bin" ^ ":" ^
         Option.value path_before ~default:"/usr/bin:/bin");
+      let failed_flutter = mobile "flutter" "analyze" "focus/flutter" [] true in
+      assert (contains failed_flutter "Mobile flutter analyze: exit 8" &&
+        contains failed_flutter
+          "Checked Dart errors:\nfocus/flutter/lib/main.dart:1:15" &&
+        not (contains failed_flutter "Checked Dart errors:\n../outside.dart"));
       let target = ["target", `String "FixtureTests.TestCase/testWorks()"] in
       assert (contains (mobile "swiftpm" "run" "focus/swift" target true)
         "approve focused task discovery");
@@ -1038,6 +1089,14 @@ esac
         "not in the approved discovery");
       assert (contains (mobile "swiftpm" "run" "focus/swift" target true)
         "selected-test-ok");
+      create "focus/bin/swift" {|#!/bin/sh
+printf '%s\n' 'Source.swift:1:13: error: cannot find missing' '../../outside.swift:1:2: error: external'
+exit 7
+|};
+      let failed = mobile "swiftpm" "run" "focus/swift" target true in
+      assert (contains failed "Mobile swiftpm run: exit 7" &&
+        contains failed "Checked Swift errors:\nfocus/swift/Source.swift:1:13" &&
+        not (contains failed "Checked Swift errors:\n../../outside.swift"));
       create "focus/bin/swift" {|#!/bin/sh
 printf '%s\n' 'Test Suite Selected tests passed. Executed 0 tests, with 0 failures.'
 |};
@@ -1050,10 +1109,15 @@ printf '%s\n' 'Test Suite Selected tests passed. Executed 0 tests, with 0 failur
       directory "focus/gradle";
       create "focus/gradle/settings.gradle.kts"
         "rootProject.name = \"Fixture\"\ninclude(\":app\")\n";
+      directory "focus/gradle/app";
+      directory "focus/gradle/app/src";
+      create "focus/gradle/app/src/Main.kt" "fun main() = missing()\n";
+      directory "focus/gradle/other";
+      create "focus/gradle/other/Other.kt" "other\n";
       create "focus/bin/gradle" {|#!/bin/sh
 case " $* " in
   *" tasks --all "*) printf '%s\n' "Tasks runnable from root project 'Fixture'" '------------------------------------------------------------' 'Build tasks' '-----------' 'app:assembleDebug - selected variant' '' 'BUILD SUCCESSFUL in 1s' ;;
-  *" :app:assembleDebug "*) printf '%s\n' 'selected variant failed'; exit 7 ;;
+  *" :app:assembleDebug "*) printf '%s\n' 'e: app/src/Main.kt: (1, 14): Unresolved reference' 'other/Other.kt:1:2: error: unrelated' 'selected variant failed'; exit 7 ;;
   *) exit 9 ;;
 esac
 |};
@@ -1063,9 +1127,13 @@ esac
       assert (contains (mobile "gradle" "run" "focus/gradle"
         ["target", `String ":app:assembleRelease"] true)
         "not in the approved discovery");
-      assert (contains (mobile "gradle" "run" "focus/gradle"
-        ["target", `String ":app:assembleDebug"] true)
-        "Mobile gradle run: exit 7"));
+      let failed_gradle = mobile "gradle" "run" "focus/gradle"
+        ["target", `String ":app:assembleDebug"] true in
+      assert (contains failed_gradle "Mobile gradle run: exit 7" &&
+        contains failed_gradle "selected task :app:assembleDebug" &&
+        contains failed_gradle
+          "Checked Kotlin/Java errors:\nfocus/gradle/app/src/Main.kt:1:14" &&
+        not (contains failed_gradle "Checked Kotlin/Java errors:\nfocus/gradle/other")));
     directory "many";
     for index = 0 to 100 do
       let project = Printf.sprintf "many/Project%03d.xcodeproj" index in

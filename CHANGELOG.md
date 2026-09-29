@@ -1,6 +1,8 @@
 # Changelog
 
 ## 2026-09-29
+- feat(mobile): highlighted checked workspace Swift error locations from failed approved Xcode and SwiftPM commands while retaining the selected scheme, actual exit, bounded raw output and incomplete-log warnings.
+- feat(mobile): mapped failed approved Gradle, Flutter and RN/Expo output to checked module/package source locations without promoting external, dependency or control-bearing frames; retained command exit, task provenance and raw output.
 - feat(distribution): added installer-owned `pave uninstall` while preserving user data, and displayed a clearer version-and-path summary after successful updates.
 - feat(tui): redrew the idle terminal logo from the SVG's stepped tile, pixel P, shadow and cursor.
 - fix(provider): accepted complete OpenAI Responses output when an item-done event was absent while retaining delta validation, and required Anthropic's terminal message-stop event before a streamed reply could succeed.

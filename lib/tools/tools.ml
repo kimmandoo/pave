@@ -1517,8 +1517,13 @@ let xcode_preflight ~approved ?cancel ?on_progress ?context root args =
       else "Xcode destination discovery: " ^ outcome ^
         (if result.truncated then " (output truncated)" else "") ^
         "\n" ^ result.output)
-    else "Xcode " ^ action ^ ": " ^ outcome ^
-      (if result.truncated then " (output truncated)" else "") ^
+    else
+      let locations = if result.termination = Workspace_process.Exited 0 then []
+        else Workspace_swift_diagnostics.locations ~root ~cwd result.output in
+      "Xcode " ^ action ^ ": " ^ outcome ^ " (scheme " ^ scheme ^ ")" ^
+      (if result.truncated then " (output truncated; incomplete result)" else "") ^
+      (if locations = [] then "" else
+         "\nChecked Swift errors:\n" ^ String.concat "\n" locations) ^
       "\n" ^ result.output)
 
 let mobile_command ~root args =
@@ -1610,7 +1615,27 @@ let mobile_check ~approved ?cancel ?on_progress ?context root args =
           " (zero matching tests executed; not a pass)"
         else if result.truncated then " (output truncated; incomplete result)"
         else "" in
+      let locations =
+        if result.termination = Workspace_process.Exited 0 then []
+        else if stack = "swiftpm" && action = "run" then
+          Workspace_swift_diagnostics.locations ~within_cwd:true
+            ~root ~cwd result.output
+        else if stack = "gradle" && action = "run" then
+          Workspace_android_diagnostics.locations ~root ~cwd ~subroot
+            ~task:(required_string "target" args) result.output
+        else if stack = "flutter" then
+          Workspace_flutter_diagnostics.locations ~root ~cwd ~subroot result.output
+        else if stack = "node" then
+          Workspace_node_diagnostics.locations ~root ~cwd ~subroot result.output
+        else [] in
       "Mobile " ^ stack ^ " " ^ action ^ ": " ^ outcome ^ note ^
+      (if stack = "gradle" && action = "run" then
+         " (selected task " ^ required_string "target" args ^ ")" else "") ^
+      (if locations = [] then "" else
+         "\nChecked " ^ (if stack = "flutter" then "Dart"
+           else if stack = "node" then "JS/TS"
+           else if stack = "gradle" then "Kotlin/Java" else "Swift") ^
+         " errors:\n" ^ String.concat "\n" locations) ^
       "\n" ^ result.output)
 
 let string_list name args =

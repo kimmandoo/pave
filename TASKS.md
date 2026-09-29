@@ -30,10 +30,10 @@ Only unchecked, independently verifiable work belongs here. The completed implem
 
 ### C — Source-linked diagnostics
 
-- [ ] **M13 — Swift diagnostics.** Map failing Xcode/SwiftPM output to checked source with scheme, line and exit provenance. **Depends:** M08 or M09. **Accept:** external/malformed paths remain untrusted text.
-- [ ] **M14 — Android diagnostics.** Map failing Kotlin/Gradle output to the actual selected module and task. **Depends:** M10. **Accept:** an unrelated stack frame cannot change the root or turn an incomplete log into success.
-- [ ] **M15 — Flutter diagnostics.** Link Dart analyzer/widget-test failures to verified package paths. **Depends:** M11. **Accept:** truncated output remains incomplete, not a successful check.
-- [ ] **M16 — RN/Metro diagnostics.** Link script failures to checked JS/TS files while excluding dependency frames/ANSI escapes. **Depends:** M12. **Accept:** a real failing script retains its exit and does not offer `node_modules` as editable source.
+- [x] **M13 — Swift diagnostics.** Map failing Xcode/SwiftPM output to checked source with scheme, line and exit provenance. **Depends:** M08 or M09. **Accept:** external/malformed paths remain untrusted text.
+- [x] **M14 — Android diagnostics.** Map Gradle task failure and Kotlin/Java source locations to the selected module/variant, without reporting the tail of a partial log as a passing build. **Depends:** M10. **Accept:** a failing multi-module fixture names the real task and file; a stack trace mentioning a different module cannot switch the selected root.
+- [x] **M15 — Flutter diagnostics.** Map analyzer/test failures to bounded Dart file locations and retain the actual Flutter command exit. **Depends:** M11. **Accept:** a widget-test failure points to its own package file; truncated output is labeled incomplete rather than summarized as a successful test.
+- [x] **M16 — RN/Metro diagnostics.** Map JS/TS test or Metro failures to verified project-relative files without treating a dependency stack frame or ANSI escape sequence as an editable source path. **Depends:** M12. **Accept:** a failing declared script identifies the project file and exact exit; `node_modules` and an external path remain untrusted context.
 
 ### D — Devices and mobile-specific change safety
 
