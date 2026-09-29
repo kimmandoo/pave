@@ -1,6 +1,6 @@
 # Contributing to Pave
 
-Pave targets iOS, Android, Flutter, and React Native repositories. The port is in progress; check `TASKS.md` and `docs/DESIGN_RULES.md` before proposing a capability as complete.
+Pave targets iOS, Android, Flutter, and React Native repositories. Check `task.md` and `docs/DESIGN_RULES.md` before proposing a capability as complete.
 
 ## Find the right module
 
@@ -21,7 +21,7 @@ Pave targets iOS, Android, Flutter, and React Native repositories. The port is i
 
 In-session `/login` reuses `bin/cli_auth.ml` and temporarily releases the full-screen terminal in `bin/ui/tui.ml`; never print an authorization URL or device code into the alternate-screen renderer or put tokens in a journal. GitHub device grants belong in `lib/auth/github_copilot_oauth.ml`; pin their inference endpoint and supported model IDs before reading the credential. `/model` parsing and provider-route lookup live in `lib/ui/interaction.ml`, with selector boundaries in `test/ui/test_interaction.ml`. Switching a provider/model rebuilds the agent from the current journal (or retained in-memory messages) and must not forward Codex or Gemini opaque state across models or protocols. An uncredentialed user must be able to enter the UI to sign in before the first model request.
 
-`bin/dune` generates the embedded installer module directly from the checked-in `install.sh`; edit the script once, then verify both the one-command installer and an installed binary's `pave update`. Keep the ownership marker, custom-directory behavior, checksum/archive validation and executable-last replacement aligned. Never invoke a remotely downloaded update script or self-update an opam-managed executable. `TASKS.md` contains the source-indexed parity inventory; unchecked entries are not implemented.
+`bin/dune` generates the embedded installer module directly from the checked-in `install.sh`; edit the script once, then verify both the one-command installer and an installed binary's `pave update`. Keep the ownership marker, custom-directory behavior, checksum/archive validation and executable-last replacement aligned. Never invoke a remotely downloaded update script or self-update an opam-managed executable. `task.md` contains only remaining work, ordered by priority and dependency; each card states its evidence, scope, acceptance and external gates.
 
 The release workflow supplies `PAVE_RELEASE_VERSION` from its validated tag when compiling the bundled updater; ordinary source builds embed `source`. Check `pave update --check` against a bounded fake release response and, after publication, the actual GitHub latest release before documenting the updater as available.
 

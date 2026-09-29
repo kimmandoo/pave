@@ -1,6 +1,7 @@
 # Changelog
 
 ## 2026-09-30
+- docs(project): replaced the completed-task backlog with ordered, source-evidenced small cards in `task.md`, retained external acceptance gates, and corrected implemented-capability and credential-alias documentation.
 - fix(tui): condensed successful `read_file` calls into one named path-and-line row while retaining independent expansion, replayed history and visible failures.
 - fix(io): allowed tail reads to skip oversized earlier lines while still rejecting oversized selected lines and preserving scan and binary limits.
 - fix(provider): accepted fragmented Devin HTTP status output and reported safe curl/Connect failure causes instead of a bare transport error without replaying ambiguous completions.

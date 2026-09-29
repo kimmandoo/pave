@@ -44,7 +44,7 @@ Each entry must follow this structure:
 - Maintain `docs/WORK_CHECKPOINT.md` as the repository handoff record for work
   that may continue in a later query session.
 - At the start of a resumed session, read `docs/WORK_CHECKPOINT.md`, this file,
-  `TASKS.md`, and the active implementation-plan section before changing code.
+  `task.md`, and the active implementation-plan section before changing code.
 - Confirm `git status --short --branch` and the latest commit. Continue the
   exact active task and recorded plan step; never infer that a task is complete
   from a commit title or jump to the next task because the working tree is
@@ -61,7 +61,7 @@ Each entry must follow this structure:
 - Maintain `docs/WORK_CHECKPOINT.md` as the repository handoff record for work
   that may continue in a later query session.
 - At the start of a resumed session, read `docs/WORK_CHECKPOINT.md`, this file,
-  `TASKS.md`, and the active implementation-plan section before changing code.
+  `task.md`, and the active implementation-plan section before changing code.
 - Confirm `git status --short --branch` and the latest commit. Continue the
   exact active task and recorded plan step; never infer that a task is complete
   from a commit title or jump to the next task because the working tree is

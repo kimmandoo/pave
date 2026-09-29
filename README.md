@@ -14,7 +14,7 @@
 <p align="center"><a href="#install">Install</a> · <a href="#use">Use</a> · <a href="#providers">Providers</a> · <a href="#features">Features</a> · <a href="#contribute">Contribute</a></p>
 
 > [!NOTE]
-> Pave is under active development. Linux and macOS Intel builds expose 71 built-in provider IDs; macOS arm64 builds expose 72 when the Apple Foundation Models helper is present. These cover 70/83 and 71/83 source identities respectively; separate Kimi Code regional routes account for the extra Pave ID, and 13 or 12 source identities remain unmatched. Seven wire payload formats, account sign-in paths, branching session journal and cancellable terminal have fixture coverage—not blanket live vendor entitlement. LSP/DAP, subagents, plugins and a complete model catalog remain open. See [the feature plan](TASKS.md).
+> Pave is under active development. Linux and macOS Intel builds expose 71 built-in provider IDs; macOS arm64 builds expose 72 when the Apple Foundation Models helper is present. These cover 70/83 and 71/83 source identities respectively; separate Kimi Code regional routes account for the extra Pave ID, and 13 or 12 source identities remain unmatched. Seven wire payload formats, account sign-in paths, branching session journal and cancellable terminal have fixture coverage—not blanket live vendor entitlement. LSP/DAP, bounded read-only child jobs and local plugins are implemented; their remaining extensions and account-specific catalog gaps are tracked in the [ordered backlog](task.md).
 
 ## Install
 
@@ -499,7 +499,7 @@ Failed approved SwiftPM, Xcode, Gradle, Flutter and RN/Expo checks retain their 
 
 ## Contribute
 
-New contributors are welcome—bug reports, TUI polish, provider work and mobile-workspace testing are useful. Start with [open issues](https://github.com/kimmandoo/pave/issues), [the feature plan](TASKS.md) and [design rules](docs/DESIGN_RULES.md).
+New contributors are welcome—bug reports, TUI polish, provider work and mobile-workspace testing are useful. Start with [open issues](https://github.com/kimmandoo/pave/issues), [the ordered backlog](task.md) and [design rules](docs/DESIGN_RULES.md).
 
 1. Fork the repository, create a focused branch from `main`, and use the source-install instructions above.
 2. Add a behavior-focused regression for a bug. Run `opam exec -- dune runtest --force` and `opam exec -- dune build @install`; check TUI changes in a real terminal or PTY.
