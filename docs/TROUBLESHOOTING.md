@@ -1,5 +1,12 @@
 # Troubleshooting
 
+### [2026-09-29] Windows Flutter launcher could not run under WSL
+
+- **Context / Symptom:** `flutter --version` on the Linux workstation called `/mnt/c/src/flutter/bin/internal/shared.sh` and failed with `$'\\r': command not found` (exit 127). `swift`, `gradle` and `xcodebuild` were also absent from PATH.
+- **Root Cause:** PATH pointed to a Windows checkout of the Flutter SDK whose shell scripts have CRLF line endings; it is not a usable Linux Flutter toolchain. The other platform binaries were not installed locally.
+- **Solution:** Kept platform execution cards open and configured disposable real-toolchain acceptance on hosted macOS/Linux CI. Local npm execution established only the RN/Expo card; no fake Flutter/Swift/Gradle/Xcode success was reported.
+- **Prevention / Reference:** Provision a Linux Flutter SDK on Linux or use the hosted Flutter setup action. Run `flutter --version` on the target OS before claiming a Flutter check.
+
 ### [2026-09-29] Dune build reported `Unbound module "Pave"` on an unmodified tree
 
 - **Context / Symptom:** After an extra-warnings build into a separate `--build-dir` with `DUNE_CACHE=disabled`, `dune build @install` in the repo failed on every `pave__*` module with `File "command line", line 1: Error: Unbound module "Pave"`; `_build/default/lib/.pave.objs/byte/pave.cmi` was missing while `pave.ml-gen` existed. A stashed (clean) tree failed the same way.

@@ -26,7 +26,7 @@ Only unchecked, independently verifiable work belongs here. The completed implem
 - [ ] **M09 — SwiftPM tests.** Approve one supported package target/filter test. **Depends:** M03, M07. **Accept:** an available package actually runs its selected test; missing filter/tool or cancel never counts as pass.
 - [ ] **M10 — Gradle tasks.** Approve task discovery separately from one selected module/variant build/test. **Depends:** M04, M07. **Accept:** a real disposable project preserves the exit; a nonexistent variant is not replaced with `assembleDebug`.
 - [ ] **M11 — Flutter checks.** Approve project-scoped analysis or targeted test without implicit `pub get`. **Depends:** M05, M07. **Accept:** a real available SDK runs a focused check; Dart-only/absent SDK cannot produce a Flutter pass.
-- [ ] **M12 — RN/Expo scripts.** Approve an existing declared test/lint script for the chosen package manager, never an implicit install. **Depends:** M06, M07. **Accept:** a disposable project reports its script exit; ambiguous lockfiles or undeclared scripts do not execute.
+- [x] **M12 — RN/Expo scripts.** Approve an existing declared test/lint script for the chosen package manager, never an implicit install. **Depends:** M06, M07. **Accept:** a disposable project reports its script exit; ambiguous lockfiles or undeclared scripts do not execute.
 
 ### C — Source-linked diagnostics
 

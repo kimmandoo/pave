@@ -11,6 +11,31 @@
  (libraries pave unix yojson))
 
 (test
+ (name test_workspace_swiftpm_focus)
+ (modules test_workspace_swiftpm_focus)
+ (libraries pave unix yojson))
+
+(test
+ (name test_workspace_gradle_focus)
+ (modules test_workspace_gradle_focus)
+ (libraries pave unix yojson))
+
+(test
+ (name test_workspace_flutter_focus)
+ (modules test_workspace_flutter_focus)
+ (libraries pave unix yojson))
+
+(test
+ (name test_workspace_node_scripts)
+ (modules test_workspace_node_scripts)
+ (libraries pave unix yojson))
+
+(test
+ (name test_mobile_real)
+ (modules test_mobile_real)
+ (libraries pave unix yojson))
+
+(test
  (name test_agent)
  (modules test_agent)
  (libraries pave unix yojson))

@@ -9,6 +9,14 @@ let max_regex_line = 4096
 
 exception Tool_error of string
 
+type mobile_discovery = {
+  stack : string;
+  root : string;
+  subroot : string;
+  manifest_hash : string;
+  choices : string list;
+}
+
 type session_context = {
   owner : string;
   process_manager : Workspace_process.manager;
@@ -23,6 +31,8 @@ type session_context = {
   ssh_sessions : (string, Workspace_ssh.session) Hashtbl.t;
   xcode_lock : Mutex.t;
   mutable xcode_discovery : Workspace_xcode.discovery option;
+  mobile_lock : Mutex.t;
+  mutable mobile_discovery : mobile_discovery option;
   record_file_change : path:string -> before:string -> after:string -> unit;
   mutable closed : bool;
 }
@@ -82,6 +92,7 @@ let create_session_context ?lsp_manager ~owner ~root ~process_manager ~read_arti
     eval_lock = Mutex.create (); python_kernel = None; javascript_kernel = None;
     ssh_lock = Mutex.create (); ssh_sessions = Hashtbl.create 8;
     xcode_lock = Mutex.create (); xcode_discovery = None;
+    mobile_lock = Mutex.create (); mobile_discovery = None;
     record_file_change; closed = false }
 
 let close_session_context context =
@@ -91,6 +102,9 @@ let close_session_context context =
     Mutex.lock context.xcode_lock;
     context.xcode_discovery <- None;
     Mutex.unlock context.xcode_lock;
+    Mutex.lock context.mobile_lock;
+    context.mobile_discovery <- None;
+    Mutex.unlock context.mobile_lock;
     let ignore_failure action = try action () with _ -> () in
     ignore_failure (fun () -> Workspace_lsp.close_manager context.lsp_manager);
     ignore_failure (fun () -> Workspace_dap.close_manager context.dap_manager);
@@ -1507,6 +1521,91 @@ let xcode_preflight ~approved ?cancel ?on_progress ?context root args =
       (if result.truncated then " (output truncated)" else "") ^
       "\n" ^ result.output)
 
+let mobile_command ~root args =
+  let stack = required_string "stack" args in
+  let action = required_string "action" args in
+  let subroot = required_string "subroot" args in
+  let target = optional_string "target" "" args in
+  let manager = optional_string "manager" "" args in
+  match stack with
+  | "swiftpm" ->
+      Workspace_swiftpm_focus.command ~root ~subroot ~action ~target
+  | "gradle" ->
+      Workspace_gradle_focus.command ~root ~subroot ~action ~task:target
+  | "flutter" ->
+      Workspace_flutter_focus.command ~root ~subroot ~action ~target
+  | "node" ->
+      Workspace_node_scripts.command ~root ~subroot ~action ~manager
+  | _ -> fail "mobile check stack must be swiftpm, gradle, flutter or node"
+
+let mobile_manifest ~root ~stack ~subroot =
+  let relative = match stack with
+    | "swiftpm" -> Filename.concat subroot "Package.swift"
+    | "gradle" ->
+        let settings = Filename.concat subroot "settings.gradle.kts" in
+        let checked = Workspace_path.checked_path root settings in
+        (try if (Unix.lstat checked).Unix.st_kind = Unix.S_REG then settings
+          else fail "Gradle settings must be a regular file"
+         with Unix.Unix_error (Unix.ENOENT, _, _) ->
+           Filename.concat subroot "settings.gradle")
+    | _ -> fail "no discovery manifest for this mobile stack" in
+  let path = Workspace_path.checked_path root relative in
+  Digestif.SHA256.(
+    to_hex (digest_string (Workspace_path.read_bounded path max_write_bytes)))
+
+let mobile_check ~approved ?cancel ?on_progress ?context root args =
+  if not approved then fail "mobile project code requires explicit interactive approval";
+  let context = require_session_context context in
+  let stack = required_string "stack" args
+  and action = required_string "action" args
+  and subroot = required_string "subroot" args in
+  let command, cwd = mobile_command ~root args in
+  let discovery_action = (stack = "swiftpm" && action = "discover") ||
+    (stack = "gradle" && action = "tasks") in
+  let needs_discovery = (stack = "swiftpm" || stack = "gradle") &&
+    action = "run" in
+  let manifest_hash = if discovery_action || needs_discovery then
+      Some (mobile_manifest ~root ~stack ~subroot)
+    else None in
+  Mutex.lock context.mobile_lock;
+  Fun.protect ~finally:(fun () -> Mutex.unlock context.mobile_lock) (fun () ->
+    check_session_context context;
+    if discovery_action then context.mobile_discovery <- None;
+    if needs_discovery then (
+      let state = match context.mobile_discovery with
+        | Some state when state.stack = stack && state.root = root &&
+                          state.subroot = subroot -> state
+        | _ -> fail "approve focused task discovery for this project first" in
+      if Some state.manifest_hash <> manifest_hash then (
+        context.mobile_discovery <- None;
+        fail "mobile project manifest changed since task discovery; discover again");
+      let target = required_string "target" args in
+      if not (List.mem target state.choices) then
+        fail "focused task was not in the approved discovery result");
+    let result = Workspace_process.run_shell ?cancel ?on_progress
+      ~timeout_seconds:(optional_int "timeout_seconds" 120
+        ~minimum:1 ~maximum:300 args)
+      ~output_limit:max_command_bytes ~cwd:(Some cwd) ~command () in
+    let outcome = match result.termination with
+      | Workspace_process.Exited code -> Printf.sprintf "exit %d" code
+      | Workspace_process.Signaled signal -> Printf.sprintf "signal %d" signal
+      | Workspace_process.Timed_out -> "timed out"
+      | Workspace_process.Cancelled -> raise Cancelled in
+    let successful = result.termination = Workspace_process.Exited 0 &&
+      not result.truncated in
+    if discovery_action && successful then (
+      let choices = if stack = "swiftpm" then
+          Workspace_swiftpm_focus.tests result.output
+        else Workspace_gradle_focus.tasks result.output in
+      context.mobile_discovery <- Some {
+        stack; root; subroot; manifest_hash = Option.get manifest_hash;
+        choices };
+      "Mobile " ^ stack ^ " discovery: " ^ outcome ^ "\nTasks:\n" ^
+        String.concat "\n" choices)
+    else "Mobile " ^ stack ^ " " ^ action ^ ": " ^ outcome ^
+      (if result.truncated then " (output truncated; no task saved)" else "") ^
+      "\n" ^ result.output)
+
 let string_list name args =
   match field name args with
   | `List values ->
@@ -2322,12 +2421,14 @@ let repository_security_scan ?cancel root args =
   | _ -> fail "format must be summary or sarif"
 
 let is_shell_tool = function
-  | "run_command" | "start_process" | "start_shell" | "xcode_preflight" -> true
+  | "run_command" | "start_process" | "start_shell" | "xcode_preflight"
+  | "mobile_check" -> true
   | _ -> false
 
 let requires_explicit_approval ~name ~args =
   match name with
   | "run_command" | "start_process" | "start_shell" | "xcode_preflight"
+  | "mobile_check"
   | "process_stdin" | "process_close_stdin" | "process_kill"
   | "worktree_create" | "worktree_commit" | "worktree_remove"
   | "web_search" | "web_fetch" | "image_ocr"
@@ -2352,6 +2453,7 @@ let requires_explicit_approval ~name ~args =
 let non_reversible_tool ~name ~args =
   match name with
   | "run_command" | "start_process" | "start_shell" | "xcode_preflight"
+  | "mobile_check"
   | "process_stdin" | "process_close_stdin" | "process_kill"
   | "worktree_create" | "worktree_commit" | "worktree_remove"
   | "lsp_start" | "dap_start" | "ssh_open" | "ssh_read"
@@ -2461,6 +2563,14 @@ let definitions = [
      "destination", string_field "Exact available iOS Simulator ID returned for this scheme";
      "timeout_seconds", integer_field "Per-command deadline (default 120 seconds)" 1 300]
     ["action"; "subroot"];
+  schema "mobile_check" "Run one explicitly approved focused SwiftPM test, offline system-Gradle task, Flutter analysis/test, or local React Native/Expo script. Discovery and selected execution require separate approvals; project code runs as your user. No dependency installation or implicit SDK setup."
+    ["stack", enum_string_field "Selected mobile stack" ["swiftpm"; "gradle"; "flutter"; "node"];
+     "action", enum_string_field "SwiftPM discover/run, Gradle tasks/run, Flutter analyze/test, or Node test/lint" ["discover"; "tasks"; "run"; "analyze"; "test"; "lint"];
+     "subroot", string_field "Exact workspace-relative package/settings/project root";
+     "target", string_field "Exact discovered Swift test or Gradle task; for Flutter test, exact workspace-relative .dart test file";
+     "manager", enum_string_field "Node script runner when multiple lockfiles exist" ["npm"; "pnpm"; "yarn"];
+     "timeout_seconds", integer_field "Per-command deadline (default 120 seconds)" 1 300]
+    ["stack"; "action"; "subroot"];
   schema "read_file" "Read bounded workspace files, directories, documents, archives, notebooks, SQLite, owned artifacts, managed worktrees, or public HTTPS URLs. HTTPS fetches send no credentials and require approval."
     ["path", string_field "Workspace-relative path or supported local://, artifact://, worktree://, or HTTPS source";
      "offset", integer_field "Byte offset for ordinary local text files (default 0; exclusive with line)" 0 max_int;
@@ -2895,6 +3005,12 @@ let approval_request ?cancel ?context ~root ~name ~args (decision : Approval.dec
         ["Working directory: parent of " ^ quoted "subroot" "(missing)" args;
          "Exact command: " ^ command;
          "Build/test may write derived data; simulator tests may launch a simulator. No signing or physical-device destination is selected."]
+    | "mobile_check" ->
+        let command, cwd = mobile_command ~root:base_root args in
+        "Executes selected mobile project code as your user; discovery and execution each need approval. Commands do not install dependencies, provision SDKs, or sandbox project code.",
+        ["Working directory: " ^ Printf.sprintf "%S" cwd;
+         "Exact command: " ^ command;
+         "The selected toolchain may write local build artifacts or invoke project-defined code."]
     | "run_command" ->
         "Runs /bin/sh as your user from the workspace root. It is not sandboxed and may access or modify files outside the workspace or use the network.",
         ["Working directory: " ^ Printf.sprintf "%S" base_root;
@@ -3159,7 +3275,7 @@ let session_tool_names = [
   "worktree_history"; "worktree_create"; "worktree_commit"; "worktree_remove";
   "lsp_start"; "lsp"; "workspace_eval";
   "ssh_open"; "ssh_close"; "ssh_read"; "ssh_write"; "ssh_command";
-  "dap_start"; "dap"; "xcode_preflight"
+  "dap_start"; "dap"; "xcode_preflight"; "mobile_check"
 ]
 
 let path_tool_names = [
@@ -3176,7 +3292,9 @@ let error_message = function
   | Workspace_lsp.Error message | Workspace_dap.Error message
   | Workspace_dap.Not_approved message | Workspace_eval.Error message
   | Workspace_ssh.Error message | Native_tokenizer.Error message
-  | Workspace_xcode.Error message ->
+  | Workspace_xcode.Error message | Workspace_swiftpm_focus.Error message
+  | Workspace_gradle_focus.Error message | Workspace_flutter_focus.Error message
+  | Workspace_node_scripts.Error message ->
       "Error: " ^ message
   | Workspace_dap.Cancelled -> "Error: DAP operation cancelled"
   | Unix.Unix_error (code, operation, path) ->
@@ -3231,6 +3349,8 @@ let prepare ?cancel ?context ~root ~name ~args () =
           | "run_command" -> run_command ?cancel ?on_progress root args
           | "xcode_preflight" ->
               xcode_preflight ~approved ?cancel ?on_progress ?context root args
+          | "mobile_check" ->
+              mobile_check ~approved ?cancel ?on_progress ?context root args
           | "start_process" -> start_process ~approved ?cancel ?context root args
           | "start_shell" -> start_shell ~approved ?cancel ?context root args
           | "process_list" -> process_list ?context root args

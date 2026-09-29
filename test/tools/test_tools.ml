@@ -983,6 +983,64 @@ esac
         "manifest changed since discovery");
       assert (contains (xcode ~approved:true "destinations" scheme)
         "approve scheme discovery"));
+    directory "focus";
+    directory "focus/node";
+    create "focus/node/package.json"
+      {|{"dependencies":{"react-native":"1"},"scripts":{"test":"node -e 'process.stdout.write(\"mobile-script-ok\\n\")'","lint":"node -e 'process.exit(4)'"}}|};
+    create "focus/node/package-lock.json" "{}";
+    let mobile stack action subroot extra approved =
+      Pave.Tools.execute ~root ~context:tool_context ~approved
+        ~name:"mobile_check" ~args:(`Assoc
+          (["stack", `String stack; "action", `String action;
+            "subroot", `String subroot] @ extra)) () in
+    assert (Pave.Tools.is_shell_tool "mobile_check");
+    assert (Pave.Tools.requires_explicit_approval ~name:"mobile_check"
+      ~args:(`Assoc ["stack", `String "node"; "action", `String "test";
+        "subroot", `String "focus/node"]));
+    assert (contains (mobile "node" "test" "focus/node" [] false)
+      "explicit interactive approval");
+    let node_preview = Pave.Tools.approval_request ~root
+      ~name:"mobile_check"
+      ~args:(`Assoc ["stack", `String "node"; "action", `String "test";
+        "subroot", `String "focus/node"])
+      (Pave.Tools.approval_decision ~command_patterns:[]
+        ~name:"mobile_check" ~args:(`Assoc [])) in
+    assert (contains (String.concat "\n" node_preview.details) "npm run test");
+    let node_result = mobile "node" "test" "focus/node" [] true in
+    assert (contains node_result "exit 0" &&
+      contains node_result "mobile-script-ok");
+    assert (contains (mobile "node" "lint" "focus/node" [] true) "exit 4");
+    directory "focus/swift";
+    create "focus/swift/Package.swift"
+      "// swift-tools-version: 6.0\nimport PackageDescription\nlet package = Package(name: \"Fixture\", targets: [.testTarget(name: \"FixtureTests\")])\n";
+    directory "focus/bin";
+    create "focus/bin/swift" {|#!/bin/sh
+case " $* " in
+  *" list "*) printf '%s\n' 'FixtureTests.TestCase/testWorks()' ;;
+  *" --filter "*) printf '%s\n' 'selected-test-ok' ;;
+  *) exit 9 ;;
+esac
+|};
+    Unix.chmod (Filename.concat root "focus/bin/swift") 0o700;
+    let path_before = Sys.getenv_opt "PATH" in
+    Fun.protect ~finally:(fun () ->
+      Unix.putenv "PATH" (Option.value path_before ~default:"")) (fun () ->
+      Unix.putenv "PATH" (Filename.concat root "focus/bin" ^ ":" ^
+        Option.value path_before ~default:"/usr/bin:/bin");
+      let target = ["target", `String "FixtureTests.TestCase/testWorks()"] in
+      assert (contains (mobile "swiftpm" "run" "focus/swift" target true)
+        "approve focused task discovery");
+      assert (contains (mobile "swiftpm" "discover" "focus/swift" [] true)
+        "FixtureTests.TestCase/testWorks()");
+      assert (contains (mobile "swiftpm" "run" "focus/swift"
+        ["target", `String "Undiscovered/test()"] true)
+        "not in the approved discovery");
+      assert (contains (mobile "swiftpm" "run" "focus/swift" target true)
+        "selected-test-ok");
+      create "focus/swift/Package.swift"
+        "// swift-tools-version: 6.0\nimport PackageDescription\nlet package = Package(name: \"Changed\", targets: [.testTarget(name: \"FixtureTests\")])\n";
+      assert (contains (mobile "swiftpm" "run" "focus/swift" target true)
+        "manifest changed since task discovery"));
     directory "many";
     for index = 0 to 100 do
       let project = Printf.sprintf "many/Project%03d.xcodeproj" index in

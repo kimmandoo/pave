@@ -1,8 +1,8 @@
 # Mobile development specialization plan
 
-**Status:** M01–M07 completed; M08–M24 remain planned. The Mobile specialization section of `TASKS.md` owns the M01–M24 checkboxes; this document supplies their dependencies, acceptance scenarios and safety limits. Complete and verify one checkbox at a time. This is not a release promise.
+**Status:** M01–M07 and M12 completed; M08–M11 and M13–M24 remain open. The Mobile specialization section of `TASKS.md` owns the M01–M24 checkboxes; this document supplies their dependencies, acceptance scenarios and safety limits. Complete and verify each checkbox against its own scenario. This is not a release promise.
 
-**M08 implementation state:** The approved `xcode_preflight` phases and bounded discovery validation are in source, but M08 remains unchecked until an available real Xcode installation builds or tests a disposable project and reports its actual exit. The current Linux workstation has no `xcodebuild`; fake executable tests establish refusal and state binding, not platform acceptance.
+**M08–M11 implementation state:** Approved `xcode_preflight` and `mobile_check` phases are in source. The Linux workstation has no native Xcode, SwiftPM or Gradle, and its Windows-mounted Flutter launcher cannot execute in Linux. Hosted macOS/Linux real disposable-project acceptance runs are configured in CI; leave each platform card unchecked until the corresponding real run reports its selected command and actual exit. Fake-executable tests establish refusal and state binding, not platform acceptance. M12 passed an actual disposable RN npm test and failing lint script with their real exits.
 
 ## Baseline and boundaries
 
