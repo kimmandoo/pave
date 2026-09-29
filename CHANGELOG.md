@@ -2,7 +2,7 @@
 
 ## 2026-09-29
 - docs(project): removed external-project attribution from current documentation and comments while retaining required provider protocol identifiers and model fixtures.
-- release(distribution): prepared v0.1.66 with verified SwiftPM, Gradle, Flutter and RN/Expo focused checks and simulator-free CI; left M08's real Xcode acceptance open with explicit user approval.
+- release(distribution): published v0.1.66 with four macOS/Linux archives and SHA256SUMS after hosted release checks; verified SwiftPM, Gradle, Flutter and RN/Expo focused checks, kept simulator work out of CI, and left M08 real Xcode acceptance open with explicit user approval.
 - fix(ci): removed automatic Xcode simulator build and xcodegen installation from CI after manual-only acceptance was required; retained fake-Xcode refusal tests and left M08 open.
 - fix(mobile): rejected symlinked selected SwiftPM and RN/Expo project roots, distinguished SwiftPM zero-test exits from passing tests, and normalized disposable project paths for macOS CI; retained exact task and tool exits.
 - feat(mobile): added individually approved, session-bound focused SwiftPM and offline Gradle task discovery/execution, Flutter analysis/targeted tests without `pub get`, and declared React Native/Expo scripts with explicit lockfile-manager selection; preserved real exits. Hosted SwiftPM, Gradle and Flutter disposable checks and a local npm fixture passed.

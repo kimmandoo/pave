@@ -1,5 +1,12 @@
 # Troubleshooting
 
+### [2026-09-29] Release verification host lacked GitHub CLI
+
+- **Context / Symptom:** `gh run list` failed with `error: command not found: gh` after pushing the release tag.
+- **Root Cause:** The local WSL environment did not have the GitHub CLI installed.
+- **Solution:** Queried the public GitHub Actions and Releases REST endpoints with `curl` and `jq`; no local CLI installation was needed.
+- **Prevention / Reference:** For public release verification, use `https://api.github.com/repos/kimmandoo/pave/actions/workflows/release.yml/runs` and `/releases/tags/v0.1.66` when `gh` is unavailable.
+
 ### [2026-09-29] macOS mobile tests compared symlinked temporary paths
 
 - **Context / Symptom:** CI run 36512074826 failed both macOS matrix jobs at `Run tests` while Ubuntu passed; unauthenticated job logs returned HTTP 403. The focused mobile tests had constructed temporary roots under macOS `/var`, then compared those literal paths against workspace helpers returning canonical `/private/var` paths.
