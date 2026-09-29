@@ -22,7 +22,7 @@ Only unchecked, independently verifiable work belongs here. The completed implem
 
 ### B — Focused builds and tests
 
-- [ ] **M08 — Xcode preflight.** Individually approve scheme/destination discovery and then one chosen non-signing build/test. **Depends:** M02, M07. **Accept:** a real disposable project reports the selected command exit; no Xcode/matching destination yields no fake result.
+- [x] **M08 — Xcode preflight.** Individually approve scheme/destination discovery and then one chosen non-signing build/test. **Depends:** M02, M07. **Accept:** a real disposable project reports the selected command exit; no Xcode/matching destination yields no fake result.
 - [x] **M09 — SwiftPM tests.** Approve one supported package target/filter test. **Depends:** M03, M07. **Accept:** an available package actually runs its selected test; missing filter/tool or cancel never counts as pass.
 - [x] **M10 — Gradle tasks.** Approve task discovery separately from one selected module/variant build/test. **Depends:** M04, M07. **Accept:** a real disposable project preserves the exit; a nonexistent variant is not replaced with `assembleDebug`.
 - [x] **M11 — Flutter checks.** Approve project-scoped analysis or targeted test without implicit `pub get`. **Depends:** M05, M07. **Accept:** a real available SDK runs a focused check; Dart-only/absent SDK cannot produce a Flutter pass.
@@ -37,7 +37,7 @@ Only unchecked, independently verifiable work belongs here. The completed implem
 
 ### D — Devices and mobile-specific change safety
 
-- [ ] **M17 — Apple simulator inventory.** Approve an available-runtime/device probe without booting a device. **Depends:** M02, M07. **Accept:** actual compatible choices appear; unavailable tooling stays unavailable.
+- [x] **M17 — Apple simulator inventory.** Approve an available-runtime/device probe without booting a device. **Depends:** M02, M07. **Accept:** actual compatible choices appear; unavailable tooling stays unavailable.
 - [ ] **M18 — Android device inventory.** Approve AVD/ADB probes and distinguish ready, offline and unauthorized devices. **Depends:** M04, M07. **Accept:** offline devices are not offered as runnable; no SDK is installed implicitly.
 - [ ] **M19 — iOS simulator test.** Select a verified simulator and approve the exact test without physical-device deployment/signing. **Depends:** M08, M17. **Accept:** a disposable app's real test exit is reported; cancellation invokes no test.
 - [ ] **M20 — Android emulator test.** Select a ready emulator and approved variant/test; keep boot/install separately approved. **Depends:** M10, M18. **Accept:** real test exit is retained; no offline device receives an install/test.
@@ -134,4 +134,4 @@ Existing release CI covers four macOS/Linux native archives and extracted execut
 - [ ] **PL04 — Long-session resource bounds.** Measure idle CPU, memory retention, subprocess lifetime, queue wakeups and redraws in interactive long-session PTYs; set and enforce a concrete baseline. **Accept:** idle does not spin, cancel cleans owned processes and keyboard/resize remain responsive under bounded transcript/job load.
 - [ ] **PL05 — Final dependency cutover.** After feature contracts settle, narrow modules along measured responsibilities and remove superseded paths with callers, tests, build rules and contributor docs updated together. **Accept:** provider fake-HTTP turns, interactive PTY and packaged CLI still behave identically after the move.
 
-- **Order / gate:** R12 is complete and recorded in the changelog/checkpoint; mobile M08 is the next mobile card after M01–M07. R13–R16 and provider/local work remain independent deliverables. Keep denied/unverifiable work open, record actual blockers in `docs/WORK_CHECKPOINT.md`, and never mark work complete because another platform's fixture or a static source scan passed.
+- **Order / gate:** R12, M08 and M17 are complete and recorded in the changelog/checkpoint; M18 is the next mobile card, while M19 separately requires an authorized simulator test. R13–R16 and provider/local work remain independent deliverables. Keep denied/unverifiable work open, record actual blockers in `docs/WORK_CHECKPOINT.md`, and never mark work complete because another platform's fixture or a static source scan passed.

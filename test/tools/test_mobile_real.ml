@@ -81,16 +81,30 @@ let () =
             let result = mobile "analyze" in
             expect "Flutter analysis" "exit 0" result;
             print_endline "real Flutter analysis: exit 0"
-        | "xcode" ->
+        | "xcode" | "simulators" ->
             mkdir (Filename.concat root "Sources");
             create (Filename.concat root "Sources/App.swift")
               "import UIKit\n@main final class AppDelegate: UIResponder, UIApplicationDelegate { var window: UIWindow?; func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool { true } }\n";
             create (Filename.concat root "project.yml")
-              "name: MobileFixture\noptions:\n  bundleIdPrefix: dev.pave\ntargets:\n  MobileFixture:\n    type: application\n    platform: iOS\n    sources: [Sources]\n    settings:\n      base:\n        CODE_SIGNING_ALLOWED: NO\n        IPHONEOS_DEPLOYMENT_TARGET: '15.0'\nschemes:\n  MobileFixture:\n    build:\n      targets:\n        MobileFixture: all\n";
+              "name: MobileFixture\noptions:\n  bundleIdPrefix: dev.pave\ntargets:\n  MobileFixture:\n    type: application\n    platform: iOS\n    sources: [Sources]\n    settings:\n      base:\n        CODE_SIGNING_ALLOWED: NO\n        GENERATE_INFOPLIST_FILE: YES\n        IPHONEOS_DEPLOYMENT_TARGET: '15.0'\nschemes:\n  MobileFixture:\n    build:\n      targets:\n        MobileFixture: all\n";
             run "xcodegen generate";
-            let xcode action more = call "xcode_preflight"
-              (["subroot", `String "MobileFixture.xcodeproj";
-                "action", `String action; "timeout_seconds", `Int 300] @ more) in
+            let xcode action more =
+              let fields = ["subroot", `String "MobileFixture.xcodeproj";
+                "action", `String action; "timeout_seconds", `Int 300] @ more in
+              let args = `Assoc fields in
+              let preview = Pave.Tools.approval_request ~root
+                ~name:"xcode_preflight" ~args
+                (Pave.Tools.approval_decision ~command_patterns:[]
+                  ~name:"xcode_preflight" ~args) in
+              if not (Unix.isatty (Unix.descr_of_in_channel stdin)) then
+                failwith "manual Xcode acceptance requires an interactive terminal";
+              Printf.printf "Disposable project: %s\n%s\n" root preview.impact;
+              List.iter print_endline preview.details;
+              print_string "Approve this command? [y/N] ";
+              flush stdout;
+              if (try read_line () with End_of_file -> "") <> "y" then
+                failwith "manual Xcode command denied";
+              call "xcode_preflight" fields in
             let schemes = xcode "schemes" [] in
             expect "Xcode schemes" "MobileFixture" schemes;
             let destinations = xcode "destinations"
@@ -109,8 +123,16 @@ let () =
               else failwith ("no simulator destination: " ^ destinations) in
             if id = "none; select another scheme or make a compatible simulator runtime available"
             then failwith ("no available iOS simulator: " ^ destinations);
-            let result = xcode "build"
-              ["scheme", `String "MobileFixture"; "destination", `String id] in
-            expect "Xcode selected non-signing build" "Xcode build: exit 0" result;
-            print_endline "real Xcode simulator build: exit 0"
+            if stack = "simulators" then (
+              let inventory = xcode "simulators"
+                ["scheme", `String "MobileFixture"] in
+              expect "Apple simulator inventory" "Apple simulator inventory: exit 0"
+                inventory;
+              expect "Selected simulator" id inventory;
+              print_endline ("real compatible Apple simulator: " ^ id))
+            else (
+              let result = xcode "build"
+                ["scheme", `String "MobileFixture"; "destination", `String id] in
+              expect "Xcode selected non-signing build" "Xcode build: exit 0" result;
+              print_endline "real Xcode simulator build: exit 0")
         | _ -> failwith ("unknown mobile acceptance stack: " ^ stack))

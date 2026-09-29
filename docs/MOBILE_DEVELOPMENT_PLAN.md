@@ -1,8 +1,10 @@
 # Mobile development specialization plan
 
-**Status:** M01–M07, M09–M16 completed; M08 and M17–M24 remain open. The Mobile specialization section of `TASKS.md` owns the M01–M24 checkboxes; this document supplies their dependencies, acceptance scenarios and safety limits. Complete and verify each checkbox against its own scenario. This is not a release promise.
+**Status:** M01–M17 completed; M18–M24 remain open. The Mobile specialization section of `TASKS.md` owns the M01–M24 checkboxes; this document supplies their dependencies, acceptance scenarios and safety limits. Complete and verify each checkbox against its own scenario. This is not a release promise.
 
-**M08 implementation state:** Approved `xcode_preflight` phases are in source, but M08 stays open. A hosted macOS CI attempt at a disposable Xcode simulator build failed; real Xcode execution was removed from CI at the user's request. The user explicitly authorized this release with M08 unchecked. Future acceptance requires a manual run on an authorized Mac with separate approvals; local Linux has no Xcode and fake-executable regressions do not prove a real build. M09–M12 passed real focused SwiftPM, Gradle, Flutter and RN/Expo checks respectively.
+**M08 acceptance:** An opt-in manual macOS arm64 Xcode 27 run generated a disposable project, called the separately approved `xcode_preflight` scheme, destination and build phases, and reported `Xcode build: exit 0` for a discovered iOS Simulator UUID with signing disabled. Xcode 27 uses `Destinations compatible/incompatible with ...` headings; the parser now supports them alongside the older `Available/Ineligible destinations` headings. A simulator placeholder, physical device and incompatible UUID cannot become a build destination. No simulator was booted or app deployed; CI still runs only fake-Xcode safety regressions and never installs xcodegen or runs a real simulator build.
+
+**M17 acceptance:** A separately approved `xcrun simctl list devices available -j` on the same local Mac returned a real iOS 26.5 simulator UUID also present in that session's approved `xcodebuild -showdestinations` result for the disposable project's scheme. `xcode_preflight action=simulators` reports only their intersection, bounded names and Booted/Shutdown state, not physical devices, unrelated platforms or local device paths; malformed/missing runtime results cannot be promoted. This probe did not boot or deploy a simulator, and CI runs only fake executables.
 
 ## Baseline and boundaries
 

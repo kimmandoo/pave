@@ -1,5 +1,12 @@
 # Troubleshooting
 
+### [2026-09-29] Xcode 27 simulator destinations appeared empty despite installed runtimes
+
+- **Context / Symptom:** On a macOS arm64 host with Xcode 27.0 and available iOS 26.5 simulators, the opt-in M08 disposable-project run returned `Xcode destination discovery: exit 0` but `Available iOS Simulator IDs: none`. A checked failure-before parser test reproduced the empty result using Xcode's actual `Destinations compatible with the "MobileFixture" scheme:` heading. After discovery worked, the fixture's first build exited 65 with `Build input file cannot be found: .../MobileFixture.app/Info.plist`.
+- **Root Cause:** The parser recognized only older `Available destinations` / `Ineligible destinations` headings. The disposable xcodegen app fixture also omitted `GENERATE_INFOPLIST_FILE: YES`, so its Info.plist was never produced.
+- **Solution:** Accepted both heading pairs, still selecting only UUIDs in the compatible iOS Simulator section. Enabled generated Info.plist in the disposable fixture and added a separate interactive confirmation for each real preflight command. An explicitly approved scheme probe, destination probe and non-signing simulator build then returned `Xcode build: exit 0`; CI continues to run fake-Xcode tests only.
+- **Prevention / Reference:** Keep Xcode 27 and legacy headings, physical/placeholder/incompatible rows, missing-Xcode refusal and manual real-tool execution separate. One later manual destination probe temporarily returned no IDs before a subsequent approved run succeeded; its exact output was not retained, so no cause was assigned to that transient result.
+
 ### [2026-09-29] macOS release tests rejected the system `/var` alias
 
 - **Context / Symptom:** v0.1.69 Release run 36542708863 passed Linux and failed both macOS jobs at `Run tests`. CI run 36550181657 identified `test_account_routing` failing with `Plugin registry: plugin directory path contains symlink or non-directory: /var`.

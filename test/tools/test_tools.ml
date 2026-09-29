@@ -921,6 +921,11 @@ other.include(":not-a-gradle-module")
     assert (Pave.Workspace_xcode.destinations
       "Available destinations:\n  { platform:iOS Simulator, id:12345678-1234-1234-1234-123456789abc, name:Phone }\nIneligible destinations:\n  { platform:iOS Simulator, id:aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa, error:runtime }\n" =
       ["12345678-1234-1234-1234-123456789abc"]);
+    assert (Pave.Workspace_xcode.destinations
+      "Destinations compatible with the \"App\" scheme:\n  { platform:iOS, id:aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa, name:Device }\n  { platform:iOS Simulator, arch:arm64, id:12345678-1234-1234-1234-123456789abc, OS:26.5, name:iPhone }\nDestinations incompatible with the \"App\" scheme:\n  { platform:iOS Simulator, id:bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb, error:missing runtime }\n" =
+      ["12345678-1234-1234-1234-123456789abc"]);
+    assert (Pave.Workspace_xcode.destinations
+      "Destinations compatible with the \"App\" scheme:\n  { platform:iOS Simulator, id:dvtdevice-DVTiOSDeviceSimulatorPlaceholder-iphonesimulator:placeholder, name:Any iOS Simulator Device }\nDestinations incompatible with the \"App\" scheme:\n  { platform:iOS Simulator, id:bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb, error:missing runtime }\n" = []);
     create "ios/Source.swift" "let value = unknown\n";
     let diagnostic_output =
       "Source.swift:1:13: error: cannot find 'unknown'\n" ^
@@ -949,6 +954,8 @@ other.include(":not-a-gradle-module")
     assert (contains (xcode "schemes" []) "explicit interactive approval");
     assert (contains (xcode ~approved:true "destinations" scheme)
       "approve scheme discovery");
+    assert (contains (xcode ~approved:true "simulators" scheme)
+      "approve scheme discovery");
     assert (contains (xcode ~approved:true "build" (scheme @ destination))
       "approve scheme discovery");
     assert (Pave.Tools.requires_explicit_approval
@@ -959,6 +966,13 @@ other.include(":not-a-gradle-module")
         ~name:"xcode_preflight" ~args:(xcode_args "schemes" [])) in
     assert (contains (String.concat "\n" xcode_preview.details)
       "xcodebuild -project 'App.xcodeproj' -list -json");
+    let simulator_preview = Pave.Tools.approval_request ~root
+      ~name:"xcode_preflight" ~args:(xcode_args "simulators" scheme)
+      (Pave.Tools.approval_decision ~command_patterns:[]
+        ~name:"xcode_preflight" ~args:(xcode_args "simulators" scheme)) in
+    assert (contains (String.concat "\n" simulator_preview.details)
+      "xcrun simctl list devices available -j");
+    assert (contains (xcode "simulators" scheme) "explicit interactive approval");
     let prior_path = Sys.getenv_opt "PATH" in
     Fun.protect ~finally:(fun () ->
       Unix.putenv "PATH" (Option.value prior_path ~default:"")) (fun () ->
@@ -971,12 +985,20 @@ other.include(":not-a-gradle-module")
     create "fake-xcode-bin/xcodebuild" {|#!/bin/sh
 case " $* " in
   *" -list -json "*) printf '%s\n' '{"project":{"schemes":["AppShared"]}}' ;;
-  *" -showdestinations "*) printf '%s\n' 'Available destinations for the \"AppShared\" scheme:' '  { platform:iOS Simulator, id:12345678-1234-1234-1234-123456789abc, OS:17.0, name:iPhone }' 'Ineligible destinations for the \"AppShared\" scheme:' '  { platform:iOS Simulator, id:aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa, error:missing runtime }' ;;
+  *" -showdestinations "*) printf '%s\n' 'Destinations compatible with the "AppShared" scheme:' '  { platform:iOS, id:cccccccc-cccc-cccc-cccc-cccccccccccc, name:Device }' '  { platform:iOS Simulator, arch:arm64, id:12345678-1234-1234-1234-123456789abc, OS:26.5, name:iPhone }' 'Destinations incompatible with the "AppShared" scheme:' '  { platform:iOS Simulator, id:aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa, error:missing runtime }' ;;
   *" build "*) printf '%s\n' 'Source.swift:1:13: error: cannot find unknown' 'fixture build failed'; exit 7 ;;
   *) printf '%s\n' 'unexpected xcodebuild invocation'; exit 8 ;;
 esac
 |};
     Unix.chmod (Filename.concat root "fake-xcode-bin/xcodebuild") 0o700;
+    create "fake-xcode-bin/xcrun" {|#!/bin/sh
+if [ -f no-runtime ]; then printf '%s\n' '{"devices":{}}'; exit 0; fi
+case " $* " in
+  " simctl list devices available -j ") printf '%s\n' '{"devices":{"com.apple.CoreSimulator.SimRuntime.iOS-26-5":[{"udid":"12345678-1234-1234-1234-123456789abc","isAvailable":true,"state":"Shutdown","name":"iPhone 17","dataPath":"/private/secret"},{"udid":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","isAvailable":true,"state":"Booted","name":"incompatible"},{"udid":"bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb","isAvailable":false,"state":"Shutdown","name":"offline"}],"com.apple.CoreSimulator.SimRuntime.tvOS-26-5":[{"udid":"12345678-1234-1234-1234-123456789abc","isAvailable":true,"state":"Booted","name":"TV"}]}}' ;;
+  *) exit 8 ;;
+esac
+|};
+    Unix.chmod (Filename.concat root "fake-xcode-bin/xcrun") 0o700;
     let saved_path = Sys.getenv_opt "PATH" in
     Fun.protect ~finally:(fun () ->
       Unix.putenv "PATH" (Option.value saved_path ~default:"")) (fun () ->
@@ -984,10 +1006,34 @@ esac
         Option.value saved_path ~default:"/usr/bin:/bin");
       assert (contains (xcode ~approved:true "schemes" [])
         "Verified schemes: AppShared");
+      assert (contains (xcode ~approved:true "simulators" scheme)
+        "approve destination discovery");
       assert (contains (xcode ~approved:true "destinations"
         ["scheme", `String "Wrong"]) "scheme was not discovered");
       assert (contains (xcode ~approved:true "destinations" scheme)
         "Available iOS Simulator IDs: 12345678-1234-1234-1234-123456789abc");
+      let inventory = xcode ~approved:true "simulators" scheme in
+      assert (contains inventory "Apple simulator inventory: exit 0 (scheme AppShared)" &&
+        contains inventory "iOS 26.5 | 12345678-1234-1234-1234-123456789abc | Shutdown | iPhone 17" &&
+        not (contains inventory "private/secret") &&
+        not (contains inventory "incompatible") &&
+        not (contains inventory "offline") &&
+        not (contains inventory "TV"));
+      create "ios/no-runtime" "";
+      let unavailable = xcode ~approved:true "simulators" scheme in
+      assert (contains unavailable "No available compatible iOS Simulator devices" &&
+        not (contains unavailable "12345678-1234-1234-1234-123456789abc"));
+      let current_path = Sys.getenv "PATH" in
+      Fun.protect ~finally:(fun () -> Unix.putenv "PATH" current_path)
+        (fun () ->
+          Unix.putenv "PATH" (Filename.concat root "missing-xcode");
+          let missing = xcode ~approved:true "simulators" scheme in
+          assert (contains missing "Apple simulator inventory: exit 127" &&
+            not (contains missing "Available compatible iOS Simulator devices")));
+      assert (try ignore (Pave.Workspace_xcode.compatible_simulators
+        ~destinations:["12345678-1234-1234-1234-123456789abc"]
+        {|{"devices":{"com.apple.CoreSimulator.SimRuntime.iOS-26-5":[{"udid":"12345678-1234-1234-1234-123456789abc","isAvailable":"true"}]}}|}); false
+        with Pave.Workspace_xcode.Error _ -> true);
       assert (contains (xcode ~approved:true "build"
         (scheme @ ["destination", `String
           "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"]))
@@ -1000,6 +1046,8 @@ esac
       create "ios/App.xcodeproj/project.pbxproj" "// changed Xcode manifest\n";
       assert (contains (xcode ~approved:true "build" (scheme @ destination))
         "manifest changed since discovery");
+      assert (contains (xcode ~approved:true "simulators" scheme)
+        "approve scheme discovery");
       assert (contains (xcode ~approved:true "destinations" scheme)
         "approve scheme discovery"));
     directory "focus";

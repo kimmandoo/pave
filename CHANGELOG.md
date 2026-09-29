@@ -1,6 +1,9 @@
 # Changelog
 
 ## 2026-09-29
+- fix(mobile): parsed Xcode 27 compatible/incompatible destination headings so real iOS Simulator UUIDs were selectable without admitting physical, placeholder or incompatible devices; corrected the disposable project’s generated Info.plist.
+- test(mobile): required separate terminal confirmation of the exact Xcode scheme, destination and build commands in opt-in manual acceptance; an approved local simulator build completed without signing.
+- feat(mobile): added a separately approved, scheme-bound Apple simulator inventory using real available CoreSimulator devices intersected with Xcode destinations; excluded unavailable, incompatible, malformed and physical devices without booting a simulator or exposing local device paths.
 - release(distribution): published v0.1.70 after four hosted CI compiler/platform jobs and four native release jobs passed; verified all four downloaded archive checksums and exercised an isolated installed Linux CLI.
 - fix(extensions): accepted root-owned system directory aliases such as macOS `/var` in private plugin paths while continuing to reject user-owned symlink redirection.
 - fix(ci): retained failed Dune test output as an artifact in CI and release workflows for platform-specific diagnostics.

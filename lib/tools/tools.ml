@@ -1428,6 +1428,9 @@ let xcode_command args =
   | "destinations" ->
       if scheme = "" then fail "select a discovered scheme";
       prefix ^ " -scheme " ^ shell_quote scheme ^ " -showdestinations"
+  | "simulators" ->
+      if scheme = "" then fail "select a discovered scheme";
+      "xcrun simctl list devices available -j"
   | "build" | "test" ->
       let destination = required_string "destination" args in
       if scheme = "" || destination = "" then
@@ -1472,12 +1475,16 @@ let xcode_preflight ~approved ?cancel ?on_progress ?context root args =
         fail "Xcode manifest changed since discovery; discover schemes again");
       if not (List.mem scheme discovery.schemes) then
         fail "scheme was not discovered for this Xcode bundle";
-      if action = "build" || action = "test" then
-        let destination = required_string "destination" args in
-        if not (List.mem destination
-          (Option.value ~default:[]
-            (List.assoc_opt scheme discovery.destinations))) then
-          fail "simulator destination was not discovered for this scheme");
+      if action = "build" || action = "test" || action = "simulators" then (
+        let destinations = Option.value ~default:[]
+          (List.assoc_opt scheme discovery.destinations) in
+        if action = "simulators" then (
+          if destinations = [] then
+            fail "approve destination discovery with a compatible simulator for this scheme first")
+        else
+          let destination = required_string "destination" args in
+          if not (List.mem destination destinations) then
+            fail "simulator destination was not discovered for this scheme"));
     let cwd = Filename.dirname (Workspace_path.checked_path root bundle) in
     let result = Workspace_process.run_shell ?cancel ?on_progress
       ~timeout_seconds:(optional_int "timeout_seconds" 120
@@ -1517,6 +1524,25 @@ let xcode_preflight ~approved ?cancel ?on_progress ?context root args =
       else "Xcode destination discovery: " ^ outcome ^
         (if result.truncated then " (output truncated)" else "") ^
         "\n" ^ result.output)
+    else if action = "simulators" then
+      if successful then (
+        let discovery = Option.get context.xcode_discovery in
+        let destinations = Option.get
+          (List.assoc_opt scheme discovery.destinations) in
+        let devices = Workspace_xcode.compatible_simulators
+          ~destinations result.output in
+        "Apple simulator inventory: " ^ outcome ^ " (scheme " ^ scheme ^ ")" ^
+        (if devices = [] then
+           "\nNo available compatible iOS Simulator devices; no device was booted."
+         else "\nAvailable compatible iOS Simulator devices:\n" ^
+           (List.map (fun (device : Workspace_xcode.simulator) ->
+             Printf.sprintf "iOS %s | %s | %s | %s" device.runtime
+               device.id device.state device.name) devices
+            |> String.concat "\n")))
+      else
+        "Apple simulator inventory: " ^ outcome ^
+        (if result.truncated then " (output truncated; no devices accepted)"
+         else "; no devices accepted")
     else
       let locations = if result.termination = Workspace_process.Exited 0 then []
         else Workspace_swift_diagnostics.locations ~root ~cwd result.output in
@@ -2588,8 +2614,8 @@ let definitions = [
   schema "mobile_project" "Inventory bounded mobile stacks; choose an exact subroot and ios/android platform before suggesting a focused inert command. Nested framework hosts cannot select a neighboring native build."
     ["subroot", string_field "Exact workspace-relative project root (Xcode bundle path for Xcode); supply with platform";
      "platform", enum_string_field "Chosen host platform" ["ios"; "android"]] [];
-  schema "xcode_preflight" "Run one explicitly approved Xcode scheme discovery, simulator destination discovery, or selected non-signing build/test. Each action evaluates project code and needs its own interactive approval; never installs an SDK or guesses a destination."
-    ["action", enum_string_field "One approved phase" ["schemes"; "destinations"; "build"; "test"];
+  schema "xcode_preflight" "Run one explicitly approved Xcode scheme or destination discovery, compatible Apple simulator inventory, or selected non-signing build/test. Each phase requires separate interactive approval; inventory never boots a simulator or installs an SDK."
+    ["action", enum_string_field "One approved phase" ["schemes"; "destinations"; "simulators"; "build"; "test"];
      "subroot", string_field "Exact scanned Xcode .xcworkspace or .xcodeproj bundle";
      "scheme", string_field "Exact scheme returned by approved discovery";
      "destination", string_field "Exact available iOS Simulator ID returned for this scheme";
@@ -3033,10 +3059,16 @@ let approval_request ?cancel ?context ~root ~name ~args (decision : Approval.dec
          "Proposed content: " ^ Printf.sprintf "%S" (preview_text preview.content)]
     | "xcode_preflight" ->
         let command = xcode_command args in
-        "Executes one Xcode command against the selected project as your user; project configuration is untrusted executable code. Discovery and build/test require separate approvals.",
+        (if optional_string "action" "" args = "simulators" then
+           "Lists installed CoreSimulator devices as your user, intersected with this session's approved Xcode scheme destinations. No device is booted, installed to or launched."
+         else
+           "Executes one Xcode command against the selected project as your user; project configuration is untrusted executable code. Discovery and build/test require separate approvals."),
         ["Working directory: parent of " ^ quoted "subroot" "(missing)" args;
          "Exact command: " ^ command;
-         "Build/test may write derived data; simulator tests may launch a simulator. No signing or physical-device destination is selected."]
+         (if optional_string "action" "" args = "simulators" then
+            "Only installed available iOS Simulator devices compatible with this scheme are shown; no physical devices or local device paths."
+          else
+            "Build/test may write derived data; simulator tests may launch a simulator. No signing or physical-device destination is selected.")]
     | "mobile_check" ->
         let command, cwd = mobile_command ~root:base_root args in
         "Executes selected mobile project code as your user; discovery and execution each need approval. Commands do not install dependencies, provision SDKs, or sandbox project code.",
