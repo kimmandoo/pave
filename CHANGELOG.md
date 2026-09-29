@@ -1,7 +1,7 @@
 # Changelog
 
 ## 2026-09-29
-- fix(release): renamed an MCP approval parameter reserved by the release runner's OCaml 5.5 parser, restoring compilation across the native release matrix.
+- fix(release): renamed an MCP approval parameter reserved by OCaml 5.5, restoring local release-compiler compilation; the hosted release remained pending CI repair.
 - feat(extensions): discovered bounded user/project skills and declarative prompt commands with explicit session activation and draft-only insertion; added private approved custom tools, opt-in lifecycle hooks and owned plugin enable/disable/reload with immediate capability filtering.
 - feat(mcp): added validated user/project MCP config, private secret references and deny overrides; explicitly approved stdio and Streamable HTTP connections, per-effect approval, bounded tool/resource/prompt handling, source-attributed draft insertion and disconnecting reload. Left remote marketplace, legacy SSE and managed OAuth unavailable pending their external prerequisites.
 - feat(tui): widened the filled startup P and removed its tile background while preserving the transparent canvas, offset shadow, amber cursor and compact label fallback.
