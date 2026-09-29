@@ -685,7 +685,20 @@ let package = Package(name: "fixture", targets: targets)
     directory "packages/swift/Tests";
     directory "packages/swift/Tests/FixtureTests";
     directory "packages/flutter";
-    create "packages/flutter/pubspec.yaml" "name: sample\nflutter:\n";
+    create "packages/flutter/pubspec.yaml"
+      "name: sample\ndependencies:\n  flutter:\n    sdk: flutter\nflutter:\n  plugin:\n    platforms:\n      ios:\n      android:\n";
+    directory "packages/flutter/ios";
+    directory "packages/flutter/android";
+    directory "packages/dart";
+    create "packages/dart/pubspec.yaml"
+      "name: dart_only\n# flutter:\ndescription: flutter: not a dependency\n";
+    directory "packages/app";
+    create "packages/app/pubspec.yaml"
+      "name: app\ndependencies:\n  flutter:\n    sdk: flutter\n";
+    directory "packages/app/android";
+    directory "packages/library";
+    create "packages/library/pubspec.yaml"
+      "name: library\ndependencies:\n  flutter:\n    sdk: flutter\n";
     directory "packages/react-native";
     create "packages/react-native/package.json"
       {|{"dependencies":{"react-native":"1"},"scripts":{"test":"test"}}|};
@@ -813,6 +826,15 @@ other.include(":not-a-gradle-module")
       not (contains mobile "computedTargets"));
     assert (not (contains mobile "swift build") &&
       not (contains mobile "swift test"));
+    assert (contains mobile "Flutter plugin: packages/flutter/pubspec.yaml");
+    assert (contains mobile "Existing ios host root: packages/flutter/ios");
+    assert (contains mobile "Existing android host root: packages/flutter/android");
+    assert (contains mobile "Flutter app: packages/app/pubspec.yaml");
+    assert (contains mobile "Existing android host root: packages/app/android");
+    assert (contains mobile "Flutter package: packages/library/pubspec.yaml");
+    assert (contains mobile "Dart package: packages/dart/pubspec.yaml");
+    assert (not (contains mobile "Flutter app: packages/dart"));
+    assert (not (contains mobile "flutter build"));
     directory "many";
     for index = 0 to 100 do
       let project = Printf.sprintf "many/Project%03d.xcodeproj" index in

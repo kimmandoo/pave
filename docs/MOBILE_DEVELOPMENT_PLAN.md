@@ -1,6 +1,6 @@
 # Mobile development specialization plan
 
-**Status:** M01–M04 completed; M05–M24 remain planned. The Mobile specialization section of `TASKS.md` owns the M01–M24 checkboxes; this document supplies their dependencies, acceptance scenarios and safety limits. Complete and verify one checkbox at a time. This is not a release promise.
+**Status:** M01–M05 completed; M06–M24 remain planned. The Mobile specialization section of `TASKS.md` owns the M01–M24 checkboxes; this document supplies their dependencies, acceptance scenarios and safety limits. Complete and verify one checkbox at a time. This is not a release promise.
 
 ## Baseline and boundaries
 

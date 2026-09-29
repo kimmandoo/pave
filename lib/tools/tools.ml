@@ -1195,13 +1195,42 @@ let mobile_project ?cancel root =
              ("Ignored unreadable mobile manifest: " ^ path ^
               " (no commands suggested).")
          | Some pubspec ->
-             let commands = if find_from pubspec "flutter:" 0 <> None then
-               ["flutter pub get"; "flutter test"; "flutter build apk";
-                "flutter build ios"]
-             else ["dart pub get"; "dart test"] in
-             let stack = if find_from pubspec "flutter:" 0 <> None
-               then "Flutter: " else "Dart: " in
-             add_stack (stack ^ path) (List.map (command_in path) commands))
+             let lines = String.split_on_char '\n' pubspec in
+             let section = ref "" and subsection = ref "" in
+             let flutter_sdk = ref false and plugin = ref false in
+             List.iter (fun line ->
+               let trimmed = String.trim line in
+               if trimmed <> "" && trimmed.[0] <> '#' then (
+                 let indent =
+                   let rec count n = if n < String.length line &&
+                     (line.[n] = ' ' || line.[n] = '\t') then count (n + 1)
+                     else n in count 0 in
+                 if indent = 0 then (
+                   section := trimmed; subsection := "")
+                 else if indent = 2 then (
+                   subsection := trimmed;
+                   if !section = "flutter:" && trimmed = "plugin:"
+                   then plugin := true)
+                 else if indent = 4 && !section = "dependencies:" &&
+                   !subsection = "flutter:" && trimmed = "sdk: flutter"
+                 then flutter_sdk := true)) lines;
+             let package_root = directory path in
+             let host name =
+               let location = join_relative package_root name in
+               if Hashtbl.mem directories location then
+                 ["  Existing " ^ name ^ " host root: " ^ location]
+               else [] in
+             let kind = if !plugin && !flutter_sdk then "Flutter plugin"
+               else if !flutter_sdk then
+                 if host "ios" <> [] || host "android" <> [] then "Flutter app"
+                 else "Flutter package"
+               else "Dart package" in
+             add_stack (String.concat "\n"
+               (("  " ^ kind ^ ": " ^ path) ::
+                ("  Package root: " ^ relative_label package_root) ::
+                (if !flutter_sdk then host "ios" @ host "android" else []) @
+                ["  Pubspec was read as bounded text; SDK and build readiness remain unknown."]))
+               [])
     | Node_manifest path ->
         (match read_manifest path with
          | None -> add_diagnostic
@@ -2206,7 +2235,7 @@ let definitions = [
     ["encoding", enum_string_field "Exact tiktoken encoding" ["cl100k_base"; "o200k_base"];
      "text", bounded_string_field "Text to count (maximum 1 MiB)" Native_tokenizer.max_input_bytes]
     ["encoding"; "text"];
-  schema "mobile_project" "Inventory bounded mobile manifests and map SwiftPM test-root candidates plus literal Gradle modules, wrappers and conventional source roots; never execute project code or infer computed targets, dynamic modules, tasks or variants."
+  schema "mobile_project" "Inventory bounded mobile manifests and map SwiftPM test roots, literal Gradle modules and conventional source roots, and Flutter pubspec kind and observed native host roots; never execute project code or infer build readiness."
     [] [];
   schema "read_file" "Read bounded workspace files, directories, documents, archives, notebooks, SQLite, owned artifacts, managed worktrees, or public HTTPS URLs. HTTPS fetches send no credentials and require approval."
     ["path", string_field "Workspace-relative path or supported local://, artifact://, worktree://, or HTTPS source";

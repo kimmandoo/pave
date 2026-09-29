@@ -1,6 +1,7 @@
 # Changelog
 
 ## 2026-09-29
+- feat(mobile): classified bounded Flutter plugin, app, package and plain Dart pubspec evidence, reported only observed native host roots and removed speculative Flutter build commands.
 - fix(tui): toggled tool details and paged the transcript using the painted body height and transcript width, so a multi-line draft or active spinner no longer expanded an off-screen tool group.
 - perf(tools): read workspace-eval kernel frames in 64 KiB chunks and scanned only newly received bytes in both the host and the Node wrapper, and made DAP header search allocation-free, replacing quadratic buffering for large responses.
 - fix(tui): labeled the activity row `Responding` once streamed answer text arrived instead of leaving it at `Thinking`, keeping the turn timer.
