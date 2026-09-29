@@ -1,8 +1,8 @@
 # Mobile development specialization plan
 
-**Status:** M01–M07 and M10–M12 completed; M08–M09 and M13–M24 remain open. The Mobile specialization section of `TASKS.md` owns the M01–M24 checkboxes; this document supplies their dependencies, acceptance scenarios and safety limits. Complete and verify each checkbox against its own scenario. This is not a release promise.
+**Status:** M01–M07 and M09–M12 completed; M08 and M13–M24 remain open. The Mobile specialization section of `TASKS.md` owns the M01–M24 checkboxes; this document supplies their dependencies, acceptance scenarios and safety limits. Complete and verify each checkbox against its own scenario. This is not a release promise.
 
-**M08–M09 implementation state:** Approved `xcode_preflight` and `mobile_check` phases are in source. Local Linux has no Xcode or SwiftPM; the first hosted macOS CI run failed during the existing test suite before real-toolchain acceptance, so neither card is checked. The hosted Ubuntu job passed a real disposable Gradle selected debug task and Flutter analysis, and the local RN npm fixture reported real test exit 0 and lint exit 4. Fake-executable tests establish refusal and state binding, not platform acceptance.
+**M08 implementation state:** Approved `xcode_preflight` phases are in source. Hosted macOS CI run 36513165905 passed real SwiftPM selected-test execution and reached a real disposable Xcode simulator build, but that final Xcode step failed; unauthenticated job logs did not expose its reason. A bounded public CI annotation is being added before retry. Hosted Ubuntu passed a real disposable Gradle selected debug task and Flutter analysis; local RN npm reported real test exit 0 and lint exit 4. Fake-executable tests establish refusal and state binding, not Xcode platform acceptance.
 
 ## Baseline and boundaries
 

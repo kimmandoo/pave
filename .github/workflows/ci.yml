@@ -32,18 +32,14 @@ jobs:
       - name: Check opam package
         if: matrix.os == 'ubuntu-24.04' && matrix.ocaml == '5.5.1'
         run: opam lint pave.opam
-      - name: Check mobile tool integration on macOS
-        if: runner.os == 'macOS'
-        run: opam exec -- dune runtest test/test_tools.exe
-      - name: Check SwiftPM focus on macOS
-        if: runner.os == 'macOS'
-        run: opam exec -- dune runtest test/test_workspace_swiftpm_focus.exe
-      - name: Check Gradle focus on macOS
-        if: runner.os == 'macOS'
-        run: opam exec -- dune runtest test/test_workspace_gradle_focus.exe
-      - name: Check Node scripts on macOS
-        if: runner.os == 'macOS'
-        run: opam exec -- dune runtest test/test_workspace_node_scripts.exe
+      - name: Provision Xcode project generator
+        if: runner.os == 'macOS' && matrix.ocaml == '5.5.1'
+        run: brew install xcodegen
+      - name: Check real Xcode simulator build
+        if: runner.os == 'macOS' && matrix.ocaml == '5.5.1'
+        env:
+          PAVE_REAL_MOBILE_STACK: xcode
+        run: opam exec -- dune exec test/test_mobile_real.exe
       - name: Run tests
         run: opam exec -- dune runtest --force -j 1
       - name: Build installation artifacts
@@ -83,12 +79,4 @@ jobs:
         if: runner.os == 'macOS' && matrix.ocaml == '5.5.1'
         env:
           PAVE_REAL_MOBILE_STACK: swiftpm
-        run: opam exec -- dune exec test/test_mobile_real.exe
-      - name: Provision Xcode project generator
-        if: runner.os == 'macOS' && matrix.ocaml == '5.5.1'
-        run: brew install xcodegen
-      - name: Check real Xcode simulator build
-        if: runner.os == 'macOS' && matrix.ocaml == '5.5.1'
-        env:
-          PAVE_REAL_MOBILE_STACK: xcode
         run: opam exec -- dune exec test/test_mobile_real.exe

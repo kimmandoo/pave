@@ -18,6 +18,18 @@ let expect label expected output =
     failwith (Printf.sprintf "%s: expected %S in output:\n%s" label expected output)
 
 let () =
+  Printexc.set_uncaught_exception_handler (fun error _ ->
+    let text = Printexc.to_string error in
+    let text = if String.length text > 6000 then
+      String.sub text (String.length text - 6000) 6000 else text in
+    let escaped = Buffer.create (String.length text) in
+    String.iter (function
+      | '%' -> Buffer.add_string escaped "%25"
+      | '\r' -> Buffer.add_string escaped "%0D"
+      | '\n' -> Buffer.add_string escaped "%0A"
+      | character -> Buffer.add_char escaped character) text;
+    Printf.eprintf "::error title=real mobile acceptance::%s\n%!"
+      (Buffer.contents escaped));
   match Sys.getenv_opt "PAVE_REAL_MOBILE_STACK" with
   | None -> ()
   | Some stack ->

@@ -1,5 +1,12 @@
 # Troubleshooting
 
+### [2026-09-29] macOS mobile tests compared symlinked temporary paths
+
+- **Context / Symptom:** CI run 36512074826 failed both macOS matrix jobs at `Run tests` while Ubuntu passed; unauthenticated job logs returned HTTP 403. The focused mobile tests had constructed temporary roots under macOS `/var`, then compared those literal paths against workspace helpers returning canonical `/private/var` paths.
+- **Root Cause:** macOS `/var` aliases `/private/var`; path equality in disposable fixtures was not comparing canonical paths. The mobile execution helper also needed to normalize its workspace root before manifest hashing.
+- **Solution:** Normalized temporary fixture roots with `Unix.realpath`, normalized the selected `mobile_check` root, and split macOS focused tests into named CI steps for diagnosis. In run 36513165905 both macOS jobs passed their focused and full test suites; the 5.5.1 job subsequently reached the separate real Xcode acceptance step.
+- **Prevention / Reference:** Compare canonical paths in tests that assert resolved workspace locations. CI real-toolchain failures should surface a named step and bounded GitHub annotation rather than require private job logs.
+
 ### [2026-09-29] Windows Flutter launcher could not run under WSL
 
 - **Context / Symptom:** `flutter --version` on the Linux workstation called `/mnt/c/src/flutter/bin/internal/shared.sh` and failed with `$'\\r': command not found` (exit 127). `swift`, `gradle` and `xcodebuild` were also absent from PATH.
