@@ -159,8 +159,10 @@ mv -f "$staged_marker" "$license_dir/.native-install" || fail 'cannot install na
 staged_marker=
 mv -f "$staged_binary" "$install_dir/pave" || fail 'cannot install pave executable'
 staged_binary=
-printf 'Installed pave to %s/pave\n' "$install_dir"
-case ":${PATH:-}:" in
-    *":$install_dir:"*) ;;
-    *) printf 'Add %s to your PATH to run pave.\n' "$install_dir" ;;
-esac
+if [ "${PAVE_UPDATE_OUTPUT:-}" != 1 ]; then
+    printf 'Installed pave to %s/pave\n' "$install_dir"
+    case ":${PATH:-}:" in
+        *":$install_dir:"*) ;;
+        *) printf 'Add %s to your PATH to run pave.\n' "$install_dir" ;;
+    esac
+fi

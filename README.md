@@ -32,10 +32,11 @@ The [installer](install.sh) checks the downloaded archive against its published 
 Inspect the script first if you prefer not to pipe a download into a shell. Installed binaries can update themselves:
 
 ```sh
-pave update --check  # Compare embedded release version against GitHub's latest published tag; no files changed.
-pave update          # Upgrade to the latest release.
+pave update --check  # Compare the installed version with the latest release.
+pave update          # Upgrade the installed binary; show version and destination.
+pave uninstall       # Remove the native binary and its bundled license files.
 ```
-A successful upgrade prints the version transition (`Updated Pave v0.1.40 → v0.1.41.`). A same-version install says `Reinstalled`; a checksum or installation failure never reports success.
+An update reports the old and new versions and installed path only after the checksum-verified installer succeeds. A failed download, checksum or installation never reports success.
 
 **Update safeguards**
 
@@ -52,7 +53,7 @@ curl -fsSL https://raw.githubusercontent.com/kimmandoo/pave/main/install.sh | PA
 curl -fsSL https://raw.githubusercontent.com/kimmandoo/pave/main/install.sh | PAVE_INSTALL_DIR="$HOME/tools/bin" sh
 ```
 
-Use the installer directly to install a **specific published** tag or change destinations; `pave update` always targets the latest release at the binary's current location. To uninstall, remove `~/.local/bin/pave` and `~/.local/share/licenses/pave` (or the equivalent locations under your custom destination).
+Use the installer directly to install a **specific published** tag or change destinations; `pave update` always targets the latest release at the binary's current location. `pave uninstall` removes only that installer-owned binary, its license files and install marker; it leaves settings, sessions, credentials and other files in the install directories untouched. Source/opam installations use their package manager.
 
 </details>
 

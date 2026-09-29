@@ -242,8 +242,12 @@ let () =
        | 3 when Sys.argv.(2) = "--check" -> Update.check ()
        | _ -> failwith "usage: pave update [--check]");
       exit 0);
+    if Array.length Sys.argv > 1 && Sys.argv.(1) = "uninstall" then (
+      if Array.length Sys.argv <> 2 then failwith "usage: pave uninstall";
+      Update.uninstall ();
+      exit 0);
     Arg.parse options (fun arg -> raise (Arg.Bad ("unexpected argument: " ^ arg)))
-      "pave [task OPERATION [OPTIONS] | update [--check] | --providers | --provider ID --model ID --prompt TEXT | --root DIRECTORY --session FILE]";
+      "pave [task OPERATION [OPTIONS] | update [--check] | uninstall | --providers | --provider ID --model ID --prompt TEXT | --root DIRECTORY --session FILE]";
     let has_explicit_prompt = !prompt_supplied || Option.is_some !prompt_file in
     if !prompt_supplied && Option.is_some !prompt_file then
       failwith "--prompt and --prompt-file are conflicting input sources";

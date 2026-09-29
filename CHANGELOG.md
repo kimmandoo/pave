@@ -1,6 +1,8 @@
 # Changelog
 
 ## 2026-09-29
+- feat(distribution): added installer-owned `pave uninstall` while preserving user data, and displayed a clearer version-and-path summary after successful updates.
+- feat(tui): redrew the idle terminal logo from the SVG's stepped tile, pixel P, shadow and cursor.
 - fix(provider): accepted complete OpenAI Responses output when an item-done event was absent while retaining delta validation, and required Anthropic's terminal message-stop event before a streamed reply could succeed.
 - fix(provider): accepted complete Codex final output when item-done events were absent and reconstructed omitted final output only from completed items; rejected mismatched deltas and malformed account model eligibility fields before selection or inference.
 - docs(project): removed external-project attribution from current documentation and comments while retaining required provider protocol identifiers and model fixtures.

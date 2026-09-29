@@ -293,21 +293,29 @@ let idle_status =
 
 let hotkeys = Keybindings.hotkeys Keybindings.bindings
 
-(* Two ASCII columns per 8px SVG pixel keep the rounded P nearly square. *)
+(* Each cell represents one 8px square of assets/pave-mark.svg. *)
 let startup_logo version =
-  let mint = I.string accent "##" and shadow = I.string muted "++"
+  let tile = I.string muted ".." and mint = I.string accent "##"
+  and shadow = I.string frame_attr "++"
   and cursor = I.string warning "**" and blank = I.string A.empty "  " in
   let pixel = function
-    | '#' -> mint | '+' -> shadow | '*' -> cursor | _ -> blank in
+    | '#' -> mint | '+' -> shadow | '*' -> cursor
+    | '.' -> tile | _ -> blank in
   let mark = I.vcat (List.map (fun row ->
     I.hcat (List.init (String.length row) (fun index -> pixel row.[index])))
-    [ "   ######  "; "  ######## "; " ##########";
-      " ###    ###"; " ###    ###"; " ###    ###";
-      " ##########"; " #########+";
-      " ###++++++ "; " ###       "; " ###     * ";
-      "  +++      " ]) in
+    [ "  ............  "; " ................";
+      "................"; "....#######.....";
+      "....########...."; "....##....##+...";
+      "....##....##+...";
+      "....##....##+...";
+      "....##....##+...";
+      "....########+...";
+      "....#######++...";
+      "....##++++++....";
+      "....##.........."; "....##......*...";
+      " ................"; "  ............  " ]) in
   I.(mark <-> void 1 1 <->
-    string accent ("  P A V E  " ^ version))
+    string accent ("       P A V E  " ^ version))
 
 let sanitize = Transcript_view.sanitize
 let single_line = Transcript_view.single_line

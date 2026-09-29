@@ -73,7 +73,7 @@ let task_cases ~task_operations ~task_options ~shell =
 let generate_bash ~executable ~options ~task_operations ~task_options =
   let flags = List.map (fun option -> option.name) options in
   let static_flags = shell_quote (String.concat " " flags) in
-  let top_commands = shell_quote "task update completions" in
+  let top_commands = shell_quote "task update uninstall completions" in
   let dynamic kind =
     "    --" ^ kind ^ ") while IFS= read -r candidate; do " ^
     "COMPREPLY+=(\"$candidate\"); done < <(" ^ shell_quote executable ^
@@ -142,7 +142,7 @@ let generate_zsh ~executable ~options ~task_operations ~task_options =
   "  case \"$prev\" in\n" ^ dynamic "model" ^ dynamic "session" ^
   enum_cases options ~shell:"zsh" ^ value_cases options ^ "  esac\n" ^
   "  if [[ \"$cur\" == -* ]]; then compadd -- " ^ static_flags ^
-  "\n  else compadd -- task update completions\n  fi\n}\n" ^
+  "\n  else compadd -- task update uninstall completions\n  fi\n}\n" ^
   "compdef _pave_completion " ^ shell_quote executable ^ "\n"
 
 let fish_option name =
@@ -173,7 +173,7 @@ let generate_fish ~executable ~options ~task_operations ~task_options =
     flag ^ (if option.takes_value then " -r" else "") ^
     choices ^ dynamic ^ " -n " ^ flag_condition global) options in
   let subcommands = [
-    base ^ " -a " ^ fish_quote "task update completions" ^ " -n " ^
+    base ^ " -a " ^ fish_quote "task update uninstall completions" ^ " -n " ^
       fish_quote top;
     base ^ " -a " ^ fish_quote (String.concat " " task_operations) ^
       " -n " ^ fish_quote "__pave_task_operations";
@@ -206,7 +206,7 @@ let generate_fish ~executable ~options ~task_operations ~task_options =
     "end\n" ^
     "function __pave_global\n" ^
     "  set -l tokens (commandline -xpc)\n" ^
-    "  test (count $tokens) -lt 2; or not contains -- $tokens[2] task update completions\n" ^
+    "  test (count $tokens) -lt 2; or not contains -- $tokens[2] task update uninstall completions\n" ^
     "end\n" ^
     "function __pave_task_operations\n" ^
     "  set -l tokens (commandline -xpc)\n" ^

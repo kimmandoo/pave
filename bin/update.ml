@@ -23,6 +23,22 @@ let native_install_dir () =
   if not recognized then fail "invalid native-install marker; refusing to overwrite this executable";
   directory
 
+let uninstall () =
+  let directory = native_install_dir () in
+  let license_dir = Filename.concat
+    (Filename.dirname directory) "share/licenses/pave" in
+  let binary = Filename.concat directory "pave" in
+  let files = [ binary; Filename.concat license_dir "LICENSE";
+    Filename.concat license_dir "THIRD_PARTY_NOTICES";
+    Filename.concat license_dir ".native-install" ] in
+  if not (List.for_all is_regular files) then
+    fail "installation is incomplete or contains non-regular files; refusing to remove it";
+  List.iter Sys.remove files;
+  (try Unix.rmdir license_dir with Unix.Unix_error (Unix.ENOTEMPTY, _, _) -> ());
+  Printf.printf "Removed Pave from %s\nSaved settings, sessions and credentials were kept.\n%!"
+    directory
+
+
 let rec wait_for pid =
   try snd (Unix.waitpid [] pid) with
   | Unix.Unix_error (Unix.EINTR, _, _) -> wait_for pid
@@ -92,18 +108,20 @@ let run () =
     close_out output;
     let keep entry =
       not (String.starts_with ~prefix:"PAVE_INSTALL_DIR=" entry ||
-           String.starts_with ~prefix:"PAVE_VERSION=" entry) in
+           String.starts_with ~prefix:"PAVE_VERSION=" entry ||
+           String.starts_with ~prefix:"PAVE_UPDATE_OUTPUT=" entry) in
     let environment = Array.of_list
       (("PAVE_INSTALL_DIR=" ^ directory) :: ("PAVE_VERSION=" ^ target) ::
+        "PAVE_UPDATE_OUTPUT=1" ::
         List.filter keep (Array.to_list (Unix.environment ()))) in
     let pid = Unix.create_process_env "/bin/sh" [| "/bin/sh"; script |]
       environment Unix.stdin Unix.stdout Unix.stderr in
     match wait_for pid with
     | Unix.WEXITED 0 ->
-        if target = installed then
-          Printf.printf "Reinstalled Pave %s (already current).\n%!" installed
-        else
-          Printf.printf "Updated Pave %s → %s.\n%!" installed target
+        Printf.printf "\n  Pave  %s\n  %s  %s\n  Path  %s/pave\n%!"
+          (if target = installed then "Reinstalled" else "Updated")
+          installed (if target = installed then "(current)" else "-> " ^ target)
+          directory
     | Unix.WEXITED code -> fail (Printf.sprintf "installer exited with status %d; inspect the installation before retrying" code)
     | Unix.WSIGNALED signal | Unix.WSTOPPED signal ->
         fail (Printf.sprintf "installer terminated with signal %d; check the installation before retrying" signal))
