@@ -1,6 +1,7 @@
 # Changelog
 
 ## 2026-09-29
+- release(distribution): published v0.1.70 after four hosted CI compiler/platform jobs and four native release jobs passed; verified all four downloaded archive checksums and exercised an isolated installed Linux CLI.
 - fix(extensions): accepted root-owned system directory aliases such as macOS `/var` in private plugin paths while continuing to reject user-owned symlink redirection.
 - fix(ci): retained failed Dune test output as an artifact in CI and release workflows for platform-specific diagnostics.
 - fix(release): renamed an MCP approval parameter reserved by OCaml 5.5, restoring local release-compiler compilation; the hosted release remained pending CI repair.
