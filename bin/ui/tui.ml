@@ -467,7 +467,9 @@ let composer_bottom cols =
 
 let activity_frames =
   [| "⠋"; "⠙"; "⠹"; "⠸"; "⠼"; "⠴"; "⠦"; "⠧"; "⠇"; "⠏" |]
-let activity_tick = 1.
+(* The spinner advances every 80 ms like the reviewed loader; only the activity
+   row changes between frames and it is overwritten in place, never erased. *)
+let activity_tick = 0.08
 
 let activity_tick_delay elapsed =
   let phase = mod_float (max 0. elapsed) activity_tick in
@@ -593,7 +595,8 @@ let activity_status ?received_bytes ?(width = max_int) ~state ~elapsed () =
   let seconds = int_of_float elapsed in
   let duration = if seconds < 60 then Printf.sprintf "%ds" seconds
     else Printf.sprintf "%dm%02ds" (seconds / 60) (seconds mod 60) in
-  let frame = activity_frames.(seconds mod Array.length activity_frames) in
+  let frame = activity_frames.(int_of_float (elapsed /. activity_tick)
+    mod Array.length activity_frames) in
   let suffix = " · " ^ duration in
   let available = max 0 (width - measure_text frame - 1 - measure_text suffix) in
   let state = shorten_activity available state in

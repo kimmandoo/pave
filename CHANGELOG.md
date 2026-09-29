@@ -1,6 +1,7 @@
 # Changelog
 
 ## 2026-09-29
+- feat(tui): advanced the activity spinner every 80 ms instead of once per second while keeping whole-second elapsed time and in-place, erase-free activity-row repaints.
 - feat(tui): redesigned transcript and composer after the reviewed dark theme: filled user bubbles, pending/settled/failed tool cards with colored `●`/`✗` markers, and a rounded composer box whose top rule carries version, model, saved state, workspace and usage while hints sit below it.
 - fix(tui): scheduled a 60 Hz repaint for short streamed deltas even when the provider paused, removed per-newline redraw bursts, and kept immediate completion and ordered output.
 - feat(mobile): mapped bounded SwiftPM package and candidate test roots without evaluating `Package.swift`; reported literal Gradle modules, observed wrapper files and conventional source roots while leaving dynamic includes, project remapping and task variants unknown.

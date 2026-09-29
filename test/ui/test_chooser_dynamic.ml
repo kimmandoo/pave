@@ -135,15 +135,19 @@ let () =
   assert (approval_rows = 3);
   let glyph status = String.sub status 0 (String.index status ' ') in
   let idle_progress = Tui.activity_status ~state:"Thinking" ~elapsed:0. () in
-  let frames = List.init 10 (fun second ->
+  let frames = List.init 10 (fun frame ->
     glyph (Tui.activity_status ~state:"Thinking"
-      ~elapsed:(float_of_int second) ())) in
+      ~elapsed:(0.04 +. 0.08 *. float_of_int frame) ())) in
   assert (idle_progress =
-    Tui.activity_status ~state:"Thinking" ~elapsed:0.125 () &&
+    Tui.activity_status ~state:"Thinking" ~elapsed:0.05 () &&
+    glyph idle_progress <>
+      glyph (Tui.activity_status ~state:"Thinking" ~elapsed:0.125 ()) &&
+    String.ends_with ~suffix:"Thinking · 0s"
+      (Tui.activity_status ~state:"Thinking" ~elapsed:0.9 ()) &&
     String.ends_with ~suffix:"Thinking · 0s" idle_progress &&
     String.ends_with ~suffix:"Tool: read_file · 1m05s"
       (Tui.activity_status ~state:"Tool: read_file" ~elapsed:65. ()) &&
-    List.length (List.sort_uniq String.compare frames) >= 4 &&
+    List.length (List.sort_uniq String.compare frames) = 10 &&
     List.for_all (fun frame ->
       measure frame = 1 &&
       not (List.mem frame ["◐"; "◓"; "◑"; "◒"])) frames);
@@ -162,8 +166,8 @@ let () =
     String.starts_with ~prefix:"Tool: ru"
       (String.sub compact (String.length (glyph compact) + 1)
         (String.length compact - String.length (glyph compact) - 1)));
-  assert (Tui.activity_tick_delay 0. = 1. &&
-    abs_float (Tui.activity_tick_delay 0.125 -. 0.875) < 0.000000001);
+  assert (Tui.activity_tick_delay 0. = 0.08 &&
+    abs_float (Tui.activity_tick_delay 0.125 -. 0.035) < 0.000001);
   let turn_started =
     Tui.activity_started_at None (Some "Thinking") 100. in
   let tool_started =

@@ -106,8 +106,8 @@ let () =
   expect "a due streamed frame wakes immediately even without activity"
     (Tui.next_tick_timeout ~now:10.05 ~last_paint:10.
        ~stream_pending:true ~activity_started:None = Some 0.);
-  expect "painted stream state returns to the activity heartbeat"
+  expect "painted stream state returns to the 80 ms spinner cadence"
     (match frame ~pending:false ~since:(Some 10.) with
-     | Some delay -> delay > 0.9 && delay < 1.
+     | Some delay -> delay > 0.07 && delay < 0.08
      | None -> false);
   print_endline "TUI attachment previews and stream batching: ok"
