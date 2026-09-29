@@ -1,7 +1,5 @@
 (* SingularityAPI's booked .tech lane, not its pay-as-you-go .dev API.
-   The sibling the reference runtime pins api.singularityapi.tech/v1 and reports
-   successful bearer-authenticated Chat probes in September 2026. An
-   unauthenticated POST /v1/chat/completions confirms the route and requires
+   An unauthenticated POST /v1/chat/completions confirms the route and requires
    "Authorization: Bearer <key>". Public .tech documentation describes Chat
    and tool calls, but gives neither an authenticated Chat response example
    nor a model-listing contract. No models or entitlements are inferred here. *)

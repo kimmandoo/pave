@@ -1,6 +1,6 @@
 (* Devin CLI's Codeium Cascade protocol. Credentials live in protobuf metadata,
-   never in an Authorization header or a client-selected endpoint. The fixed
-   Connect paths and metadata fields follow the reviewed Devin wire declarations. *)
+   never in an Authorization header or a client-selected endpoint. Connect
+   paths and metadata fields are fixed for this transport. *)
 let base_url = "https://server.codeium.com"
 let auth_url = base_url ^ "/exa.auth_pb.AuthService/GetUserJwt"
 let models_url = base_url ^ "/exa.api_server_pb.ApiServerService/GetCliModelConfigs"

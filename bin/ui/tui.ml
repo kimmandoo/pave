@@ -272,8 +272,8 @@ let selected_attr = if no_color then A.(st bold)
   else A.(fg black ++ bg lightcyan ++ st bold)
 let measure_text chunk = I.width (I.string text_attr chunk)
 
-(* Surfaces follow the reviewed dark theme: filled user bubbles, state-tinted
-   tool blocks and a muted rounded composer frame. NO_COLOR keeps shapes only. *)
+(* Filled user bubbles, state-tinted tool blocks and a muted rounded composer.
+   NO_COLOR keeps the shapes without backgrounds. *)
 let rgb hex = A.rgb_888 ~r:((hex lsr 16) land 0xff) ~g:((hex lsr 8) land 0xff)
   ~b:(hex land 0xff)
 let surface hex = if no_color then A.empty else A.bg (rgb hex)
@@ -467,8 +467,8 @@ let composer_bottom cols =
 
 let activity_frames =
   [| "⠋"; "⠙"; "⠹"; "⠸"; "⠼"; "⠴"; "⠦"; "⠧"; "⠇"; "⠏" |]
-(* The spinner advances every 80 ms like the reviewed loader; only the activity
-   row changes between frames and it is overwritten in place, never erased. *)
+(* The spinner advances every 80 ms; only the activity row changes between
+   frames, overwritten in place rather than erased. *)
 let activity_tick = 0.08
 
 let activity_tick_delay elapsed =
