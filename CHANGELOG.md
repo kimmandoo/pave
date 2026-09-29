@@ -1,6 +1,8 @@
 # Changelog
 
 ## 2026-09-29
+- fix(tui): toggled tool details and paged the transcript using the painted body height and transcript width, so a multi-line draft or active spinner no longer expanded an off-screen tool group.
+- perf(tools): read workspace-eval kernel frames in 64 KiB chunks and scanned only newly received bytes in both the host and the Node wrapper, and made DAP header search allocation-free, replacing quadratic buffering for large responses.
 - fix(tui): labeled the activity row `Responding` once streamed answer text arrived instead of leaving it at `Thinking`, keeping the turn timer.
 - feat(tui): advanced the activity spinner every 80 ms instead of once per second while keeping whole-second elapsed time and in-place, erase-free activity-row repaints.
 - feat(tui): redesigned transcript and composer after the reviewed dark theme: filled user bubbles, pending/settled/failed tool cards with colored `●`/`✗` markers, and a rounded composer box whose top rule carries version, model, saved state, workspace and usage while hints sit below it.

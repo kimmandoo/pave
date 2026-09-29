@@ -483,21 +483,23 @@ let rec validate_json depth json =
   | `String value -> if String.contains value '\000' then fail "DAP JSON contains a NUL byte"
   | `Null | `Bool _ | `Int _ | `Float _ -> ()
 
-let find_substring text needle =
+let find_substring ?(from = 0) text needle =
   let text_length = String.length text and needle_length = String.length needle in
+  let rec matches at index =
+    index = needle_length ||
+    (text.[at + index] = needle.[index] && matches at (index + 1)) in
   let rec search at =
     if at + needle_length > text_length then None
-    else if String.sub text at needle_length = needle then Some at
+    else if matches at 0 then Some at
     else search (at + 1)
   in
-  search 0
+  search from
 
 let split_crlf text =
   let rec loop start values =
-    match find_substring (String.sub text start (String.length text - start)) "\r\n" with
+    match find_substring ~from:start text "\r\n" with
     | None -> List.rev (String.sub text start (String.length text - start) :: values)
     | Some offset ->
-        let offset = start + offset in
         loop (offset + 2) (String.sub text start (offset - start) :: values)
   in
   if text = "" then [] else loop 0 []

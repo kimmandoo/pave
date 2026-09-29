@@ -1,5 +1,12 @@
 # Troubleshooting
 
+### [2026-09-29] Dune build reported `Unbound module "Pave"` on an unmodified tree
+
+- **Context / Symptom:** After an extra-warnings build into a separate `--build-dir` with `DUNE_CACHE=disabled`, `dune build @install` in the repo failed on every `pave__*` module with `File "command line", line 1: Error: Unbound module "Pave"`; `_build/default/lib/.pave.objs/byte/pave.cmi` was missing while `pave.ml-gen` existed. A stashed (clean) tree failed the same way.
+- **Root Cause:** The default `_build` tree was left inconsistent (library alias module not rebuilt); source was not at fault.
+- **Solution:** `dune clean && dune build @install` restored a green build.
+- **Prevention / Reference:** Run side builds from a copy of the tree, or run `dune clean` before trusting a failing `_build` after experimenting with `--build-dir`/`--workspace`.
+
 ### [2026-09-29] WSL host had no OCaml toolchain and rejected the Ollama PTY endpoint override
 
 - **Context / Symptom:** `opam: command not found` on the WSL host (no `_opam`, no `dune`, no sudo). A PTY fixture launched with `--provider ollama --endpoint http://127.0.0.1:18434/api/chat` displayed `Error: remote endpoint overrides are disabled; define a custom provider in user settings`.

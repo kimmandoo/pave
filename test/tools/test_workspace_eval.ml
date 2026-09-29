@@ -159,6 +159,12 @@ let () =
     let too_large = Eval.evaluate javascript "console.log('y'.repeat(70000))" in
     assert (String.length too_large.Eval.output = Eval.max_output_bytes);
     assert too_large.Eval.truncated;
+    (* A near-limit request spans several pipe reads; the next frame must still parse. *)
+    let padded = "/*" ^ String.make (Eval.max_source_bytes - 64) ' ' ^ "*/ 'big frame'" in
+    let big_frame = Eval.evaluate javascript padded in
+    assert (big_frame.Eval.error = None);
+    let after_big = Eval.evaluate javascript "console.log('after big')" in
+    assert (output after_big = "after big\n");
     let denied_import = Eval.evaluate javascript "require('node:fs')" in
     assert (Option.fold ~none:false
       ~some:(fun message -> contains message "package imports are disabled") denied_import.Eval.error);

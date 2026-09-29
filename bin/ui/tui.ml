@@ -698,9 +698,14 @@ let chooser_empty_message chooser =
   if chooser.filter <> "" then "No available models match this search"
   else "No available models yet"
 
+(* The last paint knows the real body height after the editor, activity and
+   attachment rows; the fixed estimate only covers the first frame. *)
 let view_height t =
-  let _, rows = Notty_unix.Term.size t.term in
-  max 1 (rows - 6)
+  match t.body_cache with
+  | Some (_, height, _, _) when height > 0 -> height
+  | _ ->
+      let _, rows = Notty_unix.Term.size t.term in
+      max 1 (rows - 6)
 
 (* Hint state belongs to the editor, never to the transcript or the modal chooser.
    A dismissed/inserted draft remains quiet until the user edits it again. *)
@@ -1728,14 +1733,17 @@ let rec next_input ?wake_fd t =
 
 let toggle_tool_detail t =
   let cols, rows = Notty_unix.Term.size t.term in
+  let cols = max 1 cols and rows = max 1 rows in
   let measure = measure_text in
+  let content_cols = if cols <= 4 then cols else cols - 4 in
   let layout = match t.layout_cache with
     | Some (width, revision, layout)
       when width = cols && revision = t.transcript.revision -> layout
-    | _ -> Transcript_view.snapshot t.transcript
-        ~columns:(if cols <= 6 then max 1 cols else cols - 5) ~measure in
+    | _ -> Transcript_view.snapshot t.transcript ~columns:content_cols ~measure in
   let visible = layout.total in
-  let height = max 1 (rows - 5) in
+  let height = match t.body_cache with
+    | Some (_, height, _, _) when height > 0 -> height
+    | _ -> max 1 (rows - 5) in
   let first = max 0 (visible - height - t.scroll) in
   let last = min visible (first + height) in
   let source_first = if first < visible then
@@ -1750,7 +1758,7 @@ let toggle_tool_detail t =
   | None -> ()
   | Some group ->
       let expanded = Transcript_view.snapshot t.transcript
-        ~columns:(if cols <= 6 then max 1 cols else cols - 5) ~measure in
+        ~columns:content_cols ~measure in
       let target = ref None in
       Array.iter (fun (entry : Transcript_view.entry) ->
         if entry.row.group = group &&

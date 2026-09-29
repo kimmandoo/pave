@@ -336,16 +336,24 @@ for _line in _PROTOCOL_IN:
 let javascript_wrapper = {|const fs = require("node:fs");
 const vm = require("node:vm");
 let pending = Buffer.alloc(0);
-const readBuffer = Buffer.allocUnsafe(4096);
+const readBuffer = Buffer.allocUnsafe(65536);
 const maxFrameBytes = 8 * 65536 + 16384;
 const readFrame = () => {
   let newline = pending.indexOf(10);
-  while (newline < 0) {
-    if (pending.length > maxFrameBytes) throw new Error("workspace protocol frame exceeded limit");
-    const count = fs.readSync(0, readBuffer, 0, readBuffer.length, null);
-    if (count === 0) return null;
-    pending = Buffer.concat([pending, readBuffer.subarray(0, count)]);
-    newline = pending.indexOf(10);
+  if (newline < 0) {
+    const chunks = [pending];
+    let length = pending.length;
+    while (newline < 0) {
+      if (length > maxFrameBytes) throw new Error("workspace protocol frame exceeded limit");
+      const count = fs.readSync(0, readBuffer, 0, readBuffer.length, null);
+      if (count === 0) return null;
+      const chunk = Buffer.from(readBuffer.subarray(0, count));
+      const found = chunk.indexOf(10);
+      if (found >= 0) newline = length + found;
+      chunks.push(chunk);
+      length += count;
+    }
+    pending = Buffer.concat(chunks, length);
   }
   if (newline > maxFrameBytes) throw new Error("workspace protocol frame exceeded limit");
   const line = pending.subarray(0, newline).toString("utf8");
@@ -571,7 +579,8 @@ type child = {
   pid : int;
   input_fd : Unix.file_descr;
   output_fd : Unix.file_descr;
-  mutable pending : string;
+  pending : Buffer.t;
+  mutable scanned : int;
   mutable stopped : bool;
 }
 
@@ -614,7 +623,7 @@ let spawn language =
         Unix.set_nonblock input_write;
         Unix.set_nonblock output_read;
         { pid; input_fd = input_write; output_fd = output_read;
-          pending = ""; stopped = false }
+          pending = Buffer.create 4096; scanned = 0; stopped = false }
   with exn ->
     close_fd input_read; close_fd input_write;
     close_fd output_read; close_fd output_write; close_fd null_fd;
@@ -629,20 +638,32 @@ let stop_child child =
     terminate_process child.pid;
     close_fd child.input_fd;
     close_fd child.output_fd;
-    child.pending <- "")
+    Buffer.reset child.pending;
+    child.scanned <- 0)
+
+(* Only bytes appended since the last scan are searched, so a large response
+   arriving in many reads costs linear rather than quadratic time. *)
+let rec find_newline buffer at =
+  if at >= Buffer.length buffer then None
+  else if Buffer.nth buffer at = '\n' then Some at
+  else find_newline buffer (at + 1)
 
 let read_line child deadline cancel =
   let rec extract () =
-    match String.index_opt child.pending '\n' with
+    match find_newline child.pending child.scanned with
     | Some index ->
         if index > max_protocol_frame_bytes then fail "workspace kernel response exceeded the protocol limit";
-        let line = String.sub child.pending 0 index in
-        child.pending <- String.sub child.pending (index + 1) (String.length child.pending - index - 1);
+        let line = Buffer.sub child.pending 0 index in
+        let rest = Buffer.sub child.pending (index + 1) (Buffer.length child.pending - index - 1) in
+        Buffer.reset child.pending;
+        Buffer.add_string child.pending rest;
+        child.scanned <- 0;
         if String.length line > 0 && line.[String.length line - 1] = '\r' then
           String.sub line 0 (String.length line - 1)
         else line
     | None ->
-        if String.length child.pending > max_protocol_frame_bytes then
+        child.scanned <- Buffer.length child.pending;
+        if Buffer.length child.pending > max_protocol_frame_bytes then
           fail "workspace kernel response exceeded the protocol limit";
         if cancel () then fail "workspace evaluation cancelled";
         let remaining = deadline -. Unix.gettimeofday () in
@@ -652,11 +673,11 @@ let read_line child deadline cancel =
           with Unix.Unix_error (Unix.EINTR, _, _) -> [], [], [] in
         if readable = [] then extract ()
         else
-          let bytes = Bytes.create 4096 in
+          let bytes = Bytes.create 65_536 in
           (try
              let count = Unix.read child.output_fd bytes 0 (Bytes.length bytes) in
              if count = 0 then fail "workspace kernel exited before returning a response";
-             child.pending <- child.pending ^ Bytes.sub_string bytes 0 count;
+             Buffer.add_subbytes child.pending bytes 0 count;
              extract ()
            with
            | Unix.Unix_error ((Unix.EINTR | Unix.EAGAIN | Unix.EWOULDBLOCK), _, _) -> extract ())
