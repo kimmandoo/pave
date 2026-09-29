@@ -33,17 +33,17 @@ jobs:
         if: matrix.os == 'ubuntu-24.04' && matrix.ocaml == '5.5.1'
         run: opam lint pave.opam
       - name: Run tests
-        run: opam exec -- dune runtest --force -j 1
+        shell: bash
+        run: |
+          set -o pipefail
+          opam exec -- dune runtest --force -j 1 2>&1 | tee test-results.log
       - name: Preserve failing test diagnostics
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: test-diagnostics-${{ matrix.os }}-${{ matrix.ocaml }}
-          path: |
-            _build/log
-            _build/default/**/*.log
-            _build/default/**/*.output
-          if-no-files-found: warn
+          path: test-results.log
+          if-no-files-found: error
       - name: Build installation artifacts
         run: opam exec -- dune build @install
       - name: Smoke CLI help
