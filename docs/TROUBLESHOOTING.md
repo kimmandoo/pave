@@ -1,5 +1,12 @@
 # Troubleshooting
 
+### [2026-09-29] Standalone shell command ignored installer environment
+
+- **Context / Symptom:** A v0.1.70 installation meant for a private release-upgrade directory instead printed `Installed pave to /Users/mingyu/.local/bin/pave`; the expected private executable was absent.
+- **Root Cause:** The command runner ignored its `env` argument for a standalone command (reporting `Ignored env: service-only, and no service name was given`), so `PAVE_INSTALL_DIR` and `PAVE_VERSION` never reached `install.sh`. The installer used its default destination.
+- **Solution:** Passed `PAVE_VERSION=v0.1.70 PAVE_INSTALL_DIR=/absolute/private/bin` as inline shell assignments to `sh install.sh`; the separately installed binary then reported the expected providers and v0.1.70 as current.
+- **Prevention / Reference:** For one-off shell commands, pass required variables in the command itself and verify the installer's printed destination before invoking an isolated binary. The default user installation was also written during this session; its previous state was not recorded.
+
 ### [2026-09-29] Printed unified diffs lost their patch semantics in the TUI
 
 - **Context / Symptom:** A raw `run_command` diff displayed `Status: exit 0` as its collapsed preview and parsed `- old` as a Markdown bullet when expanded; fenced `diff` output rendered all lines as identical code. A focused failure-before transcript test reproduced the missing addition/deletion distinction.

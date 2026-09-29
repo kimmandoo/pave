@@ -1,6 +1,7 @@
 # Changelog
 
 ## 2026-09-29
+- release(distribution): published v0.1.71 after four hosted CI and four native release jobs passed; verified all four downloaded checksums and archive members, exercised the macOS executable, and updated an isolated v0.1.70 installation to v0.1.71 before uninstalling it.
 - feat(tui): styled fenced and printed unified diffs with distinct file, hunk, addition, removal and context rows; preserved patch markers in monochrome and previewed changed files instead of command status in collapsed tool cards.
 - feat(mobile): added individually approved Android AVD and ADB inventory for an exact Gradle settings root; reported configured AVDs separately from ready emulators, marked offline/unauthorized transports unavailable and withheld physical serials without SDK installation or emulator boot.
 - fix(mobile): parsed Xcode 27 compatible/incompatible destination headings so real iOS Simulator UUIDs were selectable without admitting physical, placeholder or incompatible devices; corrected the disposable project’s generated Info.plist.
