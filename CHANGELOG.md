@@ -1,6 +1,7 @@
 # Changelog
 
 ## 2026-09-29
+- feat(mobile): mapped declared React Native/Expo scripts, observed lockfiles and native host roots, and withheld command suggestions when package managers conflicted or no lockfile existed; removed implicit `npx expo export`.
 - feat(mobile): classified bounded Flutter plugin, app, package and plain Dart pubspec evidence, reported only observed native host roots and removed speculative Flutter build commands.
 - fix(tui): toggled tool details and paged the transcript using the painted body height and transcript width, so a multi-line draft or active spinner no longer expanded an off-screen tool group.
 - perf(tools): read workspace-eval kernel frames in 64 KiB chunks and scanned only newly received bytes in both the host and the Node wrapper, and made DAP header search allocation-free, replacing quadratic buffering for large responses.

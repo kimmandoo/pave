@@ -955,6 +955,7 @@ let mobile_project ?cancel root =
   let candidates = ref [] and candidate_count = ref 0
   and truncated = ref false in
   let directories = Hashtbl.create 256 in
+  let lockfiles = Hashtbl.create 32 in
   Hashtbl.replace directories "." ();
   let add_candidate candidate =
     if !candidate_count < max_candidates then (
@@ -1015,6 +1016,13 @@ let mobile_project ?cancel root =
         add_regular relative (fun _ -> Gradle_wrapper relative)
     | "pubspec.yaml" -> add_regular relative (fun _ -> Pubspec_manifest relative)
     | "package.json" -> add_regular relative (fun _ -> Node_manifest relative)
+    | "package-lock.json" | "npm-shrinkwrap.json" | "yarn.lock"
+    | "pnpm-lock.yaml" as name ->
+        (try
+           let absolute = Workspace_path.checked_path root relative in
+           if (Unix.lstat absolute).Unix.st_kind = Unix.S_REG then
+             Hashtbl.replace lockfiles relative name
+         with Unix.Unix_error _ | Workspace_path.Error _ -> ())
     | name when Filename.check_suffix name ".xcscheme" ->
         add_shared_scheme relative
     | _ -> () in
@@ -1242,24 +1250,67 @@ let mobile_project ?cancel root =
                   let has_dependency name =
                     List.exists (fun section ->
                       match field section json with
-                      | `Assoc entries -> List.mem_assoc name entries
+                      | `Assoc entries ->
+                          (match List.assoc_opt name entries with
+                           | Some (`String _) -> true | _ -> false)
                       | _ -> false) ["dependencies"; "devDependencies"] in
-                  let scripts = field "scripts" json in
-                  let has_script name =
-                    match scripts with
-                    | `Assoc entries -> List.mem_assoc name entries
-                    | _ -> false in
-                  let script_commands =
-                    (if has_script "build" then ["npm run build"] else []) @
-                    (if has_script "test" then ["npm test"] else []) in
-                  if has_dependency "expo" then
-                    add_stack ("Expo: " ^ path)
-                      (List.map (command_in path)
-                        ("npx expo export" :: script_commands))
-                  else if has_dependency "react-native" then
-                    add_stack ("React Native: " ^ path ^
-                      " (use Xcode/Gradle above for native builds)")
-                      (List.map (command_in path) script_commands)
+                  let package_root = directory path in
+                  let locks = Hashtbl.fold (fun file name found ->
+                    if directory file = package_root then (file, name) :: found
+                    else found) lockfiles [] |> List.sort compare in
+                  let manager = function
+                    | "package-lock.json" | "npm-shrinkwrap.json" -> "npm"
+                    | "yarn.lock" -> "yarn"
+                    | "pnpm-lock.yaml" -> "pnpm"
+                    | _ -> assert false in
+                  let choices = List.sort_uniq String.compare
+                    (List.map (fun (_, name) -> manager name) locks) in
+                  let selection = match choices with
+                    | [choice] -> Some choice | _ -> None in
+                  let scripts = match field "scripts" json with
+                    | `Assoc entries -> List.filter_map (function
+                        | name, `String _ -> Some name | _ -> None) entries
+                    | _ -> [] in
+                  let commands = match selection with
+                    | None -> []
+                    | Some manager ->
+                        List.filter_map (fun name ->
+                          if List.mem name scripts then
+                            Some (command_in path
+                              (if manager = "npm" then
+                                 "npm run " ^ shell_quote name
+                               else manager ^ " " ^ shell_quote name))
+                          else None) ["test"; "lint"; "build"] in
+                  let hosts = List.filter_map (fun name ->
+                    let host = join_relative package_root name in
+                    if Hashtbl.mem directories host then
+                      Some ("  Existing " ^ name ^ " host root: " ^ host)
+                    else None) ["ios"; "android"] in
+                  let kind = if has_dependency "expo" then Some "Expo"
+                    else if has_dependency "react-native" then
+                      Some "React Native" else None in
+                  (match kind with
+                   | None -> ()
+                   | Some kind ->
+                       let lock_lines = match locks with
+                         | [] -> ["  Package manager unknown: no lockfile; choose explicitly."]
+                         | locks ->
+                             List.map (fun (file, _) -> "  Lockfile: " ^ file)
+                               locks @
+                             (match selection with
+                              | Some name -> ["  Package manager: " ^ name]
+                              | None -> ["  Conflicting lockfiles: choose a package manager explicitly; no commands suggested."]) in
+                       let script_lines = if scripts = [] then
+                           ["  Declared scripts: none."]
+                         else List.map (fun name ->
+                           "  Declared script: " ^ name) scripts in
+                       add_stack
+                         (String.concat "\n"
+                           (("  " ^ kind ^ ": " ^ path) ::
+                            ("  Package root: " ^ relative_label package_root) ::
+                            lock_lines @ hosts @ script_lines @
+                            ["  Native build, SDK and script effects remain unverified."]))
+                         commands)
               | _ -> add_diagnostic
                   ("Ignored invalid mobile manifest: " ^ path ^
                    " (no commands suggested).")
@@ -2235,7 +2286,7 @@ let definitions = [
     ["encoding", enum_string_field "Exact tiktoken encoding" ["cl100k_base"; "o200k_base"];
      "text", bounded_string_field "Text to count (maximum 1 MiB)" Native_tokenizer.max_input_bytes]
     ["encoding"; "text"];
-  schema "mobile_project" "Inventory bounded mobile manifests and map SwiftPM test roots, literal Gradle modules and conventional source roots, and Flutter pubspec kind and observed native host roots; never execute project code or infer build readiness."
+  schema "mobile_project" "Inventory bounded mobile manifests: map SwiftPM test roots, static Gradle modules, Flutter pubspec/hosts and React Native/Expo declared scripts, lockfile choice and native hosts; never execute project code or infer build readiness."
     [] [];
   schema "read_file" "Read bounded workspace files, directories, documents, archives, notebooks, SQLite, owned artifacts, managed worktrees, or public HTTPS URLs. HTTPS fetches send no credentials and require approval."
     ["path", string_field "Workspace-relative path or supported local://, artifact://, worktree://, or HTTPS source";

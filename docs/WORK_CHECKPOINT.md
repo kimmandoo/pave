@@ -1,11 +1,13 @@
 # Work checkpoint
 
 - **Date:** 2026-09-29
-- **Completed task:** M05 Flutter pubspec and native-host evidence map. `mobile_project` classifies literal Flutter SDK dependencies and plugin declarations, distinguishes host-bearing apps from hostless packages and plain Dart, and emits only scanned host roots without speculative Flutter commands.
+- **Completed task:** M06 React Native/Expo manifest, script, lockfile and host map. `mobile_project` reads bounded package dependency/script evidence, maps regular lockfiles next to the package, refuses ambiguous/no-lock manager command suggestions and shows only scanned native host roots. Removed implicit `npx expo export`.
 - **Changed files this session:** `lib/tools/tools.ml`, `test/tools/test_tools.ml`, `TASKS.md`, `docs/MOBILE_DEVELOPMENT_PLAN.md`, `docs/DESIGN_RULES.md`, `README.md`, `CHANGELOG.md`, `docs/WORK_CHECKPOINT.md`. No strategy code/default/selection changed; no backtest applies.
-- **Verification:** Focused actual `mobile_project` tool execution in `opam exec -- dune exec ./test/test_tools.exe` passed with Flutter plugin/app/package and misleading Dart fixtures; full `opam exec -- dune runtest --force -j 1`, `opam exec -- dune build @install` and `git diff --check` passed. No Flutter SDK/build was claimed or executed.
-- **Next action:** M06 React Native/Expo script, lockfile and host map; M07 onward remain open.
-- **Blockers / limits:** Pubspec evidence is deliberately limited to literal conventional sections, not a full YAML evaluation; platform SDK readiness remains unknown.
+- **Verification:** `opam exec -- dune exec ./test/test_tools.exe` exercised actual `mobile_project` tool output for a Yarn RN package, conflicting npm/pnpm Expo locks without a command suggestion, absent test script, and unrelated plain Node package. Full `opam exec -- dune runtest --force -j 1`, `opam exec -- dune build @install` and `git diff --check` passed. No package script, install, native build or SDK ran.
+- **Next action:** M07 mixed-stack root/platform selection; M08 onward remain open.
+- **Blockers / limits:** Lockfile presence is filesystem evidence, not proof the selected manager or dependencies are installed.
+
+- **Previous M05 task:** Classified bounded Flutter plugin/app/package/plain Dart manifests and observed native host roots without speculative build commands. Focused tool regression, full `dune runtest --force -j 1`, install build and diff check passed; no Flutter SDK/build was run.
 
 - **Previous TUI session:** Redesigned interactive transcript/composer with filled bubbles, tool cards, and rounded four-row chrome; then moved spinner cadence to 80 ms and corrected streamed text status to `Responding`. The 100×30, 60×16, 40×12 and 10×5 PTYs verified layouts and fallback; the delayed loopback fixture observed 118 spinner frames in ~9.5 s at ~0.4% CPU.
 - **Previous performance review:** Linearized workspace-eval host/Node frame scanning, removed DAP header scan allocations, and corrected TUI tool-detail sizing against painted body height. `dune build @install`, full `dune runtest --force -j 1` and `git diff --check` passed; a 90×24 PTY exercised a four-line draft.

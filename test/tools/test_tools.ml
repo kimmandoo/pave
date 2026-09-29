@@ -701,7 +701,19 @@ let package = Package(name: "fixture", targets: targets)
       "name: library\ndependencies:\n  flutter:\n    sdk: flutter\n";
     directory "packages/react-native";
     create "packages/react-native/package.json"
-      {|{"dependencies":{"react-native":"1"},"scripts":{"test":"test"}}|};
+      {|{"dependencies":{"react-native":"1"},"scripts":{"test":"jest"}}|};
+    create "packages/react-native/yarn.lock" "# fixture\n";
+    directory "packages/react-native/ios";
+    directory "packages/expo";
+    create "packages/expo/package.json"
+      {|{"dependencies":{"expo":"52","react-native":"0.76"},"scripts":{"lint":"eslint ."}}|};
+    create "packages/expo/package-lock.json" "{}";
+    create "packages/expo/pnpm-lock.yaml" "lockfileVersion: '9.0'\n";
+    directory "packages/expo/android";
+    directory "packages/plain-node";
+    create "packages/plain-node/package.json"
+      {|{"description":"expo","scripts":{"test":"echo no"}}|};
+    create "packages/plain-node/package-lock.json" "{}";
     directory "android";
     create "android/settings.gradle.kts"
       {|rootProject.name = "nested"
@@ -835,6 +847,23 @@ other.include(":not-a-gradle-module")
     assert (contains mobile "Dart package: packages/dart/pubspec.yaml");
     assert (not (contains mobile "Flutter app: packages/dart"));
     assert (not (contains mobile "flutter build"));
+    assert (contains mobile "React Native: packages/react-native/package.json");
+    assert (contains mobile "Lockfile: packages/react-native/yarn.lock");
+    assert (contains mobile "Package manager: yarn");
+    assert (contains mobile "Existing ios host root: packages/react-native/ios");
+    assert (contains mobile "cd 'packages/react-native' && yarn 'test'");
+    assert (contains mobile "Expo: packages/expo/package.json");
+    assert (contains mobile "Lockfile: packages/expo/package-lock.json");
+    assert (contains mobile "Lockfile: packages/expo/pnpm-lock.yaml");
+    assert (contains mobile "Conflicting lockfiles: choose a package manager explicitly");
+    assert (contains mobile "Declared script: lint");
+    assert (contains mobile "Existing android host root: packages/expo/android");
+    assert (not (contains mobile "npm run 'lint'"));
+    assert (not (contains mobile "pnpm 'lint'"));
+    assert (not (contains mobile "pnpm 'test'"));
+    assert (not (contains mobile "npx expo"));
+    assert (not (contains mobile "plain-node/package.json"));
+    assert (not (contains mobile "yarn 'build'"));
     directory "many";
     for index = 0 to 100 do
       let project = Printf.sprintf "many/Project%03d.xcodeproj" index in
