@@ -3378,6 +3378,8 @@ let () =
           | Pave.Turn_runner.Transcript_message { text; _ } ->
               Tui.event screen text
           | Pave.Turn_runner.Text_delta { text; _ } ->
+              (* Visible answer text means the model has moved past thinking. *)
+              Tui.set_activity screen (Some "Responding");
               Tui.delta screen text
           | Pave.Turn_runner.Activity_phase { phase; _ } ->
               (match phase with
