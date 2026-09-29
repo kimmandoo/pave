@@ -8,6 +8,7 @@ let max_matches = 100
 let max_regex_line = 4096
 
 exception Tool_error of string
+
 type session_context = {
   owner : string;
   process_manager : Workspace_process.manager;
@@ -20,6 +21,8 @@ type session_context = {
   mutable javascript_kernel : Workspace_eval.t option;
   ssh_lock : Mutex.t;
   ssh_sessions : (string, Workspace_ssh.session) Hashtbl.t;
+  xcode_lock : Mutex.t;
+  mutable xcode_discovery : Workspace_xcode.discovery option;
   record_file_change : path:string -> before:string -> after:string -> unit;
   mutable closed : bool;
 }
@@ -78,12 +81,16 @@ let create_session_context ?lsp_manager ~owner ~root ~process_manager ~read_arti
     dap_manager; dap_granted_effect;
     eval_lock = Mutex.create (); python_kernel = None; javascript_kernel = None;
     ssh_lock = Mutex.create (); ssh_sessions = Hashtbl.create 8;
+    xcode_lock = Mutex.create (); xcode_discovery = None;
     record_file_change; closed = false }
 
 let close_session_context context =
   if not context.closed then (
     context.closed <- true;
     context.dap_granted_effect := None;
+    Mutex.lock context.xcode_lock;
+    context.xcode_discovery <- None;
+    Mutex.unlock context.xcode_lock;
     let ignore_failure action = try action () with _ -> () in
     ignore_failure (fun () -> Workspace_lsp.close_manager context.lsp_manager);
     ignore_failure (fun () -> Workspace_dap.close_manager context.dap_manager);
@@ -1120,9 +1127,7 @@ let mobile_project ?cancel root args =
   let gradle_wrappers = List.filter_map (function
     | Gradle_wrapper path -> Some path
     | _ -> None) candidates in
-  let render_xcode kind flag bundle manifest =
-    let name = Filename.basename bundle in
-    let target = flag ^ " " ^ shell_quote name in
+  let render_xcode kind bundle manifest =
     let schemes = Option.value (Hashtbl.find_opt schemes_by_bundle bundle)
       ~default:[] |> List.sort String.compare in
     let scheme_name path =
@@ -1136,13 +1141,10 @@ let mobile_project ?cancel root args =
           String.concat "\n" (List.map (fun path ->
             "  Candidate shared scheme: " ^ scheme_name path ^
             " (" ^ path ^ ")") paths) in
-    let scheme_commands = List.concat_map (fun path ->
-      let scheme = shell_quote (scheme_name path) in
-      let target = target ^ " -scheme " ^ scheme in
-      [command_in bundle ("xcodebuild " ^ target ^ " build");
-       command_in bundle ("xcodebuild " ^ target ^ " test")]) schemes in
-    add_stack ("Xcode " ^ kind ^ ": " ^ manifest ^ "\n" ^ provenance)
-      (command_in bundle ("xcodebuild -list " ^ target) :: scheme_commands) in
+    add_stack
+      ("Xcode " ^ kind ^ ": " ^ manifest ^ "\n" ^ provenance ^
+       "\n  Use separately approved xcode_preflight schemes, destinations, then build/test; candidate filenames are not verified schemes.")
+      [] in
 
   let render_gradle settings_path =
     let parent = directory settings_path in
@@ -1207,9 +1209,9 @@ let mobile_project ?cancel root args =
     current := Some candidate;
     match candidate with
     | Xcode_workspace (bundle, manifest) ->
-        render_xcode "workspace" "-workspace" bundle manifest
+        render_xcode "workspace" bundle manifest
     | Xcode_project (bundle, manifest) ->
-        render_xcode "project" "-project" bundle manifest
+        render_xcode "project" bundle manifest
     | Swift_package path ->
         (match read_manifest path with
         | None -> add_diagnostic
@@ -1398,6 +1400,113 @@ let run_command ?cancel ?on_progress root args =
   Printf.sprintf "Status: %s%s\n%s" status
     (if result.truncated then " (output truncated to last 65536 bytes)" else "")
     result.output
+let xcode_command args =
+  let bundle = required_string "subroot" args in
+  let action = required_string "action" args in
+  let flag = if Filename.check_suffix bundle ".xcworkspace" then "-workspace"
+    else if Filename.check_suffix bundle ".xcodeproj" then "-project"
+    else fail "select an exact Xcode workspace or project bundle" in
+  let prefix = "xcodebuild " ^ flag ^ " " ^
+    shell_quote (Filename.basename bundle) in
+  let scheme = optional_string "scheme" "" args in
+  match action with
+  | "schemes" -> prefix ^ " -list -json"
+  | "destinations" ->
+      if scheme = "" then fail "select a discovered scheme";
+      prefix ^ " -scheme " ^ shell_quote scheme ^ " -showdestinations"
+  | "build" | "test" ->
+      let destination = required_string "destination" args in
+      if scheme = "" || destination = "" then
+        fail "select a discovered scheme and simulator destination";
+      prefix ^ " -scheme " ^ shell_quote scheme ^
+      " -destination " ^
+      shell_quote ("platform=iOS Simulator,id=" ^ destination) ^
+      " CODE_SIGNING_ALLOWED=NO " ^ action
+  | _ -> fail "unsupported Xcode preflight action"
+
+let xcode_preflight ~approved ?cancel ?on_progress ?context root args =
+  if not approved then fail "this action requires explicit interactive approval";
+  let context = require_session_context context in
+  let bundle = required_string "subroot" args in
+  let action = required_string "action" args in
+  let command = xcode_command args in
+  let manifest = Filename.concat bundle
+    (if Filename.check_suffix bundle ".xcworkspace" then
+      "contents.xcworkspacedata" else "project.pbxproj") in
+  let file = Workspace_path.checked_path root manifest in
+  let stat = Unix.lstat file in
+  if stat.Unix.st_kind <> Unix.S_REG || stat.Unix.st_size > max_write_bytes then
+    fail "selected Xcode bundle has no bounded regular manifest";
+  let manifest_hash = Digestif.SHA256.(
+    to_hex (digest_string (Workspace_path.read_bounded file max_write_bytes))) in
+  let observed = ref false in
+  let truncated = walk ?cancel ~hidden:true ~visit_directory:(fun path _ ->
+    if path = bundle then observed := true) root "." (fun _ _ -> ()) in
+  if truncated || not !observed then
+    fail "selected Xcode bundle is not a scanned workspace project";
+  let scheme = optional_string "scheme" "" args in
+  Mutex.lock context.xcode_lock;
+  Fun.protect ~finally:(fun () -> Mutex.unlock context.xcode_lock) (fun () ->
+    check_session_context context;
+    if action = "schemes" then context.xcode_discovery <- None
+    else (
+      let discovery = match context.xcode_discovery with
+        | Some state when state.bundle = bundle && state.root = root -> state
+        | _ -> fail "approve scheme discovery for this exact Xcode bundle first" in
+      if discovery.manifest_hash <> manifest_hash then (
+        context.xcode_discovery <- None;
+        fail "Xcode manifest changed since discovery; discover schemes again");
+      if not (List.mem scheme discovery.schemes) then
+        fail "scheme was not discovered for this Xcode bundle";
+      if action = "build" || action = "test" then
+        let destination = required_string "destination" args in
+        if not (List.mem destination
+          (Option.value ~default:[]
+            (List.assoc_opt scheme discovery.destinations))) then
+          fail "simulator destination was not discovered for this scheme");
+    let cwd = Filename.dirname (Workspace_path.checked_path root bundle) in
+    let result = Workspace_process.run_shell ?cancel ?on_progress
+      ~timeout_seconds:(optional_int "timeout_seconds" 120
+        ~minimum:1 ~maximum:300 args)
+      ~output_limit:max_command_bytes ~cwd:(Some cwd) ~command () in
+    let outcome = match result.termination with
+      | Workspace_process.Exited code -> Printf.sprintf "exit %d" code
+      | Workspace_process.Signaled signal -> Printf.sprintf "signal %d" signal
+      | Workspace_process.Timed_out -> "timed out"
+      | Workspace_process.Cancelled -> raise Cancelled in
+    let successful = result.termination = Workspace_process.Exited 0 &&
+      not result.truncated in
+    if action = "schemes" then (
+      if successful then (
+        let schemes = Workspace_xcode.schemes result.output in
+        context.xcode_discovery <- Some
+          { Workspace_xcode.root; bundle; manifest_hash; schemes; destinations = [] };
+        "Xcode scheme discovery: " ^ outcome ^ "\nVerified schemes: " ^
+        (if schemes = [] then
+           "none; select another project/workspace or configure a shared scheme"
+         else String.concat ", " schemes))
+      else "Xcode scheme discovery: " ^ outcome ^
+        (if result.truncated then " (output truncated)" else "") ^
+        "\n" ^ result.output)
+    else if action = "destinations" then (
+      let discovery = Option.get context.xcode_discovery in
+      discovery.destinations <- List.remove_assoc scheme discovery.destinations;
+      if successful then (
+        let destinations = Workspace_xcode.destinations result.output in
+        discovery.destinations <- (scheme, destinations) ::
+          discovery.destinations;
+        "Xcode destination discovery: " ^ outcome ^
+        "\nAvailable iOS Simulator IDs: " ^
+        (if destinations = [] then
+           "none; select another scheme or make a compatible simulator runtime available"
+         else String.concat ", " destinations))
+      else "Xcode destination discovery: " ^ outcome ^
+        (if result.truncated then " (output truncated)" else "") ^
+        "\n" ^ result.output)
+    else "Xcode " ^ action ^ ": " ^ outcome ^
+      (if result.truncated then " (output truncated)" else "") ^
+      "\n" ^ result.output)
+
 let string_list name args =
   match field name args with
   | `List values ->
@@ -2213,12 +2322,12 @@ let repository_security_scan ?cancel root args =
   | _ -> fail "format must be summary or sarif"
 
 let is_shell_tool = function
-  | "run_command" | "start_process" | "start_shell" -> true
+  | "run_command" | "start_process" | "start_shell" | "xcode_preflight" -> true
   | _ -> false
 
 let requires_explicit_approval ~name ~args =
   match name with
-  | "run_command" | "start_process" | "start_shell"
+  | "run_command" | "start_process" | "start_shell" | "xcode_preflight"
   | "process_stdin" | "process_close_stdin" | "process_kill"
   | "worktree_create" | "worktree_commit" | "worktree_remove"
   | "web_search" | "web_fetch" | "image_ocr"
@@ -2242,7 +2351,7 @@ let requires_explicit_approval ~name ~args =
 
 let non_reversible_tool ~name ~args =
   match name with
-  | "run_command" | "start_process" | "start_shell"
+  | "run_command" | "start_process" | "start_shell" | "xcode_preflight"
   | "process_stdin" | "process_close_stdin" | "process_kill"
   | "worktree_create" | "worktree_commit" | "worktree_remove"
   | "lsp_start" | "dap_start" | "ssh_open" | "ssh_read"
@@ -2345,6 +2454,13 @@ let definitions = [
   schema "mobile_project" "Inventory bounded mobile stacks; choose an exact subroot and ios/android platform before suggesting a focused inert command. Nested framework hosts cannot select a neighboring native build."
     ["subroot", string_field "Exact workspace-relative project root (Xcode bundle path for Xcode); supply with platform";
      "platform", enum_string_field "Chosen host platform" ["ios"; "android"]] [];
+  schema "xcode_preflight" "Run one explicitly approved Xcode scheme discovery, simulator destination discovery, or selected non-signing build/test. Each action evaluates project code and needs its own interactive approval; never installs an SDK or guesses a destination."
+    ["action", enum_string_field "One approved phase" ["schemes"; "destinations"; "build"; "test"];
+     "subroot", string_field "Exact scanned Xcode .xcworkspace or .xcodeproj bundle";
+     "scheme", string_field "Exact scheme returned by approved discovery";
+     "destination", string_field "Exact available iOS Simulator ID returned for this scheme";
+     "timeout_seconds", integer_field "Per-command deadline (default 120 seconds)" 1 300]
+    ["action"; "subroot"];
   schema "read_file" "Read bounded workspace files, directories, documents, archives, notebooks, SQLite, owned artifacts, managed worktrees, or public HTTPS URLs. HTTPS fetches send no credentials and require approval."
     ["path", string_field "Workspace-relative path or supported local://, artifact://, worktree://, or HTTPS source";
      "offset", integer_field "Byte offset for ordinary local text files (default 0; exclusive with line)" 0 max_int;
@@ -2773,6 +2889,12 @@ let approval_request ?cancel ?context ~root ~name ~args (decision : Approval.dec
          "Result SHA-256: " ^ preview.result_sha256;
          "Operation: " ^ ast_operation_text operation;
          "Proposed content: " ^ Printf.sprintf "%S" (preview_text preview.content)]
+    | "xcode_preflight" ->
+        let command = xcode_command args in
+        "Executes one Xcode command against the selected project as your user; project configuration is untrusted executable code. Discovery and build/test require separate approvals.",
+        ["Working directory: parent of " ^ quoted "subroot" "(missing)" args;
+         "Exact command: " ^ command;
+         "Build/test may write derived data; simulator tests may launch a simulator. No signing or physical-device destination is selected."]
     | "run_command" ->
         "Runs /bin/sh as your user from the workspace root. It is not sandboxed and may access or modify files outside the workspace or use the network.",
         ["Working directory: " ^ Printf.sprintf "%S" base_root;
@@ -3037,7 +3159,7 @@ let session_tool_names = [
   "worktree_history"; "worktree_create"; "worktree_commit"; "worktree_remove";
   "lsp_start"; "lsp"; "workspace_eval";
   "ssh_open"; "ssh_close"; "ssh_read"; "ssh_write"; "ssh_command";
-  "dap_start"; "dap"
+  "dap_start"; "dap"; "xcode_preflight"
 ]
 
 let path_tool_names = [
@@ -3053,7 +3175,8 @@ let error_message = function
   | Web_search.Error message | Native_services.Error message
   | Workspace_lsp.Error message | Workspace_dap.Error message
   | Workspace_dap.Not_approved message | Workspace_eval.Error message
-  | Workspace_ssh.Error message | Native_tokenizer.Error message ->
+  | Workspace_ssh.Error message | Native_tokenizer.Error message
+  | Workspace_xcode.Error message ->
       "Error: " ^ message
   | Workspace_dap.Cancelled -> "Error: DAP operation cancelled"
   | Unix.Unix_error (code, operation, path) ->
@@ -3106,6 +3229,8 @@ let prepare ?cancel ?context ~root ~name ~args () =
           | "apply_edits" -> apply_edits ?cancel ?context tool_root tool_args
           | "ast_edit" -> ast_edit ?cancel ?context tool_root tool_args
           | "run_command" -> run_command ?cancel ?on_progress root args
+          | "xcode_preflight" ->
+              xcode_preflight ~approved ?cancel ?on_progress ?context root args
           | "start_process" -> start_process ~approved ?cancel ?context root args
           | "start_shell" -> start_shell ~approved ?cancel ?context root args
           | "process_list" -> process_list ?context root args

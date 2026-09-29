@@ -793,15 +793,15 @@ other.include(":not-a-gradle-module")
     let selected_xcode = tool root "mobile_project"
       ["subroot", "ios/App.xcodeproj"; "platform", "ios"] in
     assert (contains selected_xcode
-      "cd 'ios' && xcodebuild -project 'App.xcodeproj' -scheme 'AppShared' build");
-    assert (contains selected_xcode
-      "cd 'ios' && xcodebuild -project 'App.xcodeproj' -scheme 'AppShared' test");
+      "Use separately approved xcode_preflight schemes, destinations, then build/test");
+    assert (not (contains selected_xcode "xcodebuild -project"));
     assert (contains mobile
       "Xcode workspace: ios/Workspace.xcworkspace/contents.xcworkspacedata");
     let selected_workspace = tool root "mobile_project"
       ["subroot", "ios/Workspace.xcworkspace"; "platform", "ios"] in
     assert (contains selected_workspace
-      "cd 'ios' && xcodebuild -workspace 'Workspace.xcworkspace' -scheme 'WorkspaceFlow' test");
+      "Candidate shared scheme: WorkspaceFlow");
+    assert (not (contains selected_workspace "xcodebuild -workspace"));
     assert (not (contains selected_workspace
       "cd 'ios' && xcodebuild -project 'Core.xcodeproj' -scheme 'CoreShared' build"));
     assert (not (contains mobile
@@ -911,6 +911,78 @@ other.include(":not-a-gradle-module")
     assert (not (contains mobile "npx expo"));
     assert (not (contains mobile "plain-node/package.json"));
     assert (not (contains mobile "yarn 'build'"));
+    assert (Pave.Workspace_xcode.schemes
+      {|{"workspace":{"schemes":["Flow","Review"]}}|} =
+      ["Flow"; "Review"]);
+    assert (try ignore (Pave.Workspace_xcode.schemes
+      {|{"project":{"schemes":["Flow","Flow"]}}|}); false
+      with Pave.Workspace_xcode.Error _ -> true);
+    assert (Pave.Workspace_xcode.destinations
+      "Available destinations:\n  { platform:iOS Simulator, id:12345678-1234-1234-1234-123456789abc, name:Phone }\nIneligible destinations:\n  { platform:iOS Simulator, id:aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa, error:runtime }\n" =
+      ["12345678-1234-1234-1234-123456789abc"]);
+    let xcode_args action more = `Assoc
+      (["action", `String action;
+        "subroot", `String "ios/App.xcodeproj"] @ more) in
+    let xcode ?(approved = false) action more =
+      Pave.Tools.execute ~root ~context:tool_context ~approved
+        ~name:"xcode_preflight" ~args:(xcode_args action more) () in
+    let scheme = ["scheme", `String "AppShared"] in
+    let destination =
+      ["destination", `String "12345678-1234-1234-1234-123456789abc"] in
+    assert (contains (xcode "schemes" []) "explicit interactive approval");
+    assert (contains (xcode ~approved:true "destinations" scheme)
+      "approve scheme discovery");
+    assert (contains (xcode ~approved:true "build" (scheme @ destination))
+      "approve scheme discovery");
+    assert (Pave.Tools.requires_explicit_approval
+      ~name:"xcode_preflight" ~args:(xcode_args "schemes" []));
+    let xcode_preview = Pave.Tools.approval_request ~root
+      ~name:"xcode_preflight" ~args:(xcode_args "schemes" [])
+      (Pave.Tools.approval_decision ~command_patterns:[]
+        ~name:"xcode_preflight" ~args:(xcode_args "schemes" [])) in
+    assert (contains (String.concat "\n" xcode_preview.details)
+      "xcodebuild -project 'App.xcodeproj' -list -json");
+    let prior_path = Sys.getenv_opt "PATH" in
+    Fun.protect ~finally:(fun () ->
+      Unix.putenv "PATH" (Option.value prior_path ~default:"")) (fun () ->
+      Unix.putenv "PATH" (Filename.concat root "missing-xcode");
+      assert (contains (xcode ~approved:true "schemes" [])
+        "Xcode scheme discovery: exit 127");
+      assert (contains (xcode ~approved:true "destinations" scheme)
+        "approve scheme discovery"));
+    directory "fake-xcode-bin";
+    create "fake-xcode-bin/xcodebuild" {|#!/bin/sh
+case " $* " in
+  *" -list -json "*) printf '%s\n' '{"project":{"schemes":["AppShared"]}}' ;;
+  *" -showdestinations "*) printf '%s\n' 'Available destinations for the \"AppShared\" scheme:' '  { platform:iOS Simulator, id:12345678-1234-1234-1234-123456789abc, OS:17.0, name:iPhone }' 'Ineligible destinations for the \"AppShared\" scheme:' '  { platform:iOS Simulator, id:aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa, error:missing runtime }' ;;
+  *" build "*) printf '%s\n' 'fixture build failed'; exit 7 ;;
+  *) printf '%s\n' 'unexpected xcodebuild invocation'; exit 8 ;;
+esac
+|};
+    Unix.chmod (Filename.concat root "fake-xcode-bin/xcodebuild") 0o700;
+    let saved_path = Sys.getenv_opt "PATH" in
+    Fun.protect ~finally:(fun () ->
+      Unix.putenv "PATH" (Option.value saved_path ~default:"")) (fun () ->
+      Unix.putenv "PATH" (Filename.concat root "fake-xcode-bin" ^ ":" ^
+        Option.value saved_path ~default:"/usr/bin:/bin");
+      assert (contains (xcode ~approved:true "schemes" [])
+        "Verified schemes: AppShared");
+      assert (contains (xcode ~approved:true "destinations"
+        ["scheme", `String "Wrong"]) "scheme was not discovered");
+      assert (contains (xcode ~approved:true "destinations" scheme)
+        "Available iOS Simulator IDs: 12345678-1234-1234-1234-123456789abc");
+      assert (contains (xcode ~approved:true "build"
+        (scheme @ ["destination", `String
+          "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"]))
+        "destination was not discovered");
+      let build = xcode ~approved:true "build" (scheme @ destination) in
+      assert (contains build "Xcode build: exit 7" &&
+        contains build "fixture build failed");
+      create "ios/App.xcodeproj/project.pbxproj" "// changed Xcode manifest\n";
+      assert (contains (xcode ~approved:true "build" (scheme @ destination))
+        "manifest changed since discovery");
+      assert (contains (xcode ~approved:true "destinations" scheme)
+        "approve scheme discovery"));
     directory "many";
     for index = 0 to 100 do
       let project = Printf.sprintf "many/Project%03d.xcodeproj" index in

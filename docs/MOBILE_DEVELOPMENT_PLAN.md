@@ -2,6 +2,8 @@
 
 **Status:** M01–M07 completed; M08–M24 remain planned. The Mobile specialization section of `TASKS.md` owns the M01–M24 checkboxes; this document supplies their dependencies, acceptance scenarios and safety limits. Complete and verify one checkbox at a time. This is not a release promise.
 
+**M08 implementation state:** The approved `xcode_preflight` phases and bounded discovery validation are in source, but M08 remains unchecked until an available real Xcode installation builds or tests a disposable project and reports its actual exit. The current Linux workstation has no `xcodebuild`; fake executable tests establish refusal and state binding, not platform acceptance.
+
 ## Baseline and boundaries
 
 Pave has a read-only `mobile_project` tool that inventories bounded workspace subprojects for Swift/Xcode/SwiftPM, Android Gradle, Flutter/Dart and React Native/Expo manifests and suggests commands without executing them. A reported shared `.xcscheme` filename is filesystem evidence only, not proof Xcode can parse/build/test it; candidate tasks, targets and SDK/emulator/device/signing readiness remain unknown. M01 regressions cover nested manifests, truncation, ignored/generated roots, symlink escapes and oversized inputs; M02 regressions and an actual CLI tool-call smoke map shared scheme files to exact project/workspace roots, keep private/missing schemes unknown and do not invoke Xcode.
