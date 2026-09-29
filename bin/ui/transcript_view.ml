@@ -7,7 +7,7 @@ type inline_style = Plain | Bold | Inline_code | Link
 type inline_run = { content : string; style : inline_style }
 
 type row = {
-  kind : kind;
+  mutable kind : kind;
   mutable style : style;
   mutable text : string;
   mutable runs : inline_run array;
@@ -359,6 +359,7 @@ let tool_result ?group:existing ?(aborted = false) ?(is_error = false) t name re
     let row = t.rows.(i) in
     if row.group = id && row.kind = Tool && row.style = Heading then (
       mark_dirty t i;
+      if error then row.kind <- Error;
       set_text row name)
   done;
   let length = String.fold_left (fun count char ->

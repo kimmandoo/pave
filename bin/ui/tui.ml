@@ -272,6 +272,18 @@ let selected_attr = if no_color then A.(st bold)
   else A.(fg black ++ bg lightcyan ++ st bold)
 let measure_text chunk = I.width (I.string text_attr chunk)
 
+(* Surfaces follow the reviewed dark theme: filled user bubbles, state-tinted
+   tool blocks and a muted rounded composer frame. NO_COLOR keeps shapes only. *)
+let rgb hex = A.rgb_888 ~r:((hex lsr 16) land 0xff) ~g:((hex lsr 8) land 0xff)
+  ~b:(hex land 0xff)
+let surface hex = if no_color then A.empty else A.bg (rgb hex)
+let user_surface = surface 0x221d1a
+let tool_pending_surface = surface 0x1d2129
+let tool_success_surface = surface 0x161a1f
+let tool_error_surface = surface 0x291d1d
+let frame_attr = if no_color then A.empty else A.fg (rgb 0x5f6673)
+let success = if no_color then A.empty else A.fg (rgb 0x89d281)
+
 let macos = Sys.os_type = "Unix" && Sys.file_exists "/System/Library"
 let meta_key = if macos then "Option" else "Alt"
 let enter_key = if macos then "Return" else "Enter"
@@ -348,9 +360,9 @@ let inline_attr = function
 
 let transcript_prefix style continuation =
   match style with
-  | Transcript_view.Heading -> if continuation then "    " else "  ▌ "
+  | Transcript_view.Heading -> if continuation then "    " else "  ● "
   | Transcript_view.Divider -> ""
-  | Transcript_view.Tool_state -> "  ↳ "
+  | Transcript_view.Tool_state -> "  ⎿ "
   | Transcript_view.Code -> "  │ "
   | Transcript_view.Quote -> if continuation then "    " else "  │ "
   | Transcript_view.List_item -> if continuation then "    " else "  • "
@@ -359,25 +371,99 @@ let transcript_prefix style continuation =
   | Transcript_view.Table_separator -> "  "
   | _ -> "  "
 
+let running_suffix = " · running"
+
+(* Rows of one block share a surface so a user prompt reads as a bubble and a
+   tool call as a card tinted by its outcome; dividers stay transparent. *)
+let row_surface (row : Transcript_view.row) =
+  match row.kind, row.style with
+  | _, Transcript_view.Divider -> A.empty
+  | Transcript_view.User, _ -> user_surface
+  | Transcript_view.Tool, Transcript_view.Heading
+    when String.ends_with ~suffix:running_suffix row.text ->
+      tool_pending_surface
+  | Transcript_view.Tool, _ -> tool_success_surface
+  | Transcript_view.Error, _ -> tool_error_surface
+  | _ -> A.empty
+
 let styled_visual cols (visual : Transcript_view.visual) =
   let row = visual.row in
+  let surface = row_surface row in
+  let heading = row.style = Transcript_view.Heading && not visual.continuation in
   let prefix = match row.style, row.kind, visual.continuation with
-    | Transcript_view.Heading, Transcript_view.User, false -> "  ◆ "
-    | Transcript_view.Heading, Transcript_view.Tool, false -> "  ◇ "
-    | Transcript_view.Heading, Transcript_view.Error, false -> "  ! "
+    | Transcript_view.Heading, Transcript_view.User, false -> "  ❯ "
+    | Transcript_view.Heading, Transcript_view.Error, false -> "  ✗ "
     | _ -> transcript_prefix row.style visual.continuation in
   let attr = style_attr row in
+  let marker_attr = match row.kind with
+    | Transcript_view.Tool when heading &&
+        String.ends_with ~suffix:running_suffix row.text -> warning
+    | Transcript_view.Tool when heading -> success
+    | _ -> attr in
   let prefix = if cols <= I.width (I.string attr prefix) then "" else prefix in
   let body = if Array.length visual.runs = 0 then
-    I.string attr visual.text
+    match row.kind with
+    | Transcript_view.Tool when heading ->
+        (* Tool identity stays prominent; its lifecycle suffix recedes. *)
+        let text = visual.text in
+        let split = if String.ends_with ~suffix:running_suffix text
+          then String.length text - String.length running_suffix
+          else String.length text in
+        I.(string A.(text_attr ++ st bold ++ surface) (String.sub text 0 split)
+           <|> string A.(muted ++ surface)
+             (String.sub text split (String.length text - split)))
+    | _ -> I.string A.(attr ++ surface) visual.text
     else I.hcat (Array.fold_right
       (fun (run : Transcript_view.inline_run) images ->
-        I.string A.(attr ++ inline_attr run.style) run.content :: images)
+        I.string A.(attr ++ inline_attr run.style ++ surface) run.content
+        :: images)
       visual.runs []) in
-  I.hsnap ~align:`Left cols I.(string attr prefix <|> body)
+  let line = I.(string A.(marker_attr ++ surface) prefix <|> body) in
+  let line = if I.width line > cols then I.hcrop 0 (I.width line - cols) line
+    else line in
+  if A.equal surface A.empty then I.hsnap ~align:`Left cols line
+  else I.(line <|> char surface ' ' (cols - width line) 1)
 
 let styled_line width attr text =
   I.hsnap ~align:`Left width (I.string attr text)
+
+(* A rounded composer box needs room for its frame; tiny terminals keep the
+   bare prompt gutter so every row still reaches the draft. *)
+let composer_boxed ~cols ~rows = cols >= 12 && rows >= 6
+
+let composer_chrome ~cols ~rows =
+  if composer_boxed ~cols ~rows then 4, 2
+  else
+    let width = I.width (I.string accent prompt) in
+    if cols <= width then 0, 0 else width, 0
+
+let composer_field_width ~cols ~rows =
+  let left, right = composer_chrome ~cols ~rows in
+  max 1 (cols - left - right)
+
+let composer_row ~cols ~rows ~marker content =
+  let left, right = composer_chrome ~cols ~rows in
+  let field = I.hsnap ~align:`Left (composer_field_width ~cols ~rows) content in
+  if composer_boxed ~cols ~rows then
+    I.(string frame_attr "│ " <|> string accent marker <|> field <|>
+       string frame_attr " │")
+  else if left = 0 && right = 0 then field
+  else I.(string accent ("  " ^ marker) <|> field)
+
+(* Status content docks into the top rule as `╭─ left ─── right ─╮`. *)
+let composer_top ~cols left right =
+  let fill = cols - 6 - I.width left - I.width right in
+  if fill < 1 then I.uchar frame_attr (Uchar.of_int 0x2500) cols 1
+  else I.(string frame_attr "╭─ " <|> left <|> string frame_attr " " <|>
+    uchar frame_attr (Uchar.of_int 0x2500) (fill - 1) 1 <|>
+    (if width right = 0 then string frame_attr "─"
+     else string frame_attr " " <|> right) <|> string frame_attr "─╮")
+
+let composer_bottom cols =
+  if cols < 2 then I.uchar frame_attr (Uchar.of_int 0x2500) cols 1
+  else I.(string frame_attr "╰" <|>
+    uchar frame_attr (Uchar.of_int 0x2500) (cols - 2) 1 <|>
+    string frame_attr "╯")
 
 let activity_frames =
   [| "⠋"; "⠙"; "⠹"; "⠸"; "⠼"; "⠴"; "⠦"; "⠧"; "⠇"; "⠏" |]
@@ -652,9 +738,7 @@ let hint_matches t =
 
 let hint_room t =
   let cols, rows = Notty_unix.Term.size t.term in
-  let prompt_width = I.width (I.string accent prompt) in
-  let field_width = max 1 (cols - if cols <= prompt_width then 0
-    else prompt_width) in
+  let field_width = composer_field_width ~cols ~rows in
   let measure = measure_text in
   let lines = Pave.Composer.layout ~columns:field_width ~measure t.editor in
   let height = min 4 (max 1 (min (rows - 4) (Array.length lines))) in
@@ -726,10 +810,9 @@ let hint_row cols selected = function
 let paint t =
   let cols, rows = Notty_unix.Term.size t.term in
   let cols = max 1 cols and rows = max 1 rows in
-  let prompt_width = I.width (I.string accent prompt) in
-  let prompt = if cols <= prompt_width then "" else prompt in
-  let prefix_width = if prompt = "" then 0 else prompt_width in
-  let field_width = max 1 (cols - prefix_width) in
+  let boxed = composer_boxed ~cols ~rows in
+  let prefix_width, _ = composer_chrome ~cols ~rows in
+  let field_width = composer_field_width ~cols ~rows in
   let measure = measure_text in
   let editor_lines = Pave.Composer.layout ~columns:field_width ~measure t.editor in
   let editor_row, editor_col =
@@ -803,14 +886,19 @@ let paint t =
     | names -> Printf.sprintf " · %d media attachment%s ready"
         (List.length names) (if List.length names = 1 then "" else "s") in
 
-  let brand = "  ◆  PAVE " ^ t.version in
-  let indicators = (if cols >= 48 then queued else "") ^ usage ^ attached in
-  let header = I.hsnap ~align:`Left cols I.(
-    string accent (shorten_width cols brand) <|>
-    string muted (shorten_width (max 0 (cols - measure brand)) indicators)) in
-  let location = match t.location_cache with
-    | Some (width, image) when width = cols -> image
+  let indicators = String.trim
+    ((if cols >= 48 then queued else "") ^ usage ^ attached) in
+  let indicators = if String.starts_with ~prefix:"· " indicators then
+      String.sub indicators 3 (String.length indicators - 3)
+    else indicators in
+  let indicators = if indicators = "" then I.empty
+    else I.string muted (shorten_width (max 0 (cols / 3)) indicators ^ " ") in
+  let identity_width = max 0 (cols - 6 - I.width indicators -
+    (if I.width indicators = 0 then 0 else 1)) in
+  let identity = match t.location_cache with
+    | Some (width, image) when width = identity_width -> image
     | _ ->
+      let width = identity_width in
       let model = single_line t.model in
       let model_id, model_scope = match String.index_opt model '/' with
         | None -> model, ""
@@ -823,34 +911,36 @@ let paint t =
         else model_name in
       let display_model width = shorten_middle width model_name in
       let image =
-        if cols < 28 then styled_line cols accent
-          (" " ^ display_model (cols - 1))
+        if width < 22 then I.string accent (display_model width)
         else
-          let badge = if cols < 60 then "  MODEL " else "  [MODEL] " in
-          let state = if cols < 45 then
+          let badge = if width < 40 then "◆ "
+            else if width < 54 then "◆ " ^ t.version ^ " · "
+            else "◆ PAVE " ^ t.version ^ " · " in
+          let state = if width < 39 then
             (if t.session then " · SAVED" else " · UNSAVED")
           else if t.session then "  ·  SAVED" else "  ·  UNSAVED" in
-          let space = max 0 (cols - measure badge - measure state) in
-          let root = if cols < 60 then "" else
+          let space = max 0 (width - measure badge - measure state) in
+          let root = if width < 54 then "" else
             let prefix = "  ·  " in
             prefix ^ shorten_middle
-              (min (cols / 4) (max 0 (space - measure prefix - 12)))
+              (min (width / 4) (max 0 (space - measure prefix - 12)))
               (single_line t.root) in
           let identity_space = max 0 (min (space / 3)
             (space - measure root - 20)) in
-          let detail = if cols < 72 || model_scope = "" ||
+          let detail = if width < 66 || model_scope = "" ||
               identity_space < 12 then ""
             else "  ·  " ^ shorten_middle (min 28 identity_space) model_scope in
           let name_width = max 0 (space - measure root - measure detail) in
-          I.hsnap ~align:`Left cols I.(
-            string accent badge <|>
+          I.(string accent badge <|>
             string text_attr (display_model name_width) <|>
             string muted state <|>
             string muted root <|>
             string muted detail) in
-      t.location_cache <- Some (cols, image);
+      t.location_cache <- Some (width, image);
       image in
-  let divider = I.uchar muted (Uchar.of_int 0x2500) cols 1 in
+  let composer_top_row = if boxed then composer_top ~cols identity indicators
+    else I.uchar frame_attr (Uchar.of_int 0x2500) cols 1 in
+  let composer_bottom_row = composer_bottom cols in
   let layout = match t.layout_cache with
     | Some (width, revision, layout)
       when width = cols && revision = t.transcript.revision -> layout
@@ -1098,24 +1188,22 @@ let paint t =
         let filter = sanitize chooser.filter in
         let col = measure filter in
         let left_crop = max 0 (col - field_width + 1) in
-        [| I.(string accent prompt <|>
-            hsnap ~align:`Left field_width (hcrop left_crop 0 (string text_attr filter))) |],
+        [| composer_row ~cols ~rows ~marker:"❯ "
+            (I.hcrop left_crop 0 (I.string text_attr filter)) |],
         0, min (cols - 1) (prefix_width + col - left_crop)
     | None, Some query ->
         let query = sanitize query in
         let col = measure query in
         let left_crop = max 0 (col - field_width + 1) in
-        let marker = if prompt = "" then "" else "  ? " in
-        [| I.(string accent marker <|>
-            hsnap ~align:`Left field_width (hcrop left_crop 0 (string text_attr query))) |],
+        [| composer_row ~cols ~rows ~marker:"? "
+            (I.hcrop left_crop 0 (I.string text_attr query)) |],
         0, min (cols - 1) (prefix_width + col - left_crop)
     | None, None ->
         let selection = Pave.Composer.selection t.editor in
         Array.init editor_height (fun index ->
           let line_index = first_line + index in
           let line = editor_lines.(line_index) in
-          let gutter = if line_index = 0 then prompt
-            else if prompt = "" then "" else "    " in
+          let marker = if line_index = 0 then "❯ " else "  " in
           let raw = String.sub (Pave.Composer.text t.editor)
             line.start (line.stop - line.start) in
           let content = match selection with
@@ -1134,8 +1222,7 @@ let paint t =
           let content = if field_width = 1 &&
               measure (sanitize raw) > 1 then I.string text_attr "?"
             else content in
-          I.(string accent gutter <|>
-            hsnap ~align:`Left field_width content)),
+          composer_row ~cols ~rows ~marker content),
         editor_row - first_line, min (cols - 1) (prefix_width + editor_col) in
   let screen = if rows < 6 then
     let candidates = Array.concat [activity_rows; [| footer |]; prompt_rows] in
@@ -1156,7 +1243,6 @@ let paint t =
             styled_line cols accent ("  PAVE " ^ t.version)
         | None -> I.void cols 1)) candidates
   else Array.concat [
-    [| header; location; divider |];
     Array.init body_height (fun row ->
       if row < body_height - hint_height then
         I.vcrop row (body_height - row - 1) body
@@ -1176,11 +1262,12 @@ let paint t =
         else
           let choice = List.nth hints (t.hint_offset + index - 1) in
           hint_row cols (t.hint_offset + index - 1 = t.hint_selected) choice);
-    activity_rows; [|footer|]; attachment_rows; prompt_rows ] in
+    [| I.void cols 1 |]; activity_rows; attachment_rows;
+    [| composer_top_row |]; prompt_rows; [| composer_bottom_row; footer |] ] in
 
   let activity_row =
     if Array.length activity_rows = 0 then -1
-    else if rows >= 6 then 3 + body_height
+    else if rows >= 6 then body_height + 1
     else
       let candidates = Array.length activity_rows + 1 + Array.length prompt_rows in
       if candidates > rows then -1 else rows - candidates in
@@ -1206,7 +1293,7 @@ let paint t =
   done;
   t.previous <- Some screen;
   let y = if rows < 6 then rows - 1
-    else rows - editor_height + cursor_row in
+    else rows - 2 - editor_height + cursor_row in
   let position = max 0 y + 1, max 0 cursor_col + 1 in
   if !dirty || t.cursor_position <> Some position then (
     Buffer.add_string output (Printf.sprintf "\027[%d;%dH%s"
@@ -1230,9 +1317,7 @@ let paint_resized t =
       let content_cols = if cols <= 4 then cols else cols - 4 in
       let next = Transcript_view.snapshot t.transcript
         ~columns:content_cols ~measure in
-      let prefix_width = I.width (I.string accent prompt) in
-      let field_width = if cols <= prefix_width then cols
-        else cols - prefix_width in
+      let field_width = composer_field_width ~cols ~rows in
       let activity_height = if Option.is_some t.activity then 1 else 0 in
       let editor_space = max 1 (rows - 4 - activity_height) in
       let editor_height = match t.chooser, Pave.Composer.search_query t.editor with
@@ -1675,9 +1760,8 @@ let toggle_tool_detail t =
 let read ?wake_fd ?on_wake ?on_interrupt ?on_dequeue ?on_completion t =
   let measure = measure_text in
   let field_width () =
-    let cols, _ = Notty_unix.Term.size t.term in
-    let prefix_width = I.width (I.string accent prompt) in
-    max 1 (if cols <= prefix_width then cols else cols - prefix_width) in
+    let cols, rows = Notty_unix.Term.size t.term in
+    composer_field_width ~cols ~rows in
   let changed () = repaint_after_key t in
   let paste_buffer = t.paste_buffer in
   let paste_truncated = ref false in
@@ -2195,7 +2279,7 @@ let confirm_review_now t ~title ~label ~body ~max_bytes ~wrap
     let editor_height = match Pave.Composer.search_query t.editor with
       | Some _ -> 1
       | None ->
-          let prompt_cols = max 1 (cols - I.width (I.string accent prompt)) in
+          let prompt_cols = composer_field_width ~cols ~rows in
           let draft = Pave.Composer.layout ~columns:prompt_cols ~measure t.editor in
           min 4 (max 1 (min editor_space (Array.length draft))) in
     let available = max 0 (rows - 4 - editor_height - activity_height) in

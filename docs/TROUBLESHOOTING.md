@@ -1,5 +1,12 @@
 # Troubleshooting
 
+### [2026-09-29] WSL host had no OCaml toolchain and rejected the Ollama PTY endpoint override
+
+- **Context / Symptom:** `opam: command not found` on the WSL host (no `_opam`, no `dune`, no sudo). A PTY fixture launched with `--provider ollama --endpoint http://127.0.0.1:18434/api/chat` displayed `Error: remote endpoint overrides are disabled; define a custom provider in user settings`.
+- **Root Cause:** The host had never been provisioned for OCaml. The local Ollama route intentionally forbids endpoint overrides, so a fixture must listen on its pinned `127.0.0.1:11434`.
+- **Solution:** Installed the static opam 2.3.0 binary to `~/.local/bin`, ran `opam init --bare --disable-sandboxing`, created switch `pave-dev` (OCaml 5.2.1) and installed `dune yojson notty-community uutf uuseg uucp digestif`. Ran the loopback Ollama fixture on port 11434 with no `--endpoint`, inside tmux for screen captures.
+- **Prevention / Reference:** `export PATH=$HOME/.local/bin:$PATH; eval $(opam env --switch pave-dev --set-switch)` before `dune`. Use `tmux capture-pane -p -e` to verify colors; do not `pkill -f` a pattern that also matches the invoking shell command.
+
 ### [2026-09-29] Groovy Gradle inventory omitted the first included module
 
 - **Context / Symptom:** The bounded mobile inventory reported `:legacy-lib:shared` but omitted `:legacy-app` from `include ':legacy-app', ':legacy-lib:shared'`.
