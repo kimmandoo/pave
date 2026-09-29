@@ -103,6 +103,12 @@ let () =
   Codex_stream.feed t final_only;
   assert ((Codex_stream.finish t).content = Some "Reading file");
   assert (List.rev !chunks = ["Reading file"]);
+  let without_item_done = added initial_message ^
+    indexed "response.output_text.delta" 0 "msg_1" ["delta", `String "Reading file"] ^
+    completed ~output:[final_message] () in
+  assert ((stream without_item_done).content = Some "Reading file");
+  assert ((stream (added initial_message ^ done_item final_message ^
+    completed ~output:[] ())).content = Some "Reading file");
   let unmetered = Codex_stream.create ~model ~on_text:(fun _ -> ()) in
   Codex_stream.feed unmetered (completed ~output:[final_message] ~usage:None ());
   ignore (Codex_stream.finish unmetered);
@@ -132,6 +138,15 @@ let () =
   invalid (added initial_call ^ event "response.function_call_arguments.delta" [
     "delta", `String "{}"] ^ done_item final_call ^ completed ());
   invalid (added initial_message ^ done_item final_message ^ completed ~status:"incomplete" ());
+  invalid (added initial_message ^ indexed "response.output_text.delta" 0
+    "msg_1" ["delta", `String "different"] ^
+    completed ~output:[final_message] ());
+  invalid (added initial_message ^ completed ~output:[] ());
+  invalid (added initial_message ^ done_item final_message ^
+    completed ~output:[final_message; message "msg_2" "unexpected"] ());
+  invalid (added initial_call ^ indexed "response.function_call_arguments.delta" 0
+    "fc_1" ["delta", `String "{}"] ^
+    completed ~output:[final_call] ());
   invalid (added initial_message ^ done_item final_message ^
     event "response.failed" ["response", `Assoc ["status", `String "failed"]]);
   invalid (added initial_message ^ event "response.refusal.delta" [

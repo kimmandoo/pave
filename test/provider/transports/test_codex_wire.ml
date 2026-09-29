@@ -157,6 +157,12 @@ let () =
     ~model:"gpt-6-luna" (`Assoc ["models", `List [
       `Assoc ["slug", `String "gpt-6-luna";
         "use_responses_lite", `Bool true; "supported_in_api", `Bool false]]])));
+  List.iter (fun unsupported ->
+    invalid (fun () -> ignore (Codex_wire.model_format
+      ~model:"gpt-6-luna" (`Assoc ["models", `List [
+        `Assoc ["slug", `String "gpt-6-luna";
+          "supported_in_api", unsupported]]]))))
+    [`String "false"; `Null; `Int 0];
   let lite_request = Codex_wire.request ~format:lite ~model:"gpt-6-luna"
     [system "Be exact"; Protocol.user "Read the file"] [tool] in
   assert (field "instructions" lite_request = `Null);

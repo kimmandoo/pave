@@ -25,9 +25,14 @@ let model_format ~model json =
       | `String ("hide" | "hidden") ->
           invalid "model is hidden from the account listing"
       | _ -> ());
-      (match member "supported_in_api" row with
-      | `Bool false -> invalid "model is not supported for API requests"
-      | _ -> ());
+      (match row with
+      | `Assoc fields ->
+          (match List.assoc_opt "supported_in_api" fields with
+          | None | Some (`Bool true) -> ()
+          | Some (`Bool false) ->
+              invalid "model is not supported for API requests"
+          | Some _ -> invalid "invalid supported_in_api in account listing")
+      | _ -> invalid "invalid model row");
       (match member "use_responses_lite" row with
       | `Bool true ->
           let effort = match member "default_reasoning_level" row with

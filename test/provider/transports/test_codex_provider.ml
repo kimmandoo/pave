@@ -107,7 +107,11 @@ let fake_curl () =
           "status", `String "completed"; "call_id", `String "call_1";
           "namespace", `String "functions"; "name", `String "read_file";
           "arguments", `String {|{"path":"README.md"}|}] in
-        200, "data: " ^ Yojson.Basic.to_string (item "response.completed" [
+        200, "data: " ^ Yojson.Basic.to_string (item "response.output_item.added" [
+          "output_index", `Int 0; "item", item "function_call" [
+            "id", `String "fc_1"; "call_id", `String "call_1";
+            "name", `String "read_file"; "arguments", `String ""]]) ^ "\n\n" ^
+        "data: " ^ Yojson.Basic.to_string (item "response.completed" [
           "response", `Assoc ["id", `String "resp_1";
             "status", `String "completed"; "output", `List [output]]]) ^ "\n\n"
     | 3 ->

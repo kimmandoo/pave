@@ -1,5 +1,19 @@
 # Troubleshooting
 
+### [2026-09-29] Codex completion required redundant output events
+
+- **Context / Symptom:** A Codex turn showed `invalid completion response: invalid Codex stream: missing completed output item`. A local event fixture reproduced that exact error when `response.output_item.added` and a complete `response.completed.output` arrived without an intermediate item-done event. Another fixture reproduced it with completed item-done events and an empty final output array. The user's raw vendor event trace was unavailable.
+- **Root Cause:** The stream parser required both a per-item completion event and the corresponding final output-array entry whenever an item-added event had been seen, even when one complete source was authoritative.
+- **Solution:** Validated an item against a nonempty completed output array when its item-done event was absent; reconstructed an omitted/empty array only when every streamed item was completed. Kept delta/final mismatches, incomplete items and mismatched output counts invalid. A pinned-account fake-HTTPS Codex tool turn exercised the missing item-done case.
+- **Prevention / Reference:** Keep real completion-envelope and streamed-item variants in `test/provider/transports/test_codex_stream.ml`; never accept a final response with neither complete items nor a complete output array.
+
+### [2026-09-29] Codex model eligibility accepted malformed metadata
+
+- **Context / Symptom:** A fixture model row with `supported_in_api: "false"` was offered as selectable by discovery, and the direct Codex request-format lookup did not reject it. This is a verified parser defect; no live account listing was available to establish whether it caused the user's reported model retrieval issue.
+- **Root Cause:** Both paths rejected JSON `false` but implicitly treated every other value, including a string, null or integer, as supported.
+- **Solution:** Required an absent or boolean eligibility field. JSON `false` remained excluded from discovery and rejected for inference; malformed fields now invalidate the discovery listing or request-format lookup without inventing models.
+- **Prevention / Reference:** Check malformed and valid eligibility rows in both discovery and wire-format regressions; retain pinned endpoint and account headers.
+
 ### [2026-09-29] Release verification host lacked GitHub CLI
 
 - **Context / Symptom:** `gh run list` failed with `error: command not found: gh` after pushing the release tag.

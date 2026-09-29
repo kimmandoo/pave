@@ -433,28 +433,33 @@ let discover_codex_models ?http ?cancel credential =
                                   (match checked_id name with
                                   | Error _ as error -> error
                                   | Ok name ->
-                                      let hidden = match extract_field
-                                        "visibility" row with
-                                        | Some (`String value) ->
-                                            List.mem (String.lowercase_ascii value)
-                                              ["hide"; "hidden"]
-                                        | _ -> false in
-                                      if Hashtbl.mem seen name then
-                                        invalid "duplicate model ID"
-                                      else (
-                                        Hashtbl.add seen name ();
-                                        if hidden || extract_field "supported_in_api" row =
-                                            Some (`Bool false) then collect tail
-                                        else (
-                                          let context_window_tokens =
-                                            positive_integer_field
-                                              "context_window" row in
-                                          let capabilities =
-                                            { Model_catalog.empty_capabilities with
-                                              context_window_tokens } in
-                                          result := { id = name; display_name = None;
-                                            capabilities } :: !result;
-                                          collect tail)))
+                                      (match extract_field "supported_in_api" row with
+                                      | Some value when value <> `Bool true &&
+                                          value <> `Bool false ->
+                                          invalid "invalid supported_in_api"
+                                      | supported_in_api ->
+                                          let hidden = match extract_field
+                                            "visibility" row with
+                                            | Some (`String value) ->
+                                                List.mem (String.lowercase_ascii value)
+                                                  ["hide"; "hidden"]
+                                            | _ -> false in
+                                          if Hashtbl.mem seen name then
+                                            invalid "duplicate model ID"
+                                          else (
+                                            Hashtbl.add seen name ();
+                                            if hidden || supported_in_api =
+                                                Some (`Bool false) then collect tail
+                                            else (
+                                              let context_window_tokens =
+                                                positive_integer_field
+                                                  "context_window" row in
+                                              let capabilities =
+                                                { Model_catalog.empty_capabilities with
+                                                  context_window_tokens } in
+                                              result := { id = name; display_name = None;
+                                                capabilities } :: !result;
+                                              collect tail))))
                               | _ -> invalid "missing slug or id model ID") in
                         collect rows) in
       try request codex_urls with

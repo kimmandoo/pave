@@ -554,6 +554,17 @@ let () =
     (Ok (200, {|{"models":[{"slug":12}]}|})) in
   expect_error is_invalid_response (discover ~http ~provider:"openai-codex"
     ~credential:codex_credential ());
+  let http, _ = fixed_http (List.hd codex_urls) codex_headers
+    (Ok (200, {|{"models":[{"slug":"supported","supported_in_api":true}]}|})) in
+  expect_models ["supported"]
+    (discover ~http ~provider:"openai-codex" ~credential:codex_credential ());
+  List.iter (fun unsupported ->
+    let http, _ = fixed_http (List.hd codex_urls) codex_headers
+      (Ok (200, {|{"models":[{"slug":"listed"},{"slug":"unverified","supported_in_api":|} ^
+        unsupported ^ {|}]}|})) in
+    expect_error is_invalid_response
+      (discover ~http ~provider:"openai-codex"
+        ~credential:codex_credential ())) ["\"false\""; "null"; "0"];
   let unused ~url:_ ~headers:_ = failwith "invalid credentials initiated a request" in
   expect_error no_credential (discover ~http:unused ~provider:"openai" ());
   expect_error no_credential (discover ~http:unused ~provider:"github-copilot" ());

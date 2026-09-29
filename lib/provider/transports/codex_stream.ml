@@ -253,22 +253,31 @@ let handle_completed t json =
   if field "status" response <> `String "completed" then invalid "response incomplete or failed";
   if field "error" response <> `Null || field "incomplete_details" response <> `Null then
     invalid "response error or truncation";
+  let streamed_outputs () =
+    let count = Hashtbl.length t.items in
+    if count = 0 then invalid "completion without output items";
+    List.init count (fun n -> match Hashtbl.find_opt t.items n with
+      | Some { done_output = Some output; _ } -> output
+      | Some _ -> invalid "completion with unfinished output item"
+      | None -> invalid "non-contiguous output indices") in
   let outputs = match field "output" response with
-    | `Null ->
-        let count = Hashtbl.length t.items in
-        if count = 0 then invalid "completion without output items";
-        List.init count (fun n -> match Hashtbl.find_opt t.items n with
-          | Some { done_output = Some output; _ } -> output
-          | Some _ -> invalid "completion with unfinished output item"
-          | None -> invalid "non-contiguous output indices")
+    | `Null | `List [] when Hashtbl.length t.items > 0 ->
+        streamed_outputs ()
     | `List outputs when Hashtbl.length t.items = 0 ->
         if outputs = [] then invalid "completion without output items";
         outputs
     | `List outputs ->
+        if Hashtbl.length t.items <> List.length outputs then
+          invalid "completion output count mismatch";
         Hashtbl.iter (fun n item ->
-          let candidate, expected = match List.nth_opt outputs n, item.done_output with
-            | Some candidate, Some expected -> candidate, expected
-            | _ -> invalid "missing completed output item" in
+          let candidate = match List.nth_opt outputs n with
+            | Some candidate -> candidate
+            | None -> invalid "missing completed output item" in
+          if item.done_output = None then
+            handle_done t (`Assoc ["output_index", `Int n; "item", candidate]);
+          let expected = match item.done_output with
+            | Some expected -> expected
+            | None -> assert false in
           if field "id" candidate <> field "id" expected ||
              field "type" candidate <> field "type" expected ||
              (match item.kind with
@@ -281,8 +290,6 @@ let handle_completed t json =
                   field "encrypted_content" candidate <> field "encrypted_content" expected ||
                   field "summary" candidate <> field "summary" expected)
           then invalid "completion output differs from item.done") t.items;
-        if Hashtbl.length t.items <> List.length outputs then
-          invalid "completion output count mismatch";
         outputs
     | _ -> invalid "invalid completion output" in
   let response = match response with
