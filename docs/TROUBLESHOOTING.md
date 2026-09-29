@@ -1,5 +1,12 @@
 # Troubleshooting
 
+### [2026-09-29] Printed unified diffs lost their patch semantics in the TUI
+
+- **Context / Symptom:** A raw `run_command` diff displayed `Status: exit 0` as its collapsed preview and parsed `- old` as a Markdown bullet when expanded; fenced `diff` output rendered all lines as identical code. A focused failure-before transcript test reproduced the missing addition/deletion distinction.
+- **Root Cause:** `Transcript_view` applied ordinary Markdown list parsing to raw tool lines and one undifferentiated `Code` style to every fenced line. Tool previews selected the first nonempty line before seeing the diff file header.
+- **Solution:** Classified sanitized unified-diff headers, hunks, changes, context and metadata in the existing transcript path; kept the literal `+`/`-` markers, reset raw diff state at boundaries and preferred file headers in collapsed command previews. Tinted diff rows in the TUI while retaining monochrome gutters. Focused tests and colored/`NO_COLOR` PTY paints displayed both an expanded raw diff and a fenced assistant diff.
+- **Prevention / Reference:** Keep ordinary Markdown lists and non-diff code fences as controls; verify wrapped, streamed and collapsed/expanded diff rows through `test_transcript_view` and the opt-in `PAVE_REAL_DIFF_TUI=1` PTY smoke.
+
 ### [2026-09-29] Xcode 27 simulator destinations appeared empty despite installed runtimes
 
 - **Context / Symptom:** On a macOS arm64 host with Xcode 27.0 and available iOS 26.5 simulators, the opt-in M08 disposable-project run returned `Xcode destination discovery: exit 0` but `Available iOS Simulator IDs: none`. A checked failure-before parser test reproduced the empty result using Xcode's actual `Destinations compatible with the "MobileFixture" scheme:` heading. After discovery worked, the fixture's first build exited 65 with `Build input file cannot be found: .../MobileFixture.app/Info.plist`.

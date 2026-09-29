@@ -1,6 +1,8 @@
 # Changelog
 
 ## 2026-09-29
+- feat(tui): styled fenced and printed unified diffs with distinct file, hunk, addition, removal and context rows; preserved patch markers in monochrome and previewed changed files instead of command status in collapsed tool cards.
+- feat(mobile): added individually approved Android AVD and ADB inventory for an exact Gradle settings root; reported configured AVDs separately from ready emulators, marked offline/unauthorized transports unavailable and withheld physical serials without SDK installation or emulator boot.
 - fix(mobile): parsed Xcode 27 compatible/incompatible destination headings so real iOS Simulator UUIDs were selectable without admitting physical, placeholder or incompatible devices; corrected the disposable project’s generated Info.plist.
 - test(mobile): required separate terminal confirmation of the exact Xcode scheme, destination and build commands in opt-in manual acceptance; an approved local simulator build completed without signing.
 - feat(mobile): added a separately approved, scheme-bound Apple simulator inventory using real available CoreSimulator devices intersected with Xcode destinations; excluded unavailable, incompatible, malformed and physical devices without booting a simulator or exposing local device paths.

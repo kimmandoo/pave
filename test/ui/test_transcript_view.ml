@@ -121,6 +121,71 @@ let () =
     (Array.exists (fun (visual : visual) ->
        visual.row.style = Code && visual.text = "code · ocaml")
        (rendered live_markdown 30));
+  let fenced_diff = create () in
+  delta fenced_diff
+    "Patch:\n```diff\ndiff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1,2 +1,2 @@\n-old\n+new\n unchanged\n```\n- ordinary item";
+  finish fenced_diff;
+  let patch_rows = Array.sub fenced_diff.rows 0 fenced_diff.count in
+  let patch_row text =
+    Option.get (Array.find_opt (fun (row : row) -> row.text = text) patch_rows) in
+  expect "fenced diff preserves markers and styles its header, hunk and edits"
+    ((patch_row "diff --git a/a.txt b/a.txt").style = Diff_header &&
+     (patch_row "@@ -1,2 +1,2 @@").style = Diff_hunk &&
+     (patch_row "-old").style = Diff_remove &&
+     (patch_row "+new").style = Diff_add &&
+     (patch_row " unchanged").style = Diff_context);
+  expect "ordinary Markdown after a diff remains a list"
+    ((patch_row "ordinary item").style = List_item);
+  let raw_diff = create () in
+  event raw_diff
+    "[run_command] Status: exit 0\ndiff --git a/a.txt b/a.txt\nindex 123..456 100644\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n- old\n+ new\n unchanged\n\n- later prose";
+  let collapsed_diff = rendered raw_diff 64 in
+  expect "collapsed command diff previews a file header, not the shell status"
+    (Array.exists (fun (visual : visual) ->
+      visual.row.preview && visual.text = "diff --git a/a.txt b/a.txt")
+      collapsed_diff);
+  ignore (toggle raw_diff ~first:0 ~last:(raw_diff.count - 1));
+  let raw_rows = Array.sub raw_diff.rows 0 raw_diff.count in
+  let raw_row text =
+    Option.get (Array.find_opt (fun (row : row) -> row.text = text) raw_rows) in
+  expect "raw diff preserves removed markers and resets for later Markdown"
+    ((raw_row "- old").style = Diff_remove &&
+     (raw_row "+ new").style = Diff_add &&
+     (raw_row " unchanged").style = Diff_context &&
+     (raw_row "later prose").style = List_item);
+  let compact_diff = rendered raw_diff 13 in
+  expect "narrow diff wraps without dropping change markers"
+    (Array.for_all (fun (visual : visual) -> measure visual.text <= 13)
+      compact_diff &&
+     Array.exists (fun (visual : visual) ->
+       visual.text = "- old" && not visual.continuation) compact_diff);
+  let bare_diff = create () in
+  event bare_diff
+    "[read_file] --- a/old.txt\n+++ b/new.txt\n@@ -1 +1 @@\n-before\n+after";
+  expect "bare unified diff without git header keeps file and change roles"
+    (Array.exists (fun (row : row) ->
+       row.text = "--- a/old.txt" && row.style = Diff_header)
+       (Array.sub bare_diff.rows 0 bare_diff.count) &&
+     Array.exists (fun (row : row) ->
+       row.text = "-before" && row.style = Diff_remove)
+       (Array.sub bare_diff.rows 0 bare_diff.count));
+  let fragmented = create () in
+  delta fragmented "```di";
+  delta fragmented "ff\n+after\n";
+  finish fragmented;
+  expect "stream fragments keep diff fence semantics"
+    (Array.exists (fun (row : row) ->
+       row.text = "+after" && row.style = Diff_add)
+       (Array.sub fragmented.rows 0 fragmented.count));
+  let ordinary_code = create () in
+  assistant ordinary_code "```text\n- not a diff\n+ not a diff\n```\n- item";
+  expect "regular code and prose do not acquire diff styling"
+    (Array.exists (fun (row : row) ->
+       row.text = "- not a diff" && row.style = Code)
+       (Array.sub ordinary_code.rows 0 ordinary_code.count) &&
+     Array.exists (fun (row : row) ->
+       row.text = "item" && row.style = List_item)
+       (Array.sub ordinary_code.rows 0 ordinary_code.count));
   let rich = create () in
   assistant rich
     "A **bold** `code` and [docs](https://example.test).\n| Name | Status |\n| ---- | ------ |\n| API | ready |";

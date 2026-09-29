@@ -1181,7 +1181,93 @@ esac
         contains failed_gradle "selected task :app:assembleDebug" &&
         contains failed_gradle
           "Checked Kotlin/Java errors:\nfocus/gradle/app/src/Main.kt:1:14" &&
-        not (contains failed_gradle "Checked Kotlin/Java errors:\nfocus/gradle/other")));
+        not (contains failed_gradle "Checked Kotlin/Java errors:\nfocus/gradle/other"));
+      let inventory action approved =
+        Pave.Tools.execute ~root ~context:tool_context ~approved
+          ~name:"android_devices" ~args:(`Assoc [
+            "action", `String action; "subroot", `String "focus/gradle"]) () in
+      assert (Pave.Tools.is_shell_tool "android_devices" &&
+        Pave.Tools.requires_explicit_approval ~name:"android_devices"
+          ~args:(`Assoc ["action", `String "avds"]));
+      let avd_preview = Pave.Tools.approval_request ~root
+        ~name:"android_devices"
+        ~args:(`Assoc ["action", `String "avds";
+          "subroot", `String "focus/gradle"])
+        (Pave.Tools.approval_decision ~command_patterns:[]
+          ~name:"android_devices" ~args:(`Assoc [])) in
+      let adb_preview = Pave.Tools.approval_request ~root
+        ~name:"android_devices"
+        ~args:(`Assoc ["action", `String "devices";
+          "subroot", `String "focus/gradle"])
+        (Pave.Tools.approval_decision ~command_patterns:[]
+          ~name:"android_devices" ~args:(`Assoc [])) in
+      assert (contains (String.concat "\n" avd_preview.details)
+          "emulator -list-avds" &&
+        contains (String.concat "\n" adb_preview.details) "adb devices" &&
+        contains (String.concat "\n" adb_preview.details)
+          "may start its local server");
+      assert (contains (inventory "avds" false) "explicit interactive approval" &&
+        contains (inventory "devices" false) "explicit interactive approval");
+      create "focus/bin/emulator"
+        ("#!/bin/sh\n[ \"$*\" = '-list-avds' ] || exit 64\ncat " ^
+          Filename.quote (Filename.concat root "focus/avds.txt") ^ "\n");
+      create "focus/bin/adb"
+        ("#!/bin/sh\n[ \"$*\" = 'devices' ] || exit 64\ncat " ^
+          Filename.quote (Filename.concat root "focus/devices.txt") ^ "\n");
+      Unix.chmod (Filename.concat root "focus/bin/emulator") 0o700;
+      Unix.chmod (Filename.concat root "focus/bin/adb") 0o700;
+      create "focus/avds.txt" "Pixel_8_API_35\nTablet_13\n";
+      create "focus/devices.txt"
+        "List of devices attached\nemulator-5554\tdevice\nemulator-5556\toffline\nemulator-5558\tunauthorized\nprivate-serial\tdevice\nprivate-offline\toffline\n\n";
+      let avds = inventory "avds" true in
+      assert (contains avds "Configured AVDs (not running; SDK image readiness unknown):" &&
+        contains avds "Pixel_8_API_35" && contains avds "Tablet_13");
+      let devices = inventory "devices" true in
+      assert (contains devices "Ready emulators: emulator-5554 (ready)" &&
+        contains devices
+          "Unavailable emulators: emulator-5556 (offline), emulator-5558 (unauthorized)" &&
+        contains devices "Physical/unclassified devices (not selectable): ready=1 offline=1" &&
+        not (contains devices "private-serial") &&
+        not (contains devices "private-offline") &&
+        not (contains devices "Ready emulators: emulator-5556"));
+      create "focus/devices.txt"
+        "List of devices attached\nemulator-5556\toffline\nemulator-5558\tunauthorized\n";
+      assert (contains (inventory "devices" true) "Ready emulators: none");
+      create "focus/devices.txt"
+        "* daemon not running; starting now at tcp:5037\n* daemon started successfully\nList of devices attached\n\n";
+      assert (contains (inventory "devices" true) "Ready emulators: none");
+      create "focus/devices.txt"
+        "List of devices attached\nemulator-5554\tdevice\nemulator-5554\tdevice\n";
+      assert (contains (inventory "devices" true) "duplicate device IDs");
+      create "focus/avds.txt" "Pixel_8_API_35\nbad name\n";
+      assert (contains (inventory "avds" true) "unsafe, duplicate or oversized");
+      create "focus/avds.txt" " Pixel_8_API_35\n";
+      assert (contains (inventory "avds" true) "unsafe, duplicate or oversized");
+      create "focus/bin/adb" "#!/bin/sh\nexit 7\n";
+      Unix.chmod (Filename.concat root "focus/bin/adb") 0o700;
+      assert (contains (inventory "devices" true) "exit 7 (no device choices" &&
+        not (contains (inventory "devices" true) "Ready emulators"));
+      let saved_path = Sys.getenv "PATH" in
+      Fun.protect ~finally:(fun () -> Unix.putenv "PATH" saved_path) (fun () ->
+        Unix.putenv "PATH" (Filename.concat root "missing-android-tools");
+        let missing_avd = inventory "avds" true in
+        let missing_adb = inventory "devices" true in
+        assert (contains missing_avd "exit 127 (no device choices" &&
+          contains missing_adb "exit 127 (no device choices"));
+      let wrong_root = Pave.Tools.execute ~root ~context:tool_context
+        ~approved:true ~name:"android_devices" ~args:(`Assoc [
+          "action", `String "avds"; "subroot", `String "focus/node"]) () in
+      assert (contains wrong_root "no Gradle settings manifest");
+      let parser = Pave.Workspace_android_devices.adb_devices in
+      assert (try ignore (parser
+        "List of devices attached\nemulator-5554\tdevice\nmalformed\n"); false
+        with Pave.Workspace_android_devices.Error _ -> true);
+      assert (try ignore (parser
+        "List of devices attached\n emulator-5554\tdevice\n"); false
+        with Pave.Workspace_android_devices.Error _ -> true);
+      assert (try ignore (parser
+        "List of devices attached\nemulator-5554\tdevice\n\027[31m"); false
+        with Pave.Workspace_android_devices.Error _ -> true));
     directory "many";
     for index = 0 to 100 do
       let project = Printf.sprintf "many/Project%03d.xcodeproj" index in

@@ -1,10 +1,12 @@
 # Mobile development specialization plan
 
-**Status:** M01–M17 completed; M18–M24 remain open. The Mobile specialization section of `TASKS.md` owns the M01–M24 checkboxes; this document supplies their dependencies, acceptance scenarios and safety limits. Complete and verify each checkbox against its own scenario. This is not a release promise.
+**Status:** M01–M18 completed; M19–M24 remain open. The Mobile specialization section of `TASKS.md` owns the M01–M24 checkboxes; this document supplies their dependencies, acceptance scenarios and safety limits. Complete and verify each checkbox against its own scenario. This is not a release promise.
 
 **M08 acceptance:** An opt-in manual macOS arm64 Xcode 27 run generated a disposable project, called the separately approved `xcode_preflight` scheme, destination and build phases, and reported `Xcode build: exit 0` for a discovered iOS Simulator UUID with signing disabled. Xcode 27 uses `Destinations compatible/incompatible with ...` headings; the parser now supports them alongside the older `Available/Ineligible destinations` headings. A simulator placeholder, physical device and incompatible UUID cannot become a build destination. No simulator was booted or app deployed; CI still runs only fake-Xcode safety regressions and never installs xcodegen or runs a real simulator build.
 
 **M17 acceptance:** A separately approved `xcrun simctl list devices available -j` on the same local Mac returned a real iOS 26.5 simulator UUID also present in that session's approved `xcodebuild -showdestinations` result for the disposable project's scheme. `xcode_preflight action=simulators` reports only their intersection, bounded names and Booted/Shutdown state, not physical devices, unrelated platforms or local device paths; malformed/missing runtime results cannot be promoted. This probe did not boot or deploy a simulator, and CI runs only fake executables.
+
+**M18 acceptance:** On a local Mac, separately approved `android_devices action=avds` and `action=devices` ran against a disposable Gradle settings root. The real SDK returned three configured AVDs (`Blurrf_Pixel_Fold`, `Blurrf_Tablet_10`, `Medium_Phone`) and no attached ADB devices, without installing an image or booting an emulator. Fake-executable regressions distinguished ready, offline, unauthorized, physical/unclassified, denied, missing-tool, failed and malformed cases; only ready emulator transports appeared under ready emulators. Configured AVD names are not proof of image readiness or a running device; M20 remains open.
 
 ## Baseline and boundaries
 

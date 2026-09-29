@@ -81,6 +81,34 @@ let () =
             let result = mobile "analyze" in
             expect "Flutter analysis" "exit 0" result;
             print_endline "real Flutter analysis: exit 0"
+        | "android_devices" ->
+            create (Filename.concat root "settings.gradle.kts")
+              "rootProject.name = \"DeviceFixture\"\ninclude(\":app\")\n";
+            let inventory action =
+              let args = `Assoc ["subroot", `String ".";
+                "action", `String action] in
+              let preview = Pave.Tools.approval_request ~root
+                ~name:"android_devices" ~args
+                (Pave.Tools.approval_decision ~command_patterns:[]
+                  ~name:"android_devices" ~args) in
+              if not (Unix.isatty (Unix.descr_of_in_channel stdin)) then
+                failwith "manual Android acceptance requires an interactive terminal";
+              Printf.printf "Disposable project: %s\n%s\n" root preview.impact;
+              List.iter print_endline preview.details;
+              print_string "Approve this command? [y/N] ";
+              flush stdout;
+              if (try read_line () with End_of_file -> "") <> "y" then
+                failwith "manual Android command denied";
+              call "android_devices" ["subroot", `String ".";
+                "action", `String action] in
+            let avds = inventory "avds" in
+            expect "Android AVD inventory" "Android AVD inventory: exit 0" avds;
+            if contains avds "SDK image readiness unknown): none" then
+              failwith "no real configured Android AVD available";
+            print_endline avds;
+            let devices = inventory "devices" in
+            expect "Android ADB inventory" "Android ADB inventory: exit 0" devices;
+            print_endline devices
         | "xcode" | "simulators" ->
             mkdir (Filename.concat root "Sources");
             create (Filename.concat root "Sources/App.swift")

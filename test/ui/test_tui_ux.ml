@@ -110,4 +110,39 @@ let () =
     (match frame ~pending:false ~since:(Some 10.) with
      | Some delay -> delay > 0.07 && delay < 0.08
      | None -> false);
-  print_endline "TUI attachment previews and stream batching: ok"
+  let diff = Transcript_view.create () in
+  Transcript_view.assistant diff
+    "```diff\n@@ -1 +1 @@\n-old\n+new\n```";
+  let rows = Transcript_view.layout diff ~columns:24
+    ~measure:(fun text -> Notty.I.width (Notty.I.string Notty.A.empty text)) in
+  let visual text = Option.get (Array.find_opt
+    (fun (row : Transcript_view.visual) -> row.text = text) rows) in
+  let removed = visual "-old" and added = visual "+new" in
+  expect "printed diff has distinct foreground and surface for each change"
+    (not (Notty.A.equal (Tui.style_attr removed.row)
+      (Tui.style_attr added.row)) &&
+     (Tui.no_color || not (Notty.A.equal
+       (Tui.row_surface removed.row) (Tui.row_surface added.row))));
+  let output = Buffer.create 128 in
+  Notty.Render.to_buffer output Notty.Cap.ansi (0, 0) (24, 1)
+    (Tui.styled_visual 24 removed);
+  expect "terminal rendering preserves the original deletion and gutter"
+    (contains (Buffer.contents output) "-old" &&
+     contains (Buffer.contents output) "│");
+  (match Sys.getenv_opt "PAVE_REAL_DIFF_TUI" with
+   | Some "1" ->
+       let screen = Tui.create ~root:(Unix.getcwd ()) ~model:"diff-smoke"
+         ~session:false () in
+       Fun.protect ~finally:(fun () -> Tui.close screen) (fun () ->
+         Tui.sent screen "Show changed lines";
+         Tui.event screen
+           "[run_command] Status: exit 0\ndiff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new";
+         ignore (Transcript_view.toggle screen.transcript ~first:0
+           ~last:(screen.transcript.count - 1));
+         Tui.delta screen
+           "```diff\n@@ -1 +1 @@\n-before\n+after\n```";
+         Transcript_view.finish screen.transcript;
+         Tui.paint screen;
+         Thread.delay 1.)
+   | _ -> ());
+  print_endline "TUI attachment, stream and diff rendering: ok"

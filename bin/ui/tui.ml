@@ -284,6 +284,9 @@ let tool_success_surface = surface 0x161a1f
 let tool_error_surface = surface 0x291d1d
 let frame_attr = if no_color then A.empty else A.fg (rgb 0x5f6673)
 let success = if no_color then A.empty else A.fg (rgb 0x89d281)
+let diff_add_surface = surface 0x182b21
+let diff_remove_surface = surface 0x301f25
+let diff_hunk_surface = surface 0x1c2834
 
 let macos = Sys.os_type = "Unix" && Sys.file_exists "/System/Library"
 let meta_key = if macos then "Option" else "Alt"
@@ -344,6 +347,16 @@ let change_transcript t action =
 
 let style_attr (row : Transcript_view.row) =
   match row.kind, row.style with
+  | _, Transcript_view.Diff_header ->
+      if no_color then A.(st bold) else A.(fg lightblue ++ st bold)
+  | _, Transcript_view.Diff_hunk ->
+      if no_color then A.(st bold) else A.(fg lightcyan ++ st bold)
+  | _, Transcript_view.Diff_add ->
+      if no_color then A.(st bold) else A.fg (rgb 0x9fe0ad)
+  | _, Transcript_view.Diff_remove ->
+      if no_color then A.(st underline) else A.fg (rgb 0xff9ba4)
+  | _, Transcript_view.Diff_context -> text_attr
+  | _, Transcript_view.Diff_meta -> muted
   | Transcript_view.Error, _ -> error
   | Transcript_view.Approval, _ -> warning
   | Transcript_view.User, Transcript_view.Heading -> user_attr
@@ -374,6 +387,10 @@ let transcript_prefix style continuation =
   | Transcript_view.Tool_state -> "  ⎿ "
   | Transcript_view.Code -> "  │ "
   | Transcript_view.Quote -> if continuation then "    " else "  │ "
+  | Transcript_view.Diff_header -> if continuation then "  │ " else "  ╭ "
+  | Transcript_view.Diff_hunk -> if continuation then "  │ " else "  ├ "
+  | Transcript_view.Diff_add | Transcript_view.Diff_remove
+  | Transcript_view.Diff_context | Transcript_view.Diff_meta -> "  │ "
   | Transcript_view.List_item -> if continuation then "    " else "  • "
   | Transcript_view.Table_header
   | Transcript_view.Table_row
@@ -386,6 +403,9 @@ let running_suffix = " · running"
    tool call as a card tinted by its outcome; dividers stay transparent. *)
 let row_surface (row : Transcript_view.row) =
   match row.kind, row.style with
+  | _, Transcript_view.Diff_add -> diff_add_surface
+  | _, Transcript_view.Diff_remove -> diff_remove_surface
+  | _, Transcript_view.Diff_hunk -> diff_hunk_surface
   | _, Transcript_view.Divider -> A.empty
   | Transcript_view.User, _ -> user_surface
   | Transcript_view.Tool, Transcript_view.Heading

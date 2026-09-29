@@ -3,6 +3,7 @@ type kind = User | Assistant | Tool | Notice | Error | Approval
 type style =
   Heading | Text | Code | Quote | List_item | Subheading | Tool_state
   | Divider | Table_header | Table_row | Table_separator
+  | Diff_header | Diff_hunk | Diff_add | Diff_remove | Diff_context | Diff_meta
 type inline_style = Plain | Bold | Inline_code | Link
 type inline_run = { content : string; style : inline_style }
 
@@ -43,6 +44,8 @@ type t = {
   mutable live : string;
   mutable streaming : bool;
   mutable fenced : bool;
+  mutable diff_fenced : bool;
+  mutable diff_raw : bool;
   mutable table_active : bool;
   mutable revision : int;
   mutable cached : snapshot option;
@@ -57,7 +60,8 @@ let blank = { kind = Notice; style = Text; text = ""; runs = [||];
 
 let create () = { rows = [||]; count = 0; next_group = 1;
   expanded = Hashtbl.create 32; pending_tool = None; live = "";
-  streaming = false; fenced = false; table_active = false; revision = 0;
+  streaming = false; fenced = false; diff_fenced = false; diff_raw = false;
+  table_active = false; revision = 0;
   cached = None; dirty = 0 }
 
 let sanitize text =
@@ -229,6 +233,8 @@ let heading t ~kind ~group ~provisional text =
   if t.count > 0 && t.rows.(t.count - 1).style <> Divider then
     add_line t ~kind ~group ~provisional ~style:Divider "";
   t.fenced <- false;
+  t.diff_fenced <- false;
+  t.diff_raw <- false;
   t.table_active <- false;
   add_line t ~kind ~group ~provisional ~style:Heading text
 
@@ -257,15 +263,56 @@ let display_line ~fenced line =
   else if fenced then Code, line
   else markdown_prefix line
 
-let content_line t ~kind ~group ~provisional ?(detail = false) line =
+let diff_style line =
+  let starts prefix = String.starts_with ~prefix line in
+  if starts "diff --git " || starts "--- " || starts "+++ " ||
+     starts "Index: " then Some Diff_header
+  else if starts "@@ " || starts "@@@ " then Some Diff_hunk
+  else if starts "index " || starts "new file mode " ||
+          starts "deleted file mode " || starts "old mode " ||
+          starts "new mode " || starts "similarity index " ||
+          starts "rename from " || starts "rename to " ||
+          starts "copy from " || starts "copy to " ||
+          starts "Binary files " || starts "GIT binary patch" ||
+          starts "\\ No newline at end of file" then Some Diff_meta
+  else if line = "" then None
+  else match line.[0] with
+    | '+' -> Some Diff_add
+    | '-' -> Some Diff_remove
+    | ' ' -> Some Diff_context
+    | _ -> None
+
+let is_diff_style = function
+  | Diff_header | Diff_hunk | Diff_add | Diff_remove | Diff_context
+  | Diff_meta -> true
+  | _ -> false
+
+let content_line t ~kind ~group ~provisional ?(detail = false)
+    ?(start_diff = false) line =
   let line = fit line in
   let fence = String.starts_with ~prefix:"```" line in
-  let style, line = display_line ~fenced:t.fenced line in
-  if fence then t.fenced <- not t.fenced;
+  let diff = not fence && (t.diff_fenced ||
+    (not t.fenced && (t.diff_raw || start_diff ||
+      String.starts_with ~prefix:"diff --git " line))) in
+  let diff_kind = if diff then diff_style line else None in
+  let style, visible = match diff_kind with
+    | Some style -> style, line
+    | None when diff && t.diff_fenced -> Code, line
+    | None -> display_line ~fenced:t.fenced line in
+  if fence then (
+    if t.fenced then t.diff_fenced <- false
+    else t.diff_fenced <- String.equal
+      (String.lowercase_ascii (String.trim
+        (String.sub line 3 (String.length line - 3)))) "diff";
+    t.fenced <- not t.fenced;
+    t.diff_raw <- false)
+  else if not t.fenced then
+    t.diff_raw <- diff && Option.is_some diff_kind;
   if style <> Text then (
     t.table_active <- false;
-    add_line t ~kind ~group ~provisional ~detail ~markdown:(style <> Code)
-      ~style line)
+    add_line t ~kind ~group ~provisional ~detail
+      ~markdown:(style <> Code && not (is_diff_style style))
+      ~style visible)
   else
     match table_cells line with
     | Some cells when table_separator cells ->
@@ -351,6 +398,8 @@ let tool_result ?group:existing ?(aborted = false) ?(is_error = false) t name re
     | None, _ -> start_tool t name in
   t.pending_tool <- None;
   t.fenced <- false;
+  t.diff_fenced <- false;
+  t.diff_raw <- false;
   t.table_active <- false;
   let failed = is_error || String.starts_with ~prefix:"Error:" result in
   let error = failed || aborted in
@@ -369,6 +418,17 @@ let tool_result ?group:existing ?(aborted = false) ?(is_error = false) t name re
     (Printf.sprintf "%s · %d %s · collapsed" outcome length
       (if length = 1 then "line" else "lines"));
   let position = ref 0 and previewed = ref false in
+  let status_preview = ref None in
+  let starts_at text index prefix =
+    let size = String.length prefix in
+    index + size <= String.length text &&
+    String.sub text index size = prefix in
+  let excerpt text =
+    if String.length text <= 160 then text
+    else let size = ref 160 in
+      while !size > 0 && Char.code text.[!size] land 0xc0 = 0x80 do
+        decr size done;
+      String.sub text 0 !size ^ "…" in
   for _index = 0 to min (length - 1) (max_tool_lines - 1) do
     let stop = match String.index_from_opt result !position '\n' with
       | Some stop -> stop | None -> String.length result in
@@ -376,27 +436,43 @@ let tool_result ?group:existing ?(aborted = false) ?(is_error = false) t name re
     let line = sanitize (String.sub result !position
       (min bytes max_line_bytes)) in
     let line = if bytes > max_line_bytes then fit (line ^ "…") else fit line in
+    let starts_diff = (not t.fenced || t.diff_fenced) &&
+      (String.starts_with ~prefix:"diff --git " line ||
+       (String.starts_with ~prefix:"--- " line &&
+        starts_at result (stop + 1) "+++ ")) in
+    if starts_diff then (
+      match !status_preview with
+      | Some index ->
+          set_row t index ~style:Diff_header ~markdown:false (excerpt line);
+          status_preview := None
+      | None -> ());
     if not !previewed && String.trim line <> "" &&
       not (String.starts_with ~prefix:"```" line) then (
       previewed := true;
-      let style, preview = display_line ~fenced:t.fenced line in
-      let excerpt =
-        if String.length preview <= 160 then preview
-        else let prefix = ref 160 in
-          while !prefix > 0 && Char.code preview.[!prefix] land 0xc0 = 0x80 do
-            decr prefix done;
-          String.sub preview 0 !prefix ^ "…" in
+      let style, preview =
+        if starts_diff || t.diff_raw || t.diff_fenced then
+          match diff_style line with
+          | Some style -> style, line
+          | None -> display_line ~fenced:t.fenced line
+        else display_line ~fenced:t.fenced line in
+      let index = t.count in
       add_line t ~kind:(if error then Error else Tool) ~group:id
         ~provisional:false ~preview:true ~style
-        ~markdown:(style <> Code) excerpt);
+        ~markdown:(style <> Code && not (is_diff_style style))
+        (excerpt preview);
+      if String.starts_with ~prefix:"Status:" line then
+        status_preview := Some index);
     content_line t ~kind:(if error then Error else Tool)
-      ~group:id ~provisional:false ~detail:true line;
+      ~group:id ~provisional:false ~detail:true ~start_diff:starts_diff line;
     position := stop + 1
   done;
   if length > max_tool_lines then
     add_line t ~kind:Notice ~group:id ~provisional:false ~detail:true
       (Printf.sprintf "… %d additional lines omitted (transcript limit)"
-        (length - max_tool_lines))
+        (length - max_tool_lines));
+  t.fenced <- false;
+  t.diff_fenced <- false;
+  t.diff_raw <- false
 
 let flush_live t =
   if t.live <> "" then (
@@ -439,6 +515,8 @@ let finish t =
   flush_live t;
   t.streaming <- false;
   t.fenced <- false;
+  t.diff_fenced <- false;
+  t.diff_raw <- false;
   t.table_active <- false;
   while t.count > 0 &&
     (let row = t.rows.(t.count - 1) in
@@ -469,6 +547,8 @@ let rollback t =
   | Some (name, id) -> interrupt_tool t name id);
   t.pending_tool <- None;
   t.fenced <- false;
+  t.diff_fenced <- false;
+  t.diff_raw <- false;
   t.table_active <- false;
   let kept = ref 0 in
   for i = 0 to t.count - 1 do
@@ -487,6 +567,8 @@ let clear t =
   t.live <- "";
   t.streaming <- false;
   t.fenced <- false;
+  t.diff_fenced <- false;
+  t.diff_raw <- false;
   t.table_active <- false;
   Hashtbl.clear t.expanded;
   t.revision <- t.revision + 1

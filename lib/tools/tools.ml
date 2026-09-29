@@ -1664,6 +1664,72 @@ let mobile_check ~approved ?cancel ?on_progress ?context root args =
          " errors:\n" ^ String.concat "\n" locations) ^
       "\n" ^ result.output)
 
+let android_device_command ~root args =
+  let subroot = required_string "subroot" args in
+  let action = required_string "action" args in
+  let _, cwd = Workspace_gradle_focus.command ~root ~subroot
+    ~action:"tasks" ~task:"" in
+  let command = match action with
+    | "avds" -> "emulator -list-avds"
+    | "devices" -> "adb devices"
+    | _ -> fail "Android inventory action must be avds or devices" in
+  command, cwd
+
+let android_devices ~approved ?cancel ?on_progress ?context root args =
+  if not approved then fail "Android inventory requires explicit interactive approval";
+  let context = require_session_context context in
+  check_session_context context;
+  let command, cwd = android_device_command ~root args in
+  let action = required_string "action" args in
+  let result = Workspace_process.run_shell ?cancel ?on_progress
+    ~timeout_seconds:30 ~output_limit:16_384 ~cwd:(Some cwd) ~command () in
+  let outcome = match result.termination with
+    | Workspace_process.Exited code -> Printf.sprintf "exit %d" code
+    | Workspace_process.Signaled signal -> Printf.sprintf "signal %d" signal
+    | Workspace_process.Timed_out -> "timed out"
+    | Workspace_process.Cancelled -> raise Cancelled in
+  let label = if action = "avds" then "AVD" else "ADB" in
+  let prefix = "Android " ^ label ^ " inventory: " ^ outcome in
+  if result.termination <> Workspace_process.Exited 0 || result.truncated then
+    prefix ^ " (no device choices; command failed or output was truncated)"
+  else if action = "avds" then
+    let names = Workspace_android_devices.avds result.output in
+    prefix ^ "\nConfigured AVDs (not running; SDK image readiness unknown): " ^
+    (if names = [] then "none"
+     else String.concat ", " (List.map (Printf.sprintf "%S") names))
+  else
+    let devices = Workspace_android_devices.adb_devices result.output in
+    let emulators, other = List.partition
+      (fun device -> device.Workspace_android_devices.emulator) devices in
+    let ready = List.filter
+      (fun device -> device.Workspace_android_devices.state =
+        Workspace_android_devices.Ready) emulators in
+    let unavailable = List.filter
+      (fun device -> device.Workspace_android_devices.state <>
+        Workspace_android_devices.Ready) emulators in
+    let state = function
+      | Workspace_android_devices.Ready -> "ready"
+      | Workspace_android_devices.Offline -> "offline"
+      | Workspace_android_devices.Unauthorized -> "unauthorized"
+      | Workspace_android_devices.Unavailable -> "unavailable" in
+    let row device = Printf.sprintf "%s (%s)"
+      device.Workspace_android_devices.serial
+      (state device.Workspace_android_devices.state) in
+    let count wanted = List.fold_left (fun n device ->
+      if device.Workspace_android_devices.state = wanted then n + 1 else n)
+      0 other in
+    prefix ^ "\nReady emulators: " ^
+    (if ready = [] then "none" else String.concat ", " (List.map row ready)) ^
+    "\nUnavailable emulators: " ^
+    (if unavailable = [] then "none"
+     else String.concat ", " (List.map row unavailable)) ^
+    Printf.sprintf
+      "\nPhysical/unclassified devices (not selectable): ready=%d offline=%d unauthorized=%d unavailable=%d"
+      (count Workspace_android_devices.Ready)
+      (count Workspace_android_devices.Offline)
+      (count Workspace_android_devices.Unauthorized)
+      (count Workspace_android_devices.Unavailable)
+
 let string_list name args =
   match field name args with
   | `List values ->
@@ -2480,13 +2546,13 @@ let repository_security_scan ?cancel root args =
 
 let is_shell_tool = function
   | "run_command" | "start_process" | "start_shell" | "xcode_preflight"
-  | "mobile_check" -> true
+  | "mobile_check" | "android_devices" -> true
   | _ -> false
 
 let requires_explicit_approval ~name ~args =
   match name with
   | "run_command" | "start_process" | "start_shell" | "xcode_preflight"
-  | "mobile_check"
+  | "mobile_check" | "android_devices"
   | "process_stdin" | "process_close_stdin" | "process_kill"
   | "worktree_create" | "worktree_commit" | "worktree_remove"
   | "web_search" | "web_fetch" | "image_ocr"
@@ -2511,7 +2577,7 @@ let requires_explicit_approval ~name ~args =
 let non_reversible_tool ~name ~args =
   match name with
   | "run_command" | "start_process" | "start_shell" | "xcode_preflight"
-  | "mobile_check"
+  | "mobile_check" | "android_devices"
   | "process_stdin" | "process_close_stdin" | "process_kill"
   | "worktree_create" | "worktree_commit" | "worktree_remove"
   | "lsp_start" | "dap_start" | "ssh_open" | "ssh_read"
@@ -2629,6 +2695,10 @@ let definitions = [
      "manager", enum_string_field "Node script runner when multiple lockfiles exist" ["npm"; "pnpm"; "yarn"];
      "timeout_seconds", integer_field "Per-command deadline (default 120 seconds)" 1 300]
     ["stack"; "action"; "subroot"];
+  schema "android_devices" "Inventory configured Android AVDs or attached ADB devices with one separately approved command per phase; never boot, install, select a physical serial or run a test."
+    ["action", enum_string_field "AVD configuration or ADB transport listing" ["avds"; "devices"];
+     "subroot", string_field "Exact workspace-relative Gradle settings directory"]
+    ["action"; "subroot"];
   schema "read_file" "Read bounded workspace files, directories, documents, archives, notebooks, SQLite, owned artifacts, managed worktrees, or public HTTPS URLs. HTTPS fetches send no credentials and require approval."
     ["path", string_field "Workspace-relative path or supported local://, artifact://, worktree://, or HTTPS source";
      "offset", integer_field "Byte offset for ordinary local text files (default 0; exclusive with line)" 0 max_int;
@@ -3075,6 +3145,15 @@ let approval_request ?cancel ?context ~root ~name ~args (decision : Approval.dec
         ["Working directory: " ^ Printf.sprintf "%S" cwd;
          "Exact command: " ^ command;
          "The selected toolchain may write local build artifacts or invoke project-defined code."]
+    | "android_devices" ->
+        let command, cwd = android_device_command ~root:base_root args in
+        "Lists Android devices as your user; this inventory is not authorization to boot, install, launch or test. Each phase requires separate interactive approval.",
+        ["Working directory: " ^ Printf.sprintf "%S" cwd;
+         "Exact command: " ^ command;
+         (if optional_string "action" "" args = "devices" then
+            "ADB may start its local server and access your configured ADB identity. Physical serials are withheld; offline and unauthorized transports are not ready."
+          else
+            "Reads locally configured AVD names; no SDK or system image is installed, and no emulator is booted.")]
     | "run_command" ->
         "Runs /bin/sh as your user from the workspace root. It is not sandboxed and may access or modify files outside the workspace or use the network.",
         ["Working directory: " ^ Printf.sprintf "%S" base_root;
@@ -3339,7 +3418,7 @@ let session_tool_names = [
   "worktree_history"; "worktree_create"; "worktree_commit"; "worktree_remove";
   "lsp_start"; "lsp"; "workspace_eval";
   "ssh_open"; "ssh_close"; "ssh_read"; "ssh_write"; "ssh_command";
-  "dap_start"; "dap"; "xcode_preflight"; "mobile_check"
+  "dap_start"; "dap"; "xcode_preflight"; "mobile_check"; "android_devices"
 ]
 
 let path_tool_names = [
@@ -3358,7 +3437,8 @@ let error_message = function
   | Workspace_ssh.Error message | Native_tokenizer.Error message
   | Workspace_xcode.Error message | Workspace_swiftpm_focus.Error message
   | Workspace_gradle_focus.Error message | Workspace_flutter_focus.Error message
-  | Workspace_node_scripts.Error message ->
+  | Workspace_node_scripts.Error message
+  | Workspace_android_devices.Error message ->
       "Error: " ^ message
   | Workspace_dap.Cancelled -> "Error: DAP operation cancelled"
   | Unix.Unix_error (code, operation, path) ->
@@ -3415,6 +3495,8 @@ let prepare ?cancel ?context ~root ~name ~args () =
               xcode_preflight ~approved ?cancel ?on_progress ?context root args
           | "mobile_check" ->
               mobile_check ~approved ?cancel ?on_progress ?context root args
+          | "android_devices" ->
+              android_devices ~approved ?cancel ?on_progress ?context root args
           | "start_process" -> start_process ~approved ?cancel ?context root args
           | "start_shell" -> start_shell ~approved ?cancel ?context root args
           | "process_list" -> process_list ?context root args
