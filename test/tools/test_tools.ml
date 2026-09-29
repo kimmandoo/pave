@@ -689,6 +689,14 @@ let package = Package(name: "fixture", targets: targets)
       "name: sample\ndependencies:\n  flutter:\n    sdk: flutter\nflutter:\n  plugin:\n    platforms:\n      ios:\n      android:\n";
     directory "packages/flutter/ios";
     directory "packages/flutter/android";
+    create "packages/flutter/android/settings.gradle" "include ':app'\n";
+    directory "packages/flutter/ios/Runner.xcodeproj";
+    create "packages/flutter/ios/Runner.xcodeproj/project.pbxproj"
+      "// Flutter-owned native host\n";
+    directory "packages/flutter/ios/Runner.xcodeproj/xcshareddata";
+    directory "packages/flutter/ios/Runner.xcodeproj/xcshareddata/xcschemes";
+    create "packages/flutter/ios/Runner.xcodeproj/xcshareddata/xcschemes/Runner.xcscheme"
+      "<Scheme/>\n";
     directory "packages/dart";
     create "packages/dart/pubspec.yaml"
       "name: dart_only\n# flutter:\ndescription: flutter: not a dependency\n";
@@ -770,8 +778,8 @@ other.include(":not-a-gradle-module")
     let mobile = tool root "mobile_project" [] in
     if not (contains mobile "Xcode project: ios/App.xcodeproj/project.pbxproj")
     then failwith ("mobile inventory missed the iOS manifest:\n" ^ mobile);
-    assert (contains mobile
-      "cd 'ios' && xcodebuild -list -project 'App.xcodeproj'");
+    assert (not (contains mobile
+      "cd 'ios' && xcodebuild -list -project 'App.xcodeproj'"));
     assert (contains mobile
       "Candidate shared scheme: AppShared (ios/App.xcodeproj/xcshareddata/xcschemes/AppShared.xcscheme)");
     assert (contains mobile (Printf.sprintf
@@ -780,16 +788,22 @@ other.include(":not-a-gradle-module")
     assert (not (contains mobile "Candidate shared scheme: Oversized"));
     assert (not (contains mobile "-scheme 'Oversized'"));
 
-    assert (contains mobile
+    assert (not (contains mobile
+      "cd 'ios' && xcodebuild -project 'App.xcodeproj' -scheme 'AppShared' build"));
+    let selected_xcode = tool root "mobile_project"
+      ["subroot", "ios/App.xcodeproj"; "platform", "ios"] in
+    assert (contains selected_xcode
       "cd 'ios' && xcodebuild -project 'App.xcodeproj' -scheme 'AppShared' build");
-    assert (contains mobile
+    assert (contains selected_xcode
       "cd 'ios' && xcodebuild -project 'App.xcodeproj' -scheme 'AppShared' test");
     assert (contains mobile
       "Xcode workspace: ios/Workspace.xcworkspace/contents.xcworkspacedata");
-    assert (contains mobile
+    let selected_workspace = tool root "mobile_project"
+      ["subroot", "ios/Workspace.xcworkspace"; "platform", "ios"] in
+    assert (contains selected_workspace
       "cd 'ios' && xcodebuild -workspace 'Workspace.xcworkspace' -scheme 'WorkspaceFlow' test");
-    assert (contains mobile
-      "cd 'ios' && xcodebuild -project 'Core.xcodeproj' -scheme 'CoreShared' build");
+    assert (not (contains selected_workspace
+      "cd 'ios' && xcodebuild -project 'Core.xcodeproj' -scheme 'CoreShared' build"));
     assert (not (contains mobile
       "cd 'ios' && xcodebuild -project 'Core.xcodeproj' -scheme 'AppShared'"));
     assert (not (contains mobile
@@ -851,7 +865,40 @@ other.include(":not-a-gradle-module")
     assert (contains mobile "Lockfile: packages/react-native/yarn.lock");
     assert (contains mobile "Package manager: yarn");
     assert (contains mobile "Existing ios host root: packages/react-native/ios");
-    assert (contains mobile "cd 'packages/react-native' && yarn 'test'");
+    assert (not (contains mobile "cd 'packages/react-native' && yarn 'test'"));
+    let selected_rn = tool root "mobile_project"
+      ["subroot", "packages/react-native"; "platform", "android"] in
+    assert (contains selected_rn "cd 'packages/react-native' && yarn 'test'");
+    assert (not (contains selected_rn "xcodebuild -project"));
+    let host = tool root "mobile_project"
+      ["subroot", "packages/flutter/ios/Runner.xcodeproj";
+       "platform", "ios"] in
+    assert (contains host "Flutter plugin: packages/flutter/pubspec.yaml");
+    assert (contains host
+      "Xcode project: packages/flutter/ios/Runner.xcodeproj/project.pbxproj");
+    assert (not (contains host "xcodebuild -project"));
+    assert (not (contains selected_xcode "Runner.xcodeproj' -scheme"));
+    assert (rejected (fun () -> tool root "mobile_project"
+      ["subroot", "packages/flutter/ios/Runner.xcodeproj"]));
+    assert (rejected (fun () -> tool root "mobile_project"
+      ["subroot", "../outside"; "platform", "ios"]));
+    let mismatched = tool root "mobile_project"
+      ["subroot", "ios/App.xcodeproj"; "platform", "android"] in
+    assert (contains mismatched "No mobile stack matched selected subroot");
+    assert (not (contains mismatched "xcodebuild -project"));
+    let flutter_android_host = tool root "mobile_project"
+      ["subroot", "packages/flutter/android"; "platform", "android"] in
+    assert (contains flutter_android_host
+      "Android Gradle settings: packages/flutter/android/settings.gradle");
+    assert (not (contains flutter_android_host "yarn 'test'"));
+    assert (contains selected_rn "React Native: packages/react-native/package.json");
+    let cancelled_inventory = try
+      ignore (Pave.Tools.mobile_project ~cancel:(fun () -> true) root
+        (`Assoc ["subroot", `String "ios/App.xcodeproj";
+                 "platform", `String "ios"]));
+      false
+    with Pave.Tools.Cancelled -> true in
+    assert cancelled_inventory;
     assert (contains mobile "Expo: packages/expo/package.json");
     assert (contains mobile "Lockfile: packages/expo/package-lock.json");
     assert (contains mobile "Lockfile: packages/expo/pnpm-lock.yaml");

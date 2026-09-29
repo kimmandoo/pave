@@ -1,11 +1,13 @@
 # Work checkpoint
 
 - **Date:** 2026-09-29
-- **Completed task:** M06 React Native/Expo manifest, script, lockfile and host map. `mobile_project` reads bounded package dependency/script evidence, maps regular lockfiles next to the package, refuses ambiguous/no-lock manager command suggestions and shows only scanned native host roots. Removed implicit `npx expo export`.
+- **Completed task:** M07 mixed-stack selection. `mobile_project` inventory reports each stack separately without runnable command previews; matching exact `subroot` plus `ios`/`android` yields inert commands for a unique stack only. Nested Flutter/React Native native hosts, ambiguous/mismatched selections and truncated scans do not borrow another stack's command. Selection has no session or draft state.
 - **Changed files this session:** `lib/tools/tools.ml`, `test/tools/test_tools.ml`, `TASKS.md`, `docs/MOBILE_DEVELOPMENT_PLAN.md`, `docs/DESIGN_RULES.md`, `README.md`, `CHANGELOG.md`, `docs/WORK_CHECKPOINT.md`. No strategy code/default/selection changed; no backtest applies.
-- **Verification:** `opam exec -- dune exec ./test/test_tools.exe` exercised actual `mobile_project` tool output for a Yarn RN package, conflicting npm/pnpm Expo locks without a command suggestion, absent test script, and unrelated plain Node package. Full `opam exec -- dune runtest --force -j 1`, `opam exec -- dune build @install` and `git diff --check` passed. No package script, install, native build or SDK ran.
-- **Next action:** M07 mixed-stack root/platform selection; M08 onward remain open.
-- **Blockers / limits:** Lockfile presence is filesystem evidence, not proof the selected manager or dependencies are installed.
+- **Verification:** Focused `opam exec -- dune exec ./test/test_tools.exe` exercised actual inventory and exact Xcode project/workspace and RN selection, Flutter iOS and Android native hosts alongside neighbors, mismatch/traversal refusal and cancellation. Full `opam exec -- dune runtest --force -j 1`, `opam exec -- dune build @install` and `git diff --check` passed. No Xcode/Gradle/Flutter/package script ran.
+- **Next action:** M08 Xcode preflight with explicit discovery approval and a real available disposable project; M09 onward remain open.
+- **Blockers / limits:** No iOS/macOS Xcode execution or simulator availability was established by this static selection card.
+
+- **Previous M06 task:** Mapped React Native/Expo dependencies, scripts, regular lockfiles and observed native hosts. Conflicting/no lockfiles suppressed script suggestions; full suite, install build and diff check passed. No package script or SDK ran.
 
 - **Previous M05 task:** Classified bounded Flutter plugin/app/package/plain Dart manifests and observed native host roots without speculative build commands. Focused tool regression, full `dune runtest --force -j 1`, install build and diff check passed; no Flutter SDK/build was run.
 

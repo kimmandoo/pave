@@ -18,7 +18,7 @@ Only unchecked, independently verifiable work belongs here. The completed implem
 - [x] **M04 — Android module map.** Read static literal includes from Gradle settings and report regular wrapper scripts plus existing conventional module/source roots without executing Gradle. **Depends:** M01. **Accept:** dynamic includes and project-directory remapping remain unresolved; missing wrappers and unlisted variants are not invented.
 - [x] **M05 — Flutter map.** Distinguish app, package, plugin and plain Dart with only actual native host roots. **Depends:** M01. **Accept:** a Dart-only project is not labeled a buildable Flutter app.
 - [x] **M06 — React Native/Expo map.** Identify declared scripts, lockfile/package-manager choice and existing native roots without `npx`. **Depends:** M01. **Accept:** conflicting lockfiles require a choice; an absent script is not offered.
-- [ ] **M07 — Mixed-stack selection.** Require a precise subroot and platform before suggesting a focused command. **Depends:** M02–M06. **Accept:** a Flutter Android host cannot silently target a neighboring native app.
+- [x] **M07 — Mixed-stack selection.** Require a precise subroot and platform before suggesting a focused command. **Depends:** M02–M06. **Accept:** a Flutter Android host cannot silently target a neighboring native app.
 
 ### B — Focused builds and tests
 
@@ -136,4 +136,4 @@ Existing release CI covers four macOS/Linux native archives and extracted execut
 - [ ] **PL04 — Long-session resource bounds.** Measure idle CPU, memory retention, subprocess lifetime, queue wakeups and redraws in interactive long-session PTYs; set and enforce a concrete baseline. **Accept:** idle does not spin, cancel cleans owned processes and keyboard/resize remain responsive under bounded transcript/job load.
 - [ ] **PL05 — Final dependency cutover.** After feature contracts settle, narrow modules along measured responsibilities and remove superseded paths with callers, tests, build rules and contributor docs updated together. **Accept:** provider fake-HTTP turns, interactive PTY and packaged CLI still behave identically after the move.
 
-- **Order / gate:** R12 is complete and recorded in the changelog/checkpoint; mobile M07 is the next mobile card after M01–M06. R13–R16 and provider/local work remain independent deliverables. Keep denied/unverifiable work open, record actual blockers in `docs/WORK_CHECKPOINT.md`, and never mark work complete because another platform's fixture or a static source scan passed.
+- **Order / gate:** R12 is complete and recorded in the changelog/checkpoint; mobile M08 is the next mobile card after M01–M07. R13–R16 and provider/local work remain independent deliverables. Keep denied/unverifiable work open, record actual blockers in `docs/WORK_CHECKPOINT.md`, and never mark work complete because another platform's fixture or a static source scan passed.

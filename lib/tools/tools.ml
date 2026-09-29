@@ -950,7 +950,17 @@ let xcode_scheme_bundle path =
   find [] (String.split_on_char '/' path)
 
 
-let mobile_project ?cancel root =
+let mobile_project ?cancel root args =
+  let subroot = optional_string "subroot" "" args
+  and platform = optional_string "platform" "" args in
+  if (subroot = "") <> (platform = "") then
+    fail "select both an exact mobile subroot and platform";
+  if subroot <> "" then (
+    let checked = Workspace_path.checked_path root subroot in
+    if (Unix.stat checked).Unix.st_kind <> Unix.S_DIR then
+      fail "selected mobile subroot must be a workspace directory");
+  if platform <> "" && platform <> "ios" && platform <> "android" then
+    fail "mobile platform must be ios or android";
   let max_candidates = 100 in
   let candidates = ref [] and candidate_count = ref 0
   and truncated = ref false in
@@ -1032,6 +1042,42 @@ let mobile_project ?cancel root =
 
   if walk_truncated then truncated := true;
   let candidates = List.rev !candidates in
+  let directory path =
+    match Filename.dirname path with "." -> "" | parent -> parent in
+  let candidate_root = function
+    | Xcode_workspace (bundle, _) | Xcode_project (bundle, _) -> bundle
+    | Swift_package path | Gradle_settings path | Pubspec_manifest path
+    | Node_manifest path -> relative_label (directory path)
+    | Gradle_wrapper _ | Oversized_manifest _ -> "" in
+  let candidate_platform candidate =
+    match candidate with
+    | Xcode_workspace _ | Xcode_project _ | Swift_package _ -> "ios"
+    | Gradle_settings _ -> "android"
+    | Pubspec_manifest _ | Node_manifest _ -> platform
+    | _ -> "" in
+  let selectable candidate = candidate_root candidate <> "" in
+  let selection = List.filter (fun candidate ->
+    selectable candidate && candidate_root candidate = subroot &&
+    candidate_platform candidate = platform) candidates in
+  let current = ref None in
+  let host_owner candidate =
+    let candidate_root = candidate_root candidate in
+    List.exists (function
+      | Pubspec_manifest path | Node_manifest path ->
+          let parent = directory path in
+          let host = if platform = "ios" then "ios" else "android" in
+          platform <> "" &&
+          (candidate_root = join_relative parent host ||
+           let prefix = join_relative parent host ^ "/" in
+           String.length candidate_root > String.length prefix &&
+           String.sub candidate_root 0 (String.length prefix) = prefix)
+      | _ -> false) candidates in
+  let can_suggest () =
+    not !truncated && List.length selection = 1 &&
+    match !current with
+    | Some candidate ->
+        List.mem candidate selection && not (host_owner candidate)
+    | None -> false in
   let output = Buffer.create 1024 in
   let truncation_notice = "[truncated; narrow the workspace and retry]\n" in
   let output_limit = max_read_bytes - String.length truncation_notice in
@@ -1045,9 +1091,14 @@ let mobile_project ?cancel root =
   let add_stack name commands =
     incr stack_count;
     if !stack_count = 1 then
-      append "Detected mobile project evidence and suggested commands (not executed):\n";
+      append "Detected mobile project evidence (commands are previews, never executed):\n";
+    let selected = can_suggest () in
     append (name ^ "\n" ^
-      String.concat "" (List.map (fun command -> "  " ^ command ^ "\n") commands)) in
+      (if commands <> [] && not selected then
+        "  Focused commands withheld: select an exact subroot and platform; nested native hosts belong to their owning framework.\n"
+       else "") ^
+      String.concat "" (List.map (fun command -> "  " ^ command ^ "\n")
+        (if selected then commands else []))) in
   let add_diagnostic text = append (text ^ "\n") in
   List.sort String.compare !oversized_schemes |> List.iter (fun path ->
     add_diagnostic
@@ -1055,8 +1106,6 @@ let mobile_project ?cancel root =
         "Ignored oversized Xcode shared scheme: %s (exceeds %d-byte limit; no scheme commands suggested)."
         path max_write_bytes));
 
-  let directory path =
-    match Filename.dirname path with "." -> "" | parent -> parent in
   let command_in path command =
     let parent = directory path in
     if parent = "" then command
@@ -1154,7 +1203,9 @@ let mobile_project ?cancel root =
           ("Android Gradle settings: " ^ settings_path ^ "\n" ^
            wrapper_text ^ "\n" ^ String.concat "\n" lines)
           [] in
-  List.iter (function
+  List.iter (fun candidate ->
+    current := Some candidate;
+    match candidate with
     | Xcode_workspace (bundle, manifest) ->
         render_xcode "workspace" "-workspace" bundle manifest
     | Xcode_project (bundle, manifest) ->
@@ -1322,10 +1373,15 @@ let mobile_project ?cancel root =
           (Printf.sprintf "Ignored oversized mobile manifest: %s (exceeds %d-byte limit; no commands suggested)."
              path max_write_bytes))
     candidates;
+  if subroot <> "" && selection = [] then
+    add_diagnostic ("No mobile stack matched selected subroot " ^ subroot ^
+      " and platform " ^ platform ^ "; no commands suggested.");
   if !stack_count = 0 then
     add_diagnostic "No supported mobile project manifests found under workspace.";
   let result = Buffer.contents output in
-  if !truncated then result ^ truncation_notice else result
+  if !output_truncated && subroot <> "" then
+    "Mobile inventory output exceeded its limit; narrow workspace and retry. No commands suggested.\n"
+  else if !truncated then result ^ truncation_notice else result
 
 let run_command ?cancel ?on_progress root args =
   let command = required_string "command" args in
@@ -1909,7 +1965,7 @@ let workspace_eval_bridge ?cancel ?context ~root ~deadline name arguments =
   | "search" -> search root arguments
   | "glob" -> glob root arguments
   | "grep" -> grep root arguments
-  | "mobile_project" -> mobile_project ?cancel root
+  | "mobile_project" -> mobile_project ?cancel root arguments
   | "process_list" -> process_list ?context root arguments
   | "process_output" -> process_output ?context root arguments
   | "process_wait" ->
@@ -2286,8 +2342,9 @@ let definitions = [
     ["encoding", enum_string_field "Exact tiktoken encoding" ["cl100k_base"; "o200k_base"];
      "text", bounded_string_field "Text to count (maximum 1 MiB)" Native_tokenizer.max_input_bytes]
     ["encoding"; "text"];
-  schema "mobile_project" "Inventory bounded mobile manifests: map SwiftPM test roots, static Gradle modules, Flutter pubspec/hosts and React Native/Expo declared scripts, lockfile choice and native hosts; never execute project code or infer build readiness."
-    [] [];
+  schema "mobile_project" "Inventory bounded mobile stacks; choose an exact subroot and ios/android platform before suggesting a focused inert command. Nested framework hosts cannot select a neighboring native build."
+    ["subroot", string_field "Exact workspace-relative project root (Xcode bundle path for Xcode); supply with platform";
+     "platform", enum_string_field "Chosen host platform" ["ios"; "android"]] [];
   schema "read_file" "Read bounded workspace files, directories, documents, archives, notebooks, SQLite, owned artifacts, managed worktrees, or public HTTPS URLs. HTTPS fetches send no credentials and require approval."
     ["path", string_field "Workspace-relative path or supported local://, artifact://, worktree://, or HTTPS source";
      "offset", integer_field "Byte offset for ordinary local text files (default 0; exclusive with line)" 0 max_int;
@@ -3083,7 +3140,7 @@ let prepare ?cancel ?context ~root ~name ~args () =
           | "dap_start" -> dap_start ~approved ?cancel ?context root args
           | "dap" -> dap_execute ~approved ?cancel ?context root args
           | "token_count" -> token_count args
-          | "mobile_project" -> mobile_project ?cancel root
+          | "mobile_project" -> mobile_project ?cancel root args
           | _ -> assert false in
         [Protocol.Text result]
       with
