@@ -60,13 +60,26 @@ let () =
   let interrupted = Pave.Anthropic_stream.create ~on_text:(fun _ -> ()) in
   Pave.Anthropic_stream.feed interrupted
     (start_metered ^ text_start ^ text_stop ^ finish_metered);
-  ignore (Pave.Anthropic_stream.finish interrupted);
+  assert (not (Pave.Anthropic_stream.is_done interrupted));
+  assert (not (Pave.Anthropic_stream.is_finished interrupted));
+  (match Pave.Anthropic_stream.finish interrupted with
+   | exception Pave.Protocol.Invalid_response _ -> ()
+   | _ -> failwith "missing Anthropic message_stop must not finish successfully");
   assert (Pave.Anthropic_stream.usage interrupted = None);
   let text_only = start ^ text_start ^ text_delta ^ text_stop ^ ending "end_turn" ^ stop in
   let parser = Pave.Anthropic_stream.create ~on_text:(fun _ -> ()) in
   Pave.Anthropic_stream.feed parser text_only;
   assert ((Pave.Anthropic_stream.finish parser).content = Some "Hi there");
+  assert (Pave.Anthropic_stream.is_finished parser);
+  let delayed_stop = Pave.Anthropic_stream.create ~on_text:(fun _ -> ()) in
+  Pave.Anthropic_stream.feed delayed_stop
+    (start ^ text_start ^ text_delta ^ text_stop ^ ending "end_turn");
+  assert (not (Pave.Anthropic_stream.is_finished delayed_stop));
+  Pave.Anthropic_stream.feed delayed_stop stop;
+  assert ((Pave.Anthropic_stream.finish delayed_stop).content = Some "Hi there");
   invalid (start ^ text_start ^ text_delta ^ text_stop);
+  invalid (start ^ text_start ^ text_delta ^ text_stop ^ ending "end_turn");
+  invalid (start ^ tool_start ^ tool_delta ^ tool_stop ^ ending "tool_use");
   invalid (event "message_start"
     {|{"type":"message_start","message":{"type":"message","role":"user","usage":{"input_tokens":2}}}|});
   invalid (start ^ tool_start ^ tool_delta ^ tool_stop ^ ending "end_turn" ^ stop);

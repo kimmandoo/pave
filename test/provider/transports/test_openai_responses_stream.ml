@@ -95,6 +95,17 @@ let () =
   Openai_responses_stream.feed t (completion [ final_message ]);
   assert ((Openai_responses_stream.finish t).content = Some "Hello world");
   assert (List.rev !only_completed = [ "Hello world" ]);
+  let without_item_done = added 0 initial_message ^
+    indexed "response.output_text.delta" 0 "msg_1" [
+      "content_index", `Int 0; "delta", `String "Hello world" ] ^
+    completion [final_message] in
+  assert ((stream without_item_done).content = Some "Hello world");
+  assert ((stream (added 0 initial_call ^
+    indexed "response.function_call_arguments.delta" 0 "fc_1" [
+      "delta", `String {|{"path":"a.txt"}|} ] ^
+    completion [final_call])).tool_calls =
+    [{ Protocol.id = "call_1"; name = "read_file";
+      arguments = `Assoc ["path", `String "a.txt"] }]);
   invalid (added 1 initial_call ^ indexed "response.function_call_arguments.delta" 1 "fc_1"
     [ "delta", `String "{" ] ^ completion [ final_message; final_call ]);
   invalid (added 1 initial_call ^ indexed "response.function_call_arguments.done" 1 "fc_1"
@@ -103,6 +114,14 @@ let () =
   invalid (added 0 initial_message ^ indexed "response.output_text.delta" 0 "msg_1"
     [ "content_index", `Int 0; "delta", `String "mismatch" ]
     ^ done_item 0 final_message ^ completion [ final_message ]);
+  invalid (added 0 initial_message ^
+    indexed "response.output_text.delta" 0 "msg_1" [
+      "content_index", `Int 0; "delta", `String "mismatch" ] ^
+    completion [final_message]);
+  invalid (added 0 initial_call ^
+    indexed "response.function_call_arguments.delta" 0 "fc_1" [
+      "delta", `String "{}" ] ^
+    completion [final_call]);
   invalid (added 0 initial_message ^ done_item 0 final_message ^
     completion [ message "msg_1" "silently changed" ]);
   invalid (added 1 initial_call ^ done_item 1 final_call ^

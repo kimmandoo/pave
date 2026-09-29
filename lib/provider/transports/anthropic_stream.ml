@@ -154,7 +154,7 @@ let feed t bytes =
     raise error
 
 let is_done t = t.stopped && not t.failed
-let is_finished t = t.reason <> None && not t.failed
+let is_finished t = t.stopped && not t.failed
 
 let usage t = match t.stopped, t.failed, t.input_tokens, t.output_tokens with
   | true, false, Some input_tokens, Some output_tokens ->
@@ -168,7 +168,7 @@ let finish t =
   if t.failed then invalid "stream is invalid";
   try
     (match t.parser with Some parser -> Sse.finish parser | None -> invalid "missing parser");
-    if not t.started || t.reason = None then invalid "incomplete message";
+    if not t.started || not t.stopped || t.reason = None then invalid "incomplete message";
     let blocks = Hashtbl.fold (fun n (block, closed) items ->
       if not closed then invalid "unclosed content block";
       (n, block) :: items) t.blocks [] |> List.sort (fun (a, _) (b, _) -> Int.compare a b) in

@@ -1,6 +1,7 @@
 # Changelog
 
 ## 2026-09-29
+- fix(provider): accepted complete OpenAI Responses output when an item-done event was absent while retaining delta validation, and required Anthropic's terminal message-stop event before a streamed reply could succeed.
 - fix(provider): accepted complete Codex final output when item-done events were absent and reconstructed omitted final output only from completed items; rejected mismatched deltas and malformed account model eligibility fields before selection or inference.
 - docs(project): removed external-project attribution from current documentation and comments while retaining required provider protocol identifiers and model fixtures.
 - release(distribution): published v0.1.66 with four macOS/Linux archives and SHA256SUMS after hosted release checks; verified SwiftPM, Gradle, Flutter and RN/Expo focused checks, kept simulator work out of CI, and left M08 real Xcode acceptance open with explicit user approval.

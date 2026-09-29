@@ -165,17 +165,22 @@ let handle_completed t json =
   Hashtbl.iter (fun index item ->
     let output = try List.nth outputs index with Failure _ -> invalid "missing completed output item" in
     if field "id" output <> `String (item_id item) then invalid "completed output ID mismatch";
-    match item with
+    (match item with
     | Message message ->
-        if not message.done_item ||
-           Buffer.contents message.text <> message_text output then
+        if not message.done_item then
+          handle_item_done t (`Assoc [
+            "output_index", `Int index; "item", output ]);
+        if Buffer.contents message.text <> message_text output then
           invalid "completed output message mismatch"
     | Call call ->
-        if not call.done_item || field "call_id" output <> `String call.call_id ||
+        if not call.done_item then
+          handle_item_done t (`Assoc [
+            "output_index", `Int index; "item", output ]);
+        if field "call_id" output <> `String call.call_id ||
            field "name" output <> `String call.name ||
            call.args_done <> Some (string_field "arguments" output) then
           invalid "completed function call mismatch"
-    | Ignored _ -> ()) t.items;
+    | Ignored _ -> ())) t.items;
   List.iteri (fun index output ->
     if not (Hashtbl.mem t.items index) && field "type" output = `String "message" then (
       let text = message_text output in

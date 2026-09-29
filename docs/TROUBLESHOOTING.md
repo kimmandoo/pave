@@ -1,5 +1,19 @@
 # Troubleshooting
 
+### [2026-09-29] Responses stream required a redundant item-done event
+
+- **Context / Symptom:** A complete OpenAI Responses event fixture with an item-added event, text delta and full `response.completed.output` failed with `invalid Responses stream: completed output message mismatch` when `response.output_item.done` was omitted. A complete function-call fixture failed similarly.
+- **Root Cause:** The final-envelope validator required each added item to have a preceding item-done event even though the final output item provided the full matching content.
+- **Solution:** Validated unfinished streamed items against their corresponding complete final output item. Text/argument delta mismatches, changed IDs, malformed tools and missing final items still fail.
+- **Prevention / Reference:** Preserve missing-item-done positive cases and mismatched-delta negatives in `test/provider/transports/test_openai_responses_stream.ml`; a complete final array is authoritative, not a substitute for an absent final response.
+
+### [2026-09-29] Anthropic stream accepted a missing terminal event
+
+- **Context / Symptom:** A closed Anthropic text or tool block followed by a stop reason but no `message_stop` could finish successfully. The transport also marked that partial stream finished, risking an early close before a delayed terminal event.
+- **Root Cause:** `Anthropic_stream.finish` and `is_finished` required a terminal reason but not the protocol's explicit `message_stop`.
+- **Solution:** Required `message_stop` before success or finished status; separately delivered terminal events complete normally. Incomplete streams retain no reported usage.
+- **Prevention / Reference:** Exercise text, tool and delayed-terminal cases in `test/provider/transports/test_anthropic_stream.ml`.
+
 ### [2026-09-29] Codex completion required redundant output events
 
 - **Context / Symptom:** A Codex turn showed `invalid completion response: invalid Codex stream: missing completed output item`. A local event fixture reproduced that exact error when `response.output_item.added` and a complete `response.completed.output` arrived without an intermediate item-done event. Another fixture reproduced it with completed item-done events and an empty final output array. The user's raw vendor event trace was unavailable.
