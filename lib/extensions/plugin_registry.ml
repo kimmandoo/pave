@@ -129,8 +129,15 @@ let check_ancestors path =
     | part :: rest ->
       let next = Filename.concat base part in
       let stat = Unix.lstat next in
-      if stat.Unix.st_kind <> Unix.S_DIR then
-        fail ("plugin directory path contains symlink or non-directory: " ^ next);
+      if stat.Unix.st_kind = Unix.S_LNK then (
+        let parent = Unix.stat base in
+        let target = Unix.stat next in
+        if stat.Unix.st_uid <> 0 || parent.Unix.st_uid <> 0 ||
+           parent.Unix.st_perm land 0o022 <> 0 ||
+           target.Unix.st_uid <> 0 || target.Unix.st_kind <> Unix.S_DIR then
+          fail ("plugin directory path contains unsafe symlink: " ^ next))
+      else if stat.Unix.st_kind <> Unix.S_DIR then
+        fail ("plugin directory path contains non-directory: " ^ next);
       inspect next rest in
   inspect "/" parts
 let ensure_dir user_dir =

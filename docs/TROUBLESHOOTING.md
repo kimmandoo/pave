@@ -1,5 +1,12 @@
 # Troubleshooting
 
+### [2026-09-29] macOS release tests rejected the system `/var` alias
+
+- **Context / Symptom:** v0.1.69 Release run 36542708863 passed Linux and failed both macOS jobs at `Run tests`. CI run 36550181657 identified `test_account_routing` failing with `Plugin registry: plugin directory path contains symlink or non-directory: /var`.
+- **Root Cause:** macOS maps root-owned `/var` to `/private/var`; the plugin registry rejected every symlink ancestor, including this system-owned alias of the private temporary configuration directory.
+- **Solution:** Accepted a root-owned directory symlink only beneath a root-owned non-group/world-writable parent when its target is a root-owned directory. User-owned symlinks still fail closed. Captured Dune output as a failure artifact in CI and release jobs for future platform-specific diagnosis.
+- **Prevention / Reference:** Keep the user-owned symlink denial regression and verify the real macOS matrix before publishing a release.
+
 ### [2026-09-29] Release matrix rejected an OCaml 5.5 reserved identifier
 
 - **Context / Symptom:** v0.1.68 Release run 36538729396 failed every platform at `Run tests`. A local CI-matched OCaml 5.5.1 switch reproduced `File "bin/main.ml", line 1123, characters 27-33: Error: Syntax error` on `let mcp_approve server effect =`; the local development compiler was OCaml 5.2.1.

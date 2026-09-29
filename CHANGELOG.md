@@ -1,6 +1,8 @@
 # Changelog
 
 ## 2026-09-29
+- fix(extensions): accepted root-owned system directory aliases such as macOS `/var` in private plugin paths while continuing to reject user-owned symlink redirection.
+- fix(ci): retained failed Dune test output as an artifact in CI and release workflows for platform-specific diagnostics.
 - fix(release): renamed an MCP approval parameter reserved by OCaml 5.5, restoring local release-compiler compilation; the hosted release remained pending CI repair.
 - feat(extensions): discovered bounded user/project skills and declarative prompt commands with explicit session activation and draft-only insertion; added private approved custom tools, opt-in lifecycle hooks and owned plugin enable/disable/reload with immediate capability filtering.
 - feat(mcp): added validated user/project MCP config, private secret references and deny overrides; explicitly approved stdio and Streamable HTTP connections, per-effect approval, bounded tool/resource/prompt handling, source-attributed draft insertion and disconnecting reload. Left remote marketplace, legacy SSE and managed OAuth unavailable pending their external prerequisites.

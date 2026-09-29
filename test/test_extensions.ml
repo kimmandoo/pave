@@ -27,12 +27,17 @@ let () =
   Unix.mkdir config 0o700;
   Unix.mkdir user 0o700;
   Unix.mkdir root 0o700;
+  let alias = Filename.concat base "user-alias" in
+  Unix.symlink user alias;
   let previous = Sys.getenv_opt "XDG_CONFIG_HOME" in
   Fun.protect ~finally:(fun () ->
     (match previous with Some value -> Unix.putenv "XDG_CONFIG_HOME" value
      | None -> Unix.putenv "XDG_CONFIG_HOME" "");
     remove base) (fun () ->
     Unix.putenv "XDG_CONFIG_HOME" config;
+    check "user-owned symlink cannot redirect plugin storage"
+      (match Plugin_registry.load ~user_dir:alias ~available ~builtins:empty with
+       | Error _ -> true | Ok _ -> false);
     let registry = match Plugin_registry.load ~user_dir:user
         ~available ~builtins:empty with
       | Ok value -> value | Error message -> failwith message in

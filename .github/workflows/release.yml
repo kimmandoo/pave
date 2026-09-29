@@ -39,17 +39,17 @@ jobs:
       - name: Install dependencies
         run: opam install . --deps-only --with-test -y
       - name: Run tests
-        run: opam exec -- dune runtest --force -j 1
+        shell: bash
+        run: |
+          set -o pipefail
+          opam exec -- dune runtest --force -j 1 2>&1 | tee test-results.log
       - name: Preserve failing test diagnostics
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: test-diagnostics-${{ matrix.os }}-${{ matrix.arch }}
-          path: |
-            _build/log
-            _build/default/**/*.log
-            _build/default/**/*.output
-          if-no-files-found: warn
+          path: test-results.log
+          if-no-files-found: error
       - name: Build native executable
         env:
           PAVE_RELEASE_VERSION: ${{ github.ref_name }}
