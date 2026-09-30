@@ -1,6 +1,7 @@
 # Changelog
 
 ## 2026-09-30
+- release(distribution): published v0.1.74 with the provider response fixes and README update after four-platform native release builds, verified archive checksums and a packaged fixture smoke; profiling of streaming, TUI rendering, startup and large journals found no bottleneck requiring change.
 - docs(readme): removed emoji markers from the README highlights for consistent terminal and plain-text rendering.
 - fix(provider): stopped cutting off healthy streamed replies at a 120-second total request limit; streams now fail only after 120 seconds without data or a one-hour total, and buffered replies allow 600 seconds, with the applicable limit named in the timeout error.
 - fix(provider): reported output-token-limit stops (`length`, `max_tokens`, `MAX_TOKENS`) on every native route as a plain truncation error that explains the partial reply was not kept, instead of a generic invalid-completion error.

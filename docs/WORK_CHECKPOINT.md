@@ -1,6 +1,16 @@
 # Work checkpoint
 
-## Current session — provider prompt/response fixes
+## Current session — performance review and v0.1.74 release
+
+- **Date:** 2026-09-30
+- **Active task:** Completed. Reviewed prompt/response performance and released the provider fixes and README update as v0.1.74.
+- **Performance measurements (loopback vLLM fixture, native build, no code change warranted):** headless streamed turn ≈25 ms; 20,000/60,000-line streamed replies 0.11/0.27 s wall; TUI 20,000-line stream 0.35 s CPU; 100 keystrokes 0.03 s and 30 PageUp 0.01 s CPU with a 20,000-line transcript; TUI first usable frame 32 ms; turns stay 0.23 s with a 9 MB session journal (the 8 MiB request cap then rejects further turns as designed); a `[DONE]` with the connection held open completes in 0.02 s. No bottleneck justified a change.
+- **Release:** `5a8000c` (README emoji removal) pushed; main CI `36677084026` passed all four jobs. Annotated tag `v0.1.74` pushed at `5a8000c`, triggering release run `36677895137`.
+- **Release proof:** Release run `36677895137` passed Linux x86_64/aarch64, macOS arm64/x86_64 and publication. Public non-draft release `399781392` has four archives plus SHA256SUMS; all four checksums matched, the Linux x86_64 archive contains only `pave`, `LICENSE`, `THIRD_PARTY_NOTICES`, and the packaged binary ran `--help` and the text/length/empty/parameterless-tool fixture scenarios with the new behavior.
+- **Exact next action:** None for this request; do not repeat the release. Unrelated work resumes at the AU01 backlog card only when requested.
+- **Blockers / limits:** `gh` is not installed; status comes from the unauthenticated GitHub API (60 requests/hour), which was exhausted once during polling.
+
+## Previous session — provider prompt/response fixes
 
 - **Date:** 2026-09-30
 - **Active task:** Completed. Wired providers against loopback OpenAI-compatible (vLLM route) fixtures, sent prompts headless and in the TUI, and fixed every response-path bug found.
