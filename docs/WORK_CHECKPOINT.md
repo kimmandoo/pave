@@ -1,5 +1,13 @@
 # Work checkpoint
 
+## Current session — release-only v0.1.76
+
+- **Date:** 2026-09-30
+- **Active task:** Preparing the user-authorized v0.1.76 release only; application code remains unchanged.
+- **Changed files:** `CHANGELOG.md`, `docs/WORK_CHECKPOINT.md`. Untracked `scratch/` was left untouched.
+- **Verification:** The existing implementation checkpoint recorded passing install build, full tests and native TUI/installer checks. Public latest-release redirect resolved v0.1.75; remote v0.1.76 was unused.
+- **Exact next action:** Commit this release metadata, publish the new v0.1.76 tag, observe the existing four-platform native release workflow and verify the published archives before recording completion.
+
 ## Current session — provider-first model picker, install animation
 - **Date:** 2026-09-30
 - **Active task:** Completed. `/model` goes provider → (API/account when several) → model; `install.sh` animates in a terminal.
