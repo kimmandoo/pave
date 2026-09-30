@@ -2,6 +2,11 @@
 
 ## 2026-09-30
 
+- fix(tui): made ordinary and modified Return/Enter queue follow-ups without cancelling active work, kept interruption explicit, clarified queue feedback down to 18 columns, and protected draft attachments during queue restoration.
+- feat(tui): added live `/queue` and Option/Alt+Q management with per-item cancel, edit, run-next and interrupt-and-run-now actions; preserved draft/media and stable duplicate-prompt identity, and rejected stale actions after a prompt started.
+- feat(tui): replaced ambiguous tool approvals with a dedicated one-action permission screen, explicit deny/allow choices, inert stray typing and paste, resize-locked approval, and clearer inherited/current next-launch tool policies.
+- fix(provider): separated first-response waiting from post-response inactivity, removed curl's pre-response low-speed timeout, preserved cancellation and total/byte limits, and distinguished timeout phases without replaying requests.
+- fix(session): saved exact last-used model identities after successful top-level responses, including initial CLI/configured and resumed models, restored them on fresh interactive launches, and preserved prior choices on failed requests or cancelled selection.
 - release(distribution): published v0.1.77 with the responsive composer, compact animated startup mark and clearer suggestion/search/transcript navigation; passed all four native release gates, verified all archive checksums and exercised the packaged macOS arm64 CLI/TUI.
 - feat(tui): clarified command/file suggestions with position counts, full-width selection and responsive name/detail columns; kept insertion, exact-command execution and cancellation hints readable in narrow windows, and prioritized latest-output navigation while scrolled.
 - fix(tui): showed explicit empty search results and filter-edit/cancel guidance in static pickers, preserved match counts beside shortened picker titles, and kept idle send hints visible after a conversation.

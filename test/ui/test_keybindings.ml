@@ -7,9 +7,15 @@ let () =
   assert (Keybindings.resolve Keybindings.bindings Keybindings.Chooser
     (`Key (`Enter, [`Meta])) = Some Keybindings.Accept);
   assert (Keybindings.resolve Keybindings.bindings Keybindings.Composer
-    (`Key (`ASCII 'M', [`Meta; `Ctrl])) = Some Keybindings.Follow_up);
+    (`Key (`ASCII 'M', [`Meta; `Ctrl])) = Some Keybindings.Submit);
   assert (Keybindings.resolve Keybindings.bindings Keybindings.Composer
     (`Key (`Enter, [`Shift])) = Some Keybindings.Newline);
+  assert (Keybindings.resolve Keybindings.bindings Keybindings.Composer
+    (`Key (`ASCII 'q', [`Meta])) = Some Keybindings.Open_queue);
+  assert (Keybindings.resolve Keybindings.bindings Keybindings.Hints
+    (`Key (`ASCII 'q', [`Meta])) = Some Keybindings.Open_queue);
+  assert (Keybindings.resolve Keybindings.bindings Keybindings.Approval
+    (`Key (`ASCII 'q', [`Meta])) = Some Keybindings.Ignore);
   assert (Keybindings.resolve Keybindings.bindings Keybindings.Approval
     (`Key (`ASCII 'y', [])) = Some Keybindings.Approve);
   assert (Keybindings.resolve Keybindings.bindings Keybindings.Approval
@@ -29,7 +35,20 @@ let () =
   assert (Keybindings.resolve Keybindings.bindings Keybindings.Approval
     (`Key (`Escape, [])) = Some Keybindings.Reject);
   assert (Keybindings.resolve Keybindings.bindings Keybindings.Approval
-    (`Key (`Uchar (Uchar.of_int 0x315B), [`Meta])) = Some Keybindings.Reject);
+    (`Key (`Uchar (Uchar.of_int 0x315B), [`Meta])) = Some Keybindings.Ignore);
+  List.iter (fun event ->
+    assert (Keybindings.resolve Keybindings.bindings Keybindings.Approval event =
+      Some Keybindings.Ignore)) [
+    `Key (`ASCII 'a', []); `Key (`ASCII 'y', [`Ctrl]);
+    `Key (`Enter, [`Meta]); `Key (`Backspace, []) ];
+  assert (Keybindings.resolve Keybindings.bindings Keybindings.Approval
+    (`Key (`Arrow `Down, [])) = Some Keybindings.Move_down);
+  assert (Keybindings.resolve Keybindings.bindings Keybindings.Approval
+    (`Key (`Enter, [])) = Some Keybindings.Accept);
+  List.iter (fun modifiers ->
+    assert (Keybindings.resolve Keybindings.bindings Keybindings.Composer
+      (`Key (`Enter, modifiers)) = Some Keybindings.Submit))
+    [[]; [`Meta]; [`Ctrl]];
   assert (Keybindings.resolve Keybindings.bindings Keybindings.Paste
     (`Key (`ASCII 'C', [`Ctrl])) = Some Keybindings.Ignore);
   assert (Keybindings.focus ~paste:true ~overlay:(Some Keybindings.Approval)

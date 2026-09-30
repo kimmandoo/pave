@@ -1,6 +1,7 @@
-(* Last interactive model selection is private, workspace-scoped UI state, not a
-   journal entry or a configured default. Reuse the journal's exact identity
-   format and the session store's owned, atomic metadata operations. *)
+(* Last used model (or explicit interactive selection) is private,
+   workspace-scoped UI state, not a journal entry or a configured default.
+   Reuse the journal's exact identity format and the session store's owned,
+   atomic metadata operations. *)
 let filename = "last-model.json"
 let max_bytes = 16_384
 
@@ -30,5 +31,9 @@ let save ~root (identity : Model_identity.t) =
     invalid_arg "recent model identity exceeds storage limit";
   let dir = Session_store.ensure ~root in
   Session_store.with_file_lock (Filename.concat dir "last-model.lock")
-    (fun () -> Session_store.write_atomic ~dir ~prefix:".last-model-"
-      (Filename.concat dir filename) text)
+    (fun () ->
+      (* Check disk while holding the lock, rather than caching in the process:
+         another CLI instance may have used a different model since our turn. *)
+      if load ~root <> Some identity then
+        Session_store.write_atomic ~dir ~prefix:".last-model-"
+          (Filename.concat dir filename) text)

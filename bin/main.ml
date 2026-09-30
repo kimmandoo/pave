@@ -1785,8 +1785,12 @@ let () =
                   "\n\nReported child-agent usage: %d input / %d output tokens."
                   tokens.input_tokens tokens.output_tokens in
           (if result = "" then "No visible child-agent response." else result) ^ usage) in
+    let remember_model identity =
+      try Pave.Recent_model.save ~root identity with exn ->
+        worker_event ("Recent model was not saved: " ^ error_message exn) in
     let make_agent () =
       let provider, authentication, resolve_credential = resolve_provider () in
+      let used_identity = !active_identity in
       let secret_mask = current_secret_mask () in
       (match !journal, !active_identity with
        | Some session, Some identity -> Pave.Session.set_model ~registry session identity
@@ -1826,7 +1830,9 @@ let () =
         (match !journal with
         | Some session -> ignore (Pave.Session.append session message)
         | None -> ());
-        mark_user_message message in
+        mark_user_message message;
+        if message.role = "assistant" then
+          Option.iter remember_model used_identity in
       let session_guidance = match !journal with
         | None -> []
         | Some session ->
@@ -2067,11 +2073,7 @@ let () =
        | Some screen ->
            Tui.set_model ?display_name screen
              (selection_label descriptor identity route);
-           refresh_usage screen;
-           Option.iter (fun selected ->
-             try Pave.Recent_model.save ~root selected with exn ->
-               on_event ("Recent model was not saved: " ^ error_message exn))
-             identity
+           refresh_usage screen
        | None -> ()) in
     let apply_model_selection ?display_name
         ((descriptor : Pave.Provider_catalog.descriptor),
@@ -2085,7 +2087,8 @@ let () =
       (match !journal, !agent with
        | None, Some previous -> retained_history := Pave.Agent.messages previous
        | _ -> ());
-      use_selection ?display_name (descriptor, Some identity, route) in
+      use_selection ?display_name (descriptor, Some identity, route);
+      if Option.is_some !ui then remember_model identity in
     (* An explicit effort pick is journaled as-is. Without one, a level chosen
        for a different model is cleared rather than silently carried over to a
        route or account model that may reject it. *)
@@ -2985,7 +2988,7 @@ let () =
                        Some { Tui.start = !argument_start;
                          stop = selector_stop; value = selection.selector })
               else None in
-      let submit_tui_prompt ?(follow_up = false) ?(paste_ranges = [])
+      let submit_tui_prompt ?(steer = false) ?draft ?(paste_ranges = [])
           active text =
         let staged = !pending_attachments in
         try
@@ -2995,13 +2998,9 @@ let () =
                 let prompt, _ = expand_shortcuts text paste_ranges in
                 { Pave.Turn_runner.prompt = prompt; display_prompt = text;
                   attachments = []; paste_ranges } in
-          if follow_up then
-            Pave.Turn_runner.follow_up active
-              ~display_prompt:submission.display_prompt
-              ~attachments:submission.attachments
-              ~paste_ranges:submission.paste_ranges submission.prompt
-          else
-            Pave.Turn_runner.steer active
+          let submit = if steer then Pave.Turn_runner.steer
+            else Pave.Turn_runner.submit in
+          submit active
               ~display_prompt:submission.display_prompt
               ~attachments:submission.attachments
               ~paste_ranges:submission.paste_ranges submission.prompt;
@@ -3011,26 +3010,155 @@ let () =
            | Some screen ->
                if !pending_attachments <> staged then
                  set_pending_attachments staged;
+               let text, paste_ranges = match draft with
+                 | Some draft -> draft
+                 | None -> text, paste_ranges in
                let restored = Tui.prepend_prompt ~paste_ranges screen text in
                Tui.alert screen (if restored then
-                 "Attachment error · draft restored: " ^ error_message exn
-                 else "Attachment error · draft could not be restored: " ^
+                 "Prompt could not be sent · draft restored: " ^ error_message exn
+                 else "Prompt could not be sent · draft could not be restored: " ^
                    error_message exn)
            | None -> on_event ("Error: " ^ error_message exn));
           false in
+      let manage_queue screen active =
+        let wake_fd = Pave.Turn_runner.fd active in
+        let pending id =
+          List.find_opt (fun (item : Pave.Turn_runner.queued_submission) ->
+            item.id = id) (Pave.Turn_runner.queued active) in
+        let preview (item : Pave.Turn_runner.queued_submission) =
+          Tui.shorten_middle 120 (Tui.single_line item.submission.display_prompt) in
+        let attachment_details (item : Pave.Turn_runner.queued_submission) =
+          match Tui.preview_attachments item.submission.attachments with
+          | [] -> "No attachments"
+          | attachments ->
+              String.concat "\n" (List.map Tui.attachment_preview_text attachments) in
+        let listing ?preferred ?status rows : Tui.listing_update = {
+          verified = List.map (fun (value, _, _) -> value) rows;
+          labels = List.map (fun (value, label, _) -> value, label) rows;
+          details = List.map (fun (value, _, detail) -> value, detail) rows;
+          status; status_pages = []; preferred
+        } in
+        let queue_listing ?preferred ?status () =
+          let rows = List.mapi (fun index
+              (item : Pave.Turn_runner.queued_submission) ->
+            let attachments = List.length item.submission.attachments in
+            string_of_int item.id,
+            Printf.sprintf "%d. %s%s" (index + 1) (preview item)
+              (if attachments = 0 then "" else
+                Printf.sprintf " · %d attachment%s" attachments
+                  (if attachments = 1 then "" else "s")),
+            attachment_details item) (Pave.Turn_runner.queued active) in
+          let status = match status with
+            | Some _ -> status
+            | None -> Some (match rows, Pave.Turn_runner.busy active with
+                | [], true -> "Active work continues. Escape returns to your draft."
+                | [], false -> "Escape returns to your draft to compose a new prompt."
+                | _ :: _, true -> "Active work continues. Prompts run in the order shown."
+                | _ :: _, false -> "Select a queued prompt to manage it.") in
+          listing ?preferred ?status rows in
+        let stale = "That prompt already started or was removed; no action taken." in
+        let rec show ?preferred ?status () =
+          Pave.Turn_runner.drain active;
+          let initial_listing = queue_listing ?preferred ?status () in
+          let on_wake () =
+            Pave.Turn_runner.drain active;
+            Tui.apply_listing_update screen (queue_listing ()) in
+          match Tui.choose screen ~dynamic:true ~wake_fd ~on_wake
+            ~initial_listing ~count_label:"queued"
+            ~empty_message:"Queue empty"
+            ~title:"Queued prompts"
+            ~intro:[Tui.enter_key ^ " manages one pending prompt. Escape closes this menu.";
+              "Cancelling a queued prompt does not cancel the active turn."]
+            ~choices:[] with
+          | None -> ()
+          | Some selected ->
+              let id = int_of_string selected in
+              Pave.Turn_runner.drain active;
+              (match pending id with
+               | None -> show ~status:stale ()
+               | Some item ->
+                   let actions () =
+                     let rows = match pending id with
+                       | None -> ["back", "Back to queue", stale]
+                       | Some _ -> [
+                           "back", "Back to queue", "Leave this prompt unchanged.";
+                           "next", "Run next · keep active work",
+                             "Move this prompt ahead of other queued prompts without interrupting.";
+                           "now", "Run now · interrupt current work",
+                             "Cancel the active turn and run this prompt next.";
+                           "edit", "Edit in composer",
+                             "Remove this prompt from the queue and restore its text and attachments.";
+                           "cancel", "Cancel queued prompt",
+                             "Remove only this pending prompt; active work continues."
+                         ] in
+                     listing ~preferred:"back"
+                       ~status:(if Option.is_some (pending id) then
+                         "Escape returns to the queue without changes." else stale) rows in
+                   let initial_listing = actions () in
+                   let on_wake () =
+                     Pave.Turn_runner.drain active;
+                     Tui.apply_listing_update screen (actions ()) in
+                   let action = Tui.choose screen ~dynamic:true ~wake_fd ~on_wake
+                     ~initial_listing ~initial_selected:"back" ~count_label:"actions"
+                     ~title:"Manage queued prompt"
+                     ~intro:[preview item; Tui.single_line (attachment_details item);
+                       "Actions affect only this pending prompt. Back is safe."]
+                     ~choices:[] in
+                   Pave.Turn_runner.drain active;
+                   match action with
+                   | None | Some "back" -> show ~preferred:selected ()
+                   | Some _ when pending id = None -> show ~status:stale ()
+                   | Some ("next" | "now" as action) ->
+                       let changed = Pave.Turn_runner.prioritize_queued active ~id
+                         ~interrupt:(action = "now") in
+                       show ~preferred:selected ~status:(if not changed then stale
+                         else if action = "now" then
+                           "Interrupting active work; selected prompt runs next."
+                         else "Selected prompt runs next; active work was not interrupted.") ()
+                   | Some "cancel" ->
+                       let removed = Pave.Turn_runner.take_queued active ~id in
+                       show ~status:(if removed = None then stale else
+                         "Queued prompt cancelled; active work was not interrupted.") ()
+                   | Some "edit" ->
+                       if !pending_attachments <> [] then
+                         show ~preferred:selected
+                           ~status:"Send or clear staged attachments first; queued prompt unchanged." ()
+                       else
+                         (match pending id with
+                          | None -> show ~status:stale ()
+                          | Some queued ->
+                              if Tui.prepend_prompt
+                                  ~paste_ranges:queued.submission.paste_ranges screen
+                                  queued.submission.display_prompt then (
+                                (* No drain between restoring the draft and removing
+                                   its pending ID: queue transitions are UI-thread owned. *)
+                                ignore (Pave.Turn_runner.take_queued active ~id);
+                                set_pending_attachments queued.submission.attachments;
+                                Tui.alert screen
+                                  "Queued prompt moved to draft · review and send when ready")
+                              else
+                                show ~preferred:selected
+                                  ~status:"Draft is full; draft and queued prompt unchanged." ())
+                   | Some _ -> show ~preferred:selected ()) in
+        show () in
       let input () = match !ui, !runner with
         | Some screen, Some active ->
             let wake_fd = Pave.Turn_runner.fd active in
             let on_wake () = Pave.Turn_runner.drain active in
             (match Tui.read screen ~wake_fd ~on_wake
               ~on_completion:(complete_command ~wake_fd ~on_wake screen)
+              ~on_queue:(fun () -> manage_queue screen active)
               ~on_interrupt:(fun () ->
                 if Pave.Turn_runner.busy active then (
                   Pave.Turn_runner.cancel active;
-                  Tui.alert screen "Cancelling turn · draft preserved; queued prompts continue";
+                  Tui.alert screen "Stopping active turn · draft preserved; queued prompts still run next";
                   true)
                 else false)
               ~on_dequeue:(fun () ->
+                if !pending_attachments <> [] then
+                  Tui.alert screen
+                    "Send or clear staged attachments before restoring · queued prompt remains pending"
+                else
                 match Pave.Turn_runner.dequeue_last active with
                 | None -> Tui.alert screen "No queued prompt to restore"
                 | Some queued ->
@@ -3038,9 +3166,8 @@ let () =
                         ~paste_ranges:queued.submission.paste_ranges screen
                         queued.submission.display_prompt then (
                       set_pending_attachments queued.submission.attachments;
-                      Tui.alert screen ("Restored queued prompt · " ^
-                        Tui.meta_key ^ "+" ^ Tui.enter_key ^
-                        " to queue, " ^ Tui.enter_key ^ " to steer"))
+                      Tui.alert screen ("Restored queued prompt into draft · " ^
+                        Tui.enter_key ^ " sends or queues; /steer MESSAGE interrupts"))
                     else (
                       Pave.Turn_runner.restore_dequeued active queued;
                       Tui.alert screen "Draft is full · queued prompt remains pending"))
@@ -3054,12 +3181,11 @@ let () =
              | None -> raise End_of_file)
         | None, _ ->
             print_string "pave> "; flush stdout;
-            { Tui.text = read_line (); follow_up = true; paste_ranges = [] } in
+            { Tui.text = read_line (); paste_ranges = [] } in
       try while true do
         (try
         let input = input () in
-        let line = input.text and follow_up = input.follow_up
-        and paste_ranges = input.paste_ranges in
+        let line = input.text and paste_ranges = input.paste_ranges in
          let command = Pave.Interaction.parse ~external_commands:!external_commands
            ~session:(Option.is_some !journal)
            ~interactive:(Option.is_some !ui) ~subagents:!enable_subagents line in
@@ -3075,14 +3201,16 @@ let () =
              (match !runner with
               | Some active when busy ->
                   Pave.Turn_runner.cancel active;
-                  feedback "Cancelling current turn; queued prompts will run next."
+                  feedback "Stopping active turn; queued prompts still run next."
               | _ -> on_event "No active turn to cancel.")
          | Pave.Interaction.Help ->
              if busy then
-               feedback ("Commands: /cancel · /quit · " ^ Tui.enter_key ^
-                 " steers and interrupts; " ^ Tui.meta_key ^ "+" ^
-                 Tui.enter_key ^ " or /queue MESSAGE queues a follow-up; " ^
-                 Tui.meta_key ^ "+↑ restores the last queued prompt")
+               feedback ("Commands: " ^ Tui.enter_key ^ " or " ^
+                 Tui.meta_key ^ "+" ^ Tui.enter_key ^
+                 " sends after this turn; /queue manages pending prompts; /queue MESSAGE also queues; " ^
+                 "/steer MESSAGE interrupts and sends next; /cancel or Ctrl+C stops the active turn " ^
+                 "(queued prompts still run); /quit exits; " ^
+                 Tui.meta_key ^ "+↑ restores a queued prompt into the draft")
              else (
                let lines = "Commands · type / then Tab to search" ::
                 Pave.Interaction.help ~external_commands:!external_commands
@@ -3099,18 +3227,39 @@ let () =
              (match !ui with
               | Some screen -> Tui.events screen Tui.hotkeys
               | None -> on_event "Hotkeys require the interactive terminal; use /help for commands")
-         | Pave.Interaction.Queue_prompt text ->
-             if busy || select_prompt_account ~paste_ranges text then (
-               (match !runner with
-                | Some active ->
-                    if submit_tui_prompt ~follow_up:true ~paste_ranges
-                        active text && busy then
-                      (match !ui with
-                       | Some screen ->
-                           Tui.alert screen
-                             "Follow-up queued for after the active turn."
-                       | None -> ())
-                | None -> send text))
+         | Pave.Interaction.Queue_view ->
+             (match !ui, !runner with
+              | Some screen, Some active -> manage_queue screen active
+              | _ -> feedback "Queue management requires the interactive terminal.")
+         | Pave.Interaction.Queue_prompt _ | Pave.Interaction.Steer_prompt _ ->
+             let steer = match command with
+               | Pave.Interaction.Steer_prompt _ -> true
+               | _ -> false in
+             if busy || select_prompt_account ~paste_ranges line then (
+               let is_space = Pave.Interaction.is_whitespace_or_control in
+               let start = ref 0 in
+               while !start < String.length line && is_space line.[!start] do
+                 incr start
+               done;
+               while !start < String.length line && not (is_space line.[!start]) do
+                 incr start
+               done;
+               while !start < String.length line && is_space line.[!start] do
+                 incr start
+               done;
+               let text = String.sub line !start (String.length line - !start) in
+               let argument_ranges = List.filter_map (fun (first, last) ->
+                 let first = max first !start and last = min last (String.length line) in
+                 if first < last then Some (first - !start, last - !start)
+                 else None) paste_ranges in
+               match !runner with
+               | Some active ->
+                   if submit_tui_prompt ~steer ~draft:(line, paste_ranges)
+                       ~paste_ranges:argument_ranges active text && busy then
+                     feedback (if steer then
+                       "Interrupting active turn · steering message runs next, before queued follow-ups."
+                       else "Prompt queued · runs after earlier prompts; active turn continues.")
+               | None -> send text)
          | _ when busy && (match command with
              | Pave.Interaction.Prompt _ | Pave.Interaction.Jobs
              | Pave.Interaction.Wait _ | Pave.Interaction.Cancel_job _
@@ -3975,15 +4124,10 @@ let () =
         | Pave.Interaction.Prompt text when text <> "" ->
             (match !runner with
              | Some active when busy ->
-                 if submit_tui_prompt ~follow_up ~paste_ranges active line then
-                   (match !ui with
-                    | Some screen when follow_up ->
-                        Tui.alert screen "Follow-up queued for after this turn."
-                    | Some screen ->
-                        Tui.alert screen "Steering queued; interrupting the current turn."
-                    | None -> ())
+                 if submit_tui_prompt ~paste_ranges active line then
+                   feedback "Prompt queued · runs after earlier prompts; active turn continues."
              | Some active when select_prompt_account ~paste_ranges line ->
-                 ignore (submit_tui_prompt ~follow_up ~paste_ranges active line)
+                 ignore (submit_tui_prompt ~paste_ranges active line)
              | Some _ -> ()
              | None -> send line)
         | Pave.Interaction.Prompt _ -> ()

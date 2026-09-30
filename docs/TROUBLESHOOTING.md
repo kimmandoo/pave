@@ -1,5 +1,33 @@
 # Troubleshooting
 
+### [2026-09-30] Additional prompts cancelled work and approval arrows rejected actions
+
+- **Context / Symptom:** The user reported `Turn cancelled` after entering a follow-up. In an actual loopback-provider TUI, pressing Down at a `write_file` approval produced `Error: tool approval denied` without an explicit denial.
+- **Root Cause:** Composer Return dispatched steering while modified Return dispatched follow-up, despite both looking like ordinary submission. Approval was appended to the transcript above an editable-looking composer and treated most keys—including arrows—as rejection.
+- **Solution:** Unified ordinary/modified Return on FIFO submission and introduced explicit `/steer MESSAGE` for interruption. Added `/queue` / Option+Q management for per-item cancellation, noninterrupting priority, interrupt-and-run-now and draft/media restoration. Stable IDs prevent duplicate text or stale selections from targeting another item. Replaced transcript approval with a draft-preserving modal, safe denial default, explicit one-action choices, inert stray typing/paste, navigation keys, and one geometry calculation shared by rendering and the allow gate. Kept next-launch policy editing visibly separate.
+- **Prevention / Reference:** `test_keybindings`, `test_turn_runner`, `test_interaction` and approval-fit boundary tests cover the contracts. Actual PTY checks exercised duplicate-item cancellation, priority and interruption, stale action removal, media restoration, staged-media protection, approval navigation, Korean input, paste, denial/allow, NO_COLOR and shrink/grow locking. Removed surplus queue-indicator whitespace so an eight-cell count remains readable at 18 columns. Kept mandatory shell warnings inside the settings chooser's two visible intro rows. Resize clears obsolete approval guidance once the full preview is visible.
+
+### [2026-09-30] Stream inactivity protection timed out before the first response
+
+- **Context / Symptom:** The user reported a timeout between model request and response. A controlled real curl POST with a five-second first-byte delay failed at 3.04 s with exit 28 under a scaled one-second low-speed guard; the same request completed at 5.03 s without that guard and with the same eight-second total cap.
+- **Root Cause:** `speed-time` / `speed-limit` measures average transfer speed and runs before response-body arrival. It is not a post-response inactivity timer, so upload/prefill/remote queueing was charged to the 120 s stream-idle budget. Generic curl exit 28 was also labelled too narrowly.
+- **Solution:** Removed low-speed policing and enforced phase-aware deadlines in the cancellable reader: existing 600 s first-response budget, then existing 120 s since the last received body byte, while retaining the ten-second connect and one-hour total limits, completion grace and byte bounds. Ready bytes/EOF win at deadline boundaries. Errors distinguish first-byte wait, post-byte stall and generic connection/total timeout; requests are never automatically replayed.
+- **Prevention / Reference:** `test_provider_http` covers first-byte versus idle expiration, progressing streams, deadline-boundary bytes/EOF and cancellation. The actual CLI completed a loopback request whose first response was delayed 125 s (125.03 s, exit 0, exactly one request). The user's exact vendor/proxy failure was not available; upstream timeouts and genuine post-byte stalls can still fail appropriately.
+
+### [2026-09-30] Successfully used initial or resumed models did not become last-used
+
+- **Context / Symptom:** The user reported that the most recently used model was not retained for the next launch.
+- **Root Cause:** Recent-model persistence occurred only in the interactive selection path; successful use of an initial CLI/configured model or a restored journal did not update it.
+- **Solution:** Captured the resolved exact model identity in the top-level agent and saved it after a valid assistant response, including tool-call responses and headless use. Explicit accepted interactive selections still save immediately; session browsing, failed calls and background agents do not. Compared on-disk state under the lock to avoid rewriting unchanged identities.
+- **Prevention / Reference:** The real-CLI regression covers replacement, failed provider/preflight preservation, headless-default precedence, and registered custom account/route/fingerprint resume. Its first resume fixture incorrectly supplied `--endpoint`, which intentionally overrides journal selection; the corrected fixture resumes a registered route with no explicit selectors.
+
+### [2026-09-30] Embedded smoke harness stalled while managing CLI subprocesses
+
+- **Context / Symptom:** The embedded evaluation kernel became unresponsive during subprocess/PTY diagnostics. An initial isolated PTY harness also stopped observing queued requests while waiting without reading terminal output.
+- **Root Cause:** [INFERENCE] The embedded harness could block on inherited open stdin or its threaded process/fork interaction; its exact kernel stall was not established as a product fault. Independently, a PTY producer can block when the harness waits for HTTP events without draining terminal output.
+- **Solution:** Moved smoke scenarios to a disposable external Python process, supplied `DEVNULL` for headless stdin, used `openpty` plus `Popen` rather than a threaded in-kernel fork, and drained PTY output during request-admission waits. Kept every fixture in an isolated workspace/config/state directory.
+- **Prevention / Reference:** Use explicit request-admission synchronization before changing fixture behavior, and keep terminal output draining while waiting for asynchronous turns. Do not count an unsynchronized delayed-response launch as timeout verification.
+
 ### [2026-09-30] Static picker searches went blank with selection hints
 
 - **Context / Symptom:** In the real 30×10 CLI TUI, filtering `/settings` to an unmatched string left an empty body and still showed `↑↓ ↵ select · Esc cancel`; the title's match count was clipped. Slash hints also clipped `/model` argument syntax and the key guide at the right edge.

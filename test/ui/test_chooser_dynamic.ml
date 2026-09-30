@@ -11,6 +11,8 @@ let chooser : Tui.chooser = {
   allow_custom = true;
   dynamic = true;
   segmented = false;
+  empty_message = "No available models yet";
+  count_label = "available";
   scope_action = None;
   status = Some "Loading available models";
   status_pages = [||];
@@ -125,11 +127,20 @@ let () =
   scoped.filter <- "";
   scoped.selected <- 1;
   assert ((Tui.matches scoped).(scoped.selected).value = id_b);
-  let approval_rows = Tui.approval_body_rows ~columns:8
-    ~measure:(fun text ->
-      Notty.I.width (Notty.I.string Notty.A.empty text))
-    "Tier: WRITE\nPath: ok" in
-  assert (approval_rows = 3);
+  let review : Tui.approval_view = {
+    heading = "Tool permission"; context = "One action";
+    lines = ["Tool: write_file"; "Tier: WRITE"; "Path: reviewed.txt"; "Content: exact"];
+    wrap_lines = true; allow_selected = false; notice = ""; preview_cache = None
+  } in
+  assert (Tui.approval_fits ~cols:24 ~rows:11 ~activity:0 review);
+  assert (not (Tui.approval_fits ~cols:24 ~rows:10 ~activity:0 review));
+  assert (not (Tui.approval_fits ~cols:24 ~rows:11 ~activity:1 review));
+  assert (Tui.approval_fits ~cols:24 ~rows:12 ~activity:1 review);
+  assert (not (Tui.approval_fits ~cols:23 ~rows:30 ~activity:0 review));
+  let unwrapped = { review with lines = [String.make 40 'x'];
+    wrap_lines = false; preview_cache = None } in
+  assert (not (Tui.approval_fits ~cols:24 ~rows:30 ~activity:0 unwrapped));
+  assert (Tui.approval_fits ~cols:44 ~rows:10 ~activity:0 unwrapped);
   let glyph status = String.sub status 0 (String.index status ' ') in
   let idle_progress = Tui.activity_status ~state:"Thinking" ~elapsed:0. () in
   let frames = List.init 10 (fun frame ->

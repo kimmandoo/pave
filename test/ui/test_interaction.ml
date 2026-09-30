@@ -68,15 +68,6 @@ let () =
       parse ~session:false "/entries", parse "/exit" with
    | Login, Unknown _, Unknown _, Unknown _, Unknown _, Unknown _ -> ()
    | _ -> fail "interactive/session capabilities or removed alias mismatch");
-  let queue_item = List.find (fun item -> item.name = "/queue") commands in
-  let queue_usage = queue_item.name ^ " " ^ usage queue_item in
-  let queue_help = List.find (fun line ->
-    String.starts_with ~prefix:(queue_item.name ^ " ") line)
-      (help ()) in
-  if not (String.starts_with ~prefix:(queue_usage ^ " ·") queue_help) then
-    fail "help and parser do not share the queue usage";
-  invalid_with_suffix "queue usage" (" (usage: " ^ queue_usage ^ ")")
-    (fun () -> parse "/queue");
   let tool_item = List.find (fun item -> item.name = "/tool") commands in
   let tool_usage = tool_item.name ^ " " ^ usage tool_item in
   invalid_with_suffix "tool usage" (" (usage: " ^ tool_usage ^ ")")
@@ -156,12 +147,21 @@ if not (List.exists (fun item -> item.name = "/rewind")
     "/rewind 0123456789abcdef0123456789abcdef extra");
   if not (List.exists (fun item -> item.name = "/delegate")
       (suggestions ~subagents:true "/del")) then fail "child delegation is missing from completion";
-  (match parse "/queue inspect the active branch" with
-   | Queue_prompt "inspect the active branch" -> ()
-   | _ -> fail "queued follow-up parsing");
-  if not (List.exists (fun item -> item.name = "/queue") (suggestions "/q")) then
-    fail "queued follow-up is missing from command completion";
-  invalid "missing queued prompt" (fun () -> parse "/queue");
+  (match parse "/queue", parse "/queue   ",
+         parse "/queue inspect  @src/main.ml after this",
+         parse ~interactive:false "/queue follow up",
+         parse "/queueing something" with
+   | Queue_view, Queue_view, Queue_prompt "inspect  @src/main.ml after this",
+     Queue_prompt "follow up", Unknown _ -> ()
+   | _ -> fail "queue management and exact queued prompt parsing diverged");
+  (match parse "/steer inspect  @src/main.ml instead",
+         parse ~interactive:false "/steer stop searching",
+         parse "/steering inspect files" with
+   | Steer_prompt "inspect  @src/main.ml instead",
+     Steer_prompt "stop searching", Unknown _ -> ()
+   | _ -> fail "explicit steering must remain distinct from model text and unknown commands");
+  invalid "missing steering prompt" (fun () -> parse "/steer");
+  invalid "blank steering prompt" (fun () -> parse "/steer   ");
   if suggestions "/model/foo" <> [] then fail "slash completion matched invalid prefix";
   invalid "multiple model arguments" (fun () -> parse "/model openai/gpt-5 extra");
   invalid "missing branch ID" (fun () -> parse "/branch");

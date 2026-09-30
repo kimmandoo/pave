@@ -68,8 +68,114 @@ let shutdown_cases () =
       | _ -> failwith (mode ^ ": shutdown failed") in
     wait ()) ["running"; "shell-approval"; "tool-approval"]
 
+let queue_management_cases () =
+  let module Runner = Pave.Turn_runner in
+  let ready = Atomic.make false and release = Atomic.make false in
+  let active_cancel = ref (fun () -> false) in
+  let started = ref [] and cancellations = ref 0 and counts = ref [] in
+  let run ~cancel (submission : Runner.submission) =
+    if submission.prompt = "active" then (
+      active_cancel := cancel;
+      Atomic.set ready true;
+      while not (Atomic.get release) && not (cancel ()) do
+        Thread.delay 0.001
+      done) in
+  let runner = Runner.create ~run
+    ~on_event:(function
+      | Runner.Turn_started { submission; _ } ->
+          started := submission :: !started
+      | Runner.Turn_cancelled _ -> incr cancellations
+      | Runner.Turn_completed _ -> ()
+      | Runner.Turn_failed { error; _ } -> raise error
+      | _ -> failwith "unexpected queue management event")
+    ~on_approve:(fun _ -> false)
+    ~on_queued:(fun count -> counts := count :: !counts) () in
+  let ids () = List.map (fun (item : Runner.queued_submission) -> item.id)
+    (Runner.queued runner) in
+  let start_active () =
+    Atomic.set ready false;
+    Atomic.set release false;
+    Runner.submit runner "active";
+    let deadline = Unix.gettimeofday () +. 3. in
+    while not (Atomic.get ready) do
+      assert (Unix.gettimeofday () < deadline);
+      Thread.delay 0.001
+    done in
+  let rec drain_idle () =
+    if Runner.busy runner then (
+      let readable, _, _ = Unix.select [Runner.fd runner] [] [] 3. in
+      assert (readable <> []);
+      Runner.drain runner;
+      drain_idle ()) in
+  Fun.protect ~finally:(fun () ->
+    Atomic.set release true; Runner.close runner) (fun () ->
+    start_active ();
+    let attachments = [{
+      Pave.Protocol.name = "same.png"; mime_type = "image/png"; data = "same-data"
+    }] in
+    let duplicate () = Runner.submit runner ~display_prompt:"same @same.png"
+      ~attachments ~paste_ranges:[5, 14] "same prepared payload" in
+    duplicate (); duplicate ();
+    Runner.submit runner "tail";
+    let first, second, tail = match Runner.queued runner with
+      | [first; second; tail] -> first, second, tail
+      | _ -> assert false in
+    assert (first.id < second.id && second.id < tail.id);
+    assert (first.submission = second.submission);
+    assert (Runner.take_queued runner ~id:first.id = Some first);
+    assert (ids () = [second.id; tail.id]);
+    assert (not ((!active_cancel) ()));
+    let count_events = !counts in
+    assert (Runner.take_queued runner ~id:first.id = None);
+    assert (not (Runner.prioritize_queued runner ~id:first.id ~interrupt:true));
+    assert (!counts = count_events && not ((!active_cancel) ()));
+    Runner.restore_dequeued runner first;
+    assert (ids () = [second.id; tail.id; first.id]);
+    assert (Runner.dequeue_last runner = Some first);
+    assert (Runner.prioritize_queued runner ~id:second.id ~interrupt:false);
+    assert (ids () = [second.id; tail.id]);
+    assert (not ((!active_cancel) ()));
+    Atomic.set release true;
+    drain_idle ();
+    assert (!cancellations = 0);
+    assert (List.rev !started = [
+      Runner.make_submission "active"; second.submission; tail.submission
+    ]);
+    started := [];
+    start_active ();
+    (* A snapshot ID which has started must never cancel a later active turn. *)
+    assert (not (Runner.prioritize_queued runner ~id:second.id ~interrupt:true));
+    assert (not ((!active_cancel) ()));
+    List.iter (fun text -> Runner.submit runner text)
+      ["fifo-a"; "priority-b"; "selected-c"; "fifo-d"];
+    let a, b, c, d = match Runner.queued runner with
+      | [a; b; c; d] -> a, b, c, d
+      | _ -> assert false in
+    assert (tail.id < a.id && a.id < b.id && b.id < c.id && c.id < d.id);
+    assert (Runner.prioritize_queued runner ~id:b.id ~interrupt:false);
+    assert (ids () = [b.id; a.id; c.id; d.id]);
+    assert (not ((!active_cancel) ()));
+    assert (Runner.prioritize_queued runner ~id:c.id ~interrupt:true);
+    assert ((!active_cancel) ());
+    assert (ids () = [c.id; b.id; a.id; d.id]);
+    drain_idle ();
+    assert (!cancellations = 1);
+    assert (List.rev !started = [
+      Runner.make_submission "active";
+      c.submission; b.submission; a.submission; d.submission
+    ]);
+    (* An item restored after the active turn ended runs once, not twice. *)
+    started := [];
+    Runner.restore_dequeued runner first;
+    assert (Runner.prioritize_queued runner ~id:first.id ~interrupt:true);
+    assert (Runner.queued runner = []);
+    drain_idle ();
+    assert (List.rev !started = [first.submission]);
+    assert (!cancellations = 1))
+
 let () =
   shutdown_cases ();
+  queue_management_cases ();
   let events = ref [] in
   let event value = events := value :: !events in
   let release_late_events = Atomic.make false in
@@ -123,7 +229,14 @@ let () =
         Pave.Turn_runner.message runner label;
         while not (cancel ()) do Thread.delay 0.001 done;
         raise Pave.Provider.Cancelled
-    | "steered" -> Pave.Turn_runner.message runner "steered-complete"
+    | "steered" ->
+        assert (submission.display_prompt = "change @focus.png");
+        assert (submission.attachments = [{
+          Pave.Protocol.name = "focus.png"; mime_type = "image/png";
+          data = "focus-data"
+        }]);
+        assert (submission.paste_ranges = [7, 17]);
+        Pave.Turn_runner.message runner "steered-complete"
     | "after-steer" ->
         Pave.Turn_runner.message runner "after-steer-complete"
     | "dequeue-removed" ->
@@ -134,6 +247,7 @@ let () =
     | "boundary-source" ->
         Pave.Turn_runner.message runner "boundary-source-ready";
         while not (Atomic.get release_follow_up) do Thread.delay 0.001 done;
+        assert (not (cancel ()));
         Pave.Turn_runner.message runner "boundary-source-complete"
     | "cancel-return" ->
         Pave.Turn_runner.message runner "cancel-return-ready";
@@ -362,19 +476,25 @@ let () =
     let prior = List.length !events in
     Pave.Turn_runner.submit runner "steering-source";
     until "message:steering-source-ready";
-    Pave.Turn_runner.follow_up runner "after-steer";
-    Pave.Turn_runner.steer runner "steered";
+    Pave.Turn_runner.submit runner "after-steer";
+    Pave.Turn_runner.steer runner ~display_prompt:"change @focus.png"
+      ~attachments:[{
+        Pave.Protocol.name = "focus.png"; mime_type = "image/png";
+        data = "focus-data"
+      }] ~paste_ranges:[7, 17] "steered";
     until_idle ();
     let sequence = after prior in
-    assert (count "start:steered" sequence = 1);
+    assert (count "cancelled" sequence = 1);
+    assert (count "start:change @focus.png" sequence = 1);
+    assert (count "message:steered-complete" sequence = 1);
     assert (count "start:after-steer" sequence = 1);
-    assert (position "start:steered" sequence <
+    assert (position "start:change @focus.png" sequence <
       position "start:after-steer" sequence);
     let prior = List.length !events in
     Atomic.set release_follow_up false;
     Pave.Turn_runner.submit runner "boundary-source";
     until "message:boundary-source-ready";
-    Pave.Turn_runner.follow_up runner "after-boundary";
+    Pave.Turn_runner.submit runner "after-boundary";
     Thread.delay 0.01;
     let sequence = after prior in
     assert (Pave.Turn_runner.busy runner);
@@ -383,6 +503,8 @@ let () =
     Atomic.set release_follow_up true;
     until_idle ();
     let sequence = after prior in
+    assert (not (List.mem "cancelled" sequence));
+    assert (count "message:boundary-source-complete" sequence = 1);
     assert (count "start:after-boundary" sequence = 1);
     assert (position "completed" sequence <
       position "start:after-boundary" sequence);

@@ -1,5 +1,5 @@
 (* UI-only transcript. History is supplied explicitly; these rows are never journaled. *)
-type kind = User | Assistant | Tool | Notice | Error | Approval
+type kind = User | Assistant | Tool | Notice | Error
 type style =
   Heading | Text | Code | Quote | List_item | Subheading | Tool_state
   | Tool_summary | Divider | Table_header | Table_row | Table_separator
@@ -372,8 +372,6 @@ let sent t text = add_block t User "You" text
 let assistant t text = add_block t Assistant "Pave" text
 let notice t text = add_block t Notice "Note" text
 let error t text = add_block t Error "Error" text
-let approval ?(title = "SHELL APPROVAL · review before deciding") t text =
-  add_block t Approval (single_line title) text
 
 let valid_tool_name name =
   name <> "" && String.length name <= 64 &&

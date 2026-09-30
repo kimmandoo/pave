@@ -161,8 +161,10 @@ pave --provider ollama --model "$LOCAL_MODEL" --prompt 'Inspect this project'
 
 | Key | Action |
 | --- | --- |
-| `Enter` | Send a prompt (interrupts and steers during a turn) |
-| `Alt+Enter` / `/queue MSG` | Queue a follow-up without interrupting |
+| `Enter` | Send when idle; queue while working without interrupting |
+| `Alt+Enter` / `/queue MSG` | Same noninterrupting send/queue behavior |
+| `/steer MSG` | Explicitly interrupt and send this message next |
+| `Alt+Q` / `/queue` | Manage queued prompts: run next, interrupt-and-run now, edit or cancel |
 | `@` | Attach workspace files |
 | `/` + `Tab` | Search slash commands |
 | `Ctrl+R` | Search prompt history |

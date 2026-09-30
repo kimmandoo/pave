@@ -18,6 +18,8 @@ type chooser = {
   allow_custom : bool;
   dynamic : bool;
   segmented : bool;
+  empty_message : string;
+  count_label : string;
   scope_action : string option;
   mutable status : string option;
   mutable status_pages : string array;
@@ -34,7 +36,6 @@ type overlay_focus = Chooser_overlay | Approval_overlay
 
 type submission = {
   text : string;
-  follow_up : bool;
   paste_ranges : (int * int) list;
 }
 type completion = { start : int; stop : int; value : string }
@@ -59,6 +60,16 @@ type approval_request = {
   approved_text : string;
   denied_text : string;
   mutable result : bool option;
+}
+
+type approval_view = {
+  heading : string;
+  context : string;
+  lines : string list;
+  wrap_lines : bool;
+  mutable allow_selected : bool;
+  mutable notice : string;
+  mutable preview_cache : (int * string array) option;
 }
 
 type terminal_event =
@@ -109,6 +120,7 @@ type t = {
   mutable scroll : int;
   mutable chooser : chooser option;
   mutable overlays : overlay_focus list;
+  mutable approval_view : approval_view option;
   mutable hint_draft : string;
   mutable hint_cursor : int;
   mutable hint_results : inline_hint list;
@@ -302,7 +314,7 @@ let meta_key = if macos then "Option" else "Alt"
 let enter_key = if macos then "Return" else "Enter"
 
 let idle_status =
-  enter_key ^ " steer · " ^ meta_key ^ "+" ^ enter_key ^ " follow-up · /queue"
+  enter_key ^ " send · while working: queue · /steer interrupts"
 
 let hotkeys = Keybindings.hotkeys Keybindings.bindings
 
@@ -375,7 +387,6 @@ let style_attr (row : Transcript_view.row) =
   | _, Transcript_view.Diff_context -> text_attr
   | _, Transcript_view.Diff_meta -> muted
   | Transcript_view.Error, _ -> error
-  | Transcript_view.Approval, _ -> warning
   | Transcript_view.User, Transcript_view.Heading -> user_attr
   | Transcript_view.Assistant, Transcript_view.Heading -> accent
   | Transcript_view.Tool, Transcript_view.Heading -> warning
@@ -758,7 +769,7 @@ let candidate_label chooser item =
 
 let chooser_empty_message chooser =
   if chooser.filter <> "" then "No matches. Edit the filter."
-  else if chooser.dynamic then "No available models yet"
+  else if chooser.dynamic then chooser.empty_message
   else "No choices available"
 
 (* Segments wrap rather than disappearing off-screen. The selected chip is
@@ -973,6 +984,65 @@ let hint_row cols selected hint =
       shorten_width detail_width detail in
   choice_line cols selected text
 
+(* One geometry calculation drives both the modal and its approval gate. *)
+let approval_preview cols view =
+  let columns = max 1 (cols - 4) in
+  match view.preview_cache with
+  | Some (width, lines) when width = columns -> lines
+  | _ ->
+      let lines = if view.wrap_lines then
+          Array.concat (List.map (fun line ->
+            if line = "" then [| "" |]
+            else Transcript_view.wrap ~columns ~measure:measure_text line) view.lines)
+        else Array.of_list view.lines in
+      view.preview_cache <- Some (columns, lines);
+      lines
+
+let approval_fits ~cols ~rows ~activity view =
+  cols >= 24 && rows >= 10 &&
+  let preview = approval_preview cols view in
+  Array.length preview <= max 0 (rows - 7 - activity) &&
+  Array.for_all (fun line -> measure_text line <= cols - 4) preview
+
+let approval_screen ~cols ~rows ~activity_rows view =
+  let activity = Array.length activity_rows in
+  let fits = approval_fits ~cols ~rows ~activity view in
+  let line attr text = styled_line cols attr (shorten_width cols text) in
+  if rows < 8 then
+    Array.init rows (fun index ->
+      if index = rows - 1 then line warning "n/Esc deny · resize"
+      else if index = 0 then line accent "Approval needs room"
+      else I.void cols 1), -1
+  else
+    let preview = approval_preview cols view in
+    let preview_height = rows - 7 - activity in
+    let notice = if not fits then
+        Printf.sprintf "Resize to review all %d rows · allow locked" (Array.length preview)
+      else if view.notice <> "" then view.notice
+      else "One action only · draft preserved" in
+    let choice selected text =
+      choice_line cols selected
+        ((if selected then "❯ " else "  ") ^
+         shorten_width (max 0 (cols - 2)) text) in
+    let controls = fit_labels cols
+      (if cols < 40 then ["y allow"; "n deny"; "Tab/↑↓"; "↵ choose"]
+       else ["y allow"; "n/Esc deny"; "Tab/↑↓ choose"; enter_key ^ " confirm"]) in
+    Array.concat [
+      [| line accent ("  " ^ view.heading);
+         line muted ("  " ^ view.context);
+         I.uchar frame_attr (Uchar.of_int 0x2500) cols 1 |];
+      Array.init preview_height (fun index ->
+        if index < Array.length preview then
+          line text_attr ("  " ^ preview.(index))
+        else I.void cols 1);
+      activity_rows;
+      [| line (if fits then muted else warning) notice;
+         choice (not view.allow_selected) "Deny once";
+         choice view.allow_selected
+           (if fits then "Allow once" else "Allow once · resize required");
+         line text_attr controls |]
+    ], (if activity = 0 then -1 else rows - 4 - activity)
+
 let paint t =
   let cols, rows = Notty_unix.Term.size t.term in
   let cols = max 1 cols and rows = max 1 rows in
@@ -997,7 +1067,7 @@ let paint t =
   let body_height =
     max 0 (rows - 4 - editor_height - activity_height - attachment_height) in
 
-  let hints = hint_matches t in
+  let hints = if t.approval_view <> None then [] else hint_matches t in
   let hint_count = List.length hints in
   let hint_height = if body_height < 2 || hint_count = 0 then 0
     else min body_height (min 8 (hint_count + 1)) in
@@ -1041,7 +1111,7 @@ let paint t =
       |> Array.of_list in
 
   let queued = if t.queue = 0 then "" else
-    Printf.sprintf "  ·  %d queued" t.queue in
+    Printf.sprintf " · %d queued" t.queue in
   let usage = match t.activity, t.usage_badge with
     | None, Some badge when cols >= 28 && cols >= 9 + String.length badge ->
         badge
@@ -1052,12 +1122,12 @@ let paint t =
         (List.length names) (if List.length names = 1 then "" else "s") in
 
   let indicators = String.trim
-    ((if cols >= 48 then queued else "") ^ usage ^ attached) in
+    (queued ^ (if queued <> "" && usage <> "" then " · " else "") ^ usage ^ attached) in
   let indicators = if String.starts_with ~prefix:"· " indicators then
       String.sub indicators 3 (String.length indicators - 3)
     else indicators in
-  let indicators = if indicators = "" || cols < 32 then I.empty
-    else I.string muted (shorten_width (max 0 (cols / 3)) indicators) in
+  let indicators = if indicators = "" || cols < 18 then I.empty
+    else I.string muted (shorten_width (max 8 (cols / 3)) indicators) in
   let identity_width = max 0 (cols - 2 - I.width indicators -
     (if I.width indicators = 0 then 0 else 2)) in
   let identity = match t.location_cache with
@@ -1181,7 +1251,8 @@ let paint t =
         I.vcat (List.init body_height (fun i ->
           if i = 0 then
             let count = if chooser.filter = "" && not chooser.dynamic then ""
-              else if chooser.dynamic then Printf.sprintf "%d available" chooser.matched_models
+              else if chooser.dynamic then
+                Printf.sprintf "%d %s" chooser.matched_models chooser.count_label
               else Printf.sprintf "%d matches" count in
             let title_width = max 0 (cols - 4 - measure count) in
             composer_header ~cols
@@ -1308,9 +1379,9 @@ let paint t =
                 (visible_first + 1) visible_last total in
             let queue = if t.queue = 0 then "" else Printf.sprintf "%d queued" t.queue in
             let submit = (if cols < 24 then "↵" else enter_key) ^
-              (if Option.is_some t.activity then " steer" else " send") in
+              (if Option.is_some t.activity then " queue" else " send") in
             let hints = if Option.is_some t.activity then
-                ["Ctrl+C cancel"; queue; submit; meta_key ^ "+" ^ enter_key ^ " queue"]
+                [submit; queue; meta_key ^ "+Q queue"; "Ctrl+C stop"; "/queue manage"]
               else if t.scroll > 0 then
                 ["Ctrl+End latest"; position; "PgUp/Dn scroll"; submit; "/help"]
               else
@@ -1394,7 +1465,8 @@ let paint t =
                    string text_attr (sanitize after))
             | _ when Pave.Composer.text t.editor = "" ->
                 I.string muted (shorten_width field_width
-                  "Message · / commands · @ files")
+                  (if Option.is_some t.activity then "Add to queue · current work continues"
+                   else "Message · / commands · @ files"))
             | _ -> I.string text_attr (sanitize raw) in
           let content = if field_width = 1 &&
               measure (sanitize raw) > 1 then I.string text_attr "?"
@@ -1446,6 +1518,9 @@ let paint t =
     else
       let candidates = Array.length activity_rows + 1 + Array.length prompt_rows in
       if candidates > rows then -1 else rows - candidates in
+  let screen, activity_row = match t.approval_view with
+    | None -> screen, activity_row
+    | Some view -> approval_screen ~cols ~rows ~activity_rows view in
   let output = Buffer.create 512 in
   let dirty = ref false in
   for row = 0 to rows - 1 do
@@ -1470,7 +1545,10 @@ let paint t =
   let y = if rows < 6 then rows - 1
     else rows - 2 - editor_height + cursor_row in
   let position = max 0 y + 1, max 0 cursor_col + 1 in
-  if !dirty || t.cursor_position <> Some position then (
+  if t.approval_view <> None then (
+    Buffer.add_string output "\027[?25l";
+    t.cursor_position <- None)
+  else if !dirty || t.cursor_position <> Some position then (
     Buffer.add_string output (Printf.sprintf "\027[%d;%dH%s"
       (fst position) (snd position) (if !dirty then "\027[?25h" else ""));
     t.cursor_position <- Some position);
@@ -1595,7 +1673,7 @@ let create ?(keybinding_overrides = []) ?(version = "source")
     editor = Pave.Composer.create ();
     transcript = Transcript_view.create (); tool_groups = Hashtbl.create 8;
     draft_groups = Hashtbl.create 8; draft_decoders = Hashtbl.create 8;
-    scroll = 0; chooser = None; overlays = [];
+    scroll = 0; chooser = None; overlays = []; approval_view = None;
     hint_suppressed = None;
     hint_draft = ""; hint_cursor = 0; hint_results = [];
     hint_truncated = false;
@@ -2059,7 +2137,7 @@ let toggle_tool_detail t =
         t.scroll <- max 0 (expanded.total - height - start)) !target);
   paint t
 
-let read ?wake_fd ?on_wake ?on_interrupt ?on_dequeue ?on_completion t =
+let read ?wake_fd ?on_wake ?on_interrupt ?on_dequeue ?on_queue ?on_completion t =
   let measure = measure_text in
   let field_width () =
     let cols, rows = Notty_unix.Term.size t.term in
@@ -2098,7 +2176,7 @@ let read ?wake_fd ?on_wake ?on_interrupt ?on_dequeue ?on_completion t =
     if !paste_truncated then
       t.status <- "Paste truncated at input limit";
     paint t in
-  let submit follow_up =
+  let submit () =
     let text = Pave.Composer.text t.editor in
     let paste_ranges =
       if !history_provenance_uncertain && text <> "" then
@@ -2108,7 +2186,7 @@ let read ?wake_fd ?on_wake ?on_interrupt ?on_dequeue ?on_completion t =
     | None -> None
     | Some text ->
         paint t;
-        Some { text; follow_up; paste_ranges } in
+        Some { text; paste_ranges } in
   let key_action event = Keybindings.resolve t.bindings (key_focus t) event in
   let rec loop () =
     match next_input ?wake_fd t with
@@ -2134,8 +2212,8 @@ let read ?wake_fd ?on_wake ?on_interrupt ?on_dequeue ?on_completion t =
     | `Key _ as event -> handle_key event
   and handle_key event =
     let action = key_action event in
-    let submit_result follow_up =
-      match submit follow_up with
+    let submit_result () =
+      match submit () with
       | None -> loop ()
       | Some _ as result -> result in
     let interrupt () =
@@ -2202,7 +2280,7 @@ let read ?wake_fd ?on_wake ?on_interrupt ?on_dequeue ?on_completion t =
         let draft = Pave.Composer.text t.editor in
         if List.exists (function
           | Command_hint item -> item.name = draft
-          | File_hint _ -> false) matches then submit_result false
+          | File_hint _ -> false) matches then submit_result ()
         else (
           if t.hint_selected < List.length matches then
             insert_hint t (List.nth matches t.hint_selected);
@@ -2214,6 +2292,10 @@ let read ?wake_fd ?on_wake ?on_interrupt ?on_dequeue ?on_completion t =
         t.hint_selected <- min (List.length (hint_matches t) - 1)
           (t.hint_selected + 1);
         changed (); loop ()
+    | Some Keybindings.Open_queue ->
+        Option.iter (fun callback -> callback ()) on_queue;
+        paint t;
+        loop ()
     | Some Keybindings.Complete ->
         (match on_completion, Pave.Composer.selection t.editor with
         | Some complete, None ->
@@ -2236,13 +2318,12 @@ let read ?wake_fd ?on_wake ?on_interrupt ?on_dequeue ?on_completion t =
           let draft = Pave.Composer.text t.editor in
           if List.exists (function
             | Command_hint item -> item.name = draft
-            | File_hint _ -> false) matches then submit_result false
+            | File_hint _ -> false) matches then submit_result ()
           else (
             if t.hint_selected < List.length matches then
               insert_hint t (List.nth matches t.hint_selected);
             changed (); loop ())
-        else submit_result false
-    | Some Keybindings.Follow_up -> submit_result true
+        else submit_result ()
     | Some Keybindings.Newline ->
         Pave.Composer.insert t.editor "\n";
         changed (); loop ()
@@ -2448,8 +2529,11 @@ let update_choices t ~verified
     verified; details; labels; status; status_pages; preferred })
 
 let choose ?(allow_custom = false) ?(intro = []) ?(plain = [])
-    ?initial_status ?initial_filter ?initial_selected ?wake_fd ?on_wake ?dynamic
-    ?(segmented = false) ?scope_action t ~title ~choices =
+    ?initial_status ?initial_filter ?initial_selected ?initial_listing
+    ?wake_fd ?on_wake ?dynamic
+    ?(segmented = false) ?scope_action
+    ?(empty_message = "No available models yet") ?(count_label = "available")
+    t ~title ~choices =
   let dynamic = Option.value dynamic ~default:(Option.is_some wake_fd) in
   let initial = if dynamic then Array.of_list plain
     else Array.of_list choices in
@@ -2458,10 +2542,16 @@ let choose ?(allow_custom = false) ?(intro = []) ?(plain = [])
     choices = Array.map (fun value ->
       { value; label = value; custom = false; verified = false;
         action = dynamic; detail = None }) initial;
-    allow_custom; dynamic; segmented; scope_action; status = initial_status;
+    allow_custom; dynamic; segmented; scope_action;
+    empty_message = sanitize empty_message; count_label = single_line count_label;
+    status = initial_status;
     status_pages = [||]; status_page = 0;
     filter = Option.value ~default:"" initial_filter; selected = 0; offset = 0; touched = false;
     filtered = None; matched_models = 0 } in
+  Option.iter (fun (update : listing_update) ->
+    update_chooser chooser ~verified:update.verified ~details:update.details
+      ~labels:update.labels ~status:update.status ~status_pages:update.status_pages
+      ?preferred:update.preferred) initial_listing;
   Option.iter (fun value ->
     Array.iteri (fun index (item : candidate) ->
       if item.value = value then chooser.selected <- index) chooser.choices)
@@ -2587,39 +2677,16 @@ let reviewable_text ~max_bytes text =
         code <> 0x2060 && code <> 0xfeff) true text
 
 
-let approval_body_rows ~columns ~measure body =
-  String.split_on_char '\n' body
-  |> List.fold_left (fun total line ->
-    total + max 1 (Transcript_view.wrapped_count ~columns ~measure line)) 0
 
 let confirm_review_now t ~title ~label ~body ~max_bytes ~wrap
     ~too_large ~unsafe_text ~approved_text ~denied_text =
-  let body_lines = String.split_on_char '\n' body in
+  let view = { heading = single_line title; context = single_line label;
+    lines = String.split_on_char '\n' body; wrap_lines = wrap;
+    allow_selected = false; notice = ""; preview_cache = None } in
   let fits () =
     let cols, rows = Notty_unix.Term.size t.term in
-    let content_cols = max 1 (cols - 5) in
-    let measure text = I.width (I.string text_attr text) in
-    let activity_height = if Option.is_some t.activity then 1 else 0 in
-    let editor_space = max 1 (rows - 4 - activity_height) in
-    let editor_height = match Pave.Composer.search_query t.editor with
-      | Some _ -> 1
-      | None ->
-          let prompt_cols = composer_field_width ~cols ~rows in
-          let draft = Pave.Composer.layout ~columns:prompt_cols ~measure t.editor in
-          min 4 (max 1 (min editor_space (Array.length draft))) in
-    let available = max 0 (rows - 4 - editor_height - activity_height) in
-    let hint_count = List.length (hint_matches t) in
-    let hint_height = if available < 2 || hint_count = 0 then 0
-      else min available (min 8 (hint_count + 1)) in
-    let header_height = Transcript_view.wrapped_count ~columns:content_cols
-      ~measure title in
-    let body_height = if wrap then
-        approval_body_rows ~columns:content_cols ~measure body
-      else List.length body_lines in
-    t.chooser = None && String.length body <= max_bytes &&
-    cols >= 25 && rows >= 10 &&
-    available - hint_height >= header_height + 1 + body_height &&
-    (wrap || List.for_all (fun line -> measure line <= content_cols) body_lines) in
+    approval_fits ~cols ~rows
+      ~activity:(if Option.is_some t.activity then 1 else 0) view in
   if String.length body > max_bytes then (
     alert t too_large;
     false)
@@ -2627,43 +2694,55 @@ let confirm_review_now t ~title ~label ~body ~max_bytes ~wrap
     alert t unsafe_text;
     false)
   else (
-    change_transcript t (fun () ->
-      Transcript_view.approval ~title t.transcript body);
-    t.scroll <- 0;
-    let previous_overlays = t.overlays in
+    let previous_overlays = t.overlays and previous_view = t.approval_view in
+    let previous_scroll = t.scroll in
     t.overlays <- Approval_overlay :: previous_overlays;
-    Fun.protect ~finally:(fun () ->
+    t.approval_view <- Some view;
+    let accepted = Fun.protect ~finally:(fun () ->
       t.overlays <- previous_overlays;
-      t.paste <- false) (fun () ->
-      let resize_notice = "Resize to review · other=no" in
-      alert t (if fits () then label else resize_notice);
-      let rec decision () = match next_input t with
+      t.approval_view <- previous_view;
+      t.scroll <- previous_scroll;
+      t.paste <- false;
+      t.previous <- None;
+      paint t) (fun () ->
+      paint t;
+      let rec decide () = match next_input t with
         | `Resize _ ->
-            alert t (if fits () then label else resize_notice);
-            decision ()
-        | `Tick -> paint t; decision ()
-        | `Wake | `Mouse _ -> decision ()
-        | `Paste `Start -> t.paste <- true; decision ()
+            view.notice <- "";
+            t.previous <- None;
+            paint t; decide ()
+        | `Tick -> paint t; decide ()
+        | `Wake | `Mouse _ -> decide ()
+        | `Paste `Start -> t.paste <- true; decide ()
         | `Paste `End ->
             t.paste <- false;
-            alert t (if fits () then label else resize_notice);
-            decision ()
-        | `Key _ when t.paste -> decision ()
+            view.notice <- "Pasted text ignored · choose an action";
+            paint t; decide ()
+        | `Key _ when t.paste -> decide ()
         | `Key _ as event ->
-            (match Keybindings.resolve t.bindings (key_focus t) event with
-            | Some Keybindings.Approve when fits () -> true
-            | Some Keybindings.Approve ->
-                alert t resize_notice;
-                decision ()
+            (match Keybindings.resolve t.bindings Keybindings.Approval event with
+            | Some Keybindings.Approve -> allow ()
+            | Some Keybindings.Accept ->
+                if view.allow_selected then allow () else false
             | Some Keybindings.Reject -> false
-            | Some Keybindings.Ignore ->
-                alert t "Switch to English input: y=yes · other=no";
-                decision ()
-            | _ -> false)
-        | _ -> false in
-      let accepted = decision () in
-      alert t (if accepted then approved_text else denied_text);
-      accepted))
+            | Some Keybindings.Move_up ->
+                view.allow_selected <- false; paint t; decide ()
+            | Some Keybindings.Move_down ->
+                view.allow_selected <- true; paint t; decide ()
+            | Some Keybindings.Next_status ->
+                view.allow_selected <- not view.allow_selected; paint t; decide ()
+            | _ ->
+                view.notice <- "Use y/n or Tab/↑↓ then " ^ enter_key;
+                paint t; decide ())
+        | `End -> false
+      and allow () =
+        if fits () then true
+        else (
+          view.notice <- "Resize first · complete preview required";
+          paint t; decide ()) in
+      decide ()) in
+    alert t (if accepted then approved_text else denied_text);
+    accepted)
 let confirm_review t ~title ~label ~body ~max_bytes ~wrap
     ~too_large ~unsafe_text ~approved_text ~denied_text =
   let request = {
@@ -2690,8 +2769,8 @@ let () =
 
 
 let confirm t command =
-  let title = "SHELL APPROVAL · review before deciding" in
-  confirm_review t ~title ~label:"SHELL: y=yes · other=no"
+  let title = "Shell permission" in
+  confirm_review t ~title ~label:"One command · unsandboxed"
     ~body:command ~max_bytes:4096 ~wrap:false
     ~too_large:"Shell command denied: too large to review on screen"
     ~unsafe_text:"Shell command denied: hidden/control text cannot be reviewed"
@@ -2700,18 +2779,14 @@ let confirm t command =
 
 let confirm_tool t (request : Pave.Approval.request) =
   let shell = request.tool_name = "run_command" in
-  let title = if shell then
-      "SHELL APPROVAL · review before deciding"
-    else "TOOL APPROVAL · review before deciding" in
+  let title = if shell then "Shell permission" else "Tool permission" in
   let body = String.concat "\n" ([
     "Tool: " ^ request.tool_name;
     "Tier: " ^ String.uppercase_ascii
       (Pave.Approval.tier_name request.tier);
-    "Impact: " ^ request.impact;
-    "Details:"
-  ] @ request.details @ [
-    (match request.reason with Some reason -> "Policy: " ^ reason | None -> "")
-  ]) in
+    "Impact: " ^ request.impact
+  ] @ request.details @
+    (match request.reason with Some reason -> ["Policy: " ^ reason] | None -> [])) in
   let oversized_shell_command = shell && List.exists (fun detail ->
     let prefix = "Command: " in
     String.starts_with ~prefix detail &&
@@ -2720,7 +2795,9 @@ let confirm_tool t (request : Pave.Approval.request) =
     alert t "Shell command denied: too large to review on screen";
     false)
   else
-    confirm_review t ~title ~label:"APPROVE: y=yes · other=no" ~body
+    confirm_review t ~title
+      ~label:(if shell then "One command · unsandboxed"
+        else "One action · settings unchanged") ~body
       ~max_bytes:8192 ~wrap:true
       ~too_large:"Tool action denied: preview does not fit on screen"
       ~unsafe_text:"Tool action denied: hidden/control text cannot be reviewed"

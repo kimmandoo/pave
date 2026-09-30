@@ -345,8 +345,6 @@ let () =
     (Array.length streamed_rows = 2 &&
      streamed_rows.(1).row.kind = Assistant &&
      streamed_rows.(1).text = "Streamed answer");
-  let approval_block = create () in
-  approval approval_block "pwd";
   let malicious = create () in
   sent malicious "safe\027[31m\194\155unsafe\226\128\174rtl";
   expect "transcript strips C0, C1 and bidi display controls while preserving prose"
@@ -362,21 +360,6 @@ let () =
      Array.for_all (fun (visual : visual) ->
        not (String.contains visual.text '\027'))
        (rendered hostile_tool 64));
-  expect "approval retains exact reviewable command"
-    (heading_count approval_block Approval = 1 &&
-      has "pwd" (lines approval_block 60));
-  let tool_approval = create () in
-  approval ~title:"TOOL APPROVAL · review before deciding" tool_approval
-    "Tool: write_file\nTier: WRITE\nImpact: Replaces a workspace file.\nPath: Sources/App.swift";
-  expect "typed approval presents the impact and exact target"
-    (heading_count tool_approval Approval = 1 &&
-     has "TOOL APPROVAL · review before deciding" (lines tool_approval 64) &&
-     has "Path: Sources/App.swift" (lines tool_approval 64));
-  let untrusted_title = create () in
-  approval ~title:"Review\027[31m\ncommand" untrusted_title "pwd";
-  expect "approval header sanitizes controls and stays on one line"
-    (has "Review [31m command" (lines untrusted_title 64) &&
-     has "pwd" (lines untrusted_title 64));
   let large = create () in
   sent large (String.make 4096 'A');
   let compact = snapshot large ~columns:1 ~measure:(fun _ -> 1) in

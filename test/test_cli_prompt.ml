@@ -291,6 +291,92 @@ let subagent_admission binary root =
     ["single-default", false, true; "child-headless", true, true;
      "child-unsaved", true, false]
 
+let last_used_model binary parent =
+  let root = Filename.concat parent "last-used-model" in
+  Unix.mkdir root 0o700;
+  let recent () =
+    let previous = Sys.getenv_opt "XDG_STATE_HOME" in
+    Fun.protect
+      ~finally:(fun () ->
+        Unix.putenv "XDG_STATE_HOME" (Option.value ~default:"" previous))
+      (fun () ->
+        Unix.putenv "XDG_STATE_HOME" (Filename.concat root "home/state");
+        Pave.Recent_model.load ~root) in
+  let identity model = Pave.Model_identity.make ~provider:"lm-studio"
+    ~route:"chat" ~upstream_id:model () in
+  let expect model label =
+    check (recent () = Some (identity model)) label in
+  let success model arguments =
+    let result = with_server
+      [response 200 "application/json"
+        {|{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"remembered"}}]}|}]
+      (fun _ _ request ->
+        let actual = member "model" request in
+        check (actual = `String model)
+          ("last-used fixture expected " ^ model ^ ", received " ^
+            Yojson.Basic.to_string actual))
+      (fun endpoint -> run binary root
+        (arguments endpoint @ ["--prompt"; "remember this model"])) in
+    assert_success result "last-used model request";
+    expect model "a successful initial model use was not remembered" in
+  success "fixture-model" base_arguments;
+  success "newer-model" (fun endpoint ->
+    ["--provider"; "lm-studio"; "--api"; "chat"; "--model"; "newer-model";
+     "--endpoint"; endpoint]);
+  let failure = with_server
+    [response 400 "application/json" {|{"error":{"message":"invalid model"}}|}]
+    (fun _ _ _ -> ())
+    (fun endpoint -> run binary root
+      ["--provider"; "lm-studio"; "--api"; "chat"; "--model"; "failed-model";
+       "--endpoint"; endpoint; "--prompt"; "do not remember failure"]) in
+  check (code failure.status <> 0) "failed model request unexpectedly succeeded";
+  expect "newer-model" "a failed provider call replaced the last-used model";
+  let preflight = run binary root
+    ["--provider"; "unknown-provider"; "--model"; "unresolved-model";
+     "--prompt"; "do not remember unresolved selection"] in
+  check (code preflight.status <> 0) "unresolved provider unexpectedly succeeded";
+  expect "newer-model" "a failed preflight replaced the last-used model";
+  let project = Filename.concat root ".pave" in
+  Unix.mkdir project 0o700;
+  write_file (Filename.concat project "settings.json")
+    {|{"default_provider":"lm-studio","default_api":"chat","default_model":"configured-model"}|};
+  success "configured-model" (fun endpoint -> ["--endpoint"; endpoint]);
+  with_server
+    [response 200 "application/json"
+      {|{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"custom remembered"}}]}|};
+     response 200 "application/json"
+      {|{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"custom resumed"}}]}|}]
+    (fun _ _ request ->
+      check (member "model" request = `String "exact/model")
+        "custom model upstream ID changed")
+    (fun endpoint ->
+      let custom = Printf.sprintf
+        {|{"id":"custom-recent","display_name":"Recent fixture","default_route":"local-chat","routes":[{"name":"local-chat","api":"openai-chat","endpoint":"%s","account_id":"local-account","models":[{"id":"exact/model"}]}]}|}
+        endpoint in
+      let user_directory = Filename.concat root "home/config/pave" in
+      if not (Sys.file_exists user_directory) then Unix.mkdir user_directory 0o700;
+      write_file (Filename.concat user_directory "settings.json")
+        ("{\"custom_providers\":[" ^ custom ^ "]}");
+      let journal = Filename.concat root "custom-conversation.jsonl" in
+      let result = run binary root
+        ["--model"; "custom-recent@local-chat#local-account/exact/model";
+         "--session"; journal; "--prompt"; "remember exact custom identity"] in
+      assert_success result "custom last-used model";
+      let provider = List.hd (Pave.Custom_provider.parse_list
+        (`List [Yojson.Basic.from_string custom])) in
+      let expected = Pave.Model_identity.make ~provider:"custom-recent"
+        ~route:"local-chat" ~account_id:"local-account" ~upstream_id:"exact/model"
+        ~config_revision:(Pave.Custom_provider.fingerprint (List.hd provider.routes))
+        () in
+      check (recent () = Some expected)
+        "last-used custom model lost account, route, upstream ID, or configuration binding";
+      success "configured-model" (fun endpoint -> ["--endpoint"; endpoint]);
+      let resumed = run binary root
+        ["--session"; journal; "--prompt"; "resume exact saved identity"] in
+      assert_success resumed "resumed custom model";
+      check (recent () = Some expected)
+        "using a resumed journal did not replace the last-used identity")
+
 let () =
   let root = Filename.temp_file "pave-cli-prompt" "" in
   Sys.remove root;
@@ -300,6 +386,7 @@ let () =
   Fun.protect ~finally:(fun () -> remove_tree root) (fun () ->
     failed_compaction_usage Sys.argv.(1) root;
     subagent_admission Sys.argv.(1) root;
+    last_used_model Sys.argv.(1) root;
     let piped_prompt = "  /help\nthinkdeep\r\n" in
     let plain = with_server
       [response 200 "application/json"

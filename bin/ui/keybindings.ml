@@ -5,9 +5,9 @@ type action =
   | Move_up | Move_down | Page_up | Page_down | First | Last | Backspace
   | Cancel_search | Accept_search | Search_older | Search_erase
   | Dismiss_hint | Insert_hint | Accept_hint | Interrupt
-  | Submit | Follow_up | Newline | Complete
+  | Submit | Newline | Complete
   | Scroll_up | Scroll_down | Toggle_details | Scroll_to_start | Scroll_to_end
-  | Restore_or_history | History_older | History_newer
+  | Open_queue | Restore_or_history | History_older | History_newer
   | Vertical_up | Vertical_down | Select_up | Select_down
   | Move_left | Move_right | Select_left | Select_right | Word_left | Word_right
   | Erase_word | Erase | Delete | Undo | Redo | Kill_end | Kill_before | Yank
@@ -97,13 +97,9 @@ let focus ~paste ~overlay ~search ~hints =
   | None when hints -> Hints
   | None -> Composer
 
-let steer_help = "Steer: " ^
+let submit_help =
   (if Sys.os_type = "Unix" && Sys.file_exists "/System/Library" then "Return" else "Enter") ^
-  " · follow-up: " ^
-  (if Sys.os_type = "Unix" && Sys.file_exists "/System/Library" then "Option" else "Alt") ^
-  "+" ^
-  (if Sys.os_type = "Unix" && Sys.file_exists "/System/Library" then "Return" else "Enter") ^
-  " or /queue MESSAGE"
+  " sends when idle; queues while working · /steer MESSAGE interrupts and sends next"
 
 let slash_help enter_key =
   "/ · live commands; ↑/↓ select · Tab/" ^ enter_key ^ " insert · Esc close"
@@ -145,6 +141,16 @@ let bindings =
     exact "approval.upper-y" Approval (`ASCII 'Y') [] Approve;
     (* The y key under a Korean two-set input method sends ㅛ. *)
     exact "approval.hangul-y" Approval (`Uchar (Uchar.of_int 0x315B)) [] Approve;
+    exact "approval.n" Approval (`ASCII 'n') [] Reject;
+    exact "approval.upper-n" Approval (`ASCII 'N') [] Reject;
+    exact "approval.escape" Approval `Escape [] Reject;
+    exact "approval.ctrl-c" Approval (`ASCII 'C') [`Ctrl] Reject;
+    exact "approval.enter" Approval `Enter [] Accept;
+    exact "approval.tab" Approval `Tab [] Next_status;
+    exact "approval.up" Approval (`Arrow `Up) [] Move_up;
+    exact "approval.down" Approval (`Arrow `Down) [] Move_down;
+    exact "approval.left" Approval (`Arrow `Left) [] Move_up;
+    exact "approval.right" Approval (`Arrow `Right) [] Move_down;
 
     any ~help:search_help "search.escape" Search `Escape Cancel_search;
     exact "search.ctrl-g" Search (`ASCII 'G') [`Ctrl] Cancel_search;
@@ -162,10 +168,10 @@ let bindings =
     exact ~help:interrupt_help "hints.ctrl-c" Hints (`ASCII 'C') [`Ctrl] Interrupt;
 
     exact ~help:interrupt_help "composer.ctrl-c" Composer (`ASCII 'C') [`Ctrl] Interrupt;
-    exact ~help:steer_help "composer.enter" Composer `Enter [] Submit;
-    exact ~help:steer_help "composer.meta-enter" Composer `Enter [`Meta] Follow_up;
-    exact "composer.meta-ctrl-m" Composer (`ASCII 'M') [`Meta; `Ctrl] Follow_up;
-    exact "composer.ctrl-enter" Composer `Enter [`Ctrl] Follow_up;
+    exact ~help:submit_help "composer.enter" Composer `Enter [] Submit;
+    exact ~help:submit_help "composer.meta-enter" Composer `Enter [`Meta] Submit;
+    exact "composer.meta-ctrl-m" Composer (`ASCII 'M') [`Meta; `Ctrl] Submit;
+    exact "composer.ctrl-enter" Composer `Enter [`Ctrl] Submit;
     exact "composer.shift-enter" Composer `Enter [`Shift] Newline;
     any "composer.tab" Composer `Tab Complete;
     any ~help:transcript_help "composer.page-up" Composer (`Page `Up) Scroll_up;
@@ -174,6 +180,8 @@ let bindings =
     exact "composer.ctrl-home" Composer `Home [`Ctrl] Scroll_to_start;
     exact "composer.ctrl-end" Composer `End [`Ctrl] Scroll_to_end;
     exact ~help:queue_help "composer.meta-up" Composer (`Arrow `Up) [`Meta] Restore_or_history;
+    exact ~help:(meta_key ^ "+Q manages queued prompts without clearing the draft · /queue")
+      "composer.meta-q" Composer (`ASCII 'q') [`Meta] Open_queue;
     exact ~help:history_help "composer.ctrl-p" Composer (`ASCII 'P') [`Ctrl] History_older;
     exact ~help:history_help "composer.ctrl-n" Composer (`ASCII 'N') [`Ctrl] History_newer;
     exact "composer.meta-down" Composer (`Arrow `Down) [`Meta] History_newer;
@@ -239,9 +247,8 @@ let fallback focus event =
   | (Hints | Composer), `Key (`ASCII char, []) when Char.code char >= 32 ->
       Some (Insert_ascii char)
   | (Hints | Composer), `Key (`Uchar uchar, []) -> Some (Insert_uchar uchar)
-  (* Other input-method characters are ambiguous; they neither approve nor deny. *)
-  | Approval, `Key (`Uchar _, []) -> Some Ignore
-  | Approval, `Key _ -> Some Reject
+  (* Only explicit choices decide an approval; typing and unknown keys are inert. *)
+  | Approval, `Key _ -> Some Ignore
   | _ -> None
 
 (* Korean two-set layout: compatibility jamo sent for each Latin key. *)

@@ -23,6 +23,7 @@ type event =
 type submission_kind = Steering | Follow_up
 
 type queued_submission = {
+  id : int;
   kind : submission_kind;
   submission : submission;
 }
@@ -71,6 +72,7 @@ type t = {
   mutable worker : Thread.t option;
   mutable active_turn : turn option;
   mutable next_turn_id : int;
+  mutable next_queue_id : int;
   mutable closed : bool;
   run : cancel:(unit -> bool) -> submission -> unit;
   on_event : event -> unit;
@@ -96,13 +98,23 @@ let create ~run ~on_event ~on_approve ~on_queued
     drafts = Hashtbl.create 8; approvals = [];
     steering = Queue.create (); follow_ups = Queue.create ();
     worker = None; active_turn = None;
-    next_turn_id = 0; closed = false;
+    next_turn_id = 0; next_queue_id = 0; closed = false;
     run; on_event; on_approve; on_approve_tool; on_queued }
 let fd t = t.read_fd
 let busy t = t.worker <> None
 
 
 let queued_count t = Queue.length t.steering + Queue.length t.follow_ups
+
+let queued t =
+  List.rev (Queue.fold (fun pending item -> item :: pending)
+    (Queue.fold (fun pending item -> item :: pending) [] t.steering)
+    t.follow_ups)
+
+let make_queued t kind submission =
+  let id = t.next_queue_id in
+  t.next_queue_id <- id + 1;
+  { id; kind; submission }
 
 
 let emit_finish t turn_id = function
@@ -288,7 +300,7 @@ let follow_up t ?display_prompt ?(attachments = []) ?(paste_ranges = []) text =
   let submission = make_submission ?display_prompt ~attachments
       ~paste_ranges text in
   if busy t then (
-    Queue.add { kind = Follow_up; submission } t.follow_ups;
+    Queue.add (make_queued t Follow_up submission) t.follow_ups;
     t.on_queued (queued_count t))
   else start t submission
 
@@ -305,10 +317,48 @@ let steer t ?display_prompt ?(attachments = []) ?(paste_ranges = []) text =
   let submission = make_submission ?display_prompt ~attachments
       ~paste_ranges text in
   if busy t then (
-    Queue.add { kind = Steering; submission } t.steering;
+    Queue.add (make_queued t Steering submission) t.steering;
     t.on_queued (queued_count t);
     cancel t)
   else start t submission
+
+let remove_queued t ~id =
+  let remove queue =
+    if not (Queue.fold (fun found (item : queued_submission) ->
+      found || item.id = id) false queue) then None
+    else (
+      let found = ref None in
+      for _ = 1 to Queue.length queue do
+        let (item : queued_submission) = Queue.take queue in
+        if item.id = id then found := Some item
+        else Queue.add item queue
+      done;
+      !found) in
+  match remove t.steering with
+  | Some _ as found -> found
+  | None -> remove t.follow_ups
+
+let take_queued t ~id =
+  let selected = remove_queued t ~id in
+  Option.iter (fun _ -> t.on_queued (queued_count t)) selected;
+  selected
+
+let prioritize_queued t ~id ~interrupt =
+  if t.closed then false
+  else match remove_queued t ~id with
+  | None -> false
+  | Some selected ->
+      if busy t then (
+        let remaining = Queue.create () in
+        Queue.transfer t.steering remaining;
+        Queue.add { selected with kind = Steering } t.steering;
+        Queue.transfer remaining t.steering;
+        t.on_queued (queued_count t);
+        if interrupt then cancel t)
+      else (
+        start t selected.submission;
+        t.on_queued (queued_count t));
+      true
 
 let pop_last queue =
   if Queue.is_empty queue then None

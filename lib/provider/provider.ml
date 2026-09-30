@@ -107,14 +107,23 @@ let rec write_all fd data offset =
 
 exception Stream_complete
 
+type stream_timeouts = {
+  first_byte_seconds : float;
+  idle_seconds : float;
+}
+
+exception Stream_timeout of [ `First_byte | `Idle ]
+
 let check_cancel = function
   | Some cancel when cancel () -> raise Cancelled
   | _ -> ()
 
-let read_all ?on_chunk ?is_done ?is_finished ?cancel fd =
+let read_all ?on_chunk ?is_done ?is_finished ?cancel ?stream_timeouts fd =
   let buffer = Buffer.create 128 in
   let chunk = Bytes.create 8192 in
   let finished_at = ref None in
+  let started_at = Unix.gettimeofday () in
+  let last_received_at = ref None in
   let rec loop () =
     check_cancel cancel;
     (match is_done with
@@ -131,6 +140,18 @@ let read_all ?on_chunk ?is_done ?is_finished ?cancel fd =
                let remaining = 1. -. (Unix.gettimeofday () -. start) in
                if remaining <= 0. then raise Stream_complete;
                Some remaining) in
+    let deadline = Option.map (fun limits ->
+      match !last_received_at with
+      | None -> started_at +. limits.first_byte_seconds, `First_byte
+      | Some received -> received +. limits.idle_seconds, `Idle)
+        stream_timeouts in
+    let timeout = match timeout, deadline with
+      | timeout, None -> timeout
+      | timeout, Some (deadline, _) ->
+          let remaining = max 0. (deadline -. Unix.gettimeofday ()) in
+          Some (match timeout with
+            | None -> remaining
+            | Some timeout -> min timeout remaining) in
     let timeout = match cancel, timeout with
       | None, None -> None
       | Some _, None -> Some 0.1
@@ -151,6 +172,7 @@ let read_all ?on_chunk ?is_done ?is_finished ?cancel fd =
       if count <> 0 then (
         check_cancel cancel;
         if count > 0 then (
+          last_received_at := Some (Unix.gettimeofday ());
           match on_chunk with
           | None -> Buffer.add_subbytes buffer chunk 0 count
           | Some consume ->
@@ -161,7 +183,12 @@ let read_all ?on_chunk ?is_done ?is_finished ?cancel fd =
                 Buffer.clear buffer;
                 Buffer.add_string buffer tail));
         loop ()))
-    else loop () in
+    else (
+      (match deadline with
+       | Some (deadline, phase) when Unix.gettimeofday () >= deadline ->
+           raise (Stream_timeout phase)
+       | _ -> ());
+      loop ()) in
   loop ();
   Buffer.contents buffer
 
@@ -193,7 +220,7 @@ module Test = struct
 end
 
 
-let run_curl ?on_chunk ?is_done ?is_finished ?cancel configuration =
+let run_curl ?on_chunk ?is_done ?is_finished ?cancel ?stream_timeouts configuration =
   check_cancel cancel;
   let executable = match !Test.curl_helper with
     | Some executable -> executable
@@ -254,7 +281,8 @@ let run_curl ?on_chunk ?is_done ?is_finished ?cancel configuration =
         with Unix.Unix_error (Unix.EPIPE, _, _) -> true
       in
       close_fd input_write;
-      let status_code = read_all ?on_chunk ?is_done ?is_finished ?cancel output_read in
+      let status_code = read_all ?on_chunk ?is_done ?is_finished ?cancel
+        ?stream_timeouts output_read in
       close_fd output_read;
       let status = wait_for ?cancel pid in
       waited := true;
@@ -267,25 +295,22 @@ let run_curl ?on_chunk ?is_done ?is_finished ?cancel configuration =
       | Unix.WSIGNALED signal | Unix.WSTOPPED signal ->
           raise (Provider_error (Printf.sprintf
             "Transport error: curl terminated (signal %d)" signal)))
-(* Buffered replies arrive all at once, so only a total limit applies. Streams
-   are bounded by an idle limit plus a generous total cap, so long but healthy
-   generations and slow local prompt processing are not cut off. *)
+(* Upload and model prefill share the buffered request budget until the first
+   response body byte. Only then does the response inactivity deadline apply.
+   curl's low-speed guard is not an idle timer: it also runs before a response
+   and averages transfer speed, including upload. Keep its total/connect bounds,
+   but enforce response phase deadlines in the cancellable reader instead. *)
 let buffered_max_seconds = 600
 let stream_idle_seconds = 120
 let stream_max_seconds = 3600
 
 let curl_timeout_message ~streaming ~response_body_seen =
-  if not streaming then
-    Printf.sprintf
-      "Transport error: provider request timed out before a response was available (%d s limit)"
-      buffered_max_seconds
-  else
-    let phase = if response_body_seen then
-      Printf.sprintf "after response data (no data for %d s, or the %d s total limit)"
-        stream_idle_seconds stream_max_seconds
-      else Printf.sprintf "before the first response data byte (no data for %d s)"
-        stream_idle_seconds in
-    "Transport error: provider stream timed out " ^ phase
+  let phase = if response_body_seen then "after response data"
+    else "before response data" in
+  Printf.sprintf
+    "Transport error: provider %s timed out %s (connection setup or %d s total request limit)"
+    (if streaming then "stream" else "request") phase
+    (if streaming then stream_max_seconds else buffered_max_seconds)
 
 
 let read_file path =
@@ -590,9 +615,7 @@ let post_stream ?max_request_bytes ?(local = false) ?cancel ~endpoint ~headers
         curl_options ~local ~max_seconds:stream_max_seconds
           ~endpoint ~headers ~body_path
         ^ "no-buffer\n"
-        ^ option "dump-header" header_path
-        ^ option "speed-time" (string_of_int stream_idle_seconds)
-        ^ option "speed-limit" "1" in
+        ^ option "dump-header" header_path in
       let status = ref None in
       let response_body_seen = ref false in
       let pending = Buffer.create 256 in
@@ -609,9 +632,21 @@ let post_stream ?max_request_bytes ?(local = false) ?cancel ~endpoint ~headers
             if Buffer.length pending + String.length chunk > 16_384 then
               raise (Provider_error "HTTP error or missing response headers exceeded 16 KiB");
             Buffer.add_string pending chunk in
-      (try ignore (run_curl ~on_chunk:consume ~is_done ~is_finished ?cancel configuration)
+      (try ignore (run_curl ~on_chunk:consume ~is_done ~is_finished ?cancel
+         ~stream_timeouts:{
+           first_byte_seconds = float_of_int buffered_max_seconds;
+           idle_seconds = float_of_int stream_idle_seconds;
+         } configuration)
        with
        | Stream_complete -> ()
+       | Stream_timeout `First_byte ->
+           raise (Provider_error (Printf.sprintf
+             "Transport error: provider stream timed out before the first response data byte (upload and response wait exceeded %d s)"
+             buffered_max_seconds))
+       | Stream_timeout `Idle ->
+           raise (Provider_error (Printf.sprintf
+             "Transport error: provider stream stalled after response data (no data for %d s)"
+             stream_idle_seconds))
        | Provider_error "Transport error: curl failed (exit status 28)" ->
            raise (Provider_error (curl_timeout_message ~streaming:true
              ~response_body_seen:!response_body_seen)));

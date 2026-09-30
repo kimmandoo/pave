@@ -199,7 +199,72 @@ let serve client step signal_write closed_write =
     flush oc);
   close_in_noerr ic; close_out_noerr oc
 
+let response_deadline_cases () =
+  let with_pipe f =
+    let reader, writer = Unix.pipe () in
+    Fun.protect ~finally:(fun () ->
+      Pave.Provider.close_fd reader; Pave.Provider.close_fd writer)
+      (fun () -> f reader writer) in
+  let limits first idle : Pave.Provider.stream_timeouts =
+    { first_byte_seconds = first; idle_seconds = idle } in
+  let expect_timeout phase f =
+    match f () with
+    | _ -> failwith "stalled response unexpectedly completed"
+    | exception Pave.Provider.Stream_timeout actual -> assert (actual = phase) in
+  with_pipe (fun reader _writer ->
+    expect_timeout `First_byte (fun () ->
+      Pave.Provider.read_all ~stream_timeouts:(limits 0.01 1.) reader));
+  with_pipe (fun reader writer ->
+    Pave.Provider.write_all writer "partial" 0;
+    let received = Buffer.create 16 in
+    expect_timeout `Idle (fun () ->
+      Pave.Provider.read_all ~stream_timeouts:(limits 1. 0.01)
+        ~on_chunk:(Buffer.add_string received) reader);
+    assert (Buffer.contents received = "partial"));
+  with_pipe (fun reader writer ->
+    Pave.Provider.write_all writer "already-readable" 0;
+    Pave.Provider.close_fd writer;
+    assert (Pave.Provider.read_all ~stream_timeouts:(limits 0. 0.) reader =
+      "already-readable"));
+  let delayed_chunks ~limits chunks expected =
+    with_pipe (fun reader writer ->
+      let child = Unix.fork () in
+      if child = 0 then (
+        Pave.Provider.close_fd reader;
+        (try
+           List.iter (fun (delay, text) ->
+             ignore (Unix.select [] [] [] delay);
+             Pave.Provider.write_all writer text 0) chunks;
+           Pave.Provider.close_fd writer;
+           exit 0
+         with _ -> exit 2));
+      Pave.Provider.close_fd writer;
+      Fun.protect ~finally:(fun () ->
+        (try Unix.kill child Sys.sigkill with Unix.Unix_error (Unix.ESRCH, _, _) -> ());
+        ignore (Unix.waitpid [] child))
+        (fun () ->
+          assert (Pave.Provider.read_all ~stream_timeouts:limits reader = expected))) in
+  (* Model prefill may exceed the idle budget before any body byte arrives. *)
+  delayed_chunks ~limits:(limits 2. 0.1) [0.3, "ready"] "ready";
+  (* The first-byte budget expires only before data; each chunk resets idle. *)
+  delayed_chunks ~limits:(limits 0.5 0.5)
+    [0., "a"; 0.2, "b"; 0.2, "c"; 0.2, "d"] "abcd";
+  with_pipe (fun reader _writer ->
+    match Pave.Provider.read_all ~stream_timeouts:(limits 0. 0.)
+        ~cancel:(fun () -> true) reader with
+    | _ -> failwith "cancelled first-byte wait completed"
+    | exception Pave.Provider.Cancelled -> ());
+  with_pipe (fun reader writer ->
+    Pave.Provider.write_all writer "received" 0;
+    let cancelled = ref false in
+    match Pave.Provider.read_all ~stream_timeouts:(limits 1. 1.)
+        ~on_chunk:(fun _ -> cancelled := true)
+        ~cancel:(fun () -> !cancelled) reader with
+    | _ -> failwith "cancelled response stream completed"
+    | exception Pave.Provider.Cancelled -> ())
+
 let () =
+  response_deadline_cases ();
   let pinned = "https://api.example.test/v1/chat/completions" in
   Pave.Provider.validate_endpoint_override
     ~api:Pave.Provider.Openai_completions ~pinned_endpoint:pinned

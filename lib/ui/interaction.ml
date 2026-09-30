@@ -39,7 +39,9 @@ type command =
   | Loop of string option
   | Autoresearch of string option
   | Rule of string option
+  | Queue_view
   | Queue_prompt of string
+  | Steer_prompt of string
   | Quit
   | Prompt of string
   | Skill of string
@@ -51,7 +53,7 @@ type command =
 type action =
   | A_model | A_settings | A_setup | A_login | A_new | A_resume | A_clear | A_fresh
   | A_rename | A_label | A_pin | A_approval | A_thinking | A_tool | A_attach
-  | A_cancel | A_queue | A_entries | A_tree | A_tools | A_context | A_usage
+  | A_cancel | A_queue | A_steer | A_entries | A_tree | A_tools | A_context | A_usage
   | A_hotkeys | A_branch | A_fork | A_compact | A_retry | A_help | A_quit
   | A_jobs | A_wait | A_cancel_job | A_artifact | A_rewind | A_delegate
   | A_plan | A_goal | A_advisor | A_watchdog | A_loop | A_autoresearch | A_rule
@@ -102,8 +104,9 @@ let commands = [
   command "/thinking" (Optional_word "LEVEL|default") "Store branch-local thinking level; compatible providers receive the selected reasoning control" A_thinking;
   command "/tool" (Required_choice_word ("enable", "disable", "NAME")) "Set branch-local tool availability" A_tool;
   command "/attach" (Path_or_clear "PATH") "Stage supported image, audio, or video media for the next prompt" A_attach;
-  command "/queue" (Required_text "MESSAGE") "Queue a follow-up without interrupting the active turn" A_queue;
-  command "/cancel" No_arguments "Cancel the active turn" A_cancel;
+  command "/queue" (Optional_text "MESSAGE") "Manage queued prompts, or queue MESSAGE without interrupting active work" A_queue;
+  command "/steer" (Required_text "MESSAGE") "Interrupt the active turn and send this message next, ahead of queued follow-ups" A_steer;
+  command "/cancel" No_arguments "Stop the active turn; queued prompts still run next" A_cancel;
   command "/retry" No_arguments "Retry the last turn only if no tools ran" A_retry;
   command "/tools" (Optional_word "NAME") "List or inspect enabled tools" A_tools;
   command "/plugin" (Optional_text "list|enable NAME|disable NAME|reload")
@@ -318,7 +321,9 @@ let parse ?(session = true) ?(interactive = true) ?(subagents = false)
             Tool_toggle { name = tool_name; enabled = operation = "enable" }
         | A_attach, Required_argument "clear" -> Attach None
         | A_attach, Required_argument path -> Attach (Some path)
-        | A_queue, Required_argument text -> Queue_prompt text
+        | A_queue, Optional_argument None -> Queue_view
+        | A_queue, Optional_argument (Some text) -> Queue_prompt text
+        | A_steer, Required_argument text -> Steer_prompt text
         | A_compact, No_argument -> Compact
         | A_retry, No_argument -> Retry
         | A_branch, Required_argument id -> Branch id

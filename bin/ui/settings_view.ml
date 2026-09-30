@@ -12,22 +12,53 @@ let approval_tools = [
   "edit_file", "write";
   "apply_edits", "write";
   "ast_edit", "write (dry-run is read)";
-  "run_command", "exec (per-command prompt remains mandatory)"
+  "run_command", "shell command"
 ]
 
 let account_label id = "Account ID: " ^ Printf.sprintf "%S" id
+
+let approval_mode_label = function
+  | Pave.Approval.Ask_writes -> "Ask before writes and commands; reads automatic"
+  | Pave.Approval.Ask_exec -> "Allow reads and writes; ask before commands"
+  | Pave.Approval.Auto_all -> "Automatic where permitted; command approval still required"
+
+let approval_policy_label = function
+  | Pave.Approval.Allow -> "Allow without routine prompts; safety gates still apply"
+  | Pave.Approval.Prompt -> "Ask before each use"
+  | Pave.Approval.Deny -> "Block this tool"
+
+(* Read each scope separately for selection state; merged values describe effects,
+   not whether the project has an override. Match Settings.load's safeguards. *)
+let approval_scope ~user directory =
+  try
+    if not user && (Unix.lstat directory).Unix.st_kind <> Unix.S_DIR then
+      invalid_arg "project .pave must be a real directory";
+    Pave.Settings.read ~allow_custom:user (Filename.concat directory "settings.json")
+  with
+  | Unix.Unix_error _ | Sys_error _ | Invalid_argument _ | Yojson.Json_error _ ->
+      Pave.Settings.empty
+
+let approval_safety =
+  "run_command always needs approval · unsandboxed · explicit blocks win"
 
 let open_view screen ~root ~registry =
   let save change =
     ignore (Pave.Settings.update_project ~root change);
     Tui.event screen "Project settings saved for the next launch; active turns are unchanged." in
-  let mode_name = function
-    | None -> "write (default)"
-    | Some mode -> Pave.Approval.string_of_mode mode in
-  let policy_name = function
-    | None -> "inherit global mode"
-    | Some policy -> Pave.Approval.string_of_policy policy in
-  let rec loop () =
+  let mode_name mode = approval_mode_label
+    (Option.value ~default:Pave.Approval.Ask_exec mode) in
+  let project_scope () =
+    approval_scope ~user:false (Filename.concat root ".pave") in
+  let user_scope () =
+    let home, _ = Pave.Settings.config_home () in
+    approval_scope ~user:true (Filename.concat home "pave") in
+  let marked_options current options =
+    List.map (fun (label, value) ->
+      (if value = current then "Current project · " ^ label else label),
+      value) options in
+  let current_label current options =
+    fst (List.find (fun (_, value) -> value = current) options) in
+  let rec loop ?initial_selected () =
     let loaded = Pave.Settings.load ~root in
     let values = loaded.values in
     let provider = "Default provider: " ^ configured values.default_provider in
@@ -39,9 +70,11 @@ let open_view screen ~root ~registry =
     let turns = "Maximum model turns: " ^
       (match values.max_turns with Some count -> string_of_int count
        | None -> "20 (default)") in
-    let approval_mode = "Approval mode: " ^ mode_name values.approval_mode in
-    let tool_approval = "Per-tool approval overrides" in
-    match Tui.choose screen ~title:"Project settings"
+    let approval_mode = "Tool approval default: " ^ mode_name values.approval_mode in
+    let tool_approval = "Per-tool approval defaults" in
+    match Tui.choose screen ~title:"Project settings" ?initial_selected
+      ~intro:["Saved defaults apply on the next launch, not to active turns.";
+        "This is not a one-time tool approval. Escape closes settings."]
       ~choices:[provider; model; api; account; shell; turns; approval_mode; tool_approval] with
     | None -> ()
     | Some choice ->
@@ -153,43 +186,72 @@ let open_view screen ~root ~registry =
            | Some count -> save (fun current -> { current with
                max_turns = Some (int_of_string count) }))
          else if choice = approval_mode then (
-           let options = ["always-ask"; "write"; "yolo";
-             "Inherit from user/default"] in
-           match Tui.choose screen ~title:"Global tool approval mode"
-             ~choices:options with
+           let project = project_scope () and user = user_scope () in
+           let options = marked_options project.approval_mode [
+             "Use user/default setting: " ^ mode_name user.approval_mode, None;
+             approval_mode_label Pave.Approval.Ask_writes, Some Pave.Approval.Ask_writes;
+             approval_mode_label Pave.Approval.Ask_exec, Some Pave.Approval.Ask_exec;
+             approval_mode_label Pave.Approval.Auto_all, Some Pave.Approval.Auto_all
+           ] in
+           match Tui.choose screen ~title:"Tool approval · next-launch project default"
+            ~intro:["Effective default: " ^ mode_name values.approval_mode;
+              approval_safety]
+             ~initial_selected:(current_label project.approval_mode options)
+             ~choices:(List.map fst options) with
            | None -> ()
-           | Some "Inherit from user/default" ->
-               save (fun current -> { current with approval_mode = None })
            | Some selected ->
-               (match Pave.Approval.mode_of_string selected with
-                | None -> assert false
-                | Some mode ->
-                    save (fun current ->
-                      { current with approval_mode = Some mode })))
+               let mode = List.assoc selected options in
+               if mode <> project.approval_mode then
+                 save (fun current -> { current with approval_mode = mode }))
          else if choice = tool_approval then (
-           let choices = List.map (fun (name, tier) ->
-             let policy = List.assoc_opt name values.tool_approval in
-             Printf.sprintf "%s (%s): %s" name tier (policy_name policy), name)
-             approval_tools in
-           match Tui.choose screen ~title:"Per-tool approval overrides"
-             ~choices:(List.map fst choices) with
-           | None -> ()
-           | Some selected ->
-               let name = List.assoc selected choices in
-               let current_policy = List.assoc_opt name values.tool_approval in
-               let options = ["Inherit global mode"; "allow"; "prompt"; "deny"] in
-               (match Tui.choose screen
-                 ~title:(name ^ " · " ^ policy_name current_policy)
-                 ~choices:options with
-                | None -> ()
-                | Some selected ->
-                    let policy = match selected with
-                      | "Inherit global mode" -> None
-                      | other -> Pave.Approval.policy_of_string other in
-                    save (fun current ->
-                      let policies = List.remove_assoc name current.tool_approval in
-                      { current with tool_approval = match policy with
-                        | None -> policies
-                        | Some value -> policies @ [name, value] }))));
-        loop () in
+           let rec tools ?selected_tool () =
+             let values = (Pave.Settings.load ~root).values in
+             let project = project_scope () and user = user_scope () in
+             let effective name =
+               match List.assoc_opt name values.tool_approval with
+               | Some policy -> approval_policy_label policy
+               | None -> "Global default: " ^ mode_name values.approval_mode in
+             let choices = List.map (fun (name, tier) ->
+               let origin = if List.mem_assoc name project.tool_approval
+                 then "project override" else "inherited" in
+               Printf.sprintf "%s (%s) · %s · %s" name tier origin (effective name),
+               name) approval_tools in
+             let initial_selected = Option.bind selected_tool (fun name ->
+               List.find_opt (fun (_, tool) -> tool = name) choices |> Option.map fst) in
+             match Tui.choose screen ~title:"Per-tool defaults · next launch"
+              ~intro:["Choose a tool to edit its next-launch default, not approve one use.";
+                approval_safety]
+               ?initial_selected ~choices:(List.map fst choices) with
+             | None -> ()
+             | Some selected ->
+                 let name = List.assoc selected choices in
+                 let current_policy = List.assoc_opt name project.tool_approval in
+                 let inherited = match List.assoc_opt name user.tool_approval with
+                   | Some policy -> "User policy: " ^ approval_policy_label policy
+                   | None -> "Global default: " ^ mode_name values.approval_mode in
+                 let allow_label = if name = "run_command" then
+                   "Allow subject to mandatory per-command approval (unsandboxed)"
+                   else approval_policy_label Pave.Approval.Allow in
+                 let options = marked_options current_policy [
+                   "Use inherited setting · " ^ inherited, None;
+                   allow_label, Some Pave.Approval.Allow;
+                   approval_policy_label Pave.Approval.Prompt, Some Pave.Approval.Prompt;
+                   approval_policy_label Pave.Approval.Deny, Some Pave.Approval.Deny
+                 ] in
+                 (match Tui.choose screen ~title:(name ^ " · next-launch default")
+                  ~intro:["Effective saved policy: " ^ effective name; approval_safety]
+                   ~initial_selected:(current_label current_policy options)
+                   ~choices:(List.map fst options) with
+                  | None -> ()
+                  | Some selected ->
+                      let policy = List.assoc selected options in
+                      if policy <> current_policy then
+                        save (fun current ->
+                          let policies = List.remove_assoc name current.tool_approval in
+                          { current with tool_approval = match policy with
+                            | None -> policies
+                            | Some value -> policies @ [name, value] }));
+                 tools ~selected_tool:name () in
+           tools ()));
+        loop ~initial_selected:choice () in
   loop ()
