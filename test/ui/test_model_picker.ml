@@ -73,6 +73,12 @@ let () =
     (match Model_picker.model_detail routed terminal_name with
      | Some details -> not (String.contains details '\027')
      | None -> false));
+  let rows = Model_picker.row_labels ~current_model:exact_a
+    [named_a; { named_a with Catalog.identity = { named_a.identity with
+      upstream_id = "gpt-4o-mini" } }] in
+  assert (List.map snd rows =
+    ["GPT-4o · shared-id  (current)"; "GPT-4o · gpt-4o-mini"]);
+  assert (List.map snd (Model_picker.row_labels [model_a]) = ["shared-id"]);
   let slash_listing = listing ~provider:"abliteration" ~route:"chat"
     ~account_id:"team-a" ~ids:["org/model"] () in
   let slash_model = List.hd

@@ -2028,9 +2028,12 @@ let () =
           | None -> failwith ("saved session uses unsupported route " ^
               identity.provider ^ "@" ^ identity.route) in
         descriptor, Some identity, route) saved in
+    let update_thinking_level value =
+      thinking_level := value;
+      Option.iter (fun screen -> Tui.set_effort screen value) !ui in
     let restore_branch_settings current leaf =
       let saved_mode = Pave.Session.mode_at current leaf in
-      thinking_level := Pave.Session.thinking_at current leaf;
+      update_thinking_level (Pave.Session.thinking_at current leaf);
       disabled_tools := Pave.Session.disabled_tools_at current leaf;
       effective_approval_mode := if explicit_approval_mode then
         Option.value ~default:configured_approval_mode !approval_mode_override
@@ -2067,6 +2070,22 @@ let () =
        | None, Some previous -> retained_history := Pave.Agent.messages previous
        | _ -> ());
       use_selection ?display_name (descriptor, Some identity, route) in
+    (* An explicit effort pick is journaled as-is. Without one, a level chosen
+       for a different model is cleared rather than silently carried over to a
+       route or account model that may reject it. *)
+    let settle_thinking_for_model ~previous_identity ~picked
+        (identity : Pave.Model_identity.t) =
+      let record value =
+        Option.iter (fun current -> Pave.Session.set_thinking current value) !journal;
+        update_thinking_level value in
+      match picked, !thinking_level with
+      | Some value, _ ->
+          if value <> !thinking_level then record value;
+          " · effort " ^ Option.value ~default:"provider default" value
+      | None, Some _ when previous_identity <> Some identity ->
+          record None;
+          " · effort reset to provider default"
+      | None, _ -> "" in
     let select_prompt_account ?(paste_ranges = []) text =
       match !ui, !active_identity with
       | Some screen, Some identity when identity.account_id = None ->
@@ -2418,13 +2437,13 @@ let () =
           with exn ->
             (match !ui with Some screen -> Tui.reset_status screen | None -> ());
             raise exn in
+        let previous_identity = !active_identity in
         apply_model_selection ?display_name:!display_name
           (descriptor, identity, route);
-        Option.iter (fun thinking ->
-          Option.iter (fun current -> Pave.Session.set_thinking current thinking) !journal;
-          thinking_level := thinking) !picked_thinking;
+        let effort_note = settle_thinking_for_model ~previous_identity
+          ~picked:!picked_thinking identity in
         on_event ("Active model: " ^ Pave.Model_identity.selector identity ^
-          ". /setup saves a cross-workspace default.")
+          effort_note ^ ". /setup saves a cross-workspace default.")
       ) else match !ui with
         | Some screen ->
             Tui.reset_status screen;
@@ -2482,8 +2501,14 @@ let () =
           else on_event "Setup cancelled; your saved default is unchanged."
       | Setup_view.Selected (descriptor, identity, route, missing_key,
           display_name) ->
+          let previous_identity = !active_identity in
           apply_model_selection ?display_name
             (descriptor, identity, route);
+          let effort_note = settle_thinking_for_model ~previous_identity
+            ~picked:None identity in
+          if effort_note <> "" then
+            on_event ("Active model: " ^ Pave.Model_identity.selector identity ^
+              effort_note ^ ".");
           let saved =
             try
               ignore (Pave.Settings.update_user (fun current -> {
@@ -2593,10 +2618,10 @@ let () =
       (match !journal with
        | Some current -> Pave.Session.set_thinking current selected
        | None -> ());
-      thinking_level := selected;
-      notify ("Thinking level: " ^
-        Option.value ~default:"default" selected ^
-        " (compatible provider routes receive their documented reasoning control).") in
+      update_thinking_level selected;
+      notify ("Effort: " ^
+        Option.value ~default:"provider default" selected ^
+        " · routes without a documented reasoning control ignore it.") in
     let set_tool_enabled name enabled =
       let names = "task" :: (Pave.Tools.available ~allow_shell:true
         |> List.filter_map (fun json ->
@@ -3411,9 +3436,9 @@ let () =
         | Pave.Interaction.Thinking selected ->
             (match selected with
              | None ->
-                 notify ("Thinking level: " ^
-                   Option.value ~default:"default" !thinking_level ^
-                   " (compatible provider routes receive their documented reasoning control).")
+                 notify ("Effort: " ^
+                   Option.value ~default:"provider default" !thinking_level ^
+                   " · /thinking LEVEL sets it; /model lists this model's reported levels.")
              | Some level -> set_thinking (Some level))
         | Pave.Interaction.Tool_toggle { name; enabled } ->
             set_tool_enabled name enabled
@@ -3636,8 +3661,10 @@ let () =
         | Pave.Interaction.Rule (Some value) ->
             set_interruption_rule (Some value)
         | Pave.Interaction.Context ->
-          let model = !active_descriptor.id ^ "/" ^
-            (if !active_model = "" then "(not selected)" else !active_model) in
+          let model = match !active_identity with
+            | Some identity -> Pave.Model_identity.selector identity
+            | None -> !active_descriptor.id ^ "@" ^ !active_route.name ^
+                "/(not selected)" in
           let context_messages, conversation_lines = match !journal with
             | Some current ->
                 let saved = Pave.Session.history current in
@@ -3742,13 +3769,13 @@ let () =
               | _ ->
                   ["Anthropic native compaction · capability checked against the model listing before use"] in
           let budget_lines = budget_lines @ anthropic_capability_lines in
-          let lines = ["Context · " ^ model ^ " · " ^ !active_route.name] @
+          let lines = ["Context · " ^ model] @
             conversation_lines @ budget_lines @
             ["Approval mode · " ^ Pave.Approval.string_of_mode
                !effective_approval_mode ^
                (if explicit_approval_mode then " (CLI override)" else "");
-             "Thinking metadata · " ^
-               Option.value ~default:"default" !thinking_level;
+             "Effort · " ^
+               Option.value ~default:"provider default" !thinking_level;
              "Disabled tools · " ^
                (if !disabled_tools = [] then "(none)"
                 else String.concat ", " !disabled_tools);
@@ -3993,6 +4020,7 @@ let () =
         ui := None;
         Tui.close screen) (fun () ->
         ui := Some screen;
+        Tui.set_effort screen !thinking_level;
         set_pending_attachments !pending_attachments;
         (match !journal with
          | Some current -> Tui.show_history screen (Pave.Session.history current)

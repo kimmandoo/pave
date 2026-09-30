@@ -41,7 +41,7 @@ let open_view screen ~root ~registry =
        | None -> "20 (default)") in
     let approval_mode = "Approval mode: " ^ mode_name values.approval_mode in
     let tool_approval = "Per-tool approval overrides" in
-    match Tui.choose screen ~title:"Project settings · Esc closes"
+    match Tui.choose screen ~title:"Project settings"
       ~choices:[provider; model; api; account; shell; turns; approval_mode; tool_approval] with
     | None -> ()
     | Some choice ->

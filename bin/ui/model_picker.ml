@@ -154,22 +154,21 @@ let scope_label (scope : Pave.Model_discovery_coordinator.scope) =
    | Some account -> "#" ^ Pave.Model_identity.encode_component account)
 
 let listing_status ?registry (descriptor : Pave.Provider_catalog.descriptor)
-    scope (listing : Pave.Model_discovery.listing) models =
-  let prefix = scope_label scope in
+    _scope (listing : Pave.Model_discovery.listing) models =
   if listing.source.id_source =
       Pave.Model_catalog.Runtime_default then
-    prefix ^ ": OS-managed model readiness is not verified by discovery"
+    "OS-managed model; readiness is not verified by discovery"
   else if listing.source.id_source =
       Pave.Model_catalog.Explicit_user_input then
-    prefix ^ ": configured IDs are not verified by a live listing"
+    "Configured IDs; not verified by a live listing"
   else if Pave.Provider_catalog.unclassified_models ?registry descriptor.id then
-    prefix ^ ": listed IDs have unverified route compatibility"
+    "Listed IDs; route compatibility unverified"
   else
     let excluded = List.length listing.models - List.length models in
-    Printf.sprintf "%s: %d route-compatible listed ID%s%s; inference authorization is not guaranteed"
-      prefix (List.length models) (if List.length models = 1 then "" else "s")
+    Printf.sprintf "Fresh listing%s · access is confirmed on the first request"
       (if excluded = 0 then "" else
-        Printf.sprintf " · %d excluded" excluded)
+        Printf.sprintf " · %d other-API ID%s hidden" excluded
+          (if excluded = 1 then "" else "s"))
 
 let identity_selector (model : Pave.Model_discovery.model) =
   Pave.Model_identity.selector model.identity
@@ -189,6 +188,20 @@ let identity_label (model : Pave.Model_discovery.model) =
   (match identity.account_id with
    | None -> ""
    | Some account -> "#" ^ Pave.Model_identity.encode_component account)
+
+(* Rows in a single-scope list omit the scope already shown in the title;
+   repeated display names fall back to the exact upstream ID. *)
+let row_labels ?current_model (models : Pave.Model_discovery.model list) =
+  let names = List.map visible_model_name models in
+  List.map (fun (model : Pave.Model_discovery.model) ->
+    let name = visible_model_name model in
+    let shared = List.length (List.filter (String.equal name) names) > 1 in
+    let upstream = Tui.single_line model.identity.upstream_id in
+    let label = if shared && name <> upstream then name ^ " · " ^ upstream
+      else name in
+    let selector = identity_selector model in
+    selector, (if current_model = Some selector then label ^ "  (current)"
+      else label)) models
 
 let model_detail ?registry (descriptor : Pave.Provider_catalog.descriptor)
     (model : Pave.Model_discovery.model) =
@@ -231,6 +244,10 @@ let model_detail ?registry (descriptor : Pave.Provider_catalog.descriptor)
     | None -> None in
   let output_limit = Option.map
     (Printf.sprintf "maximum output %d tokens") capabilities.max_output_tokens in
+  let efforts = match capabilities.effort_levels with
+    | Some (_ :: _ as levels) ->
+        Some ("effort " ^ String.concat "/" (List.map Tui.single_line levels))
+    | _ -> None in
   let id_source = Some (match model.provenance.id_source with
     | Pave.Model_catalog.Pinned_account_listing -> "IDs from pinned account listing"
     | Pave.Model_catalog.Provider_listing -> "IDs from provider listing"
@@ -259,9 +276,9 @@ let model_detail ?registry (descriptor : Pave.Provider_catalog.descriptor)
       observed.tm_hour observed.tm_min observed.tm_sec)
     model.provenance.retrieved_at in
   match List.filter_map Fun.id
-    [Some ("exact identity " ^ identity_selector model);
-     context; id_source; capability_source; retrieved_at; output_limit;
-     compaction; tools; display_name; endpoints; tokenizer; listing_endpoint] with
+    [context; output_limit; tools; efforts; endpoints; compaction;
+     Some (identity_selector model); display_name; capability_source;
+     id_source; retrieved_at; tokenizer; listing_endpoint] with
   | [] -> None
   | parts -> Some (String.concat " · " parts)
 
@@ -285,6 +302,7 @@ let configure_model_effort screen ~current_thinking
     (model : Pave.Model_discovery.model) =
   let route = Option.get (Pave.Provider_catalog.route descriptor model.identity.route) in
   let options = effort_options route model in
+  if options = [] then Some None else
   let provenance = match model.provenance.capability_source with
     | Some Pave.Model_catalog.Pinned_account_listing -> "fresh account listing"
     | Some Pave.Model_catalog.Provider_listing -> "fresh provider listing"
@@ -389,25 +407,22 @@ let choose ?registry screen ~(descriptor : Pave.Provider_catalog.descriptor)
       match Pave.Model_discovery_coordinator.poll coordinator with
       | [{ scope; status = Pave.Model_discovery_coordinator.Loading }] ->
           Tui.update_choices screen ~verified:[]
-            ~status:(Some (scope_label scope ^ ": checking live model availability")) ()
+            ~status:(Some ("Checking " ^ scope_label scope ^ "…")) ()
       | [{ scope; status = Ready listing }] ->
           let routed_models = eligible_models ~registry descriptor scope listing in
           List.iter (fun model ->
             Hashtbl.replace fresh_models (identity_selector model) model) routed_models;
           let values = List.map identity_selector routed_models in
           let details = model_details ~registry descriptor routed_models in
-          let labels = List.map (fun model ->
-            let selector = identity_selector model in
-            selector, (if current_model = Some selector then "Current · " else "") ^
-              identity_label model) routed_models in
+          let labels = row_labels ?current_model routed_models in
           Tui.update_choices screen ~verified:values ~details ~labels
+            ?preferred:current_model
             ~status:(Some (listing_status ~registry descriptor scope listing
               routed_models)) ()
-      | [{ scope; status = Unsupported error }]
-      | [{ scope; status = Failed error }] ->
+      | [{ status = Unsupported error; _ }]
+      | [{ status = Failed error; _ }] ->
           Tui.update_choices screen ~verified:[]
-            ~status:(Some (scope_label scope ^ ": " ^
-              Pave.Model_discovery.message error)) ()
+            ~status:(Some (Pave.Model_discovery.message error)) ()
       | _ -> () in
     let selected = Tui.choose ?initial_filter ?scope_action screen ~intro ~plain
       ~initial_status:"Loading available models…"
@@ -454,6 +469,28 @@ let available_scopes ?registry () =
           ({ Pave.Model_discovery_coordinator.provider = descriptor.id;
              route = route.name; account_id }, descriptor)) accounts))
 
+(* A cheap local check: environment keys, saved sign-ins and keyless local
+   routes. It never resolves or refreshes a credential. *)
+let scope_ready ?registry (descriptor : Pave.Provider_catalog.descriptor)
+    (scope : Pave.Model_discovery_coordinator.scope) =
+  let registry = Option.value ~default:Pave.Provider_catalog.builtin_registry registry in
+  match Pave.Provider_catalog.custom_route registry ~provider:descriptor.id
+      ~route:scope.route with
+  | Some { auth = Pave.Custom_provider.No_auth; _ } -> true
+  | Some { auth = Pave.Custom_provider.Api_key_env name; _ } ->
+      (match Sys.getenv_opt name with Some key -> key <> "" | None -> false)
+  | None ->
+      Cli_auth.api_key descriptor <> None || scope.account_id <> None ||
+      (match Pave.Model_discovery.credential_policy descriptor.id with
+       | Some Pave.Model_discovery.Anonymous -> descriptor.api_key_env = None
+       | Some Pave.Model_discovery.Ambient_credentials -> true
+       | Some Pave.Model_discovery.Optional_api_key -> descriptor.id <> "azure"
+       | Some (Pave.Model_discovery.Stored_api_key _)
+       | Some (Pave.Model_discovery.OAuth_account _) ->
+           Pave.Oauth_store.accounts ~path:(Pave.Oauth_store.default_path ())
+             ~provider:descriptor.id <> []
+       | Some Pave.Model_discovery.Required_api_key | None -> false)
+
 let browse ?registry ?initial_filter ?(configure_effort = false)
     ?current_thinking ?current_model ?current_account_id screen
     ~(active : Pave.Provider_catalog.descriptor) ~current_route () =
@@ -466,19 +503,27 @@ let browse ?registry ?initial_filter ?(configure_effort = false)
         ~route_name:scope.Pave.Model_discovery_coordinator.route
         ?account_id:scope.account_id ~configure_effort ?current_thinking ?current_model
         ~scope_action:switch_action ~plain:[switch_action]
-        ~intro:["Only this provider / API / account is checked.";
-          "Tab switches scope · type to search every freshly listed ID.";
-          "Selection changes this conversation only."]
+        ~intro:["Type to filter · Tab switches provider / API / account.";
+          "Applies to this conversation only; /setup saves a default."]
         ~title:("Models · " ^ scope_label scope) () with
     | Some selection when selection.selector = switch_action ->
         let scopes = available_scopes ~registry () in
         let scopes = if List.exists (fun (candidate, _) -> candidate = scope) scopes
           then scopes else (scope, descriptor) :: scopes in
-        let options = List.map (fun (candidate, descriptor) ->
-          scope_label candidate, (candidate, descriptor)) scopes in
-        (match Tui.choose screen ~initial_selected:(scope_label scope)
-            ~intro:["Select a provider / API / account. No models are fetched here.";
-              "Search scopes · Enter opens a fresh listing · Esc returns."]
+        let label (candidate, descriptor) =
+          if candidate = scope then scope_label candidate ^ "  (current)"
+          else if scope_ready ~registry descriptor candidate then
+            scope_label candidate
+          else scope_label candidate ^ "  · needs sign-in or API key" in
+        let current, others = List.partition (fun (candidate, _) ->
+          candidate = scope) scopes in
+        let ready, missing = List.partition (fun (candidate, descriptor) ->
+          scope_ready ~registry descriptor candidate) others in
+        let options = List.map (fun entry -> label entry, entry)
+          (current @ ready @ missing) in
+        (match Tui.choose screen ~initial_selected:(label (scope, descriptor))
+            ~intro:["Ready scopes first. Enter opens a fresh listing.";
+              "Type to search · Esc returns to the model list."]
             ~title:"Model scope" ~choices:(List.map fst options) with
          | None -> open_scope None scope descriptor
          | Some label ->

@@ -47,6 +47,7 @@ type listing_update = {
   labels : (string * string) list;
   status : string option;
   status_pages : string list;
+  preferred : string option;
 }
 
 type approval_request = {
@@ -94,6 +95,7 @@ type t = {
   version : string;
   mutable model : string;
   mutable model_display_name : string option;
+  mutable effort : string option;
   mutable session : bool;
   subagents : bool;
   mutable external_commands : Pave.Interaction.shortcut list;
@@ -1038,7 +1040,8 @@ let paint t =
     else indicators in
   let indicators = if indicators = "" then I.empty
     else I.string muted (shorten_width (max 0 (cols / 3)) indicators ^ " ") in
-  let identity_width = max 0 (cols - 6 - I.width indicators -
+  (* composer_top needs at least one fill cell besides its six frame cells. *)
+  let identity_width = max 0 (cols - 7 - I.width indicators -
     (if I.width indicators = 0 then 0 else 1)) in
   let identity = match t.location_cache with
     | Some (width, image) when width = identity_width -> image
@@ -1064,12 +1067,17 @@ let paint t =
           let state = if width < 39 then
             (if t.session then " · SAVED" else " · UNSAVED")
           else if t.session then "  ·  SAVED" else "  ·  UNSAVED" in
-          let space = max 0 (width - measure badge - measure state) in
+          let effort = match t.effort with
+            | Some level when width >= 26 ->
+                " · " ^ shorten_width 12 (single_line level)
+            | _ -> "" in
+          let space = max 0 (width - measure badge - measure state -
+            measure effort) in
           let root = if width < 54 then "" else
             let prefix = "  ·  " in
-            prefix ^ shorten_middle
-              (min (width / 4) (max 0 (space - measure prefix - 12)))
-              (single_line t.root) in
+            let room = min (width / 4) (max 0 (space - measure prefix - 28)) in
+            if room < 8 then ""
+            else prefix ^ shorten_middle room (single_line t.root) in
           let identity_space = max 0 (min (space / 3)
             (space - measure root - 20)) in
           let detail = if width < 66 || model_scope = "" ||
@@ -1078,6 +1086,7 @@ let paint t =
           let name_width = max 0 (space - measure root - measure detail) in
           I.(string accent badge <|>
             string text_attr (display_model name_width) <|>
+            string accent effort <|>
             string muted state <|>
             string muted root <|>
             string muted detail) in
@@ -1127,8 +1136,9 @@ let paint t =
             (if chooser.dynamic then
               Printf.sprintf "  ▌  %s  ·  %d available"
                 chooser.title chooser.matched_models
-             else Printf.sprintf "  ▌  %s  ·  %d matches"
-                chooser.title count)
+             else if chooser.filter = "" then "  ▌  " ^ chooser.title
+             else Printf.sprintf "  ▌  %s  ·  %d match%s"
+                chooser.title count (if count = 1 then "" else "es"))
           else if i <= intro_height then
             styled_line cols muted ("  " ^ chooser.intro.(i - 1))
           else if i <= intro_height + status_height then
@@ -1245,6 +1255,10 @@ let paint t =
           if cols < 45 then "Ctrl+C cancel · " ^ enter_key ^ " steer"
           else "Ctrl+C cancel · " ^ enter_key ^ " steer · " ^
             meta_key ^ "+" ^ enter_key ^ " queue"
+        else if status = idle_status && cols >= 45 then
+          enter_key ^ " send · / commands · @ files · " ^
+          (if total = 0 then "Ctrl+R history · /help"
+           else "PgUp/Dn scroll · " ^ meta_key ^ "+O details")
         else status in
         (if cols < 45 then
           (if status = idle_status then
@@ -1271,6 +1285,11 @@ let paint t =
                Printf.sprintf " · +%d more" (List.length rest))) in
 
 
+  (* Chooser hints share the transcript footer's two-cell gutter. *)
+  let footer_text = match t.chooser with
+    | Some _ when cols >= 24 &&
+        not (String.starts_with ~prefix:" " footer_text) -> "  " ^ footer_text
+    | _ -> footer_text in
   let footer = styled_line cols text_attr (shorten_width cols footer_text) in
   let first_line = max 0 (min (editor_row - editor_height + 1)
     (Array.length editor_lines - editor_height)) in
@@ -1515,7 +1534,8 @@ let create ?(keybinding_overrides = []) ?(version = "source")
     raise exn in
   let t = try {
     term; input = Terminal_input.create term;
-    root; version = single_line version; model; model_display_name; session; subagents;
+    root; version = single_line version; model; model_display_name;
+    effort = None; session; subagents;
     external_commands;
     editor = Pave.Composer.create ();
     transcript = Transcript_view.create (); tool_groups = Hashtbl.create 8;
@@ -1610,6 +1630,12 @@ let set_model ?display_name t model =
   t.model_display_name <- display_name;
   t.location_cache <- None;
   reset_status t
+
+let set_effort t effort =
+  if t.effort <> effort then (
+    t.effort <- effort;
+    t.location_cache <- None;
+    paint t)
 
 let set_session t session =
   t.session <- session;
@@ -2280,7 +2306,7 @@ let read ?wake_fd ?on_wake ?on_interrupt ?on_dequeue ?on_completion t =
 
 (* Dynamic choices contain only fresh usable IDs and explicit navigation controls.
    Preserve a touched selection when discovery refreshes the IDs. *)
-let update_chooser ?(status_pages = []) chooser ~verified
+let update_chooser ?(status_pages = []) ?preferred chooser ~verified
     ~details ~labels ~status =
   let previous = matches chooser in
   let selected = if chooser.selected < Array.length previous then
@@ -2312,8 +2338,14 @@ let update_chooser ?(status_pages = []) chooser ~verified
   chooser.status_page <- min chooser.status_page
     (max 0 (Array.length chooser.status_pages - 1));
   let found = matches chooser in
+  let locate value =
+    let rec find i =
+      if i = Array.length found then None
+      else if found.(i).value = value then Some i else find (i + 1) in
+    find 0 in
   chooser.selected <- (if
-    verified <> [] && chooser.filter = "" && not chooser.touched then 0
+    verified <> [] && chooser.filter = "" && not chooser.touched then
+      Option.value ~default:0 (Option.bind preferred locate)
     else match selected with
     | Some value ->
         let rec locate i =
@@ -2328,7 +2360,7 @@ let apply_listing_update t update =
   | Some chooser when chooser.dynamic ->
       update_chooser chooser ~verified:update.verified
         ~details:update.details ~labels:update.labels ~status:update.status
-        ~status_pages:update.status_pages;
+        ~status_pages:update.status_pages ?preferred:update.preferred;
       paint t
   | _ -> ()
 
@@ -2336,9 +2368,9 @@ let () =
   listing_handler := apply_listing_update
 
 let update_choices t ~verified
-    ?(details = []) ?(labels = []) ?(status_pages = []) ~status () =
+    ?(details = []) ?(labels = []) ?(status_pages = []) ?preferred ~status () =
   enqueue_ui_event t (Listing_event {
-    verified; details; labels; status; status_pages })
+    verified; details; labels; status; status_pages; preferred })
 
 let choose ?(allow_custom = false) ?(intro = []) ?(plain = [])
     ?initial_status ?initial_filter ?initial_selected ?wake_fd ?on_wake ?dynamic

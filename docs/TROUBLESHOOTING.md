@@ -1,5 +1,12 @@
 # Troubleshooting
 
+### [2026-09-30] Composer header lost its border when the model name was shortened
+
+- **Context / Symptom:** At about 60 columns with a long model name, the composer's top row rendered as a bare `────` line with no corners and no model header, while the sides and bottom still drew a box.
+- **Root Cause:** The header identity was laid out to exactly `cols - 6` cells. When the model name had to be shortened, the image filled that budget completely, so `composer_top` computed a fill of 0 and fell back to the plain line.
+- **Solution:** Reserved one fill cell (`cols - 7`) for the identity, dropped the workspace path when it would get fewer than 8 cells, and gave the model name 28 cells of priority before the path is shown.
+- **Prevention / Reference:** Check header PTY captures at several widths (36/50/60/75/100/140) with a long model ID, not only the default 100-column width.
+
 ### [2026-09-30] Manual native UI smoke linked mixed interface generations
 
 - **Context / Symptom:** A standalone native panel link launched while Dune was rebuilding dependencies failed with `make inconsistent assumptions over interface Pave__Sse`.

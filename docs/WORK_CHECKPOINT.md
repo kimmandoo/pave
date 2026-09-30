@@ -1,5 +1,16 @@
 # Work checkpoint
 
+## Current session — model / effort selection fixes and TUI UX pass
+
+- **Date:** 2026-09-30
+- **Active task:** Completed the user request to fix provider / model-effort / model-selection bugs, followed by a whole-TUI UX pass.
+- **Fixes:** A previous model's effort no longer carries over to a different model when no effort is picked; it is cleared, journaled and reported. The model-change note reports the effort, and the composer header shows it. The effort panel is skipped when there are no admissible levels. `/model` preselects the current model. Rows show only the model name, with the upstream ID added when display names repeat. Status and detail text were shortened, and capabilities are listed before provenance. The scope switcher lists the current scope first, then ready scopes, and marks scopes that need sign-in or an API key.
+- **UX pass:** Fixed the composer top border and header vanishing when a long model name filled the header, and gave the model name priority over the root path. The idle footer now shows send/command/file hints instead of "steer". `/context` uses the canonical selector and "Effort" wording, and so does `/thinking`. Static chooser titles show a match count only while filtering, and chooser footers are indented.
+- **Changed files:** `bin/main.ml`, `bin/ui/{model_picker,tui,settings_view}.ml`, `test/ui/{test_model_picker,test_chooser_dynamic}.ml`, `CHANGELOG.md`, `docs/{DESIGN_RULES,TROUBLESHOOTING,WORK_CHECKPOINT}.md`. No strategy code; no backtest applies.
+- **Verification:** `opam exec --switch=/tmp/pave-ci55 -- dune build @install -j 4` and `dune runtest --force -j 4` passed (exit 0). tmux PTY checks against a loopback fake vLLM server covered: effort reset after `/thinking high` plus a model switch, panel skip, current-model preselection, scope ordering, header at widths 36/50/60/75/100/140, idle footer, `/context`, `/settings` and `@` hints.
+- **Not exercised:** The effort panel with real levels (Codex/Umans) was not re-run in a PTY this session; its unit tests pass and its code path is unchanged apart from the empty-options skip. No live vendor inference was run.
+- **Exact next action:** None for this request. Resume the ordered backlog in `task.md` when asked.
+
 - **Date:** 2026-09-30
 - **Active task:** Completed the requested README cleanup. The README was reduced from 535 dense lines to a scannable overview (highlights, install table, quick start, shortcuts, features, provider categories, safety, documentation index, contribute). Detailed sections were moved verbatim into `docs/USAGE.md` and `docs/PROVIDERS.md` with tables of contents; relative links were adjusted.
 - **Changed files:** `README.md`, `docs/USAGE.md` (new), `docs/PROVIDERS.md` (new), `CONTRIBUTING.md`, `CHANGELOG.md`, `docs/WORK_CHECKPOINT.md`. Documentation only; no code, strategy code/default/selection changed; no backtest applies.

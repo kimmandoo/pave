@@ -47,6 +47,15 @@ let () =
   chooser.filter <- "custom/provider-model";
   assert (values chooser = []);
   chooser.filter <- "";
+  Tui.update_chooser chooser ~preferred:"openai/gpt-4.1"
+    ~verified:["openai/o3"; "openai/gpt-4.1"] ~details:[] ~labels:[]
+    ~status:None;
+  assert ((Tui.matches chooser).(chooser.selected).value = "openai/gpt-4.1");
+  Tui.update_chooser chooser ~preferred:"openai/missing"
+    ~verified:["openai/o3"; "openai/gpt-4.1"] ~details:[] ~labels:[]
+    ~status:None;
+  assert (chooser.selected = 0);
+  chooser.filter <- "";
   chooser.selected <- 1;
   chooser.touched <- true;
   Tui.update_chooser chooser ~verified:["openai/o3"; "openai/gpt-4.1";

@@ -1,6 +1,10 @@
 # Changelog
 
 ## 2026-09-30
+- fix(tui): cleared a previous model's effort when switching models without an explicit effort pick, reported the resulting effort in the model-change note, and showed the active effort in the composer header.
+- fix(tui): skipped the effort panel when a model offered no selectable levels, preselected the current model in `/model`, and listed ready provider scopes first while marking scopes that need sign-in or an API key.
+- fix(tui): kept the composer top border and model header intact when a long model name filled the header, and gave the model name priority over the workspace path.
+- fix(tui): replaced the misleading idle "steer" footer with send/command/file hints, used the canonical model selector and effort wording in `/context` and `/thinking`, shortened picker rows, status and detail lines, and aligned chooser titles and footers.
 - docs(readme): condensed the README into scannable highlights, install, quick-start, feature, provider and safety sections, and moved the detailed usage and provider references verbatim into `docs/USAGE.md` and `docs/PROVIDERS.md`.
 - release(distribution): published v0.1.73 after four-platform native tests and package smokes, verified all archive checksums and exercised an isolated v0.1.71 upgrade with shipped model/write TUI scenarios.
 - perf(parser): batched bounded SSE framing and printable tool-argument spans, removed repeated copies and per-scalar allocation, and retained efficient singleton fragments with identical Unicode, overflow and EOF behavior.
