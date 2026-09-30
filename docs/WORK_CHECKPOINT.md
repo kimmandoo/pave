@@ -1,5 +1,13 @@
 # Work checkpoint
 
+## Current session — update without API quota, progress animation
+
+- **Date:** 2026-09-30
+- **Active task:** Completed. `pave update` and `--check` resolve the latest tag from the `releases/latest` web redirect, with the REST API as a fallback. Update shows a cat-paving progress line driven by installer `pave-phase:` markers.
+- **Changed files:** `bin/update.ml`, `install.sh` (phase markers under `PAVE_UPDATE_OUTPUT=1` only), `docs/DESIGN_RULES.md`, `CHANGELOG.md`.
+- **Verification:** `dune build @install` and `dune test --force` passed. A sandbox native install built with `PAVE_RELEASE_VERSION=v0.1.74`: `--check` reported v0.1.75 without consuming API quota (remaining count unchanged apart from a manual header probe). A tmux TTY update animated through Fetching checksums / Downloading / Inspecting archive and finished with `(=^w^=)  Pave updated v0.1.74 → v0.1.75`; `--check` then reported up to date. With an unreachable proxy, both paths failed with curl's error and `cannot check latest release`. Ctrl-C mid-update printed `update: interrupted` with the cursor restored. The update code has no automated unit tests.
+- **Exact next action:** None. On main and not released yet (latest release v0.1.75).
+
 ## Current session — unintended approval denials
 
 - **Date:** 2026-09-30

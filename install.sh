@@ -7,6 +7,13 @@ fail() {
     exit 1
 }
 
+# `pave update` shows these phase names beside its progress animation.
+phase() {
+    if [ "${PAVE_UPDATE_OUTPUT:-}" = 1 ]; then
+        printf 'pave-phase: %s\n' "$*"
+    fi
+}
+
 for prerequisite in uname curl tar mktemp awk mkdir cp chmod mv rm; do
     command -v "$prerequisite" >/dev/null 2>&1 || fail "missing prerequisite: $prerequisite"
 done
@@ -85,8 +92,11 @@ fetch() {
         --output "$2" "$release_url/$1" ||
         fail "cannot download $1; check that the release exists and is public at $release_url"
 }
+phase 'Fetching checksums'
 fetch SHA256SUMS "$temp_dir/SHA256SUMS"
+phase "Downloading $asset"
 fetch "$asset" "$temp_dir/$asset"
+phase 'Verifying checksum'
 
 # Require one well-formed checksum for each of the four published archives.
 expected=$(awk -v wanted="$asset" '
@@ -116,6 +126,7 @@ esac
 awk -v expected="$expected" 'NR == 1 && tolower($1) == tolower(expected) { valid = 1 } END { exit !valid }' \
     "$temp_dir/computed" || fail "SHA-256 mismatch for $asset; refusing to install"
 
+phase 'Inspecting archive'
 # Refuse extra paths, duplicates, links, or directories before extracting any entries.
 tar -tzf "$temp_dir/$asset" > "$temp_dir/entries" || fail "cannot read archive $asset"
 awk '
@@ -134,6 +145,7 @@ for file in pave LICENSE THIRD_PARTY_NOTICES; do
         fail "archive $asset has an invalid $file entry"
 done
 
+phase 'Installing'
 # Stage all files first; publish the executable last, by a rename in its own directory.
 # A marker distinguishes native installs from opam-managed binaries for `pave update`.
 license_dir=${install_dir%/*}/share/licenses/pave
