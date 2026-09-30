@@ -220,4 +220,27 @@ let () =
   let unsupported_route = Option.get
     (Pave.Provider_catalog.route anonymous "chat") in
   assert (Model_picker.effort_options unsupported_route reported = []);
+  (* Provider first: the active provider leads, ready providers follow in
+     catalog order, and scopes of one provider collapse into one row. *)
+  let openai = descriptor "openai" and ollama = descriptor "ollama" in
+  let scope provider route account_id =
+    { Pave.Model_discovery_coordinator.provider; route; account_id } in
+  let groups = Model_picker.provider_groups ~active_id:"vllm"
+    ~ready:(fun (descriptor : Pave.Provider_catalog.descriptor) _ ->
+      descriptor.id <> "openai")
+    [ scope "openai" "responses" None, openai;
+      scope "openai" "chat" None, openai;
+      scope "ollama" "chat" None, ollama;
+      scope "vllm" "chat" None, vllm ] in
+  assert (List.map (fun ((descriptor : Pave.Provider_catalog.descriptor), members, ready) ->
+    descriptor.id, List.length members, ready) groups =
+    ["vllm", 1, true; "ollama", 1, true; "openai", 2, false]);
+  let labels = List.map (Model_picker.provider_label ~active_id:"vllm") groups in
+  assert (String.ends_with ~suffix:"(current)" (List.hd labels));
+  assert (String.ends_with ~suffix:"needs sign-in or API key" (List.nth labels 2));
+  let contains needle text =
+    let n = String.length needle in
+    let rec at i = i + n <= String.length text &&
+      (String.sub text i n = needle || at (i + 1)) in at 0 in
+  assert (contains "2 APIs/accounts" (List.nth labels 2));
   print_endline "model picker verified route/account candidates: ok"

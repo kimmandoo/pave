@@ -2,7 +2,65 @@
 # Install a verified, prebuilt Pave release without opam or elevated privileges.
 set -eu
 
+animator=
+temp_dir=
+
+# Direct terminal installs animate a cat paving the road; `pave update` draws
+# its own animation from the phase lines, and pipes and dumb terminals get none.
+fancy=0
+if [ "${PAVE_UPDATE_OUTPUT:-}" != 1 ] && [ -t 1 ]; then
+    case "${TERM:-dumb}" in
+        dumb | '') ;;
+        *) fancy=1 ;;
+    esac
+fi
+case "${LC_ALL:-${LC_CTYPE:-${LANG:-}}}" in
+    *[Uu][Tt][Ff]-8* | *[Uu][Tt][Ff]8*) paved='▰' unpaved='▱' ;;
+    *) paved='=' unpaved='-' ;;
+esac
+if [ -n "${NO_COLOR:-}" ]; then
+    road_color= face_color= dim_color= reset_color=
+else
+    road_color=$(printf '\033[36m') face_color=$(printf '\033[1;33m')
+    dim_color=$(printf '\033[2m') reset_color=$(printf '\033[0m')
+fi
+
+animate() {
+    parent=$1 tick=0 width=16
+    while kill -0 "$parent" 2>/dev/null; do
+        step=$((tick % (width + 4)))
+        position=$step
+        [ "$position" -le "$width" ] || position=$width
+        if [ "$step" -gt "$width" ]; then face='(=^w^=)'
+        elif [ $((tick % 16)) -eq 15 ]; then face='(=-.-=)'
+        elif [ $((tick % 2)) -eq 0 ]; then face='(=^.^=)'
+        else face='(=^o^=)'
+        fi
+        road= rest= index=0
+        while [ "$index" -lt "$width" ]; do
+            if [ "$index" -lt "$position" ]; then road="$road$paved"; else rest="$rest$unpaved"; fi
+            index=$((index + 1))
+        done
+        case $((tick / 3 % 3)) in 0) dots=. ;; 1) dots=.. ;; *) dots=... ;; esac
+        label=$(cat "$temp_dir/phase" 2>/dev/null) || label='Paving'
+        printf '\r\033[K  %s%s%s%s%s%s%s%s  %s%s' "$road_color" "$road" "$reset_color" \
+            "$face_color" "$face" "$reset_color" "$dim_color" "$rest$reset_color" "$label" "$dots"
+        tick=$((tick + 1))
+        sleep 0.12 2>/dev/null || sleep 1
+    done
+}
+
+stop_animation() {
+    if [ -n "$animator" ]; then
+        kill "$animator" 2>/dev/null || :
+        wait "$animator" 2>/dev/null || :
+        animator=
+        printf '\r\033[K\033[?25h'
+    fi
+}
+
 fail() {
+    stop_animation
     printf 'pave installer: %s\n' "$*" >&2
     exit 1
 }
@@ -11,6 +69,13 @@ fail() {
 phase() {
     if [ "${PAVE_UPDATE_OUTPUT:-}" = 1 ]; then
         printf 'pave-phase: %s\n' "$*"
+    elif [ "$fancy" = 1 ]; then
+        printf '%s' "$*" > "$temp_dir/phase.next" && mv -f "$temp_dir/phase.next" "$temp_dir/phase"
+        if [ -z "$animator" ]; then
+            printf '\033[?25l'
+            animate $$ &
+            animator=$!
+        fi
     fi
 }
 
@@ -77,6 +142,7 @@ staged_license=
 staged_notices=
 staged_marker=
 cleanup() {
+    stop_animation
     [ -z "$staged_binary" ] || rm -f "$staged_binary"
     [ -z "$staged_license" ] || rm -f "$staged_license"
     [ -z "$staged_notices" ] || rm -f "$staged_notices"
@@ -89,8 +155,11 @@ trap 'exit 1' 1 2 3 15
 asset="pave-$os-$arch.tar.gz"
 fetch() {
     curl --fail --location --silent --show-error --proto '=https' --proto-redir '=https' \
-        --output "$2" "$release_url/$1" ||
+        --output "$2" "$release_url/$1" 2> "$temp_dir/curl-error" || {
+        stop_animation
+        cat "$temp_dir/curl-error" >&2
         fail "cannot download $1; check that the release exists and is public at $release_url"
+    }
 }
 phase 'Fetching checksums'
 fetch SHA256SUMS "$temp_dir/SHA256SUMS"
@@ -171,7 +240,9 @@ mv -f "$staged_marker" "$license_dir/.native-install" || fail 'cannot install na
 staged_marker=
 mv -f "$staged_binary" "$install_dir/pave" || fail 'cannot install pave executable'
 staged_binary=
+stop_animation
 if [ "${PAVE_UPDATE_OUTPUT:-}" != 1 ]; then
+    [ "$fancy" = 0 ] || printf '%s(=^w^=)%s  ' "$face_color" "$reset_color"
     printf 'Installed pave to %s/pave\n' "$install_dir"
     case ":${PATH:-}:" in
         *":$install_dir:"*) ;;

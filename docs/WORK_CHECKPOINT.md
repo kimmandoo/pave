@@ -1,5 +1,12 @@
 # Work checkpoint
 
+## Current session — provider-first model picker, install animation
+- **Date:** 2026-09-30
+- **Active task:** Completed. `/model` goes provider → (API/account when several) → model; `install.sh` animates in a terminal.
+- **Changed files:** `bin/ui/model_picker.ml` (`provider_groups`, `provider_label`, `scope_choice_label`, new `browse`), `bin/ui/tui.ml` (footer `Tab providers`), `install.sh` (`animate`, `stop_animation`, curl stderr capture), `test/ui/test_model_picker.ml`, `docs/DESIGN_RULES.md`, `CHANGELOG.md`.
+- **Verification:** `dune build @install` and `dune test --force` passed. tmux TUI with a loopback vLLM fixture: `/model` showed `Models · provider` with `vLLM (local) · vllm  (current)` first and credential-less providers last; Enter opened the vLLM listing, Esc returned to providers, Tab from Ollama returned with Ollama preselected, Amazon Bedrock asked `converse`/`converse-stream`, picking `m` set the active model. `cat install.sh | dash` in tmux installed v0.1.75 into a scratch dir with the animation; piped output and `PAVE_UPDATE_OUTPUT=1` phase lines were unchanged; a missing tag printed curl's 404 on its own line; Ctrl-C exited 1 with the line cleared.
+- **Exact next action:** None. On main, not released (latest release v0.1.75); v0.1.76 awaits the user's go-ahead.
+
 ## Current session — update without API quota, progress animation
 
 - **Date:** 2026-09-30

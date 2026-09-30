@@ -502,44 +502,114 @@ let scope_ready ?registry (descriptor : Pave.Provider_catalog.descriptor)
              ~provider:descriptor.id <> []
        | Some Pave.Model_discovery.Required_api_key | None -> false)
 
+(* Group scopes by provider in catalog order, then list the active provider,
+   ready providers and providers still needing credentials. *)
+let provider_groups ~ready ~active_id scopes =
+  let ordered = List.fold_left (fun groups
+      (scope, (descriptor : Pave.Provider_catalog.descriptor)) ->
+    if List.exists (fun ((known : Pave.Provider_catalog.descriptor), _) ->
+        known.id = descriptor.id) groups then
+      List.map (fun ((known : Pave.Provider_catalog.descriptor), members) ->
+        known, if known.id = descriptor.id then members @ [scope] else members) groups
+    else groups @ [descriptor, [scope]]) [] scopes in
+  let entries = List.map (fun (descriptor, members) ->
+    descriptor, members, List.exists (ready descriptor) members) ordered in
+  let current, others = List.partition
+    (fun ((descriptor : Pave.Provider_catalog.descriptor), _, _) ->
+      descriptor.id = active_id) entries in
+  let available, missing = List.partition (fun (_, _, ready) -> ready) others in
+  current @ available @ missing
+
+let provider_label ~active_id
+    ((descriptor : Pave.Provider_catalog.descriptor), members, ready) =
+  let name = Tui.single_line descriptor.display_name |> String.trim in
+  let name = if name = "" || name = descriptor.id then descriptor.id
+    else name ^ " · " ^ descriptor.id in
+  let count = List.length members in
+  let name = if count > 1 then Printf.sprintf "%s  · %d APIs/accounts" name count
+    else name in
+  if descriptor.id = active_id then name ^ "  (current)"
+  else if ready then name
+  else name ^ "  · needs sign-in or API key"
+
+let scope_choice_label (descriptor : Pave.Provider_catalog.descriptor)
+    (scope : Pave.Model_discovery_coordinator.scope) =
+  scope.route ^
+  (match scope.account_id with
+   | None -> ""
+   | Some account -> " · account " ^ Tui.single_line account) ^
+  (if scope.route = descriptor.default_route then "  (default API)" else "")
+
+(* Provider first, then model: the provider list is local metadata, and only
+   the scope the user opens is fetched. Esc in a model list returns to the
+   provider list. A typed filter (`/model foo`) searches the active scope. *)
 let browse ?registry ?initial_filter ?(configure_effort = false)
     ?current_thinking ?current_model ?current_account_id screen
     ~(active : Pave.Provider_catalog.descriptor) ~current_route () =
   let registry = Option.value ~default:Pave.Provider_catalog.builtin_registry registry in
   let initial_scope : Pave.Model_discovery_coordinator.scope = {
     provider = active.id; route = current_route; account_id = current_account_id } in
-  let switch_action = "Switch provider / API / account" in
-  let rec open_scope initial_filter scope descriptor =
-    match choose ~registry ?initial_filter screen ~descriptor
+  let providers_action = "← Choose another provider" in
+  let open_models initial_filter scope descriptor =
+    let selection = choose ~registry ?initial_filter screen ~descriptor
         ~route_name:scope.Pave.Model_discovery_coordinator.route
         ?account_id:scope.account_id ~configure_effort ?current_thinking ?current_model
-        ~scope_action:switch_action ~plain:[switch_action]
-        ~intro:["Type to filter · Tab switches provider / API / account.";
+        ~scope_action:providers_action ~plain:[providers_action]
+        ~intro:[(if initial_filter = None
+            then "Type to filter · Tab or Esc returns to providers."
+            else "Type to filter · Tab chooses another provider.");
           "Applies to this conversation only; /setup saves a default."]
-        ~title:("Models · " ^ scope_title descriptor scope) () with
-    | Some selection when selection.selector = switch_action ->
-        let scopes = available_scopes ~registry () in
-        let scopes = if List.exists (fun (candidate, _) -> candidate = scope) scopes
-          then scopes else (scope, descriptor) :: scopes in
-        let label (candidate, descriptor) =
-          let title = scope_title descriptor candidate in
-          if candidate = scope then title ^ "  (current)"
-          else if scope_ready ~registry descriptor candidate then title
-          else title ^ "  · needs sign-in or API key" in
-        let current, others = List.partition (fun (candidate, _) ->
-          candidate = scope) scopes in
-        let ready, missing = List.partition (fun (candidate, descriptor) ->
-          scope_ready ~registry descriptor candidate) others in
-        let options = List.map (fun entry -> label entry, entry)
-          (current @ ready @ missing) in
-        (match Tui.choose screen ~initial_selected:(label (scope, descriptor))
-            ~intro:["Ready scopes first. Enter opens a fresh listing.";
-              "Type to search · Esc returns to the model list."]
-            ~title:"Model scope" ~choices:(List.map fst options) with
-         | None -> open_scope None scope descriptor
-         | Some label ->
-             (match List.assoc_opt label options with
-              | Some (scope, descriptor) -> open_scope None scope descriptor
-              | None -> None))
-    | selection -> selection in
-  open_scope initial_filter initial_scope active
+        ~title:("Models · " ^ scope_title descriptor scope) () in
+    match selection with
+    | Some selection when selection.selector = providers_action -> `Providers
+    | Some selection -> `Picked selection
+    | None -> `Cancelled in
+  let rec providers last =
+    let scopes = available_scopes ~registry () in
+    let scopes = if List.exists (fun (candidate, _) -> candidate = initial_scope) scopes
+      then scopes else (initial_scope, active) :: scopes in
+    let groups = provider_groups ~active_id:active.id
+      ~ready:(fun descriptor scope -> scope_ready ~registry descriptor scope) scopes in
+    let options = List.map (fun entry ->
+      provider_label ~active_id:active.id entry, entry) groups in
+    let initial_selected = List.find_map (fun (label,
+        ((descriptor : Pave.Provider_catalog.descriptor), _, _)) ->
+      if descriptor.id = last then Some label else None) options in
+    match Tui.choose screen ?initial_selected
+        ~intro:["Step 1 of 2 · choose a provider, then its model.";
+          "Ready providers first · type to search · Esc cancels."]
+        ~title:"Models · provider" ~choices:(List.map fst options) with
+    | None -> None
+    | Some label ->
+        (match List.assoc_opt label options with
+         | None -> None
+         | Some (descriptor, members, _) ->
+             let scope = match members with
+               | [ scope ] -> Some scope
+               | members ->
+                   let preferred = if descriptor.id = active.id
+                     then Some initial_scope else None in
+                   let options = List.map (fun scope ->
+                     scope_choice_label descriptor scope, scope) members in
+                   let initial_selected = Option.bind preferred (fun preferred ->
+                     List.find_map (fun (label, scope) ->
+                       if scope = preferred then Some label else None) options) in
+                   Option.bind (Tui.choose screen ?initial_selected
+                     ~intro:["This provider has several APIs or accounts.";
+                       "Enter opens a fresh model listing · Esc returns."]
+                     ~title:("Models · " ^ Tui.single_line descriptor.display_name ^
+                       " API/account") ~choices:(List.map fst options))
+                     (fun label -> List.assoc_opt label options) in
+             match scope with
+             | None -> providers descriptor.id
+             | Some scope ->
+                 (match open_models None scope descriptor with
+                  | `Picked selection -> Some selection
+                  | `Providers | `Cancelled -> providers descriptor.id)) in
+  match initial_filter with
+  | Some _ ->
+      (match open_models initial_filter initial_scope active with
+       | `Picked selection -> Some selection
+       | `Providers -> providers active.id
+       | `Cancelled -> None)
+  | None -> providers active.id

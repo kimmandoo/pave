@@ -1,6 +1,9 @@
 # Changelog
 
 ## 2026-09-30
+
+- feat(tui): made `/model` choose a provider first and then its model: the provider list puts the current provider first, then ready providers, then ones needing sign-in or an API key; a provider with several APIs or accounts asks which one; Esc or Tab in the model list returns to the providers, while `/model <filter>` still searches the current provider directly.
+- feat(install): showed the cat-paving progress animation during a first install from a terminal, labelled by the installer phase, and kept curl errors off the animation line; piped and `pave update` output is unchanged.
 - fix(update): found the latest release through the GitHub release-page redirect instead of the REST API, so repeated `pave update` and `pave update --check` runs no longer spend the anonymous 60-requests-per-hour API quota; the API remains a fallback, and its rate-limit failure is named.
 - feat(update): showed a one-line animation of a cat paving a road, labelled with the current installer phase (checksums, download, verification, install), while `pave update` runs, with plain phase lines for non-interactive output and cursor restoration on Ctrl-C.
 - fix(tui): approved tool and shell actions when the y key is pressed under a Korean input method (`ㅛ`), which had been denied as "other key"; other input-method characters now show a switch-input hint instead of denying.

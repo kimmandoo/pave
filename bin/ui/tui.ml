@@ -1219,7 +1219,7 @@ let paint t =
         let status = match chooser.status with
           | Some text when body_height < 3 -> " · " ^ single_line text
           | _ -> "" in
-        let status_page = if chooser.scope_action <> None then " · Tab scope"
+        let status_page = if chooser.scope_action <> None then " · Tab providers"
           else if Array.length chooser.status_pages = 0 then ""
           else Printf.sprintf " · Tab status %d/%d"
             (chooser.status_page + 1) (Array.length chooser.status_pages) in
@@ -1234,7 +1234,7 @@ let paint t =
         else if cols < 24 then "↑↓ ↵ select Esc"
         else if cols < 55 then
           Printf.sprintf "↑↓ ↵ select · Esc cancel%s"
-            (if chooser.scope_action <> None && cols >= 40 then " · Tab scope" else "")
+            (if chooser.scope_action <> None && cols >= 40 then " · Tab providers" else "")
         else if cols < 85 then
           Printf.sprintf "%s select · Esc cancel · ↑↓/PgUp/Dn · %d/%d%s"
             enter_key number (Array.length found) status_page
