@@ -791,3 +791,10 @@
 - **Root Cause:** Independent Dune processes were launched concurrently in the same workspace and collided on the shared `_build` lock; no Dune process remained after the failure.
 - **Solution:** Confirmed there was no active Dune process, removed only the generated stale `_build/.lock`, then ran focused tests, the full suite, install build and opam lint sequentially; all passed.
 - **Prevention / Reference:** Run one Dune command at a time in this workspace. Put parallelism inside one Dune invocation instead of launching multiple Dune processes.
+
+### [2026-09-30] Models looped on `read_file` rejecting defaulted `offset` and `line`
+
+- **Context / Symptom:** A Pave session repeated `read_file docs/WORK_CHECKPOINT.md` many times, each failing with `Error: use either line or offset, not both`, then told the user it could not read the file.
+- **Root Cause:** `read_text_page` rejected any call where `line` was set and `offset` was present at all, even `offset: 0`. Models (especially local OpenAI-compatible ones) commonly fill every optional schema field with its default, so a plain read arrived as `offset: 0, line: 1` and could never succeed.
+- **Solution:** Treat `offset: 0` and `line: 1` as the defaults they are; reject only a nonzero offset combined with a line above 1, with a message telling the model to retry with one of them. Schema descriptions now state the defaults. Regression cases were added to `test/tools/test_tools.ml`.
+- **Prevention / Reference:** Mutually exclusive optional tool arguments must tolerate echoed default values. `dune test test/tools` does not run `test_tools` (it is declared in `test/dune`); run `dune test` to exercise it.

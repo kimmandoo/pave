@@ -611,7 +611,10 @@ let read_text_page root relative args =
   let path = Workspace_path.regular_path root relative in
   let requested_offset = optional_int "offset" 0 ~minimum:0 ~maximum:max_int args in
   let line = optional_int "line" 0 ~minimum:1 ~maximum:max_int args in
-  if line > 0 && field "offset" args <> `Null then fail "use either line or offset, not both";
+  (* Models often echo defaults (offset 0, line 1); only distinct positions conflict. *)
+  let line = if line = 1 && requested_offset > 0 then 0 else line in
+  if line > 0 && requested_offset > 0 then
+    fail "use either line or offset, not both; retry with only one of them";
   let count = optional_int "max_bytes" 16_384 ~minimum:1 ~maximum:max_read_bytes args in
   let max_lines = optional_int "max_lines" 1000 ~minimum:1 ~maximum:1000 args in
   Workspace_path.with_fd path [Unix.O_RDONLY] 0 (fun fd ->
@@ -2701,8 +2704,8 @@ let definitions = [
     ["action"; "subroot"];
   schema "read_file" "Read bounded workspace files, directories, documents, archives, notebooks, SQLite, owned artifacts, managed worktrees, or public HTTPS URLs. HTTPS fetches send no credentials and require approval."
     ["path", string_field "Workspace-relative path or supported local://, artifact://, worktree://, or HTTPS source";
-     "offset", integer_field "Byte offset for ordinary local text files (default 0; exclusive with line)" 0 max_int;
-     "line", integer_field "One-based line for ordinary local text files (exclusive with offset)" 1 max_int;
+     "offset", integer_field "Byte offset for ordinary local text files (default 0; do not combine with a line other than 1)" 0 max_int;
+     "line", integer_field "One-based line for ordinary local text files (default 1; do not combine with a nonzero offset)" 1 max_int;
      "max_lines", integer_field "Maximum lines returned (default 1000)" 1 1000;
      "max_bytes", integer_field "Maximum output bytes (default 16384)" 1 max_read_bytes] ["path"];
   schema "workspace_snapshot" "Read a bounded page and SHA-256 for one text file snapshot (maximum 1 MiB); pass the hash to conflict-aware edit tools."

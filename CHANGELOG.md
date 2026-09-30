@@ -1,6 +1,7 @@
 # Changelog
 
 ## 2026-09-30
+- fix(tools): accepted `read_file` calls that echo default paging values (`offset: 0` with a line, or `line: 1` with an offset) instead of rejecting them as conflicting, which had left models retrying the same failing read; only two distinct positions are still rejected, now with a retry hint.
 - release(distribution): published v0.1.74 with the provider response fixes and README update after four-platform native release builds, verified archive checksums and a packaged fixture smoke; profiling of streaming, TUI rendering, startup and large journals found no bottleneck requiring change.
 - docs(readme): removed emoji markers from the README highlights for consistent terminal and plain-text rendering.
 - fix(provider): stopped cutting off healthy streamed replies at a 120-second total request limit; streams now fail only after 120 seconds without data or a one-hour total, and buffered replies allow 600 seconds, with the applicable limit named in the timeout error.

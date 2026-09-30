@@ -623,6 +623,15 @@ let () =
       "ond\n");
     assert (rejected (fun () -> tool_json root "read_file"
       ["path", `String "pages.txt"; "offset", `Int 3; "line", `Int 2]));
+    assert (contains (tool_json root "read_file"
+      ["path", `String "pages.txt"; "offset", `Int 0; "line", `Int 2])
+      "offset: 6; bytes: 13; lines: 2-3");
+    assert (contains (tool_json root "read_file"
+      ["path", `String "pages.txt"; "offset", `Int 6; "line", `Int 1])
+      "offset: 6; bytes: 13; lines: 2-3");
+    assert (contains (tool_json root "read_file"
+      ["path", `String "pages.txt"; "offset", `Int 0; "line", `Int 1])
+      "offset: 0; bytes: 19; lines: 1-3");
     assert (rejected (fun () -> tool_json root "read_file"
       ["path", `String "pages.txt"; "line", `Int 9]));
     create "large.txt" (String.make 70_000 'x' ^ "\nTARGET-END\n");

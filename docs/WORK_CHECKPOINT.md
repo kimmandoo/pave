@@ -1,6 +1,14 @@
 # Work checkpoint
 
-## Current session — performance review and v0.1.74 release
+## Current session — read_file defaulted paging fix
+
+- **Date:** 2026-09-30
+- **Active task:** Completed. Fixed `read_file` rejecting model calls that echo defaults (`offset: 0` + `line`, or `line: 1` + `offset`), which caused repeated failed reads in a live session.
+- **Changed files:** `lib/tools/tools.ml` (`read_text_page` conflict rule, schema descriptions), `test/tools/test_tools.ml`, `CHANGELOG.md`, `docs/TROUBLESHOOTING.md`.
+- **Verification:** `dune build @install` passed; full `dune test` passed (rc 0). `dune build` (default alias) still fails on the pre-existing macOS-only `bin/pave-apple-foundation-models` rule, unchanged by this session.
+- **Exact next action:** Resume the v0.1.74 release confirmation recorded below (run `36677895137`).
+
+## Previous session — performance review and v0.1.74 release
 
 - **Date:** 2026-09-30
 - **Active task:** Completed. Reviewed prompt/response performance and released the provider fixes and README update as v0.1.74.
