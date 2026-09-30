@@ -1,6 +1,7 @@
 # Changelog
 
 ## 2026-09-30
+- docs(readme): removed emoji markers from the README highlights for consistent terminal and plain-text rendering.
 - fix(provider): stopped cutting off healthy streamed replies at a 120-second total request limit; streams now fail only after 120 seconds without data or a one-hour total, and buffered replies allow 600 seconds, with the applicable limit named in the timeout error.
 - fix(provider): reported output-token-limit stops (`length`, `max_tokens`, `MAX_TOKENS`) on every native route as a plain truncation error that explains the partial reply was not kept, instead of a generic invalid-completion error.
 - fix(provider): accepted OpenAI-compatible tool calls whose arguments are omitted or blank as parameterless `{}` calls in streamed and buffered replies.

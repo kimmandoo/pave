@@ -18,12 +18,12 @@
 
 ## Highlights
 
-- 📱 **Mobile-aware** — inventories Xcode, SwiftPM, Gradle, Flutter and React Native/Expo projects, and runs focused checks only with your approval.
-- 🔌 **70+ providers** — OpenAI, Anthropic, Gemini, Codex, Copilot, OpenRouter, Bedrock, Vertex, Ollama and many more, plus your own OpenAI-compatible gateway.
-- ⌨️ **Keyboard-first TUI** — streaming output, queued follow-ups, searchable model picker, `@` file attachments and live write previews.
-- 🌿 **Branching sessions** — private append-only journals with `/tree`, `/branch`, `/fork` and journal-safe compaction.
-- 🛡️ **Safe by default** — shell is off unless you pass `--allow-shell`, and every command still needs your approval.
-- 🧩 **Extensible** — local skills, declarative commands, plugins, MCP servers, LSP/DAP and opt-in read-only subagents.
+- **Mobile-aware** — inventories Xcode, SwiftPM, Gradle, Flutter and React Native/Expo projects, and runs focused checks only with your approval.
+- **70+ providers** — OpenAI, Anthropic, Gemini, Codex, Copilot, OpenRouter, Bedrock, Vertex, Ollama and many more, plus your own OpenAI-compatible gateway.
+- **Keyboard-first TUI** — streaming output, queued follow-ups, searchable model picker, `@` file attachments and live write previews.
+- **Branching sessions** — private append-only journals with `/tree`, `/branch`, `/fork` and journal-safe compaction.
+- **Safe by default** — shell is off unless you pass `--allow-shell`, and every command still needs your approval.
+- **Extensible** — local skills, declarative commands, plugins, MCP servers, LSP/DAP and opt-in read-only subagents.
 
 ## Install
 
