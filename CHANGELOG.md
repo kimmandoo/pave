@@ -1,6 +1,7 @@
 # Changelog
 
 ## 2026-09-30
+- release(distribution): published v0.1.75 with the workspace scan and parallel tool batch performance work after CI passed, verified all four archive checksums and ran the packaged Linux binary.
 - perf(agent): ran parallel shared tool calls in a sliding window of four instead of fixed waves, so one slow call no longer holds back the rest, and settled each finished prefix of results immediately in provider order.
 - perf(tools): serialized concurrent workspace tree walks behind one scan lock, which roughly halved a mixed parallel batch (search, grep and twelve reads: 687 ms to 326 ms) that thread contention had made slower than running it serially.
 - perf(tools): sped up workspace walks and searches on a 20k-file tree: `list_files` 188 to 4 ms, `glob` 189 to 3 ms, `fuzzy_file_search` 187 to 50 ms, `search` 370 to 145 ms, by precompiling glob and ignore patterns, pruning directories a glob cannot match, stopping walks once limits are reached, using a skip-table substring search, jumping between literal hits instead of splitting every line, and reading files without an extra copy.
