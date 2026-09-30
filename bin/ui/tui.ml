@@ -19,6 +19,8 @@ type chooser = {
   mutable choices : candidate array;
   allow_custom : bool;
   dynamic : bool;
+  segmented : bool;
+  scope_action : string option;
   mutable status : string option;
   mutable status_pages : string array;
   mutable status_page : int;
@@ -93,10 +95,13 @@ type t = {
   mutable model : string;
   mutable model_display_name : string option;
   mutable session : bool;
+  subagents : bool;
   mutable external_commands : Pave.Interaction.shortcut list;
   editor : Pave.Composer.t;
   transcript : Transcript_view.t;
   tool_groups : (string, int) Hashtbl.t;
+  draft_groups : (string, int) Hashtbl.t;
+  draft_decoders : (string, Pave.Write_preview.t) Hashtbl.t;
   mutable scroll : int;
   mutable chooser : chooser option;
   mutable overlays : overlay_focus list;
@@ -733,6 +738,55 @@ let chooser_empty_message chooser =
   if chooser.filter <> "" then "No available models match this search"
   else "No available models yet"
 
+(* Segments wrap rather than disappearing off-screen. The selected chip is
+   kept visible even when the terminal only has room for one chip row. *)
+let segment_rows ~columns chooser =
+  let columns = max 1 columns in
+  let rows = ref [] and row = ref [] and width = ref 0 in
+  let selected_row = ref 0 in
+  Array.iteri (fun index (item : candidate) ->
+    let selected = index = chooser.selected in
+    let label = (if selected then "[✓ " else "[ ") ^
+      sanitize item.label ^ " ]" in
+    let label = shorten_width columns label in
+    let chip = I.string (if selected then selected_attr else muted) label in
+    let needed = I.width chip + (if !row = [] then 0 else 1) in
+    if !row <> [] && !width + needed > columns then (
+      rows := I.hcat (List.rev !row) :: !rows;
+      row := []; width := 0);
+    if selected then selected_row := List.length !rows;
+    if !row <> [] then (row := I.void 1 1 :: !row; incr width);
+    row := chip :: !row;
+    width := !width + I.width chip) chooser.choices;
+  if !row <> [] then rows := I.hcat (List.rev !row) :: !rows;
+  Array.of_list (List.rev !rows), !selected_row
+
+let effort_panel ~cols ~height chooser =
+  let chips, selected_row = segment_rows ~columns:(max 1 (cols - 4)) chooser in
+  let intro = Array.to_list chooser.intro |> List.concat_map (fun text ->
+    Array.to_list (wrap_chooser_text ~columns:(max 1 (cols - 4))
+      ~max_rows:2 text)) in
+  let status = Option.to_list chooser.status |> List.concat_map (fun text ->
+    Array.to_list (wrap_chooser_text ~columns:(max 1 (cols - 4))
+      ~max_rows:3 text)) in
+  let header_rows = if height >= 5 then min 3 (List.length intro) else 0 in
+  let chip_room = max 0 (height - 1 - header_rows) in
+  let chip_count = min chip_room (Array.length chips) in
+  let chip_start = max 0 (min selected_row (Array.length chips - chip_count)) in
+  let status_room = max 0 (height - 1 - header_rows - chip_count - 1) in
+  I.vcat (List.init (max 0 height) (fun row ->
+    if row = 0 then styled_line cols accent ("  ▌  " ^ chooser.title)
+    else if row <= header_rows then
+      styled_line cols text_attr ("  " ^ List.nth intro (row - 1))
+    else if row <= header_rows + chip_count then
+      I.hsnap ~align:`Left cols I.(void 2 1 <|>
+        chips.(chip_start + row - header_rows - 1))
+    else
+      let index = row - header_rows - chip_count - 2 in
+      if index >= 0 && index < min status_room (List.length status) then
+        styled_line cols muted ("  " ^ List.nth status index)
+      else I.void cols 1))
+
 (* The last paint knows the real body height after the editor, activity and
    attachment rows; the fixed estimate only covers the first frame. *)
 let view_height t =
@@ -770,7 +824,7 @@ let hint_matches t =
                    (fun c -> c = ' ' || c = '\t' || c = '\n') draft) ->
             List.map (fun item -> Command_hint item)
               (Pave.Interaction.suggestions
-                ~session:t.session ~interactive:true
+                ~session:t.session ~interactive:true ~subagents:t.subagents
                 ~external_commands:t.external_commands draft)
         | _ -> []);
   if t.paste || t.overlays <> [] ||
@@ -1005,6 +1059,8 @@ let paint t =
       let start = max 0 (total - spare - t.scroll) in
       start, min total (start + spare) in
   let body = match t.chooser with
+    | Some chooser when chooser.segmented ->
+        effort_panel ~cols ~height:body_height chooser
     | Some chooser ->
         let found = matches chooser in
         let count = Array.length found in
@@ -1137,13 +1193,19 @@ let paint t =
             t.body_cache <- Some (cols, body_height, t.revision, body);
             body) in
   let footer_text = match t.chooser with
+    | Some chooser when chooser.segmented ->
+        if cols < 9 || rows < 2 then "Resize · Esc cancel"
+        else if cols < 24 then "←→ ↵ Esc"
+        else if cols < 55 then "←→ effort · ↵ confirm · Esc cancel"
+        else "  ←/→ effort · Enter confirm model + effort · Esc cancel"
     | Some chooser ->
         let found = matches chooser in
         let number = if Array.length found = 0 then 0 else chooser.selected + 1 in
         let status = match chooser.status with
           | Some text when body_height < 3 -> " · " ^ single_line text
           | _ -> "" in
-        let status_page = if Array.length chooser.status_pages = 0 then ""
+        let status_page = if chooser.scope_action <> None then " · Tab scope"
+          else if Array.length chooser.status_pages = 0 then ""
           else Printf.sprintf " · Tab status %d/%d"
             (chooser.status_page + 1) (Array.length chooser.status_pages) in
         if cols < 9 || rows < 2 then
@@ -1228,6 +1290,10 @@ let paint t =
     (Array.length editor_lines - editor_height)) in
   let prompt_rows, cursor_row, cursor_col =
     match t.chooser, Pave.Composer.search_query t.editor with
+    | Some chooser, _ when chooser.segmented ->
+        let selected = if Array.length chooser.choices = 0 then ""
+          else chooser.choices.(chooser.selected).label in
+        [| styled_line cols selected_attr ("  ✓ " ^ selected) |], 0, 0
     | Some chooser, _ ->
         let filter = sanitize chooser.filter in
         let col = measure filter in
@@ -1433,7 +1499,8 @@ let close t =
       Fun.protect (fun () -> Notty_unix.Term.release t.term)
         ~finally:(fun () -> restore_terminal_signals t.signals))
 let create ?(keybinding_overrides = []) ?(version = "source")
-    ?(external_commands = []) ?model_display_name ~root ~model ~session () =
+    ?(external_commands = []) ?(subagents = false) ?model_display_name
+    ~root ~model ~session () =
   let bindings =
     match Keybindings.apply_overrides Keybindings.bindings
       keybinding_overrides with
@@ -1451,10 +1518,11 @@ let create ?(keybinding_overrides = []) ?(version = "source")
     raise exn in
   let t = try {
     term; input = Terminal_input.create term;
-    root; version = single_line version; model; model_display_name; session;
+    root; version = single_line version; model; model_display_name; session; subagents;
     external_commands;
     editor = Pave.Composer.create ();
     transcript = Transcript_view.create (); tool_groups = Hashtbl.create 8;
+    draft_groups = Hashtbl.create 8; draft_decoders = Hashtbl.create 8;
     scroll = 0; chooser = None; overlays = [];
     hint_suppressed = None;
     hint_draft = ""; hint_cursor = 0; hint_results = [];
@@ -1592,6 +1660,8 @@ let prepend_prompt ?(paste_ranges = []) t text =
 
 let show_history t (messages : Pave.Protocol.message list) =
   Hashtbl.clear t.tool_groups;
+  Hashtbl.clear t.draft_groups;
+  Hashtbl.clear t.draft_decoders;
   let names = Hashtbl.create 32 in
   Transcript_view.clear t.transcript;
   List.iter (fun (message : Pave.Protocol.message) ->
@@ -1642,7 +1712,21 @@ let show_history t (messages : Pave.Protocol.message list) =
   paint t
 
 let finish_live t =
-  change_transcript t (fun () -> Transcript_view.finish t.transcript);
+  change_transcript t (fun () ->
+    Hashtbl.iter (fun _ group ->
+      Transcript_view.write_state t.transcript group "interrupted draft · not written")
+      t.draft_groups;
+    Hashtbl.iter (fun _ group ->
+      Option.iter (fun (card : Transcript_view.write_card) ->
+        Transcript_view.write_state t.transcript group
+          (if card.executing then "interrupted · write unconfirmed"
+            else "interrupted · not written"))
+        (Hashtbl.find_opt t.transcript.writes group))
+      t.tool_groups;
+    Hashtbl.clear t.transcript.writes;
+    Transcript_view.finish t.transcript);
+  Hashtbl.clear t.draft_groups;
+  Hashtbl.clear t.draft_decoders;
   Hashtbl.clear t.tool_groups;
   t.active_tool <- None;
   t.activity <- None;
@@ -1665,11 +1749,65 @@ let event t text =
   change_transcript t (fun () -> Transcript_view.event t.transcript text);
   paint t
 
-let tool_started ?target t call_id name =
+let tool_preview t key name preview =
+  if name = "write_file" then (
+    change_transcript t (fun () ->
+      let group = match Hashtbl.find_opt t.draft_groups key with
+        | Some group -> group
+        | None ->
+            let group = Transcript_view.start_write t.transcript in
+            Hashtbl.add t.draft_groups key group; group in
+      Transcript_view.write_preview t.transcript group preview
+        "generating draft · not written");
+    t.scroll <- 0;
+    paint t)
+
+let tool_draft t (delta : Pave.Protocol.tool_argument_delta) =
+  let decoder = match Hashtbl.find_opt t.draft_decoders delta.key with
+    | Some decoder -> Some decoder
+    | None when Hashtbl.length t.draft_decoders < 128 ->
+        let decoder = Pave.Write_preview.create () in
+        Hashtbl.add t.draft_decoders delta.key decoder; Some decoder
+    | None -> None in
+  Option.iter (fun decoder ->
+    Pave.Write_preview.feed decoder delta.fragment;
+    if delta.name = "write_file" then
+      tool_preview t delta.key delta.name (Pave.Write_preview.snapshot decoder)) decoder
+
+let tool_draft_ended t key call_id valid =
+  Hashtbl.remove t.draft_decoders key;
+  Option.iter (fun group ->
+    Hashtbl.remove t.draft_groups key;
+    change_transcript t (fun () ->
+      if Option.is_some call_id then (
+        Hashtbl.replace t.tool_groups (Option.get call_id) group;
+        Transcript_view.write_state t.transcript group
+          (if valid then "queued · not written" else "invalid arguments · not written"))
+      else (
+        Transcript_view.write_state t.transcript group "discarded draft · not written";
+        Hashtbl.remove t.transcript.writes group));
+    paint t) (Hashtbl.find_opt t.draft_groups key)
+
+let tool_executing t call_id =
+  Option.iter (fun group ->
+    change_transcript t (fun () ->
+      Transcript_view.write_state t.transcript group "writing");
+    paint t) (Hashtbl.find_opt t.tool_groups call_id)
+
+let tool_started ?target ?write_content t call_id name =
   let name = single_line name in
   change_transcript t (fun () ->
-    Hashtbl.replace t.tool_groups call_id
-      (Transcript_view.start_tool ?target t.transcript name));
+    let group = match Hashtbl.find_opt t.tool_groups call_id with
+      | Some group -> group
+      | None when name = "write_file" && Option.is_some write_content ->
+          Transcript_view.start_write t.transcript
+      | None -> Transcript_view.start_tool ?target t.transcript name in
+    Hashtbl.replace t.tool_groups call_id group;
+    Option.iter (fun content ->
+      let preview = Pave.Write_preview.of_values
+        ~path:(Option.value ~default:"" target) ~content in
+      Transcript_view.write_preview t.transcript group preview
+        "queued / awaiting approval · not written") write_content);
   t.active_tool <- Some { call_id; name; received_bytes = None };
   let activity = Some ("Tool: " ^ name) in
   if t.activity = activity then paint t else set_activity t activity
@@ -1696,8 +1834,13 @@ let finish_tool ?(aborted = false) ?(is_error = false)
   Hashtbl.remove t.tool_groups call_id;
   t.active_tool <- reset_tool_progress t.active_tool call_id;
   change_transcript t (fun () ->
+    let is_error = is_error || String.starts_with ~prefix:"Error:" result in
+    let write = Option.fold ~none:false
+      ~some:(Hashtbl.mem t.transcript.writes) group in
     Transcript_view.tool_result ?group ~aborted ~is_error
-      t.transcript name result);
+      t.transcript name result;
+    if write then Option.iter (fun group ->
+      Transcript_view.finish_write t.transcript group ~aborted ~is_error) group);
   paint t
 
 let tool_settled t call_id name result is_error =
@@ -2201,7 +2344,8 @@ let update_choices t ~verified
     verified; details; labels; status; status_pages })
 
 let choose ?(allow_custom = false) ?(intro = []) ?(plain = [])
-    ?initial_status ?initial_filter ?wake_fd ?on_wake ?dynamic t ~title ~choices =
+    ?initial_status ?initial_filter ?initial_selected ?wake_fd ?on_wake ?dynamic
+    ?(segmented = false) ?scope_action t ~title ~choices =
   let dynamic = Option.value dynamic ~default:(Option.is_some wake_fd) in
   let initial = if dynamic then Array.of_list plain
     else Array.of_list choices in
@@ -2210,10 +2354,14 @@ let choose ?(allow_custom = false) ?(intro = []) ?(plain = [])
     choices = Array.map (fun value ->
       { value; label = value; custom = false; verified = false;
         action = dynamic; detail = None }) initial;
-    allow_custom; dynamic; status = initial_status;
+    allow_custom; dynamic; segmented; scope_action; status = initial_status;
     status_pages = [||]; status_page = 0;
     filter = Option.value ~default:"" initial_filter; selected = 0; offset = 0; touched = false;
     filtered = None; matched_models = 0 } in
+  Option.iter (fun value ->
+    Array.iteri (fun index (item : candidate) ->
+      if item.value = value then chooser.selected <- index) chooser.choices)
+    initial_selected;
   let old_scroll = t.scroll in
   let selected () =
     let found = matches chooser in
@@ -2223,11 +2371,12 @@ let choose ?(allow_custom = false) ?(intro = []) ?(plain = [])
   let can_select () =
     let cols, rows = Notty_unix.Term.size t.term in
     cols >= 9 && rows >= 2 in
+  let previous_chooser = t.chooser in
   let previous_overlays = t.overlays in
   t.overlays <- Chooser_overlay :: previous_overlays;
   t.chooser <- Some chooser;
   Fun.protect ~finally:(fun () ->
-    t.chooser <- None;
+    t.chooser <- previous_chooser;
     t.overlays <- previous_overlays;
     t.scroll <- old_scroll;
     t.previous <- None;
@@ -2246,8 +2395,15 @@ let choose ?(allow_custom = false) ?(intro = []) ?(plain = [])
       | `Paste `End -> t.paste <- false; paint t; loop ()
       | `Key _ as event ->
           let action = Keybindings.resolve t.bindings (key_focus t) event in
+          let action = if segmented then match event with
+            | `Key (`Arrow `Left, []) -> Some Keybindings.Move_up
+            | `Key (`Arrow `Right, []) -> Some Keybindings.Move_down
+            | _ -> action
+            else action in
           (match action with
           | Some Keybindings.Cancel -> None
+          | Some Keybindings.Next_status when scope_action <> None ->
+              scope_action
           | Some Keybindings.Next_status when can_select () &&
               Array.length chooser.status_pages > 1 ->
               chooser.status_page <- (chooser.status_page + 1) mod
@@ -2280,7 +2436,7 @@ let choose ?(allow_custom = false) ?(intro = []) ?(plain = [])
               chooser.touched <- true;
               chooser.selected <- max 0 (Array.length (matches chooser) - 1);
               paint t; loop ()
-          | Some Keybindings.Backspace when can_select () &&
+          | Some Keybindings.Backspace when not segmented && can_select () &&
               chooser.filter <> "" ->
               chooser.touched <- true;
               let boundaries = Pave.Composer.segment chooser.filter in
@@ -2288,14 +2444,14 @@ let choose ?(allow_custom = false) ?(intro = []) ?(plain = [])
                 boundaries.(Array.length boundaries - 2);
               chooser.selected <- 0; chooser.offset <- 0;
               paint t; loop ()
-          | Some (Keybindings.Filter_ascii char) when can_select () ->
+          | Some (Keybindings.Filter_ascii char) when not segmented && can_select () ->
               if String.length chooser.filter < 256 then (
                 chooser.touched <- true;
                 chooser.filter <- chooser.filter ^ String.make 1 char;
                 chooser.selected <- 0; chooser.offset <- 0;
                 paint t);
               loop ()
-          | Some (Keybindings.Filter_uchar uchar) when can_select () ->
+          | Some (Keybindings.Filter_uchar uchar) when not segmented && can_select () ->
               let value = utf8 uchar in
               if String.length chooser.filter + String.length value <= 256 then (
                 chooser.touched <- true;

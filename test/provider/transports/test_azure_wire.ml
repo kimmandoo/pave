@@ -177,7 +177,7 @@ let () =
     "strict", `Bool false; "description", `String "Look up a greeting" ]]);
   let buffered = Openai_responses_wire.parse_completion response in
   assert (buffered = expected);
-  let streamed = Openai_responses_stream.create ~on_text:(fun _ -> ()) in
+  let streamed = Openai_responses_stream.create ~on_text:(fun _ -> ()) () in
   let initial_call = `Assoc [ "id", `String "fc_72";
     "type", `String "function_call"; "call_id", `String "call_72";
     "name", `String "lookup"; "arguments", `String "" ] in
@@ -216,8 +216,7 @@ let () =
   assert ((Openai_responses_wire.parse_completion answer).content =
     Some "Hello from lookup");
   let emitted = ref [] in
-  let final_stream = Openai_responses_stream.create
-    ~on_text:(fun text -> emitted := text :: !emitted) in
+  let final_stream = Openai_responses_stream.create ~on_text:(fun text -> emitted := text :: !emitted) () in
   Openai_responses_stream.feed final_stream
     (event "response.completed" ["response", answer] ^ "data: [DONE]\r\n\r\n");
   assert ((Openai_responses_stream.finish final_stream).content =

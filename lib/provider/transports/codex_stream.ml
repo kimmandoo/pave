@@ -23,6 +23,7 @@ let parse_json data = try Yojson.Basic.from_string data
   with Yojson.Json_error _ -> invalid "invalid SSE JSON"
 
 type item = {
+  index : int;
   id : string option;
   kind : string;
   call_id : string option;
@@ -40,6 +41,7 @@ type item = {
 type t = {
   model : string;
   on_text : string -> unit;
+  on_tool_arguments : (Protocol.tool_argument_delta -> unit) option;
   items : (int, item) Hashtbl.t;
   ids : (string, int) Hashtbl.t;
   mutable bytes : int;
@@ -105,7 +107,7 @@ let handle_added t json =
         Some call_id, Some (required "name" output)
     | "reasoning" -> None, None
     | _ -> invalid "unsupported Codex output item" in
-  let item = { id; kind; call_id; name; text = Buffer.create 128;
+  let item = { index; id; kind; call_id; name; text = Buffer.create 128;
     arguments = Buffer.create 128; text_seen = false; args_seen = false;
     args_done = None; last_content_index = -1; parts = Hashtbl.create 2;
     done_output = None } in
@@ -117,7 +119,13 @@ let handle_added t json =
   | "function_call", _ -> invalid "invalid function arguments"
   | _ -> ());
   Hashtbl.add t.items index item;
-  (match id with Some id -> Hashtbl.add t.ids id index | None -> ())
+  (match id with Some id -> Hashtbl.add t.ids id index | None -> ());
+  (match t.on_tool_arguments, kind with
+   | Some emit, "function_call" ->
+       let fragment = match field "arguments" output with `String args -> args | _ -> "" in
+       emit { Protocol.key = Printf.sprintf "codex:%d" index;
+         call_id; name = Option.value ~default:"" name; fragment }
+   | _ -> ())
 
 let find_done t json =
   let output = field "item" json in
@@ -177,7 +185,12 @@ let handle_done t json =
       | _ -> ());
       (match (try Yojson.Basic.from_string args with Yojson.Json_error _ ->
         invalid "invalid function arguments JSON") with
-      | `Assoc _ -> () | _ -> invalid "tool arguments must be an object")
+      | `Assoc _ -> () | _ -> invalid "tool arguments must be an object");
+      if not item.args_seen then (
+        match t.on_tool_arguments with
+        | None -> ()
+        | Some emit -> emit { Protocol.key = Printf.sprintf "codex:%d" item.index;
+            call_id = item.call_id; name = Option.value ~default:"" item.name; fragment = args })
   | "reasoning" -> ()
   | _ -> assert false);
   item.done_output <- Some output
@@ -244,7 +257,12 @@ let handle_arguments t ~done_event json =
   else (
     if item.args_done <> None then invalid "arguments after arguments done";
     item.args_seen <- true;
-    Buffer.add_string item.arguments (string "delta" json))
+    let fragment = string "delta" json in
+    Buffer.add_string item.arguments fragment;
+    (match t.on_tool_arguments with
+     | None -> ()
+     | Some emit -> emit { Protocol.key = Printf.sprintf "codex:%d" item.index;
+         call_id = item.call_id; name = Option.value ~default:"" item.name; fragment }))
 
 let handle_completed t json =
   if t.completed <> None then invalid "duplicate response completion";
@@ -342,9 +360,9 @@ let handle_event t event data =
         invalid "unsupported Codex output annotation"
     | _ -> invalid "unknown Codex event"))
 
-let create ~model ~on_text =
+let create ?on_tool_arguments ~model ~on_text () =
   if model = "" then invalid_arg "empty Codex model";
-  let t = { model; on_text; items = Hashtbl.create 4; ids = Hashtbl.create 4;
+  let t = { model; on_text; on_tool_arguments; items = Hashtbl.create 4; ids = Hashtbl.create 4;
     bytes = 0; response_id = None; completed = None; usage = None;
     done_seen = false; failed = false; parser = None } in
   t.parser <- Some (Sse.create ~on_event:(handle_event t));

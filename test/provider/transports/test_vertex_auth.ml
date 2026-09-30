@@ -106,16 +106,52 @@ let run_command program arguments =
   | _ -> fail (program ^ " failed")
 
 
-let () =
-  (* The direct child may exit while a descendant still holds stdout open.
-     Once reaped, drain that pipe without calling waitpid on the same PID. *)
-  assert (Vertex.execute ~timeout:3. "/bin/sh"
-    ["-c"; "printf ready; sleep 0.2 &"] = "ready");
-  let arguments, body = Vertex.service_account_request ~assertion:"a.b" in
-  assert (Vertex.curl_path = "/usr/bin/curl");
-  assert (Array.to_list Vertex.curl_environment = ["LANG=C"; "LC_ALL=C"]);
+let reaped_leader_pipe () =
+  let directory = Filename.temp_file "pave-adc-pipe-" "" in
+  Sys.remove directory; Unix.mkdir directory 0o700;
+  let leader_file = Filename.concat directory "leader" in
+  let release_file = Filename.concat directory "release" in
+  Unix.mkfifo release_file 0o600;
+  let releaser = Unix.fork () in
+  if releaser = 0 then (
+    let rec leader attempts =
+      if attempts = 0 then Unix._exit 2;
+      match int_of_string (String.trim (read_file leader_file)) with
+      | pid -> pid
+      | exception (Sys_error _ | Failure _) ->
+          Unix.sleepf 0.01; leader (attempts - 1) in
+    let pid = leader 1000 in
+    let rec await_reaped attempts =
+      if attempts = 0 then Unix._exit 3;
+      match Unix.kill pid 0 with
+      | () -> Unix.sleepf 0.01; await_reaped (attempts - 1)
+      | exception Unix.Unix_error (Unix.ESRCH, _, _) -> () in
+    await_reaped 1000;
+    write_file release_file "release\n";
+    Unix._exit 0);
+  let reaped = ref false in
+  Fun.protect ~finally:(fun () ->
+    if not !reaped then (
+      (try Unix.kill releaser Sys.sigkill with Unix.Unix_error _ -> ());
+      (try ignore (Unix.waitpid [] releaser) with Unix.Unix_error _ -> ()));
+    List.iter (fun path -> if Sys.file_exists path then Sys.remove path)
+      [leader_file; release_file];
+    Unix.rmdir directory) (fun () ->
+    (* Release inherited stdout only after the direct leader has been reaped. *)
+    let output = Vertex.execute ~timeout:10. "/bin/sh"
+      ["-c"; "printf ready; (read token < \"$1\"; printf released) & printf '%s\\n' \"$$\" > \"$2\"";
+       "adc-pipe"; release_file; leader_file] in
+    assert (output = "readyreleased");
+    let _, status = Unix.waitpid [] releaser in
+    reaped := true;
+    match status with
+    | Unix.WEXITED 0 -> ()
+    | _ -> fail "pipe releaser failed")
 
-  assert (arguments = Vertex.authorized_user_curl_arguments);
+let () =
+  reaped_leader_pipe ();
+  let _, body = Vertex.service_account_request ~assertion:"a.b" in
+
   assert (body =
     "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=a.b");
   assert (Vertex.validate_credential_json

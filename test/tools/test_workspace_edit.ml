@@ -74,6 +74,23 @@ let () =
       assert successful.changed;
       assert (read hunk_path = "A B omega\n");
 
+      let filler = String.make (Workspace_edit.max_file_bytes - 3) 'x' in
+      let bounded_path = create "bounded.txt" ("A" ^ filler ^ "BC") in
+      let bounded_snapshot = Workspace_edit.read_snapshot ~root ~path:"bounded.txt" in
+      let bounded = Workspace_edit.apply_hunks ~root ~path:"bounded.txt"
+        ~expected_sha256:bounded_snapshot.sha256
+        ~hunks:[
+          { Workspace_edit.old_text = "A"; new_text = "AA" };
+          { Workspace_edit.old_text = "BC"; new_text = "B" };
+        ] in
+      assert bounded.changed;
+      assert (read bounded_path = "AA" ^ filler ^ "B");
+      let at_limit = Workspace_edit.read_snapshot ~root ~path:"bounded.txt" in
+      expect_error (fun () -> Workspace_edit.apply_hunks ~root ~path:"bounded.txt"
+        ~expected_sha256:at_limit.sha256
+        ~hunks:[{ Workspace_edit.old_text = "AA"; new_text = "AAA" }]);
+      assert (read bounded_path = at_limit.contents);
+
       expect_error (fun () -> Workspace_edit.replace_unique ~root ~path:"hunks.txt"
         ~old_text:"alpha" ~new_text:"A");
 

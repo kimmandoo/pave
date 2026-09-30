@@ -468,16 +468,5 @@ let () =
         "Transport error: provider unavailable";
         "Request error: provider context limit exceeded";
         "Request error: invalid provider request";
-        "Transport error: provider request timed out" ];
-    assert (Pave.Provider.curl_path = "/usr/bin/curl");
-    assert (Array.to_list Pave.Provider.curl_environment = ["LANG=C"; "LC_ALL=C"]);
-    assert (Pave.Provider.curl_timeout_message ~streaming:false
-      ~response_body_seen:false =
-      "Transport error: provider request timed out before a response was available");
-    assert (Pave.Provider.curl_timeout_message ~streaming:true
-      ~response_body_seen:false =
-      "Transport error: provider stream timed out before the first response data byte");
-    assert (Pave.Provider.curl_timeout_message ~streaming:true
-      ~response_body_seen:true =
-      "Transport error: provider stream timed out after response data (stream idle or total request timeout)"));
+        "Transport error: provider request timed out" ]);
   print_endline "provider HTTP: ok"

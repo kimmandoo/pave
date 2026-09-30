@@ -35,11 +35,20 @@ type snapshot = {
   mutable recent : (int * wrapped_segment array) option;
 }
 
+type write_card = {
+  title : row;
+  state : row;
+  mutable code : row list;
+  mutable path : string option;
+  mutable executing : bool;
+}
+
 type t = {
   mutable rows : row array;
   mutable count : int;
   mutable next_group : int;
   expanded : (int, bool) Hashtbl.t;
+  writes : (int, write_card) Hashtbl.t;
   mutable pending_tool : (string * int) option;
   mutable live : string;
   mutable streaming : bool;
@@ -59,7 +68,8 @@ let blank = { kind = Notice; style = Text; text = ""; runs = [||];
   provisional = false; group = 0; detail = false; preview = false }
 
 let create () = { rows = [||]; count = 0; next_group = 1;
-  expanded = Hashtbl.create 32; pending_tool = None; live = "";
+  expanded = Hashtbl.create 32; writes = Hashtbl.create 8;
+  pending_tool = None; live = "";
   streaming = false; fenced = false; diff_fenced = false; diff_raw = false;
   table_active = false; revision = 0;
   cached = None; dirty = 0 }
@@ -102,7 +112,9 @@ let add t row =
     (* Group IDs increase monotonically; trimming cannot retain an older ID. *)
     let first = t.rows.(0).group in
     Hashtbl.filter_map_inplace (fun id expanded ->
-      if id < first then None else Some expanded) t.expanded);
+      if id < first then None else Some expanded) t.expanded;
+    Hashtbl.filter_map_inplace (fun id card ->
+      if id < first then None else Some card) t.writes);
   if t.count = Array.length t.rows then (
     let grown = Array.make (min max_rows (max 128 (2 * t.count))) blank in
     Array.blit t.rows 0 grown 0 t.count;
@@ -401,6 +413,74 @@ let start_tool ?target t name =
   heading t ~kind:Tool ~group:id ~provisional:false
     (label ^ " · running");
   id
+let write_label path =
+  "write_file" ^ Option.fold ~none:""
+    ~some:(fun path -> " · " ^ single_line path) path
+
+let start_write t =
+  let id = group t in
+  heading t ~kind:Tool ~group:id ~provisional:false
+    "write_file · generating draft · not written";
+  let title = t.rows.(t.count - 1) in
+  add_line t ~kind:Tool ~group:id ~provisional:false ~style:Tool_state
+    "draft · not written";
+  let state = t.rows.(t.count - 1) in
+  Hashtbl.add t.writes id { title; state; code = []; path = None;
+    executing = false };
+  id
+
+let dirty_write t id =
+  for index = 0 to t.count - 1 do
+    if t.rows.(index).group = id then mark_dirty t index
+  done;
+  t.revision <- t.revision + 1
+
+let write_state t id state =
+  Option.iter (fun card ->
+    set_text card.title (write_label card.path ^ " · " ^ state);
+    set_text card.state (write_label card.path ^ " · " ^ state);
+    if state = "writing" then card.executing <- true;
+    dirty_write t id) (Hashtbl.find_opt t.writes id)
+
+let write_preview t id (preview : Pave.Write_preview.snapshot) state =
+  Option.iter (fun card ->
+    card.path <- preview.path;
+    set_text card.title (write_label card.path ^ " · " ^ state);
+    set_text card.state (Printf.sprintf
+      "%s · %s · %d lines · %d earlier lines omitted · %d bytes omitted"
+      (write_label card.path) state preview.total_lines
+      preview.omitted_lines preview.omitted_bytes);
+    let rec update rows lines = match rows, lines with
+      | row :: rows, (number, text) :: lines ->
+          set_text row (Printf.sprintf "%7d │ %s" number text);
+          row :: update rows lines
+      | [], (number, text) :: lines ->
+          add_line t ~kind:Tool ~group:id ~provisional:false ~style:Code
+            (Printf.sprintf "%7d │ %s" number text);
+          let row = t.rows.(t.count - 1) in
+          (* Keep simultaneous calls contiguous and the live status below the tail. *)
+          let index = ref 0 in
+          while !index < t.count - 1 && t.rows.(!index) != card.state do
+            incr index
+          done;
+          if !index < t.count - 1 then (
+            Array.blit t.rows !index t.rows (!index + 1) (t.count - !index - 1);
+            t.rows.(!index) <- row;
+            mark_dirty t !index);
+          row :: update [] lines
+      | rows, [] ->
+          List.iter (fun row -> set_text row "") rows; rows in
+    card.code <- update card.code preview.lines;
+    dirty_write t id) (Hashtbl.find_opt t.writes id)
+
+let finish_write t id ~aborted ~is_error =
+  if Hashtbl.mem t.writes id then (
+    let card = Hashtbl.find t.writes id in
+    write_state t id (if aborted then
+      (if card.executing then "cancelled · write unconfirmed" else "cancelled · not written")
+      else if is_error then "failed · not written" else "completed · written");
+    Hashtbl.remove t.writes id)
+
 
 let tool_result ?group:existing ?(aborted = false) ?(is_error = false) t name result =
   let name = single_line name in
@@ -593,11 +673,13 @@ let clear t =
   t.diff_raw <- false;
   t.table_active <- false;
   Hashtbl.clear t.expanded;
+  Hashtbl.clear t.writes;
   t.revision <- t.revision + 1
 
 let visible t row =
   let expanded = Option.value (Hashtbl.find_opt t.expanded row.group)
     ~default:false in
+  (row.style <> Code || row.text <> "") &&
   (not row.detail || expanded) && (not row.preview || not expanded)
 
 let expandable_style = function

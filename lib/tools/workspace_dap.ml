@@ -545,7 +545,7 @@ let take_frame session =
   let buffer = session.receive_buffer in
   match find_substring buffer "\r\n\r\n" with
   | None ->
-      if String.length buffer > max_header_bytes then fail "DAP frame header exceeds its limit";
+      if String.length buffer > max_header_bytes + 3 then fail "DAP frame header exceeds its limit";
       None
   | Some separator ->
       if separator > max_header_bytes then fail "DAP frame header exceeds its limit";
@@ -553,7 +553,7 @@ let take_frame session =
       let content_length = parse_content_length header in
       let body_start = separator + 4 in
       if String.length buffer - body_start < content_length then (
-        if String.length buffer > max_frame_bytes + max_header_bytes then
+        if String.length buffer > max_frame_bytes + max_header_bytes + 4 then
           fail "DAP receive buffer exceeds its limit";
         None)
       else (

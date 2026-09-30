@@ -177,7 +177,7 @@ let fake_io server = {
           count in
     Mutex.unlock server.lock;
     result);
-  write = (fun wire -> handle_client_message server (decode_frame wire));
+  write = (fun ~deadline:_ ~cancel:_ wire -> handle_client_message server (decode_frame wire));
   close = (fun () ->
     Mutex.lock server.lock; server.closed <- true; Condition.broadcast server.ready; Mutex.unlock server.lock);
   terminate = (fun () -> server.terminated <- true);
@@ -219,6 +219,65 @@ let execute manager ~owner ~root ?(args = []) ?apply_approved ?cancel
 
 let start manager ~owner ~root ?(args = []) ?(execution_approved = true) () =
   Workspace_lsp.start manager ~owner ~root ~program:"fake-lsp" ~args ~execution_approved
+
+let test_stalled_native_writes () =
+  List.iter (fun document_notification ->
+    with_root (fun root file ->
+      write file (String.make 262_144 'x');
+      let python = "/usr/bin/python3" in
+      let script =
+        "import json, sys, time\n" ^
+        "header = sys.stdin.buffer.readline()\n" ^
+        "length = int(header.split(b':', 1)[1])\n" ^
+        "sys.stdin.buffer.readline()\n" ^
+        "request = json.loads(sys.stdin.buffer.read(length))\n" ^
+        "body = json.dumps({'jsonrpc': '2.0', 'id': request['id'], 'result': {'capabilities': {}}}).encode()\n" ^
+        "sys.stdout.buffer.write(('Content-Length: %d\\r\\n\\r\\n' % len(body)).encode() + body)\n" ^
+        "sys.stdout.buffer.flush()\n" ^
+        "time.sleep(30)\n" in
+      let native = ref None and worker = ref None in
+      let manager = Workspace_lsp.create_manager ~launcher:(fun ~program ~arguments ~cwd ~environment ->
+        let io = Workspace_lsp.default_launcher ~program ~arguments ~cwd ~environment in
+        native := Some io; io) () in
+      let old_sigpipe = Sys.signal Sys.sigpipe Sys.Signal_ignore in
+      Fun.protect ~finally:(fun () ->
+        Option.iter (fun io -> io.Workspace_lsp.terminate (); io.close ()) !native;
+        Option.iter Thread.join !worker;
+        Workspace_lsp.close_manager manager;
+        ignore (Sys.signal Sys.sigpipe old_sigpipe))
+        (fun () ->
+          Workspace_lsp.start manager ~owner:"stalled-write" ~root ~program:python
+            ~args:["-I"; "-u"; "-c"; script] ~execution_approved:true;
+          let finished = Atomic.make false and failed = Atomic.make false in
+          let cancellation_seen = Atomic.make false in
+          let started = Unix.gettimeofday () in
+          worker := Some (Thread.create (fun () ->
+            (try
+              if document_notification then
+                ignore (Workspace_lsp.execute manager ~owner:"stalled-write" ~root
+                  ~program:python ~args:["-I"; "-u"; "-c"; script]
+                  ~cancel:(fun () ->
+                    let cancelled = Unix.gettimeofday () -. started >= 0.05 in
+                    if cancelled then Atomic.set cancellation_seen true;
+                    cancelled)
+                  (arguments ~action:"diagnostics" []))
+              else
+                ignore (Workspace_lsp.request ~timeout_seconds:0.1 manager
+                  "textDocument/hover" (`Assoc ["text", `String (String.make 262_144 'x')]))
+            with Workspace_lsp.Error _ -> Atomic.set failed true);
+            Atomic.set finished true) ());
+          let deadline = started +. 1. in
+          while not (Atomic.get finished) && Unix.gettimeofday () < deadline do Thread.delay 0.01 done;
+          expect (Atomic.get finished && Atomic.get failed)
+            "backpressured native sends obey request deadlines and document cancellation";
+          if document_notification then
+            expect (Atomic.get cancellation_seen) "didOpen checks turn cancellation during its send";
+          expect (Hashtbl.length manager.pending = 0) "failed sends release pending requests";
+          let closing = Unix.gettimeofday () in
+          Workspace_lsp.close_manager manager;
+          expect (Unix.gettimeofday () -. closing < 1.)
+            "a failed partial send disposes without a second blocked shutdown write")))
+    [true; false]
 
 let () =
   with_root (fun root file ->
@@ -412,4 +471,39 @@ let () =
           (arguments ~action:"hover" []));
         expect (has_method fake "$/cancelRequest")
           "cancelling a pending request sends LSP $/cancelRequest"));
+  with_root (fun root _file ->
+    let pidfile = Filename.concat root "server-child.pid" in
+    let io = Workspace_lsp.default_launcher ~program:"/bin/sh"
+        ~arguments:["-c";
+          "(trap '' TERM; exec sleep 30) & echo $! > \"$1\"; printf ready; wait";
+          "lsp-fixture"; pidfile]
+        ~cwd:root ~environment:(Workspace_lsp.safe_server_environment ()) in
+    let child = ref None and reader = ref None in
+    Fun.protect ~finally:(fun () ->
+      Option.iter (fun pid -> try Unix.kill pid Sys.sigkill with Unix.Unix_error _ -> ()) !child;
+      io.close (); io.terminate ();
+      Option.iter Thread.join !reader;
+      if Sys.file_exists pidfile then Unix.unlink pidfile)
+      (fun () ->
+        let ready = Bytes.create 5 in
+        let rec receive offset =
+          if offset < 5 then (
+            let count = io.read ready offset (5 - offset) in
+            expect (count > 0) "native server fixture must report readiness";
+            receive (offset + count)) in
+        receive 0;
+        child := Some (int_of_string (String.trim (read pidfile)));
+        io.terminate ();
+        io.terminate ();
+        let lock = Mutex.create () and eof = ref None in
+        reader := Some (Thread.create (fun () ->
+          let result = try io.read (Bytes.create 1) 0 1 = 0 with _ -> false in
+          Mutex.lock lock; eof := Some result; Mutex.unlock lock) ());
+        let deadline = Unix.gettimeofday () +. 1. in
+        let completed () =
+          Mutex.lock lock; let result = !eof in Mutex.unlock lock; result in
+        while completed () = None && Unix.gettimeofday () < deadline do Thread.delay 0.01 done;
+        expect (completed () = Some true)
+          "terminating a native LSP server kills TERM-resistant descendants and closes their output pipe"));
+  test_stalled_native_writes ();
   print_endline "workspace LSP: ok"

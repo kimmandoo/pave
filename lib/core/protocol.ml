@@ -1,4 +1,10 @@
 type tool_call = { id : string; name : string; arguments : Yojson.Basic.t }
+type tool_argument_delta = {
+  key : string;
+  call_id : string option;
+  name : string;
+  fragment : string;
+}
 type modality_token_count = { modality : string; token_count : int }
 type usage = {
   input_tokens : int;

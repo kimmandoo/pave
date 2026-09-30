@@ -21,7 +21,10 @@ let delivery_count session job_id =
     | Pave.Session.Job_delivery delivery when delivery.job_id = job_id -> count + 1
     | _ -> count) 0 (Pave.Session.entries session)
 
+exception Diagnostic of string
+
 let () =
+  Printexc.register_printer (function Diagnostic text -> Some text | _ -> None);
   let previous_home = Sys.getenv_opt "HOME"
   and previous_state = Sys.getenv_opt "XDG_STATE_HOME" in
   let base = Filename.temp_file "pave-session-jobs-" "" in
@@ -82,6 +85,31 @@ let () =
     assert (Pave.Session_jobs.deliver_pending reopened_manager = []);
     assert (delivery_count reopened complete_id = 1);
     assert (delivery_count reopened cancel_id = 1);
+
+    let failure_origin = Pave.Session_store.create ~root in
+    let failure_origin_manager = Pave.Session_jobs.create ~root ~session:failure_origin () in
+    let diagnostic = String.concat "" (List.init 2000 (fun _ -> "진단")) in
+    let failed_id = Pave.Session_jobs.start failure_origin_manager ~kind:"delegate"
+      ~label:"oversized failure" ~task:(fun ~cancel:_ -> raise (Diagnostic diagnostic)) in
+    let failed = Option.get (Pave.Session_jobs.await failure_origin_manager ~id:failed_id) in
+    assert (failed.status = Pave.Session_jobs.Failed);
+    assert (String.length failed.summary <= 4096);
+    assert (Pave.Session_store.valid_utf8 failed.summary);
+    assert (String.ends_with ~suffix:" [truncated]" failed.summary);
+    let failed_session = Pave.Session_store.open_existing ~root failure_origin.path in
+    let failed_manager = Pave.Session_jobs.create ~root ~session:failed_session () in
+    let recovered_failure = Option.get (Pave.Session_jobs.find failed_manager ~id:failed_id) in
+    assert (recovered_failure.status = Pave.Session_jobs.Failed);
+    assert (recovered_failure.summary = failed.summary);
+    assert (Pave.Session_jobs.deliver_pending failed_manager = []);
+    assert (Pave.Session_jobs.deliver_pending failed_manager = []);
+    assert (delivery_count failed_session failed_id = 1);
+    let delivered_session = Pave.Session_store.open_existing ~root failure_origin.path in
+    let delivered_manager = Pave.Session_jobs.create ~root ~session:delivered_session () in
+    assert (Pave.Session_jobs.deliver_pending delivered_manager = []);
+    assert (delivery_count delivered_session failed_id = 1);
+    Pave.Session_jobs.close failed_manager;
+    Pave.Session_jobs.close delivered_manager;
 
     let fork = Pave.Session_store.fork ~root reopened in
     let fork_manager = Pave.Session_jobs.create ~root ~session:fork () in

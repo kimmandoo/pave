@@ -2,7 +2,13 @@ type workspace_effect = Session_rewind.workspace_effect
 type phase = Model | Tool of string
 
 type tool_event =
-  | Tool_started of { call_id : string; name : string; target : string option }
+  | Tool_draft of Protocol.tool_argument_delta
+  | Tool_draft_ended of { key : string; call_id : string option; valid : bool }
+  | Tool_started of {
+      call_id : string; name : string; target : string option;
+      write_content : string option
+    }
+  | Tool_executing of { call_id : string; name : string }
   | Tool_updated of { call_id : string; name : string; received_bytes : int }
   | Tool_settled of {
       call_id : string; name : string; result : string; is_error : bool
@@ -13,6 +19,12 @@ type tool_event =
       result : string;
       side_effects_may_have_occurred : bool;
     }
+
+type draft_metadata = {
+  scoped_key : string;
+  mutable draft_call_id : string option;
+  mutable draft_name : string;
+}
 
 type t = {
   secret_mask : Secret_mask.t option;
@@ -32,6 +44,8 @@ type t = {
   external_approval_details : (string -> string list) option;
   delegate_task : (cancel:(unit -> bool) -> label:string -> task:string -> string) option;
   stream : bool;
+  preview_tools : bool;
+  mutable request_serial : int;
   approval_mode : Approval.mode;
   tool_approval : (string * Approval.policy) list;
   command_patterns : Approval.command_rule list;
@@ -56,6 +70,7 @@ let create ~provider ~root ~system ?workspace_context
     ?resolve_credential ?secret_mask ?before_request ?(history = [])
     ?(thinking = fun () -> None) ?(allow_shell = false)
     ?(tool_available = fun _ -> true) ?delegate_task ?(stream = false)
+    ?(preview_tools = false)
     ?(external_tools = []) ?execute_external ?validate_external_tool
     ?external_approval_details
     ?(approval_mode = Approval.Ask_exec) ?(tool_approval = [])
@@ -70,17 +85,28 @@ let create ~provider ~root ~system ?workspace_context
     system; secret_mask;
     allow_shell; tool_available; external_tools; execute_external;
     validate_external_tool; external_approval_details;
-    delegate_task; stream; approval_mode;
-    tool_approval; command_patterns; approve_command; approve_tool; before_request;
+    delegate_task; stream; preview_tools; request_serial = 0; approval_mode;
+    tool_approval; command_patterns;
+    approve_command = (fun command -> approve_command (redact command));
+    approve_tool = Option.map (fun approve (request : Approval.request) ->
+      approve { request with
+        tool_name = redact request.tool_name; impact = redact request.impact;
+        details = List.map redact request.details;
+        reason = Option.map redact request.reason }) approve_tool;
+    before_request;
     history_rev = List.rev history; scoped_pending = [];
     on_change; on_delta = (fun text -> on_delta (redact text));
     on_event = (fun text -> on_event (redact text));
     on_usage; on_phase;
     on_tool_event = Option.map (fun notify event ->
       let event = match event with
-        | Tool_started { call_id; name; target } -> Tool_started {
+        | Tool_draft _ | Tool_draft_ended _ -> event
+        | Tool_started { call_id; name; target; write_content } -> Tool_started {
             call_id = redact call_id; name = redact name;
-            target = Option.map redact target }
+            target = Option.map redact target;
+            write_content = Option.map redact write_content }
+        | Tool_executing { call_id; name } ->
+            Tool_executing { call_id = redact call_id; name = redact name }
         | Tool_updated { call_id; name; received_bytes } -> Tool_updated {
             call_id = redact call_id; name = redact name; received_bytes }
         | Tool_settled { call_id; name; result; is_error } -> Tool_settled {
@@ -133,7 +159,7 @@ let emit_tool_event t event =
   | None ->
       (match event with
        | Tool_started { name; _ } -> t.on_event ("[" ^ name ^ "]")
-       | Tool_updated _ -> ()
+       | Tool_draft _ | Tool_draft_ended _ | Tool_executing _ | Tool_updated _ -> ()
        | Tool_settled { name; result; _ }
        | Tool_aborted { name; result; _ } ->
            t.on_event ("[" ^ name ^ "] " ^ result))
@@ -272,13 +298,56 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
     let on_text = match t.secret_mask with
       | Some _ when t.stream -> fun text -> Buffer.add_string streamed_text text
       | _ -> t.on_delta in
+    let drafts =
+      if t.stream && t.preview_tools && Option.is_some t.on_tool_event &&
+        Option.is_none t.secret_mask then Some (Hashtbl.create 4)
+      else None in
+    let request = t.request_serial in
+    t.request_serial <- request + 1;
+    let on_tool_arguments = Option.map (fun drafts ->
+      fun (delta : Protocol.tool_argument_delta) ->
+        let metadata = match Hashtbl.find_opt drafts delta.key with
+          | Some metadata -> Some metadata
+          | None when Hashtbl.length drafts < 128 ->
+              let metadata = {
+                scoped_key = Printf.sprintf "%d:%s" request delta.key;
+                draft_call_id = delta.call_id; draft_name = delta.name } in
+              Hashtbl.add drafts delta.key metadata; Some metadata
+          | None -> None in
+        Option.iter (fun metadata ->
+          if Option.is_some delta.call_id then metadata.draft_call_id <- delta.call_id;
+          metadata.draft_name <- delta.name;
+          emit_tool_event t (Tool_draft { delta with key = metadata.scoped_key }))
+          metadata) drafts in
+    let end_drafts calls = Option.iter (fun drafts ->
+      Hashtbl.iter (fun _ metadata ->
+        let call = Option.bind metadata.draft_call_id (fun id ->
+          List.find_opt (fun (call : Protocol.tool_call) ->
+            call.id = id && call.name = metadata.draft_name) calls) in
+        let valid = match call with
+          | Some call when call.name = "write_file" ->
+              (try Tools.validate_arguments ~name:call.name ~args:call.arguments;
+                true with Tools.Tool_error _ -> false)
+          | Some _ -> true | None -> false in
+        emit_tool_event t (Tool_draft_ended {
+          key = metadata.scoped_key;
+          call_id = Option.map (fun (call : Protocol.tool_call) -> call.id) call;
+          valid })) drafts;
+      Hashtbl.clear drafts) drafts in
     let reply =
-      if t.stream then Provider.complete ~authentication:t.authentication
-        ?resolve_credential:t.resolve_credential ?thinking:(t.thinking ())
-        ~on_text ?on_usage:t.on_usage ?cancel t.provider transcript definitions
-      else Provider.complete ~authentication:t.authentication
-        ?resolve_credential:t.resolve_credential ?thinking:(t.thinking ())
-        ?on_usage:t.on_usage ?cancel t.provider transcript definitions in
+      try
+        let reply =
+          if t.stream then Provider.complete ~authentication:t.authentication
+            ?resolve_credential:t.resolve_credential ?thinking:(t.thinking ())
+            ~on_text ?on_tool_arguments ?on_usage:t.on_usage ?cancel
+            t.provider transcript definitions
+          else Provider.complete ~authentication:t.authentication
+            ?resolve_credential:t.resolve_credential ?thinking:(t.thinking ())
+            ?on_usage:t.on_usage ?cancel t.provider transcript definitions in
+        Provider.check_cancel cancel;
+        end_drafts reply.tool_calls;
+        reply
+      with exn -> end_drafts []; raise exn in
     (match t.secret_mask with
      | Some _ when t.stream && Buffer.length streamed_text > 0 ->
          t.on_delta (Buffer.contents streamed_text)
@@ -334,13 +403,21 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
           let complete message =
             Tool_scheduler.Complete [Protocol.Text message] in
           let prepare () =
-            let target = if call.name = "read_file" then
+            let target = if List.mem call.name ["read_file"; "write_file"] then
               match Protocol.member "path" call.arguments with
               | `String path -> Some path
               | _ -> None
               else None in
+            let write_content = if call.name = "write_file" &&
+              t.preview_tools && Option.is_some t.on_tool_event then
+              try
+                Tools.validate_arguments ~name:call.name ~args:call.arguments;
+                match Protocol.member "content" call.arguments with
+                | `String content -> Some content | _ -> None
+              with Tools.Tool_error _ -> None
+              else None in
             emit_tool_event t (Tool_started {
-              call_id = call.id; name = call.name; target
+              call_id = call.id; name = call.name; target; write_content
             });
             Provider.check_cancel cancel;
             (match t.on_phase with
@@ -507,8 +584,27 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
                             (match Protocol.member "task" call.arguments with
                              | `String value -> Some value | _ -> None))];
                       reason = Some "Child-agent work requires explicit approval." }
-                  else Tools.approval_request ?cancel ?context:t.workspace_context
-                    ~root:t.root ~name:call.name ~args:call.arguments decision in
+                  else
+                    let args = match t.secret_mask, call.name, call.arguments with
+                      | Some mask, "write_file", `Assoc fields ->
+                          `Assoc (List.map (function
+                            | "content", `String value ->
+                                "content", `String (Secret_mask.redact mask value)
+                            | field -> field) fields)
+                      | _ -> call.arguments in
+                    let request = Tools.approval_request ?cancel
+                      ?context:t.workspace_context ~root:t.root
+                      ~name:call.name ~args decision in
+                    (* Redact complete path values before quoting; resolution above
+                       must continue to use the actual workspace path. *)
+                    match t.secret_mask, call.name, request.details with
+                    | Some mask, "write_file", _ :: details ->
+                        let path = match Protocol.member "path" call.arguments with
+                          | `String path -> Secret_mask.redact mask path
+                          | _ -> "(missing)" in
+                        { request with details =
+                          ("Path: " ^ Printf.sprintf "%S" path) :: details }
+                    | _ -> request in
                   let request = { request with
                     Approval.reason = (match reason with
                       | Some _ -> reason
@@ -550,6 +646,10 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
                           Some (location, Session_rewind.snapshot_file
                             ~root:location.root ~path:location.path)
                       | _ -> None in
+                    Provider.check_cancel cancel;
+                    if call.name = "write_file" then
+                      emit_tool_event t (Tool_executing {
+                        call_id = call.id; name = call.name });
                     let content = execute ?cancel ?on_progress ~approved () in
                     let failed = List.exists (function
                       | Protocol.Text text ->

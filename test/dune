@@ -56,6 +56,21 @@
  (libraries pave unix yojson))
 
 (test
+ (name test_write_preview)
+ (modules test_write_preview)
+ (libraries pave uutf))
+
+(test
+ (name test_agent_write_preview)
+ (modules test_agent_write_preview)
+ (libraries pave unix yojson threads))
+
+(test
+ (name test_write_draft_runner)
+ (modules test_write_draft_runner)
+ (libraries pave unix yojson threads))
+
+(test
  (name test_context_budget)
  (modules test_context_budget)
  (libraries pave unix yojson))
@@ -83,6 +98,11 @@
 (test
  (name test_provider_http)
  (modules test_provider_http)
+ (libraries pave unix yojson))
+
+(test
+ (name test_provider_response_limits)
+ (modules test_provider_response_limits)
  (libraries pave unix yojson))
 
 (test

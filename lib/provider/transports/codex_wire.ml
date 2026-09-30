@@ -8,8 +8,31 @@ let models_urls = List.map (fun path ->
     client_version) ["/codex/models"; "/models"]
 
 type request_format = Standard | Responses_lite of string option
+let valid_effort = function
+  | "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra" -> true
+  | _ -> false
 
-let model_format ~model json =
+let effort_levels row =
+  let fields = match row with
+    | `Assoc fields -> fields
+    | _ -> invalid "invalid model reasoning metadata" in
+  match List.filter (fun (name, _) -> name = "supported_reasoning_levels") fields with
+  | [] -> None
+  | [_, `List levels] when List.length levels <= 16 ->
+      let rec collect seen = function
+        | [] -> Some (List.rev seen)
+        | `Assoc fields :: rest ->
+            (match List.filter (fun (name, _) -> name = "effort") fields with
+            | [_, `String level] when level <> "" && String.length level <= 32 &&
+                String.for_all (fun c -> Char.code c > 32 && Char.code c < 127) level &&
+                not (List.mem level seen) -> collect (level :: seen) rest
+            | _ -> invalid "invalid supported reasoning level in account listing")
+        | _ -> invalid "invalid supported reasoning level in account listing" in
+      collect [] levels
+  | _ -> invalid "invalid supported reasoning levels in account listing"
+
+
+let model_format ?thinking ~model json =
   let rows = match member "models" json with
     | `Null -> member "data" json
     | rows -> rows in
@@ -33,12 +56,20 @@ let model_format ~model json =
               invalid "model is not supported for API requests"
           | Some _ -> invalid "invalid supported_in_api in account listing")
       | _ -> invalid "invalid model row");
+      let levels = effort_levels row in
+      (match thinking with
+      | None -> ()
+      | Some level ->
+          if not (valid_effort level) then invalid "unsupported reasoning effort";
+          (match levels with
+          | Some levels when not (List.mem level levels) ->
+              invalid "reasoning effort is not supported by the account model"
+          | _ -> ()));
       (match member "use_responses_lite" row with
       | `Bool true ->
           let effort = match member "default_reasoning_level" row with
             | `Null -> None
-            | `String ("none" | "minimal" | "low" | "medium" | "high" |
-                "xhigh" | "max" | "ultra" as value) -> Some value
+            | `String value when valid_effort value -> Some value
             | _ -> invalid "invalid default reasoning level in account listing" in
           Responses_lite effort
       | `Bool false | `Null -> Standard
@@ -205,8 +236,11 @@ let replay_items ~model (msg : message) state =
     | `Assoc fields -> `Assoc (List.remove_assoc "id" fields)
     | _ -> invalid "invalid opaque Codex output item") items
 
-let request ?(format = Standard) ~model messages tools =
+let request ?(format = Standard) ?thinking ~model messages tools =
   if model = "" then invalid_arg "empty Codex model";
+  (match thinking with
+  | Some level when not (valid_effort level) -> invalid "unsupported reasoning effort"
+  | _ -> ());
   let input = ref [] and pending = ref [] and instructions = ref None
   and seen_input = ref false in
   let emit item = input := item :: !input; seen_input := true in
@@ -296,8 +330,12 @@ let request ?(format = Standard) ~model messages tools =
           | Some text -> ["instructions", `String text] in
         let fields = if tools = [] then fields else
           fields @ ["tools", `List (List.map tool_schema tools)] in
+        let fields = match thinking with
+          | None -> fields
+          | Some level -> fields @ ["reasoning", `Assoc ["effort", `String level]] in
         input, fields
     | Responses_lite effort ->
+        let effort = match thinking with Some _ -> thinking | None -> effort in
         let tools = List.map tool_schema tools in
         let tools = if tools = [] then [] else
           [`Assoc ["type", `String "namespace"; "name", `String "functions";

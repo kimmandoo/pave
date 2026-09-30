@@ -24,7 +24,7 @@ let call id call_id name arguments = item "function_call" [
   "status", `String "completed"; "arguments", `String arguments]
 let model = "gpt-5.1-codex"
 let stream wire =
-  let t = Codex_stream.create ~model ~on_text:(fun _ -> ()) in
+  let t = Codex_stream.create ~model ~on_text:(fun _ -> ()) () in
   Codex_stream.feed t wire;
   Codex_stream.finish t
 let rejects = ref 0
@@ -68,10 +68,17 @@ let () =
         "delta", `String {|README.md"}|}]
     ^ done_item final_call ^ completed () in
   let chunks = ref [] in
-  let t = Codex_stream.create ~model ~on_text:(fun chunk -> chunks := chunk :: !chunks) in
+  let drafts = ref [] in
+  let t = Codex_stream.create ~model
+    ~on_tool_arguments:(fun delta -> drafts := delta :: !drafts)
+    ~on_text:(fun chunk -> chunks := chunk :: !chunks) () in
   String.iter (fun char -> Codex_stream.feed t (String.make 1 char)) sse;
   assert (Codex_stream.is_done t && Codex_stream.is_finished t);
   let result = Codex_stream.finish t in
+  let drafts = List.rev !drafts in
+  assert (String.concat "" (List.map (fun (d : Protocol.tool_argument_delta) -> d.fragment) drafts)
+    = {|{"path":"README.md"}|});
+  assert (List.for_all (fun (d : Protocol.tool_argument_delta) -> d.name = "read_file") drafts);
   assert (Codex_stream.usage t =
     Some { Protocol.input_tokens = 5; output_tokens = 3;
       cached_input_tokens = None; cache_creation_input_tokens = None;
@@ -93,13 +100,13 @@ let () =
   | _ -> failwith "Codex native reasoning not replayed");
   let no_delta = added initial_message ^ done_item final_message ^ completed () in
   let chunks = ref [] in
-  let t = Codex_stream.create ~model ~on_text:(fun chunk -> chunks := chunk :: !chunks) in
+  let t = Codex_stream.create ~model ~on_text:(fun chunk -> chunks := chunk :: !chunks) () in
   Codex_stream.feed t no_delta;
   assert ((Codex_stream.finish t).content = Some "Reading file");
   assert (List.rev !chunks = ["Reading file"]);
   let final_only = completed ~output:[final_message] () in
   let chunks = ref [] in
-  let t = Codex_stream.create ~model ~on_text:(fun chunk -> chunks := chunk :: !chunks) in
+  let t = Codex_stream.create ~model ~on_text:(fun chunk -> chunks := chunk :: !chunks) () in
   Codex_stream.feed t final_only;
   assert ((Codex_stream.finish t).content = Some "Reading file");
   assert (List.rev !chunks = ["Reading file"]);
@@ -109,11 +116,11 @@ let () =
   assert ((stream without_item_done).content = Some "Reading file");
   assert ((stream (added initial_message ^ done_item final_message ^
     completed ~output:[] ())).content = Some "Reading file");
-  let unmetered = Codex_stream.create ~model ~on_text:(fun _ -> ()) in
+  let unmetered = Codex_stream.create ~model ~on_text:(fun _ -> ()) () in
   Codex_stream.feed unmetered (completed ~output:[final_message] ~usage:None ());
   ignore (Codex_stream.finish unmetered);
   assert (Codex_stream.usage unmetered = None);
-  let malformed = Codex_stream.create ~model ~on_text:(fun _ -> ()) in
+  let malformed = Codex_stream.create ~model ~on_text:(fun _ -> ()) () in
   Codex_stream.feed malformed (completed ~output:[final_message]
     ~usage:(Some (`Assoc ["input_tokens", `Int 5;
       "output_tokens", `Int (-1)])) ());
@@ -163,7 +170,7 @@ let () =
     added initial_message ^ done_item final_message ^
     event "response.completed" ["response", `Assoc [
       "id", `String "wrong-response-id"; "status", `String "completed"]]);
-  let poisoned = Codex_stream.create ~model ~on_text:(fun _ -> ()) in
+  let poisoned = Codex_stream.create ~model ~on_text:(fun _ -> ()) () in
   Codex_stream.feed poisoned (completed ~output:[final_message] ());
   (match Codex_stream.feed poisoned (event "response.created" ["id", `String "resp_1"]) with
    | exception Protocol.Invalid_response _ -> ()

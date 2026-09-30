@@ -4,19 +4,13 @@
 
 ## How to execute this list
 
-- Work top-to-bottom within P1 → P2 → P3 → P4. A named dependency must finish first; a missing external gate blocks only that card. Skip gated cards rather than invent credentials, device readiness, registry contracts or hosted services. Start with **IO01**; M19a remains the next mobile delivery after MB01.
+- Work top-to-bottom within P1 → P2 → P3 → P4. A named dependency must finish first; a missing external gate blocks only that card. Skip gated cards rather than invent credentials, device readiness, registry contracts or hosted services. Start with **AU01**; M19a remains the next mobile delivery after MB01.
 - Each checkbox is one deliverable, not an entire subsystem. Letter suffixes split an old card; the unsuffixed ID is a scope family, not another checkbox. `Depends: none` means no unfinished prerequisite, not permission to ignore existing contracts.
 - **Evidence** describes inspected source or an existing plan, not an executed failure. Cards labeled **diagnostic** must first reproduce the suspected behavior; close with evidence if not reproduced, rather than inventing a fix. Other new gaps are source-observed and still require failing-before/passing-after proof when implemented.
 - **Accept** is future acceptance, not a claim that this audit ran it. Runtime changes require focused behavioral checks plus actual CLI/tool/PTY smoke. Real Xcode simulator acceptance stays manual-only, never CI. No model/tool request is automatically replayed, and every shell/device command retains separate informed approval.
 - Keep [design rules](docs/DESIGN_RULES.md) binding. Remove a finished checkbox after recording verification in the changelog/checkpoint; never retain `[x]` history here. Planning does not authorize new products, trust boundaries, releases or live account spending.
 
 ## P1 — Existing-path safety and reliability
-
-- [ ] **IO01 — Bound buffered completion downloads during receipt**
-  **Evidence:** [buffered HTTP output](lib/provider/provider.ml#L503-L522) writes to a temporary file before its read-size check. **Deliver:** enforce the existing response ceiling while receiving declared-length and chunked success/error bodies, with owned-process cleanup.
-  **Accept:** an in-bound local HTTP tool turn completes; oversized bodies stop with bounded retained bytes, no executed calls/usage, no second request and no temporary-file leak.
-  **Depends:** none.
-  **Gate:** none; local HTTP fixture, not a vendor account.
 
 - [ ] **AU01 — Cancel in-turn credential refresh**
   **Evidence:** [refresh transport](lib/auth/oauth_flow.ml#L313-L360) blocks on read/wait; [credential resolution](bin/cli_auth.ml#L275-L296) has no turn-cancellation parameter. **Deliver:** propagate cancellation through refresh and reap its owned subprocess; define the outcome of ambiguous remote token rotation without automatic retry.
@@ -29,18 +23,6 @@
   **Accept:** two processes serialize updates without losing accounts; a cancelled/expired waiter exits without refreshing, unlocking another holder or replacing credentials.
   **Depends:** AU01.
   **Gate:** none.
-
-- [ ] **SJ01 — Persist bounded failed-job diagnostics**
-  **Evidence:** [job failure](lib/session/session_jobs.ml#L208-L241) persists arbitrary exception text, while its parser limits summaries to 4096 bytes. **Deliver:** one bounded UTF-8-safe terminal summary with an explicit truncation marker before persistence/delivery.
-  **Accept:** an oversized exception remains a failed job after resume and delivers exactly once; diagnostic size cannot cause false success or repeated invalid delivery.
-  **Depends:** none.
-  **Gate:** none.
-
-- [ ] **SJ02 — Retain usage from unsuccessful compaction operations**
-  **Evidence:** [compaction usage callbacks](lib/agent/context_compaction.ml#L102-L110) precede local summary validation; [CLI integration](bin/main.ml#L1665-L1719) records buffered usage only after successful compaction. **Deliver:** record each validated summary request's reported usage independently of committing its context marker.
-  **Accept:** a successful first chunk followed by failure or oversized summary retains exact usage once across resume, with original history intact and no phantom compaction or retry.
-  **Depends:** none.
-  **Gate:** none; controlled provider responses.
 
 - [ ] **WK07 — Report recoverable partial LSP application**
   **Evidence:** [apply_edit_preview](lib/tools/workspace_lsp.ml#L807-L850) prechecks then writes sequentially, with per-file callbacks but no structured partial result. **Deliver:** reproduce a later-target failure and expose exact applied/unchanged targets plus existing guarded recovery records; do not claim whole-batch atomicity.
@@ -77,18 +59,6 @@
   **Accept:** custom-directory upgrade preserves unrelated files and user state; corrupt checksum, link/unexpected archive member, invalid marker and failed publication preserve the executable. Verify metadata state on partial publication; inherited destination/version overrides cannot redirect update.
   **Depends:** PL06.
   **Gate:** packaged current-target binaries; no public release required.
-
-- [ ] **SJ03 — Diagnose same-process artifact quota races**
-  **Evidence:** [artifact locking/accounting](lib/session/session_artifact.ml#L106-L129) uses OS record locks while [jobs](lib/session/session_jobs.ml#L224-L268) can write from threads. **Deliver:** a deterministic competing-writer boundary scenario, then minimal synchronization only if the race is reproduced.
-  **Accept:** with one remaining item/byte allowance exactly one writer succeeds; no quota overshoot, deadlock or orphan temporary file, while cross-process exclusion remains intact.
-  **Depends:** none.
-  **Gate:** none; **diagnostic**, not a demonstrated runtime race.
-
-- [ ] **SJ04 — Account for interrupted artifact publication**
-  **Evidence:** [artifact publication](lib/session/session_artifact.ml#L191-L278) counts valid metadata and publishes data before metadata. **Deliver:** bounded reconciliation/accounting for crash-left temporary/data files and corrupt metadata, distinguishing active writers.
-  **Accept:** interrupted publication cannot evade the retained-byte quota on subsequent writes; valid owner references and another active writer's files are neither deleted nor adopted.
-  **Depends:** SJ03.
-  **Gate:** none; disposable crash/fault fixture.
 
 - [ ] **MB01 — Diagnose Xcode discovery fingerprint freshness**
   **Evidence:** [discovery checks](lib/tools/tools.ml#L1450-L1487) fingerprint only the principal workspace/project manifest. **Deliver:** reproduce shared-scheme/referenced-project changes and define bounded relevant-file invalidation; arbitrary executable project code is not fully fingerprintable.
@@ -205,13 +175,13 @@ M01–M18 are satisfied prerequisites, not repeated tasks. Mobile suffixes retai
 - [ ] **SJ05 — Persist child usage under its original identity**
   **Evidence:** [child workflow](bin/main.ml#L1727-L1759) puts usage in a success string, not durable typed markers. **Deliver:** owner-thread, idempotent delivery of each validated child usage record tied to original job/provider/account/route/model.
   **Accept:** usage survives child failure/cancellation and resume exactly once, even after parent model/session switch; no inferred counts or attribution to the new active identity.
-  **Depends:** SJ01.
+  **Depends:** none.
   **Gate:** none.
 
 - [ ] **CT02 — Recover explicitly after provider context rejection**
   **Evidence:** [pre-request compaction](bin/main.ml#L1598-L1722) already exists; post-rejection recovery is not a distinct action. **Deliver:** an explicit user recovery path reusing compaction with unchanged ancestry and signed-state validation, not automatic replay.
   **Accept:** a controlled context-size rejection can be compacted then resumed only by explicit action; interruption, unresolved calls or signed mismatch preserve original history and duplicate no tool/request.
-  **Depends:** SJ02, CT03.
+  **Depends:** CT03.
   **Gate:** none; local near-limit fixture, not live account inference.
 
 - [ ] **RC01a — Correlate public tool events with opaque IDs**
@@ -229,7 +199,7 @@ M01–M18 are satisfied prerequisites, not repeated tasks. Mobile suffixes retai
 - [ ] **AG01a — Validate typed child outcomes**
   **Evidence:** [jobs](lib/session/session_jobs.ml) already bound concurrency and deliver owner artifacts, but results are strings. **Deliver:** bounded schema-validated child success/failure values without replacing the existing job system.
   **Accept:** valid structured output survives owner delivery once; schema mismatch, oversize and partial failure remain explicit failures rather than successful text artifacts.
-  **Depends:** SJ01.
+  **Depends:** none.
   **Gate:** none; read-only children and delegation approval remain mandatory.
 
 - [ ] **AG01b — Propagate parent cancellation to owned children**
@@ -307,7 +277,7 @@ M01–M18 are satisfied prerequisites, not repeated tasks. Mobile suffixes retai
 - [ ] **LD02 — Aggregate cross-session local statistics**
   **Evidence:** [usage_by_route](lib/session/session.ml#L703-L731) already totals selected-branch usage. **Deliver:** private project/model/day CLI/JSON aggregation with explicit fork/off-branch semantics and optional timing, not a second per-session usage command.
   **Accept:** reference sessions aggregate without duplicate billing; absent usage/prices/premium counts stay unknown and another project's private data is not exposed by default.
-  **Depends:** SJ02, SJ05, LD01.
+  **Depends:** SJ05, LD01.
   **Gate:** none.
 
 - [ ] **PL04c — Measure long-session manager retention**
@@ -688,8 +658,8 @@ Preserve these scopes without inventing availability. Research cards can conclud
 
 | Surveyed area | Evidence inspected | Backlog result |
 | --- | --- | --- |
-| Provider/auth/discovery/context | `lib/provider/`, `lib/auth/`, `bin/cli_auth.ml`, context integration and provider/auth fixtures | IO01, AU01–AU02; retained PG scopes; narrowed CT01–CT03 to actual residuals |
-| Agent/journal/config/core | `lib/agent/`, `lib/session/`, `lib/config/`, `lib/core/` and lifecycle/usage/artifact fixtures | SJ01–SJ05; typed/cancelled child residuals, not replacement job storage |
+| Provider/auth/discovery/context | `lib/provider/`, `lib/auth/`, `bin/cli_auth.ml`, context integration and provider/auth fixtures | AU01–AU02; retained PG scopes; narrowed CT01–CT03 to actual residuals; IO01 verified and removed |
+| Agent/journal/config/core | `lib/agent/`, `lib/session/`, `lib/config/`, `lib/core/` and lifecycle/usage/artifact fixtures | SJ05; typed/cancelled child residuals, not replacement job storage; SJ01–SJ04 verified and removed |
 | Workspace/mobile/extensions | `lib/tools/`, `lib/extensions/`, tool/local-content fixtures and mobile plan | WK07–WK08, MB01; smaller mobile/edit/device cards; external MCP gates retained |
 | CLI/TUI/distribution | `bin/`, `lib/ui/`, UI/CLI fixtures, installer/updater and CI/release workflows | queue/fairness and release-boundary cards; correlated events rather than duplicate JSONL |
 | Product/maintainer docs | README, contributor/security/design rules, discovery inventory, changelog/checkpoint | canonical backlog links and implemented-feature wording corrected; historical evidence retained |

@@ -45,7 +45,8 @@ let parse_completion ~model json =
   validate_completion
     (Anthropic_wire.parse_native_completion ~provider:"google-vertex" ~model json)
 
-let create_stream ~on_text = Anthropic_stream.create ~on_text
+let create_stream ?on_tool_arguments ~on_text () =
+  Anthropic_stream.create ?on_tool_arguments ~on_text ()
 let feed_stream = Anthropic_stream.feed
 let stream_is_finished = Anthropic_stream.is_finished
 let stream_usage = Anthropic_stream.usage

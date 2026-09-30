@@ -515,8 +515,39 @@ let test_unsolicited_response_and_event_bound () =
     expect "invalid type tears down its session" (!(bad_type.close_count) = 1);
     Dap.close_manager dap_manager)
 
+let test_frame_boundaries_across_chunks () =
+  let fixture = root_with_target () in
+  Fun.protect ~finally:(fun () -> cleanup_root fixture) (fun () ->
+    let root, _ = fixture in
+    let dap_manager = manager root in
+    Fun.protect ~finally:(fun () -> Dap.close_manager dap_manager) (fun () ->
+      let adapter = mock standard_responder in
+      let session = Dap.create_session dap_manager ~id:"frame-boundary"
+          ~transport:adapter.transport in
+      let header body_length =
+        let prefix = "Content-Length:" and value = string_of_int body_length in
+        prefix ^ String.make (Dap.max_header_bytes - String.length prefix -
+          String.length value) ' ' ^ value in
+      let body = String.make Dap.max_frame_bytes 'x' in
+      let frame_header = header (String.length body) in
+      List.iter (fun delimiter_bytes ->
+        session.receive_buffer <- frame_header ^ String.sub "\r\n\r\n" 0 delimiter_bytes;
+        expect "bounded header accepts a split delimiter" (Dap.take_frame session = None))
+        [0; 1; 2; 3];
+      session.receive_buffer <- frame_header ^ "\r\n\r\n" ^
+        String.sub body 0 (String.length body - 1);
+      expect "bounded body waits for its final byte" (Dap.take_frame session = None);
+      session.receive_buffer <- session.receive_buffer ^ "x";
+      expect "fragmented maximum frame retains exact body"
+        (Dap.take_frame session = Some body && session.receive_buffer = "");
+      session.receive_buffer <- frame_header ^ " \r\n\r\n" ^ body;
+      expect_error "oversized complete header" (fun () -> Dap.take_frame session);
+      session.receive_buffer <- String.make (Dap.max_header_bytes + 4) ' ';
+      expect_error "oversized unterminated header" (fun () -> Dap.take_frame session)))
+
 let () =
   test_fragmented_flow_and_transitions ();
+  test_frame_boundaries_across_chunks ();
   test_stdio_transport_framing_lifecycle_and_environment ();
   test_denied_effects_do_not_send ();
   test_failed_execution_keeps_stopped_state ();

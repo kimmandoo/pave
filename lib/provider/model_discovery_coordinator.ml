@@ -102,6 +102,7 @@ let start ?(max_workers = 4) ?(timeout_seconds = 20.) requests =
   Unix.set_close_on_exec read_fd;
   Unix.set_close_on_exec write_fd;
   Unix.set_nonblock read_fd;
+  Unix.set_nonblock write_fd;
   let t = {
     read_fd; write_fd; cancelled = Atomic.make false; lock = Mutex.create ();
     pending = List.mapi (fun index request -> index, request) requests;

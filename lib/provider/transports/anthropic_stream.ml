@@ -5,6 +5,7 @@ type block =
 
 type t = {
   on_text : string -> unit;
+  on_tool_arguments : (Protocol.tool_argument_delta -> unit) option;
   blocks : (int, block * bool) Hashtbl.t;
   mutable started : bool;
   mutable stopped : bool;
@@ -55,6 +56,10 @@ let handle_block_start t json =
           | `Null -> `Assoc []
           | (`Assoc _ as json) -> json
           | _ -> invalid "tool input must be an object" in
+        (match t.on_tool_arguments with
+         | None -> ()
+         | Some emit -> emit { Protocol.key = Printf.sprintf "anthropic:%d" n;
+             call_id = Some id; name; fragment = "" });
         Tool (id, name, input, Buffer.create 128)
     | `String ("thinking" | "redacted_thinking") -> Ignored
     | _ -> invalid "unsupported content block" in
@@ -72,10 +77,14 @@ let handle_block_delta t json =
        reserve t value;
        Buffer.add_string text value;
        if value <> "" then t.on_text value
-   | `String "input_json_delta", Tool (_, _, _, partial) ->
+   | `String "input_json_delta", Tool (id, name, _, partial) ->
        let value = required_string "partial_json" delta in
        reserve t value;
-       Buffer.add_string partial value
+       Buffer.add_string partial value;
+       (match t.on_tool_arguments with
+        | None -> ()
+        | Some emit -> emit { Protocol.key = Printf.sprintf "anthropic:%d" n;
+            call_id = Some id; name; fragment = value })
    | `String ("thinking_delta" | "signature_delta"), Ignored -> ()
    | _ -> invalid "delta type does not match content block")
 
@@ -136,8 +145,8 @@ let handle_event t event data =
       t.stopped <- true
   | _ -> invalid ("unknown event: " ^ kind)
 
-let create ~on_text =
-  let t = { on_text; blocks = Hashtbl.create 4; started = false; stopped = false;
+let create ?on_tool_arguments ~on_text () =
+  let t = { on_text; on_tool_arguments; blocks = Hashtbl.create 4; started = false; stopped = false;
     reason = None; input_tokens = None; output_tokens = None;
     cached_input_tokens = None; cache_creation_input_tokens = None;
     failed = false; response_bytes = 0; parser = None } in

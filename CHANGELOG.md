@@ -1,6 +1,20 @@
 # Changelog
 
 ## 2026-09-30
+- feat(tui): scoped model discovery to the active provider/API/account with on-demand scope switching and added a focused, resizable model-effort confirmation panel using only fresh native-supported levels.
+- fix(provider): preserved Codex account-reported effort levels, applied selected reasoning effort to Standard and Lite requests, rejected unsupported account/model overrides before inference and resolved dynamic local endpoints consistently during model selection.
+- test(provider): verified disjoint effort levels for two models in one account, rejected cross-model overrides before inference and exercised distinct model-specific TUI choices without typed/pasted bypass.
+- test(tui): removed incidental model-label separator and explanatory-wording assertions while retaining exact identity, account isolation and terminal-sanitization regressions.
+- feat(tui): displayed bounded incremental write drafts with filenames, line numbers and explicit approval/execution/not-written states, reusing each card through completion without executing partial arguments.
+- fix(security): suppressed masked partial drafts and redacted complete write proposals and typed approval fields before truncation while preserving exact approved file bytes.
+- refactor(provider): added optional incremental tool-argument callbacks and migrated all stream constructors to a final `()` argument, a source-breaking change for direct OCaml constructor callers.
+- test(runtime): replaced timing-dependent cancellation and descendant-pipe fixtures with observed-output and leader-reaping handshakes, and removed incidental transport-default and opaque-key-format assertions.
+- fix(provider): preserved fresh capability metadata, filtered Mistral models by reported chat/tool support, retained Gemini output limits, rejected duplicate catalog members and kept OpenAI's mixed-task ID roster API-unverified.
+- fix(io): enforced the 16 MiB buffered response ceiling during receipt and made discovery wake saturation nonblocking without dropping results or replaying requests.
+- fix(session): bounded failed-job diagnostics before persistence and serialized artifact publication while accounting for interrupted, temporary and corrupt retained files.
+- fix(agent): retained validated usage from rejected or partly failed compaction and cancelled active workers and approval waits before terminal shutdown.
+- fix(tools): bounded LSP writes by cancellation/deadline, disposed owned process groups, accepted valid final-size simultaneous edits and correctly budgeted fragmented DAP delimiters.
+- feat(agent): kept single-agent parallel reads as the default and required `--enable-subagents` for explicitly approved read-only child workflows in private saved sessions.
 - docs(project): replaced the completed-task backlog with ordered, source-evidenced small cards in `task.md`, retained external acceptance gates, and corrected implemented-capability and credential-alias documentation.
 - fix(tui): condensed successful `read_file` calls into one named path-and-line row while retaining independent expansion, replayed history and visible failures.
 - fix(io): allowed tail reads to skip oversized earlier lines while still rejecting oversized selected lines and preserving scan and binary limits.

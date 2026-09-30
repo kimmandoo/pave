@@ -16,6 +16,74 @@ let write_file path text =
   Fun.protect ~finally:(fun () -> Unix.close fd) (fun () ->
     ignore (Unix.write_substring fd text 0 (String.length text)))
 
+let competing_writes store ~owner payload =
+  let module Store = Pave.Session_artifact in
+  let ready = Atomic.make 0 and release = Atomic.make false in
+  let results = Array.make 2 None in
+  let workers = List.init 2 (fun index ->
+    let writer = Store.begin_write store ~owner ~name:"competing" ~mime_type:"text/plain" in
+    Store.write writer payload;
+    Thread.create (fun () ->
+      ignore (Atomic.fetch_and_add ready 1);
+      while not (Atomic.get release) do Thread.delay 0.001 done;
+      results.(index) <- Some (try ignore (Store.finish writer); true
+        with Store.Error _ -> false)) ()) in
+  let deadline = Unix.gettimeofday () +. 3. in
+  while Atomic.get ready < 2 && Unix.gettimeofday () < deadline do Thread.delay 0.001 done;
+  assert (Atomic.get ready = 2);
+  Atomic.set release true;
+  List.iter Thread.join workers;
+  assert (Array.to_list results |> List.sort compare = [Some false; Some true]);
+  assert (not (Array.exists (fun name -> Filename.check_suffix name ".tmp")
+    (Sys.readdir store.Store.dir)))
+
+let sparse_file path size =
+  let fd = Unix.openfile path [Unix.O_WRONLY; Unix.O_CREAT; Unix.O_EXCL] 0o600 in
+  Fun.protect ~finally:(fun () -> Unix.close fd) (fun () -> Unix.ftruncate fd size)
+
+let retained_quota_fixture ~base ~owner kind =
+  let module Store = Pave.Session_artifact in
+  let root = child base ("retained-" ^ kind) in
+  Unix.mkdir root 0o700;
+  let store = Store.open_for_workspace ~root in
+  let kept = Store.put store ~owner ~name:"kept" ~mime_type:"text/plain" "kept" in
+  let id = String.make 32 'b' in
+  let filename = if kind = "temp" then "." ^ id ^ ".tmp"
+    else if kind = "unknown" then "unknown-retained-file"
+    else id ^ ".data" in
+  let retained_path = child store.Store.dir filename in
+  sparse_file retained_path (Store.max_total_bytes - kept.size);
+  if kind = "corrupt" then (
+    let metadata = Store.meta_path store id in
+    sparse_file metadata 0;
+    write_file metadata "{invalid");
+  let before = Sys.readdir store.dir |> Array.to_list |> List.sort String.compare in
+  rejected (fun () -> Store.put store ~owner ~name:"overflow" ~mime_type:"text/plain" "x");
+  assert ((Unix.stat retained_path).Unix.st_size = Store.max_total_bytes - kept.size);
+  assert (Store.read store ~owner ~id:kept.id = "kept");
+  assert (Sys.readdir store.dir |> Array.to_list |> List.sort String.compare = before)
+
+let active_writer_fixture ~base ~owner =
+  let module Store = Pave.Session_artifact in
+  let root = child base "active-staging" in
+  Unix.mkdir root 0o700;
+  let store = Store.open_for_workspace ~root in
+  let writer = Store.begin_write store ~owner ~name:"active" ~mime_type:"text/plain" in
+  Store.write writer "active";
+  let orphan = Store.data_path store (String.make 32 'c') in
+  sparse_file orphan (Store.max_total_bytes - writer.size);
+  rejected (fun () -> Store.put store ~owner ~name:"overflow" ~mime_type:"text/plain" "x");
+  assert (Sys.file_exists writer.temp_path);
+  assert (not writer.closed);
+  Store.abort writer;
+  let accepted = Store.put store ~owner ~name:"after-abort" ~mime_type:"text/plain" "x" in
+  assert (Store.read store ~owner ~id:accepted.id = "x");
+  let unsafe = child store.dir "unknown-symlink" in
+  Unix.symlink orphan unsafe;
+  rejected (fun () -> Store.put store ~owner ~name:"unsafe" ~mime_type:"text/plain" "");
+  assert ((Unix.lstat unsafe).Unix.st_kind = Unix.S_LNK);
+  assert (Store.read store ~owner ~id:accepted.id = "x")
+
 let () =
   let previous_home = Sys.getenv_opt "HOME"
   and previous_state = Sys.getenv_opt "XDG_STATE_HOME" in
@@ -92,23 +160,33 @@ let () =
     Store.write overflow "x";
     rejected (fun () -> Store.write overflow max_data);
     Store.abort overflow;
-    (* Eight maximum-sized artifacts fill the aggregate quota. *)
+    (* Leave exactly one byte for two competing publishers. *)
     let quota_root = child base "quota-workspace" in
     Unix.mkdir quota_root 0o700;
     let quota_store = Store.open_for_workspace ~root:quota_root in
-    for index = 1 to 8 do
+    for index = 1 to 7 do
       ignore (Store.put quota_store ~owner ~name:(string_of_int index)
         ~mime_type:"application/octet-stream" max_data)
     done;
+    ignore (Store.put quota_store ~owner ~name:"almost-full"
+      ~mime_type:"application/octet-stream"
+      (String.sub max_data 0 (String.length max_data - 1)));
+    competing_writes quota_store ~owner "x";
+    assert (List.fold_left (fun total (entry : Store.item) -> total + entry.size) 0
+      (Store.list quota_store ()) = Store.max_total_bytes);
     rejected (fun () -> Store.put quota_store ~owner ~name:"over-quota"
       ~mime_type:"text/plain" "x");
     let count_root = child base "count-workspace" in
     Unix.mkdir count_root 0o700;
     let count_store = Store.open_for_workspace ~root:count_root in
-    for index = 1 to Store.max_artifacts do
+    for index = 1 to Store.max_artifacts - 1 do
       ignore (Store.put count_store ~owner ~name:(string_of_int index)
         ~mime_type:"text/plain" "")
     done;
+    competing_writes count_store ~owner "";
+    assert (List.length (Store.list count_store ()) = Store.max_artifacts);
     rejected (fun () -> Store.put count_store ~owner ~name:"too-many"
       ~mime_type:"text/plain" "");
+    List.iter (retained_quota_fixture ~base ~owner) ["orphan"; "temp"; "corrupt"; "unknown"];
+    active_writer_fixture ~base ~owner;
     print_endline "private session artifact store: ok")

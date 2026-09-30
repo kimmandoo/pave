@@ -29,6 +29,17 @@ let () =
   check_capabilities ~session:false ~interactive:true;
   check_capabilities ~session:true ~interactive:true;
   check_capabilities ~session:true ~interactive:false;
+  List.iter (fun line ->
+    (match parse line with Unknown _ -> () | _ -> fail "disabled child workflow was accepted");
+    (match parse ~subagents:true ~session:false line with
+     | Unknown _ -> () | _ -> fail "child workflow accepted without a saved session"))
+    ["/delegate review inspect files"; "/plan inspect files"; "/advisor inspect files";
+     "/watchdog inspect files"; "/loop inspect files"; "/autoresearch inspect files"];
+  if has_help (help ()) "/delegate" || suggestions "/del" <> [] then
+    fail "disabled subagents remained visible";
+  if not (has_help (help ~subagents:true ()) "/delegate") ||
+     not (has_help (help ()) "/jobs") then
+    fail "opt-in delegation or existing job management disappeared";
   let external_commands = [
     command "/skill:review" No_arguments "Review [user skill]" (A_skill "review");
     command "/summarize" No_arguments "Summarize [project command]"
@@ -113,12 +124,13 @@ let () =
   (match parse "/jobs", parse "/wait 0123456789abcdef0123456789abcdef",
       parse "/cancel-job 0123456789abcdef0123456789abcdef",
       parse "/artifact 0123456789abcdef0123456789abcdef",
-      parse "/delegate reviewer inspect the selected source files",
-      parse "/plan simplify the session lifecycle",
+      parse ~subagents:true "/delegate reviewer inspect the selected source files",
+      parse ~subagents:true "/plan simplify the session lifecycle",
       parse "/goal simplify the session lifecycle", parse "/goal",
-      parse "/advisor check the proposed plan",
-      parse "/watchdog inspect scope drift", parse "/loop review the goal",
-      parse "/autoresearch locate existing patterns",
+      parse ~subagents:true "/advisor check the proposed plan",
+      parse ~subagents:true "/watchdog inspect scope drift",
+      parse ~subagents:true "/loop review the goal",
+      parse ~subagents:true "/autoresearch locate existing patterns",
       parse "/rule stop before irreversible changes", parse "/rule" with
    | Jobs, Wait "0123456789abcdef0123456789abcdef",
      Cancel_job "0123456789abcdef0123456789abcdef",
@@ -139,11 +151,11 @@ if not (List.exists (fun item -> item.name = "/rewind")
     (suggestions "/rew")) then
   fail "workspace rewind is missing from completion";
   invalid "missing wait ID" (fun () -> parse "/wait");
-  invalid "missing delegation task" (fun () -> parse "/delegate reviewer");
+  invalid "missing delegation task" (fun () -> parse ~subagents:true "/delegate reviewer");
   invalid "multiple rewind IDs" (fun () -> parse
     "/rewind 0123456789abcdef0123456789abcdef extra");
   if not (List.exists (fun item -> item.name = "/delegate")
-      (suggestions "/del")) then fail "child delegation is missing from completion";
+      (suggestions ~subagents:true "/del")) then fail "child delegation is missing from completion";
   (match parse "/queue inspect the active branch" with
    | Queue_prompt "inspect the active branch" -> ()
    | _ -> fail "queued follow-up parsing");

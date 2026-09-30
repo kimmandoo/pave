@@ -97,14 +97,18 @@ let occurrences_up_to_two text needle =
 let replace_ranges original ranges =
   let ranges = List.sort (fun (a, _, _) (b, _, _) -> compare a b) ranges in
   let cursor = ref 0 and output_size = ref (String.length original) in
+  let replacement_bytes = ref 0 in
   List.iter (fun (start, finish, replacement) ->
     if start < !cursor || finish < start || finish > String.length original then
       fail "edit ranges overlap or are outside the original file";
     output_size := !output_size - (finish - start);
-    if String.length replacement > max_file_bytes - !output_size then
+    if String.length replacement > max_file_bytes - !replacement_bytes then
       fail (Printf.sprintf "edited file exceeds %d-byte limit" max_file_bytes);
-    output_size := !output_size + String.length replacement;
+    replacement_bytes := !replacement_bytes + String.length replacement;
     cursor := finish) ranges;
+  if !replacement_bytes > max_file_bytes - !output_size then
+    fail (Printf.sprintf "edited file exceeds %d-byte limit" max_file_bytes);
+  output_size := !output_size + !replacement_bytes;
   let buffer = Buffer.create !output_size in
   cursor := 0;
   List.iter (fun (start, finish, replacement) ->

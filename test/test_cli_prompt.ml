@@ -168,6 +168,129 @@ let records output =
 let record_type record = member "type" record
 let record_status record = member "status" record
 
+let failed_compaction_usage binary root =
+  let assistant text : Pave.Protocol.message = {
+    role = "assistant"; content = Some text; tool_calls = [];
+    tool_call_id = None; tool_result_content = None; provider_state = None;
+    attachments = [] } in
+  let original = [
+    Pave.Protocol.user (String.make 1600 'u'); assistant (String.make 200 'a');
+    Pave.Protocol.user (String.make 1600 'v'); assistant (String.make 200 'b')] in
+  let completed summary input output cached reasoning =
+    response 200 "application/json" (Yojson.Basic.to_string (`Assoc [
+      "choices", `List [`Assoc [
+        "finish_reason", `String "stop";
+        "message", `Assoc ["role", `String "assistant";
+          "content", `String summary]]];
+      "usage", `Assoc ["prompt_tokens", `Int input;
+        "completion_tokens", `Int output;
+        "prompt_tokens_details", `Assoc ["cached_tokens", `Int cached];
+        "completion_tokens_details", `Assoc ["reasoning_tokens", `Int reasoning]]])) in
+  let scenarios = [
+    "later-failure", [
+      completed "summary-1" 12 3 7 2;
+      response 500 "application/json"
+        {|{"error":{"message":"summary unavailable"}}|}],
+      (12, 3, 7, 2);
+    "oversized-summary", [completed (String.make 2049 's') 17 5 11 3],
+      (17, 5, 11, 3)] in
+  List.iter (fun (name, responses, (input, output, cached, reasoning)) ->
+    let path = Filename.concat root (name ^ ".jsonl") in
+    let session = Pave.Session.open_file path in
+    List.iter (fun message -> ignore (Pave.Session.append session message)) original;
+    let result = with_server responses
+      (fun index _ request ->
+        if index = 1 then
+          match member "messages" request with
+          | `List [_system; user] ->
+              let payload = match member "content" user with
+                | `String text -> Yojson.Basic.from_string text
+                | _ -> fail "summary request omitted its transcript" in
+              check (member "priorSummary" payload = `String "summary-1")
+                "second summary request lost the successful first chunk"
+          | _ -> fail "unexpected summary request shape")
+      (fun endpoint -> run binary root
+        (base_arguments endpoint @ ["--session"; path;
+          "--context-window"; "8192"; "--prompt"; "latest request"])) in
+    check (code result.status = 1)
+      ("failed compaction returned success: " ^ result.stderr);
+    let reopened = Pave.Session.open_file path in
+    check (Pave.Session.history reopened =
+      original @ [Pave.Protocol.user "latest request"])
+      "failed compaction changed or dropped original conversation history";
+    check (not (List.exists (fun (entry : Pave.Session.entry) ->
+      match entry.kind with Pave.Session.Compaction _ -> true | _ -> false)
+      (Pave.Session.entries reopened)))
+      "failed compaction left a phantom context marker";
+    let recorded = List.filter_map (fun (entry : Pave.Session.entry) ->
+      match entry.kind with
+      | Pave.Session.Usage { provider; account_id; route; model; tokens } ->
+          check (provider = "lm-studio" && account_id = None &&
+            route = Some "chat" && model = "fixture-model")
+            "failed compaction lost actual usage provenance";
+          Some tokens
+      | _ -> None) (Pave.Session.entries reopened) in
+    (match recorded with
+     | [usage] ->
+         check (usage.input_tokens = input && usage.output_tokens = output &&
+           usage.cached_input_tokens = Some cached &&
+           usage.reasoning_output_tokens = Some reasoning)
+           "validated compaction usage was lost, duplicated or altered"
+     | _ -> fail "failed compaction did not retain exactly one billed request");
+    let again = Pave.Session.open_file path in
+    check (Pave.Session.usage again = Pave.Session.usage reopened)
+      "resuming failed compaction recorded billed usage again") scenarios
+
+let subagent_admission binary root =
+  let tool_reply = Yojson.Basic.to_string (`Assoc [
+    "choices", `List [`Assoc ["finish_reason", `String "tool_calls";
+      "message", `Assoc ["role", `String "assistant"; "content", `Null;
+        "tool_calls", `List [`Assoc ["id", `String "child-request";
+          "type", `String "function"; "function", `Assoc [
+            "name", `String "task";
+            "arguments", `String {|{"label":"review","task":"inspect files"}|}]]]]]]]) in
+  let final_reply = Yojson.Basic.to_string (`Assoc [
+    "choices", `List [`Assoc ["finish_reason", `String "stop";
+      "message", `Assoc ["role", `String "assistant";
+        "content", `String "Child request was not executed."]]]]) in
+  List.iter (fun (name, enabled, saved) ->
+    let path = Filename.concat root (name ^ ".jsonl") in
+    let extra = (if enabled then ["--enable-subagents"] else []) @
+      (if saved then ["--session"; path] else []) in
+    let result = with_server [
+      response 200 "application/json" tool_reply;
+      response 200 "application/json" final_reply]
+      (fun index _ request ->
+        if index = 0 then (
+          let definitions = match member "tools" request with
+            | `List definitions -> definitions | _ -> fail "missing tool roster" in
+          let advertised = List.exists (fun definition ->
+            member "name" (member "function" definition) = `String "task") definitions in
+          check (advertised = (enabled && saved))
+            "child capability escaped opt-in or saved-session boundary")
+        else
+          match member "messages" request with
+          | `List messages ->
+              check (List.exists (fun message ->
+                Pave.Protocol.member "role" message = `String "tool" &&
+                Pave.Protocol.member "tool_call_id" message = `String "child-request")
+                messages) "denied child call lost its ordered tool result"
+          | _ -> fail "missing denied child result")
+      (fun endpoint -> run binary root
+        (base_arguments endpoint @ extra @
+          ["--approval-mode"; "yolo"; "--prompt"; "inspect source"])) in
+    check (code result.status = 2)
+      "disabled or unapproved headless delegation was reported successful";
+    if saved then (
+      let session = Pave.Session.open_file path in
+      check (not (List.exists (fun (entry : Pave.Session.entry) ->
+        match entry.kind with
+        | Pave.Session.Job_started _ -> true
+        | _ -> false) (Pave.Session.entries session)))
+        "unapproved or disabled delegation started a child job"))
+    ["single-default", false, true; "child-headless", true, true;
+     "child-unsaved", true, false]
+
 let () =
   let root = Filename.temp_file "pave-cli-prompt" "" in
   Sys.remove root;
@@ -175,6 +298,8 @@ let () =
   let source_dir = Filename.concat root "src" in
   Unix.mkdir source_dir 0o700;
   Fun.protect ~finally:(fun () -> remove_tree root) (fun () ->
+    failed_compaction_usage Sys.argv.(1) root;
+    subagent_admission Sys.argv.(1) root;
     let piped_prompt = "  /help\nthinkdeep\r\n" in
     let plain = with_server
       [response 200 "application/json"

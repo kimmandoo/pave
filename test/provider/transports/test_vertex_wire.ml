@@ -84,7 +84,7 @@ let () =
   invalid (fun () -> Vertex_wire.request ~model [user; direct] []);
   invalid (fun () -> Vertex_wire.request ~model:"another-model"
     [user; parsed] []);
-  let stream = Gemini_stream.create ~model ~on_text:(fun _ -> ()) in
+  let stream = Gemini_stream.create ~model ~on_text:(fun _ -> ()) () in
   let event = completion parts in
   Gemini_stream.feed stream ("data: " ^ Yojson.Basic.to_string event ^ "\n\n");
   let streamed = Vertex_wire.finish_stream ~model stream in
@@ -132,7 +132,7 @@ let () =
       "content", `List []; "stop_reason", `String "end_turn"]));
   let chunks = ref [] in
   let stream = Vertex_anthropic_wire.create_stream
-    ~on_text:(fun part -> chunks := part :: !chunks) in
+    ~on_text:(fun part -> chunks := part :: !chunks) () in
   let event kind data = "event: " ^ kind ^ "\r\ndata: " ^ data ^ "\r\n\r\n" in
   Vertex_anthropic_wire.feed_stream stream
     (event "message_start"
@@ -149,7 +149,7 @@ let () =
   assert ((Vertex_anthropic_wire.finish_stream ~model:claude stream).content =
     Some "Hello");
   assert (String.concat "" (List.rev !chunks) = "Hello");
-  let empty = Vertex_anthropic_wire.create_stream ~on_text:(fun _ -> ()) in
+  let empty = Vertex_anthropic_wire.create_stream ~on_text:(fun _ -> ()) () in
   Vertex_anthropic_wire.feed_stream empty
     (event "message_start"
        {|{"type":"message_start","message":{"id":"msg_2","type":"message","role":"assistant"}}|} ^
@@ -157,12 +157,12 @@ let () =
        {|{"type":"message_delta","delta":{"stop_reason":"end_turn"}}|} ^
      event "message_stop" {|{"type":"message_stop"}|});
   invalid (fun () -> Vertex_anthropic_wire.finish_stream ~model:claude empty);
-  let incomplete = Vertex_anthropic_wire.create_stream ~on_text:(fun _ -> ()) in
+  let incomplete = Vertex_anthropic_wire.create_stream ~on_text:(fun _ -> ()) () in
   Vertex_anthropic_wire.feed_stream incomplete
     (event "message_start"
       {|{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","usage":{"input_tokens":2}}}|});
   invalid (fun () -> Vertex_anthropic_wire.finish_stream ~model:claude incomplete);
-  let failed = Vertex_anthropic_wire.create_stream ~on_text:(fun _ -> ()) in
+  let failed = Vertex_anthropic_wire.create_stream ~on_text:(fun _ -> ()) () in
   invalid (fun () -> Vertex_anthropic_wire.feed_stream failed
     (event "error" {|{"type":"error","error":{"type":"api_error","message":"denied"}}|}));
   invalid (fun () -> Vertex_anthropic_wire.finish_stream ~model:claude failed);

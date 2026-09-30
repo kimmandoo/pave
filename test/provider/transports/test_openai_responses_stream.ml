@@ -22,7 +22,7 @@ let completion outputs = event "response.completed" [ "response", `Assoc [
 let failed = event "response.failed" [ "response", `Assoc [
   "status", `String "failed"; "error", `Assoc [ "message", `String "unavailable" ] ] ]
 let stream wire =
-  let t = Openai_responses_stream.create ~on_text:(fun _ -> ()) in
+  let t = Openai_responses_stream.create ~on_text:(fun _ -> ()) () in
   Openai_responses_stream.feed t wire;
   Openai_responses_stream.finish t
 let invalid_cases = ref 0
@@ -58,18 +58,26 @@ let () =
     ^ completion [ final_message; final_call ]
     ^ "data: [DONE]\r\n\r\n" in
   let deltas = ref [] in
-  let t = Openai_responses_stream.create ~on_text:(fun part -> deltas := part :: !deltas) in
+  let drafts = ref [] in
+  let t = Openai_responses_stream.create
+    ~on_tool_arguments:(fun delta -> drafts := delta :: !drafts)
+    ~on_text:(fun part -> deltas := part :: !deltas) () in
   String.iter (fun byte -> Openai_responses_stream.feed t (String.make 1 byte)) wire;
   assert (Openai_responses_stream.is_done t);
   assert (Openai_responses_stream.is_finished t);
   let response = Openai_responses_stream.finish t in
+  let draft_key = (List.hd !drafts).Protocol.key in
+  assert (List.rev !drafts = [
+    { Protocol.key = draft_key; call_id = Some "call_1"; name = "read_file"; fragment = "" };
+    { Protocol.key = draft_key; call_id = Some "call_1"; name = "read_file"; fragment = {|{"path":"|} };
+    { Protocol.key = draft_key; call_id = Some "call_1"; name = "read_file"; fragment = {|a.txt"}|} } ]);
   assert (List.rev !deltas = [ "Hello "; "world" ]);
   assert (response = { Protocol.role = "assistant"; content = Some "Hello world";
     tool_calls = [ { Protocol.id = "call_1"; name = "read_file";
       arguments = `Assoc [ "path", `String "a.txt" ] } ];
     tool_call_id = None; tool_result_content = None; provider_state = None; attachments = [] });
   assert (Openai_responses_stream.usage t = None);
-  let metered = Openai_responses_stream.create ~on_text:(fun _ -> ()) in
+  let metered = Openai_responses_stream.create ~on_text:(fun _ -> ()) () in
   let measured = event "response.completed" [ "response", `Assoc [
     "status", `String "completed"; "output", `List [final_message];
     "usage", `Assoc ["input_tokens", `Int 21; "output_tokens", `Int 9;
@@ -85,13 +93,12 @@ let () =
   let without_deltas = added 0 initial_message ^ done_item 0 final_message
     ^ completion [ final_message ] in
   let deltas = ref [] in
-  let t = Openai_responses_stream.create ~on_text:(fun part -> deltas := part :: !deltas) in
+  let t = Openai_responses_stream.create ~on_text:(fun part -> deltas := part :: !deltas) () in
   Openai_responses_stream.feed t without_deltas;
   assert ((Openai_responses_stream.finish t).content = Some "Hello world");
   assert (List.rev !deltas = [ "Hello world" ]);
   let only_completed = ref [] in
-  let t = Openai_responses_stream.create
-    ~on_text:(fun part -> only_completed := part :: !only_completed) in
+  let t = Openai_responses_stream.create ~on_text:(fun part -> only_completed := part :: !only_completed) () in
   Openai_responses_stream.feed t (completion [ final_message ]);
   assert ((Openai_responses_stream.finish t).content = Some "Hello world");
   assert (List.rev !only_completed = [ "Hello world" ]);
@@ -137,7 +144,7 @@ let () =
   invalid ("data: [DONE]\r\n\r\n");
   invalid ("event: error\r\ndata: {\"type\":\"error\",\"message\":\"bad\"}\r\n\r\n");
   invalid ("event: response.completed\r\ndata: {bad}\r\n\r\n");
-  let poisoned = Openai_responses_stream.create ~on_text:(fun _ -> ()) in
+  let poisoned = Openai_responses_stream.create ~on_text:(fun _ -> ()) () in
   Openai_responses_stream.feed poisoned
     (completion [ final_message ] ^ "data: [DONE]\r\n\r\n");
   (match Openai_responses_stream.feed poisoned

@@ -1,5 +1,89 @@
 # Troubleshooting
 
+### [2026-09-30] Local model picker rejected an overridden native server address
+
+- **Context / Symptom:** A real `/model` PTY fetched one model from an `LM_STUDIO_BASE_URL` loopback fixture, but showed `0 route-compatible listed IDs · 1 excluded`. The permanent picker regression failed before the repair at `test/ui/test_model_picker.ml:186`.
+- **Root Cause:** Selection resolved the native route through `Provider_catalog.route`, but `Model_discovery.model_supports_endpoint` compared that current address against the descriptor's static default endpoint.
+- **Solution:** Resolved each registered route through the existing factory before endpoint comparison, and migrated CLI/picker API facts to the same current route. Kept exact endpoint, provider, account and fresh-listing admission; no model-name heuristic or arbitrary-host exception was added.
+- **Prevention / Reference:** The regression passed after repair. Actual native PTYs fetched only the current scope on entry, no hidden model list while browsing scopes, and one explicitly selected second scope; accepted models reached the next real loopback HTTP request. Escape from effort preserved a byte-identical journal; accepting unknown support cleared the prior thinking override.
+
+### [2026-09-30] Codex ignored the conversation's selected reasoning effort
+
+- **Context / Symptom:** `/thinking` and the agent retained a level, but the Codex completion branch never passed it to the native request constructor. Lite used only the fresh listing default; Standard omitted the requested effort. Account discovery also discarded `supported_reasoning_levels`.
+- **Root Cause:** The Codex request API had no thinking argument and discovery projected those account rows without reasoning metadata.
+- **Solution:** Preserved bounded unique reported levels; admitted only exact tokens supported by the native route, rechecked account/model support before inference and serialized explicit effort for Standard/Lite while retaining the Lite default when no override is chosen. A selected-model chip panel now confirms model and effort before any settings mutation.
+- **Prevention / Reference:** Native HTTPS fixtures exercised Standard high, Lite high/ultra, listing default and absent/empty/restricted/malformed/account-isolated metadata. Actual colored and monochrome effort PTYs exercised explicit selection, default, cancellation, unknown metadata and 100×28→40×12→18×8 resize; their accepted values reached the actual Codex wire constructor. These are controlled fixtures, not live account entitlement. [Official model metadata schema](https://github.com/openai/codex/blob/rust-v0.146.1/codex-rs/models-manager/models.json).
+
+### [2026-09-30] Standalone native TUI smoke needed a concrete Digestif backend
+
+- **Context / Symptom:** Linking a throwaway native UI driver with `ocamlfind ... -package digestif` failed with `No implementation provided for ... Digestif`.
+- **Root Cause:** The package exposes the shared interface; the manual link did not select an implementation as the normal Dune build does.
+- **Solution:** Linked the isolated OCaml 5.5.1 driver against `digestif.c` and the already built project/UI objects. No production dependency or build rule changed.
+- **Prevention / Reference:** Prefer the normal Dune build; manual native smoke drivers must select the concrete backend and matching compiler. The linked driver exercised the real terminal effort panel and Codex serializer, then was removed.
+
+### [2026-09-30] Masked writes exposed restored secrets in approval previews
+
+- **Context / Symptom:** A native PTY with `--mask-secrets` exposed a synthetic `LM_STUDIO_API_KEY` in the completed write-approval surface, even though the exact approved file write itself succeeded.
+- **Root Cause:** Agent execution restored tool arguments, then the write-approval formatter truncated/quoted raw proposed content before display redaction. Redacting arbitrary partial fragments also cannot safely hide secrets split across chunks.
+- **Solution:** Suppressed unvalidated streamed previews under an active mask, redacted complete proposed content and displayed paths before truncation/quoting, and redacted typed approval fields at the consumer boundary. Execution still receives the original approved arguments.
+- **Prevention / Reference:** Native approval/denial/cancel/truncated/masked PTY scenarios passed. The masked scenario retained exact Korean/emoji/secret file bytes while the synthetic secret never appeared in terminal output; streamed drafts remain UI-only, not journal or headless JSONL data.
+
+### [2026-09-30] Subprocess regression fixtures depended on timing instead of lifecycle
+
+- **Context / Symptom:** Full integration encountered the command-cancellation assertion `cancelled && elapsed < 2.` and `Google ADC sh command timed out` in a descendant-held-stdout fixture. Earlier runs of the same paths had passed; no production ADC failure was established.
+- **Root Cause:** Cancellation admission used wall-clock delay and pinned total elapsed time. The ADC fixture used an uncoordinated background sleep to try to place stdout closure after leader reaping, without enforcing that lifecycle order.
+- **Solution:** Requested command cancellation only after actual child output and asserted cancellation, not a machine-speed threshold. Replaced the ADC sleep race with a private FIFO released only after the direct leader had been reaped; the child then closed its inherited stdout. Removed incidental executable/environment/opaque-key format pins.
+- **Prevention / Reference:** Synchronize on observable state transitions; bounded fixture deadlines prevent hangs but are not performance assertions. Live TUI responsiveness was measured separately with a held 872,018-byte write draft: input plus resize 0.020 seconds and cancellation 0.021 seconds, with one request and no file mutation.
+
+### [2026-09-30] Fresh model listings lost capabilities or overstated route compatibility
+
+- **Context / Symptom:** Mistral's mixed-task roster included embedding and tool-disabled models; five generic listing filters discarded reported capabilities. Gemini's output-token limit was missing. OpenAI's ID-only mixed-task roster appeared selectable on both Chat and Responses despite lacking route/tool evidence.
+- **Root Cause:** Some adapters projected response objects to IDs too early, Mistral used the generic parser, and OpenAI inherited the generic route-compatible classification. Duplicate JSON members could also hide conflicting catalog data.
+- **Solution:** Preserved filtered raw metadata/provenance, required Mistral's documented chat and function-calling flags, retained Gemini's output limit, rejected duplicate members recursively, and marked OpenAI listings API-unverified. Explicit model/route selectors remain usable; no model-name heuristic or stale fallback was introduced.
+- **Prevention / Reference:** Each listing/picker open performs fresh discovery. [Mistral model capabilities](https://docs.mistral.ai/api/endpoint/models), [Gemini model limits](https://ai.google.dev/api/models), and [OpenAI's ID-only model roster](https://developers.openai.com/api/reference/resources/models/methods/list.md) describe distinct contracts; fixtures do not establish live account entitlement.
+
+### [2026-09-30] Discovery wake saturation blocked cancellation
+
+- **Context / Symptom:** A standalone coordinator saturated its notification pipe after about 65,540 scopes; closing it could wait indefinitely for the blocked worker.
+- **Root Cause:** Worker notifications used a blocking write even though results were already retained under the coordinator mutex.
+- **Solution:** Made wake writes nonblocking and coalesced saturated notifications without dropping outcomes. The bounded child regression completed and polled 100,000 scopes, then closed successfully.
+- **Prevention / Reference:** Wake bytes are hints, not the result store; producers must not block cancellation while reporting an already-retained result.
+
+### [2026-09-30] Failed jobs and interrupted artifacts escaped persistence limits
+
+- **Context / Symptom:** A 48,011-byte failed-job diagnostic could not be parsed after resume. Two same-process writers accepted 257 artifacts against a 256-item cap. Orphan data, temporary files and corrupt metadata could evade retained-byte accounting.
+- **Root Cause:** Failure summaries were bounded only by the parser, POSIX record locks did not serialize threads in one process, and quota inventory counted only valid metadata.
+- **Solution:** Normalized every terminal diagnostic to bounded UTF-8 with an explicit truncation marker; serialized the existing record-lock transaction with a process mutex; conservatively counted actual retained data, staging and corrupt/unrecognized files under that lock. Failed candidates remove only their own temporary files.
+- **Prevention / Reference:** Exercise resume and exactly-once failed delivery, same/cross-process item and byte boundaries, and sparse interrupted-publication fixtures. Crash leftovers consume quota; they are not silently deleted or adopted.
+
+### [2026-09-30] Compaction rejection lost billed usage and terminal exit left workers waiting
+
+- **Context / Symptom:** A successful 12-input/3-output summary followed by HTTP 500 lost its usage marker; an oversized 17-input/5-output summary also lost usage despite a validated response. Ctrl+D during a held provider request waited for the remote response.
+- **Root Cause:** CLI usage was flushed only after the whole compaction committed; turn-runner shutdown joined workers without first cancelling them or releasing approval waits.
+- **Solution:** Recorded each validated usage callback immediately and independently of context publication. Shutdown now cancels the active turn, releases approvals, joins it and drains terminal outcomes without dispatching queued work.
+- **Prevention / Reference:** Native automatic/manual rejection fixtures retained exact usage once and unchanged context. The held-response PTY exited in 0.114 seconds without releasing the response; neither path automatically retried.
+
+### [2026-09-30] LSP disposal and full stdin pipes escaped request deadlines
+
+- **Context / Symptom:** Terminating an LSP leader left descendants holding its pipes. A server that stopped reading a 256 KiB request prevented cancellation/deadline checks and left a pending request.
+- **Root Cause:** LSP launch owned only the leader PID, and synchronous pipe writes could block before the receive loop enforced its deadline.
+- **Solution:** Reused owned process-group launch/disposal and interruptible nonblocking writes with the absolute request deadline. A failed partial frame disposes the owned group and settles pending requests once; writer-lock waits and cancellation notifications are bounded.
+- **Prevention / Reference:** Native fixtures retained a signal-resistant descendant and filled server stdin. Cancellation/deadline completed in 0.201/0.222 seconds with zero pending requests; repeated disposal remained safe.
+
+### [2026-09-30] Exact-boundary edits and fragmented DAP headers were rejected
+
+- **Context / Symptom:** A valid simultaneous edit at the 1 MiB ceiling was rejected when an early insertion was offset by a later deletion. A maximum-size DAP frame failed when its header delimiter arrived in fragments.
+- **Root Cause:** Edit admission capped intermediate construction rather than the final simultaneous result; DAP's incomplete-buffer budget omitted the partial/full four-byte delimiter.
+- **Solution:** Calculated the final removed/replacement size before construction and separately budgeted delimiter framing without widening header/body ceilings.
+- **Prevention / Reference:** Boundary regressions accepted net-zero edits and delimiter fragments of zero through three bytes, while rejecting real growth without mutation.
+
+### [2026-09-30] Buffered completions downloaded beyond their response ceiling
+
+- **Context / Symptom:** A controlled 32 MiB local HTTP response made the native CLI retain all 33,554,432 response bytes in a temporary file before reporting `completion response exceeds 16 MiB`.
+- **Root Cause:** `Provider.post_json` let curl finish downloading to disk and checked the size only when reading the completed file.
+- **Solution:** Received buffered bodies through a bounded pipe consumer, retained only the existing 16 MiB body allowance plus curl's three-byte status, and applied curl's declared-size limit before receipt. Oversize exceptions use the existing owned-child kill/reap path; no response temporary file is created.
+- **Prevention / Reference:** Exercise both declared-length and chunked success/error bodies, the exact ceiling and one-byte overflow; preserve cancellation, no automatic replay and the normal tool-result round trip.
+
 ### [2026-09-30] Devin Connect failures hid their transport cause
 
 - **Context / Symptom:** A model turn ended with `Error: Devin Connect transport failed`, leaving DNS, TLS, timeout and a malformed response indistinguishable. A valid subprocess response could also fail when the three-byte curl HTTP status arrived in separate pipe reads.

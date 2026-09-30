@@ -44,8 +44,10 @@ let model_supports_endpoint ?registry ~provider (model : model) ~endpoint =
     | None -> None
     | Some descriptor ->
         descriptor.routes
-        |> List.find_opt (fun (route : Provider_catalog.route) ->
-          route.endpoint = endpoint) in
+        |> List.find_map (fun (declared : Provider_catalog.route) ->
+          match Provider_catalog.route descriptor declared.name with
+          | Some route when route.endpoint = endpoint -> Some route
+          | _ -> None) in
   match route with
   | None -> false
   | Some route ->
@@ -166,6 +168,23 @@ let extract_field field = function
 
 let invalid detail = Error (Invalid_response detail)
 
+let parse_listing_json body =
+  let rec unique_fields = function
+    | `Assoc fields ->
+        let seen = Hashtbl.create (List.length fields) in
+        List.for_all (fun (name, value) ->
+          if Hashtbl.mem seen name then false
+          else (
+            Hashtbl.add seen name ();
+            unique_fields value)) fields
+    | `List values -> List.for_all unique_fields values
+    | _ -> true in
+  try
+    let json = Yojson.Basic.from_string body in
+    if unique_fields json then Ok json
+    else invalid "duplicate model listing field"
+  with Yojson.Json_error _ -> invalid "malformed or truncated JSON"
+
 let listing field json = match extract_field field json with
   | Some (`List rows) -> Ok rows
   | _ -> invalid ("missing " ^ field ^ " array")
@@ -255,7 +274,12 @@ let collect_rows ~seen ~provider ~id ~include_row rows =
                             positive_integer_field "inputTokenLimit" row
                           else if provider = "anthropic" then
                             positive_integer_field "max_input_tokens" row
+                          else if provider = "mistral" then
+                            positive_integer_field "max_context_length" row
                           else None in
+                        let max_output_tokens = if provider = "google" then
+                          positive_integer_field "outputTokenLimit" row
+                        else max_output_tokens in
                         let native_compaction_supported =
                           if provider = "anthropic" then
                             anthropic_compaction_supported row
@@ -279,7 +303,7 @@ let collect_rows ~seen ~provider ~id ~include_row rows =
                                           capabilities with
                                       | Some (`Bool value) -> Some value
                                       | _ -> None))
-                          | "fireworks" | "baseten" | "huggingface" | "nanogpt" ->
+                          | "mistral" | "fireworks" | "baseten" | "huggingface" | "nanogpt" ->
                               Some true
                           | _ -> None in
                         let capabilities = { Model_catalog.empty_capabilities with
@@ -311,6 +335,14 @@ let include_together row = match extract_field "type" row with
   | Some (`String "chat") -> Ok true
   | Some (`String _) -> Ok false
   | _ -> invalid "missing or invalid Together model type"
+
+let include_mistral row = match extract_field "capabilities" row with
+  | Some (`Assoc _ as capabilities) ->
+      (match extract_field "completion_chat" capabilities,
+          extract_field "function_calling" capabilities with
+       | Some (`Bool chat), Some (`Bool tools) -> Ok (chat && tools)
+       | _ -> invalid "missing or invalid Mistral chat/tool capabilities")
+  | _ -> invalid "missing or invalid Mistral model capabilities"
 
 let include_venice row = match extract_field "type" row with
   | Some (`String "text") ->
@@ -407,11 +439,9 @@ let discover_codex_models ?http ?cancel credential =
             | Ok (_, body) ->
                 if String.length body > max_response_bytes then
                   invalid "listing exceeds 1 MiB"
-                else let json = try Some (Yojson.Basic.from_string body)
-                  with Yojson.Json_error _ -> None in
-                match json with
-                | None -> invalid "malformed or truncated JSON"
-                | Some json ->
+                else match parse_listing_json body with
+                | Error _ as error -> error
+                | Ok json ->
                     let rows = match extract_field "models" json with
                       | Some (`List rows) -> Ok rows
                       | None -> listing "data" json
@@ -454,12 +484,19 @@ let discover_codex_models ?http ?cancel credential =
                                               let context_window_tokens =
                                                 positive_integer_field
                                                   "context_window" row in
-                                              let capabilities =
-                                                { Model_catalog.empty_capabilities with
-                                                  context_window_tokens } in
-                                              result := { id = name; display_name = None;
-                                                capabilities } :: !result;
-                                              collect tail))))
+                                              let effort_levels =
+                                                try Ok (Codex_wire.effort_levels row)
+                                                with Protocol.Invalid_response detail ->
+                                                  invalid detail in
+                                              match effort_levels with
+                                              | Error _ as error -> error
+                                              | Ok effort_levels ->
+                                                  let capabilities =
+                                                    { Model_catalog.empty_capabilities with
+                                                      context_window_tokens; effort_levels } in
+                                                  result := { id = name; display_name = None;
+                                                    capabilities } :: !result;
+                                                  collect tail))))
                               | _ -> invalid "missing slug or id model ID") in
                         collect rows) in
       try request codex_urls with
@@ -907,7 +944,7 @@ let discover_generic_models ?http ?cancel ~provider ?credential () =
     | "deepseek" -> Some (deepseek_url, "data", "id", include_all)
     | "minimax" -> Some (minimax_url, "data", "id", include_all)
     | "groq" -> Some (groq_url, "data", "id", include_all)
-    | "mistral" -> Some (mistral_url, "data", "id", include_all)
+    | "mistral" -> Some (mistral_url, "data", "id", include_mistral)
     | "together" -> Some (together_url, "", "id", include_together)
     | "cerebras" -> Some (cerebras_url, "data", "id", include_all)
     | "venice" -> Some (venice_url, "data", "id", include_venice)
@@ -1005,11 +1042,9 @@ let discover_generic_models ?http ?cancel ~provider ?credential () =
                 if String.length body > response_limit url then
                   invalid "listing exceeds size limit"
                 else
-                  let json = try Some (Yojson.Basic.from_string body)
-                    with Yojson.Json_error _ -> None in
-                  match json with
-                  | None -> invalid "malformed or truncated JSON"
-                  | Some json ->
+                  match parse_listing_json body with
+                  | Error _ as failure -> failure
+                  | Ok json ->
                       (match (if provider = "together" then
                         match json with
                         | `List rows -> Ok rows
@@ -1352,7 +1387,10 @@ let discover_raw ?http ?cancel ~provider ?credential () =
       (discover_devin_models ?http ?cancel credential)
   else if provider = "openai-codex" then
     discover_codex_models ?http ?cancel credential
-  else if provider = "google" || provider = "anthropic" || provider = "openrouter" then
+  else if List.mem provider [
+    "google"; "anthropic"; "openrouter"; "mistral"; "venice"; "fireworks";
+    "baseten"; "huggingface"; "nanogpt"
+  ] then
     discover_generic_models ?http ?cancel ~provider ?credential ()
   else
     Result.map (List.map (fun id ->

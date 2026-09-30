@@ -28,6 +28,15 @@ type credentials = {
   account_id : string option;
   residency : string option;
 }
+let effort_choices api reported =
+  let valid = match api with
+    | Codex_responses -> Codex_wire.valid_effort
+    | Umans_chat | Umans_messages -> Umans_api.valid_effort
+    | _ -> fun _ -> false in
+  match reported with
+  | None -> []
+  | Some levels -> List.filter valid levels
+
 
 exception Provider_error of string
 exception Cancelled
@@ -507,35 +516,45 @@ let post_json ?max_request_bytes ?(local = false) ?cancel
   with_temp_file (fun body_path body_output ->
     output_string body_output body;
     close_out body_output;
-    with_temp_file (fun response_path response_output ->
-      close_out response_output;
-      let option name value = name ^ " = " ^ quote_config value ^ "\n" in
-      let configuration =
-        curl_options ~local ~endpoint ~headers ~body_path
-        ^ option "output" response_path
-        ^ option "write-out" "%{http_code}" in
-      let status = try run_curl ?cancel configuration with
-        | Provider_error "Transport error: curl failed (exit status 28)" ->
-            raise (Provider_error (curl_timeout_message ~streaming:false
-              ~response_body_seen:false)) in
-      check_cancel cancel;
-      let response = read_file response_path in
-      let json =
-        try Some (Yojson.Basic.from_string response)
-        with Yojson.Json_error _ -> None in
-      let http_status =
-        try int_of_string status
-        with Failure _ -> raise (Provider_error "curl returned an invalid HTTP status") in
-      if http_status < 200 || http_status >= 300 then
-        raise (Provider_error (http_error_reason secret http_status
-          (Option.value ~default:`Null json)));
-      match json with
-      | None -> raise (Provider_error "invalid JSON in completion response")
-      | Some json ->
-          (match error_message secret json with
-          | Some message -> raise (Provider_error ("provider error: " ^ message))
-          | None -> ());
-          json))
+    let option name value = name ^ " = " ^ quote_config value ^ "\n" in
+    let max_response_bytes = 16_777_216 in
+    let received = Buffer.create 8192 in
+    let consume chunk =
+      (* curl appends a three-byte HTTP status after the body. *)
+      if String.length chunk > max_response_bytes + 3 - Buffer.length received then
+        raise (Provider_error "completion response exceeds 16 MiB");
+      Buffer.add_string received chunk in
+    let configuration =
+      curl_options ~local ~endpoint ~headers ~body_path
+      ^ option "output" "/dev/stdout"
+      ^ option "max-filesize" (string_of_int max_response_bytes)
+      ^ option "write-out" "%{http_code}" in
+    (try ignore (run_curl ?cancel ~on_chunk:consume configuration) with
+      | Provider_error "Transport error: curl failed (exit status 28)" ->
+          raise (Provider_error (curl_timeout_message ~streaming:false
+            ~response_body_seen:false))
+      | Provider_error "Transport error: curl failed (exit status 63)" ->
+          raise (Provider_error "completion response exceeds 16 MiB"));
+    check_cancel cancel;
+    let length = Buffer.length received in
+    if length < 3 then raise (Provider_error "curl returned an invalid HTTP status");
+    let http_status =
+      try int_of_string (Buffer.sub received (length - 3) 3)
+      with Failure _ -> raise (Provider_error "curl returned an invalid HTTP status") in
+    let response = Buffer.sub received 0 (length - 3) in
+    let json =
+      try Some (Yojson.Basic.from_string response)
+      with Yojson.Json_error _ -> None in
+    if http_status < 200 || http_status >= 300 then
+      raise (Provider_error (http_error_reason secret http_status
+        (Option.value ~default:`Null json)));
+    match json with
+    | None -> raise (Provider_error "invalid JSON in completion response")
+    | Some json ->
+        (match error_message secret json with
+        | Some message -> raise (Provider_error ("provider error: " ^ message))
+        | None -> ());
+        json)
 
 let status_from_headers headers =
   List.fold_left (fun current line ->
@@ -615,8 +634,11 @@ let supports_user_media = function
   | Vertex_anthropic | Devin_connect | Apple_foundation_models -> false
 
 let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage
-    ?thinking ?cancel ?apple_helper_path config messages tools =
+    ?on_tool_arguments ?thinking ?cancel ?apple_helper_path config messages tools =
   check_cancel cancel;
+  let on_text = match on_text, on_tool_arguments with
+    | None, Some _ -> Some (fun _ -> ())
+    | _ -> on_text in
 
   let has_attachments = ref false in
   List.iter (fun (message : Protocol.message) ->
@@ -746,7 +768,7 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage
                Option.iter report (Protocol.completion_usage json));
           reply
       | Some emit ->
-          let stream = Openai_stream.create ~on_text:emit in
+          let stream = Openai_stream.create ?on_tool_arguments ~on_text:emit () in
           let fields = fields @ [ "stream", `Bool true ] in
           let fields = if config.api = Openai_completions &&
             config.endpoint = "https://api.openai.com/v1/chat/completions" then
@@ -1229,7 +1251,7 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage
                Option.iter report (Anthropic_wire.usage json));
           reply
       | Some emit ->
-          let stream = Anthropic_stream.create ~on_text:emit in
+          let stream = Anthropic_stream.create ?on_tool_arguments ~on_text:emit () in
           let body = match body with
             | `Assoc fields -> `Assoc (fields @ [ "stream", `Bool true ])
             | _ -> assert false in
@@ -1275,7 +1297,7 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage
                Option.iter report (Openai_responses_wire.usage json));
           reply
       | Some emit ->
-          let stream = Openai_responses_stream.create ~on_text:emit in
+          let stream = Openai_responses_stream.create ?on_tool_arguments ~on_text:emit () in
           let body = parse (fun () ->
             Openai_responses_wire.request ~stream:true
               ~model:config.model messages tools) in
@@ -1342,7 +1364,7 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage
          | _ -> ());
         reply
       ) else
-        let stream = Bedrock_wire.create_converse_stream () in
+        let stream = Bedrock_wire.create_converse_stream ?on_tool_arguments () in
         let content = Buffer.create 256 and calls = ref [] and usage = ref None in
         parse_with_secret keys.access_key_id (fun () ->
           post_stream ~local:(config.endpoint <> "") ?cancel
@@ -1394,7 +1416,7 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage
                Option.iter report (Ollama_wire.usage json));
           reply
       | Some emit ->
-          let stream = Ollama_stream.create ~on_text:emit in
+          let stream = Ollama_stream.create ?on_tool_arguments ~on_text:emit () in
           let body = match body with
             | `Assoc fields ->
                 `Assoc (("stream", `Bool true) :: List.remove_assoc "stream" fields)
@@ -1433,7 +1455,7 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage
                Option.iter report (Gemini_wire.usage json));
           reply
       | Some emit ->
-          let stream = Gemini_stream.create ~model:config.model ~on_text:emit in
+          let stream = Gemini_stream.create ?on_tool_arguments ~model:config.model ~on_text:emit () in
           let endpoint = base ^ "/" ^ model_path ^ ":streamGenerateContent?alt=sse" in
           parse (fun () ->
             post_stream ~max_request_bytes:gemini_max_request_bytes ?cancel
@@ -1465,7 +1487,7 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage
         with Invalid_argument reason -> raise (Provider_error reason) in
       let body = parse (fun () -> Vertex_wire.request ~model:config.model messages tools) in
       let emit = Option.value ~default:(fun _ -> ()) on_text in
-      let stream = Gemini_stream.create ~model:config.model ~on_text:emit in
+      let stream = Gemini_stream.create ?on_tool_arguments ~model:config.model ~on_text:emit () in
       parse (fun () ->
         post_stream ~max_request_bytes:gemini_max_request_bytes ?cancel
           ~endpoint ~headers:["Authorization: Bearer " ^ access] ~secret:access
@@ -1501,7 +1523,7 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage
       let headers = ["Authorization: Bearer " ^ access] in
       if streaming then (
         let emit = Option.value ~default:(fun _ -> ()) on_text in
-        let stream = Vertex_anthropic_wire.create_stream ~on_text:emit in
+        let stream = Vertex_anthropic_wire.create_stream ?on_tool_arguments ~on_text:emit () in
         parse (fun () ->
           post_stream ?cancel ~endpoint ~headers ~secret:access body
             ~on_chunk:(Vertex_anthropic_wire.feed_stream stream)
@@ -1568,7 +1590,8 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage
                   let listing = try Yojson.Basic.from_string (read_file response_path)
                     with Yojson.Json_error _ ->
                       raise (Provider_error "invalid Codex account model listing JSON") in
-                  parse (fun () -> Codex_wire.model_format ~model:config.model listing)) in
+                  parse (fun () ->
+                    Codex_wire.model_format ?thinking ~model:config.model listing)) in
         from_listing Codex_wire.models_urls in
       let headers = [
         "Authorization: Bearer " ^ api_key;
@@ -1588,9 +1611,9 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage
              reject_controls "Codex residency" residency;
              [ "x-openai-internal-codex-residency: " ^ residency ]) in
       let body = parse (fun () ->
-        Codex_wire.request ~format:model_format ~model:config.model messages tools) in
+        Codex_wire.request ~format:model_format ?thinking ~model:config.model messages tools) in
       let emit = match on_text with Some emit -> emit | None -> fun _ -> () in
-      let stream = Codex_stream.create ~model:config.model ~on_text:emit in
+      let stream = Codex_stream.create ?on_tool_arguments ~model:config.model ~on_text:emit () in
       (try parse (fun () ->
         post_stream ?cancel ~endpoint:config.endpoint ~headers ~secret:api_key
           body ~on_chunk:(Codex_stream.feed stream)

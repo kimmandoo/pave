@@ -12,6 +12,7 @@ type item =
 
 type t = {
   on_text : string -> unit;
+  on_tool_arguments : (Protocol.tool_argument_delta -> unit) option;
   items : (int, item) Hashtbl.t;
   mutable response_bytes : int;
   mutable completed : Protocol.message option;
@@ -77,7 +78,13 @@ let handle_added t json =
         Call { id; call_id; name; args; args_done = None; done_item = false }
     | `String "reasoning" -> Ignored id
     | _ -> invalid "unsupported output item" in
-  Hashtbl.add t.items n item
+  Hashtbl.add t.items n item;
+  (match t.on_tool_arguments, item with
+   | Some emit, Call call ->
+       let fragment = match field "arguments" output with `String value -> value | _ -> "" in
+       emit { Protocol.key = Printf.sprintf "responses:%d" n;
+         call_id = Some call.call_id; name = call.name; fragment }
+   | _ -> ())
 
 let message_text output =
   match field "content" output with
@@ -121,7 +128,12 @@ let handle_item_done t json =
       (match call.args_done with
        | Some finished when finished <> args -> invalid "function arguments done mismatch"
        | _ -> ());
-      if Buffer.length call.args = 0 then reserve t (String.length args);
+      if Buffer.length call.args = 0 then (
+        reserve t (String.length args);
+        match t.on_tool_arguments with
+        | None -> ()
+        | Some emit -> emit { Protocol.key = Printf.sprintf "responses:%d" (index json);
+            call_id = Some call.call_id; name = call.name; fragment = args });
       call.args_done <- Some args;
       call.done_item <- true
   | Ignored _ -> ()
@@ -154,7 +166,12 @@ let handle_arguments t ~done_event json =
         call.args_done <- Some args)
       else (
         if call.args_done <> None then invalid "arguments after arguments done";
-        append t call.args (string_field "delta" json))
+        let fragment = string_field "delta" json in
+        append t call.args fragment;
+        (match t.on_tool_arguments with
+         | None -> ()
+         | Some emit -> emit { Protocol.key = Printf.sprintf "responses:%d" (index json);
+             call_id = Some call.call_id; name = call.name; fragment }))
   | _ -> invalid "function arguments for non-call item"
 
 let handle_completed t json =
@@ -212,8 +229,8 @@ let handle_event t event data =
     | _ when String.length kind >= 9 && String.sub kind 0 9 = "response." -> ()
     | _ -> invalid "unknown event")
 
-let create ~on_text =
-  let t = { on_text; items = Hashtbl.create 4; response_bytes = 0;
+let create ?on_tool_arguments ~on_text () =
+  let t = { on_text; on_tool_arguments; items = Hashtbl.create 4; response_bytes = 0;
     completed = None; usage = None; done_seen = false; failed = false; parser = None } in
   t.parser <- Some (Sse.create ~on_event:(handle_event t));
   t

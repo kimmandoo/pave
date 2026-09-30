@@ -1,4 +1,75 @@
+let shutdown_cases () =
+  List.iter (fun mode ->
+    let child = Unix.fork () in
+    if child = 0 then (
+      (try
+         let ready = Atomic.make false in
+         let events = ref [] and prompts = ref 0 and runner_ref = ref None in
+         let run ~cancel (_ : Pave.Turn_runner.submission) =
+           let runner = Option.get !runner_ref in
+           Pave.Turn_runner.tool runner (Pave.Agent.Tool_started {
+             call_id = "shutdown-call"; name = "run_command"; target = None;
+             write_content = None });
+           Atomic.set ready true;
+           Fun.protect ~finally:(fun () ->
+             Pave.Turn_runner.tool runner (Pave.Agent.Tool_aborted {
+               call_id = "shutdown-call"; name = "run_command";
+               result = "Error: cancelled before execution";
+               side_effects_may_have_occurred = false })) (fun () ->
+             (match mode with
+              | "running" ->
+                  while not (cancel ()) do Thread.delay 0.001 done
+              | "shell-approval" ->
+                  ignore (Pave.Turn_runner.approve runner "printf approved")
+              | "tool-approval" ->
+                  ignore (Pave.Turn_runner.approve_tool runner {
+                    Pave.Approval.tool_name = "write_file";
+                    tier = Pave.Approval.Write; impact = "Writes a file";
+                    details = ["Path: blocked.txt"]; reason = None })
+              | _ -> assert false);
+             raise Pave.Provider.Cancelled) in
+         let runner = Pave.Turn_runner.create ~run
+           ~on_event:(function
+             | Pave.Turn_runner.Turn_started _ -> events := "started" :: !events
+             | Pave.Turn_runner.Tool_event {
+                 event = Pave.Agent.Tool_aborted { call_id; _ }; _ } ->
+                 assert (call_id = "shutdown-call");
+                 events := "aborted" :: !events
+             | Pave.Turn_runner.Turn_cancelled _ ->
+                 events := "cancelled" :: !events
+             | _ -> failwith "unexpected shutdown event")
+           ~on_approve:(fun _ -> incr prompts; true)
+           ~on_approve_tool:(fun _ -> incr prompts; true)
+           ~on_queued:(fun _ -> ()) () in
+         runner_ref := Some runner;
+         Pave.Turn_runner.submit runner "active";
+         while not (Atomic.get ready) do Thread.delay 0.001 done;
+         Pave.Turn_runner.follow_up runner "must-not-start";
+         Pave.Turn_runner.close runner;
+         Pave.Turn_runner.close runner;
+         Pave.Turn_runner.post runner "late background event";
+         assert (not (Pave.Turn_runner.busy runner));
+         assert (!prompts = 0);
+         assert (List.rev !events = ["started"; "aborted"; "cancelled"]);
+         exit 0
+       with exn ->
+         prerr_endline (mode ^ ": " ^ Printexc.to_string exn);
+         exit 2));
+    let deadline = Unix.gettimeofday () +. 3. in
+    let rec wait () =
+      match Unix.waitpid [Unix.WNOHANG] child with
+      | 0, _ when Unix.gettimeofday () < deadline ->
+          Thread.delay 0.005; wait ()
+      | 0, _ ->
+          Unix.kill child Sys.sigkill;
+          ignore (Unix.waitpid [] child);
+          failwith (mode ^ ": shutdown did not cancel and release its worker")
+      | _, Unix.WEXITED 0 -> ()
+      | _ -> failwith (mode ^ ": shutdown failed") in
+    wait ()) ["running"; "shell-approval"; "tool-approval"]
+
 let () =
+  shutdown_cases ();
   let events = ref [] in
   let event value = events := value :: !events in
   let release_late_events = Atomic.make false in
@@ -73,7 +144,8 @@ let () =
     | "fail" -> failwith "expected turn failure"
     | "cancel-abort" ->
         Pave.Turn_runner.tool runner (Pave.Agent.Tool_started {
-          call_id = "aborted-call"; name = "read_file"; target = None
+          call_id = "aborted-call"; name = "read_file"; target = None;
+          write_content = None
         });
         Pave.Turn_runner.message runner "cancel-abort-ready";
         while not (cancel ()) do Thread.delay 0.001 done;
@@ -138,6 +210,8 @@ let () =
       | Pave.Turn_runner.Tool_event { turn_id; event = tool_event } ->
           require_owner turn_id;
           (match tool_event with
+           | Pave.Agent.Tool_draft _ | Pave.Agent.Tool_draft_ended _ |
+             Pave.Agent.Tool_executing _ -> ()
            | Pave.Agent.Tool_started { call_id; name; _ } ->
                event ("tool-start:" ^ call_id ^ ":" ^ name)
            | Pave.Agent.Tool_updated { call_id; received_bytes; _ } ->
@@ -148,6 +222,8 @@ let () =
                side_effects_may_have_occurred; _ } ->
                event ("tool-abort:" ^ call_id ^ ":" ^
                  string_of_bool side_effects_may_have_occurred))
+      | Pave.Turn_runner.Draft_preview { turn_id; _ } ->
+          require_owner turn_id
       | Pave.Turn_runner.Turn_completed { turn_id } ->
           require_owner turn_id;
           active_turn_id := None;

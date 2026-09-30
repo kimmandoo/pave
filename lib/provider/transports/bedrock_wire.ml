@@ -226,6 +226,7 @@ type stream_block =
 
 type converse_stream = {
   frames : Aws_event_stream.decoder;
+  on_tool_arguments : (Protocol.tool_argument_delta -> unit) option;
   mutable message_started : bool;
   mutable message_stopped : string option;
   mutable metadata_seen : bool;
@@ -234,7 +235,8 @@ type converse_stream = {
   mutable tool_ids : string list;
 }
 
-let create_converse_stream () = {
+let create_converse_stream ?on_tool_arguments () = {
+  on_tool_arguments;
   frames = Aws_event_stream.create ();
   message_started = false;
   message_stopped = None;
@@ -333,6 +335,10 @@ let decode_converse_event stream frame =
               String.length name > 256 || List.mem id stream.tool_ids then
              invalid "invalid or duplicate ConverseStream tool use";
            stream.active_block <- Some (Tool_block (index, id, name, Buffer.create 128));
+           (match stream.on_tool_arguments with
+            | None -> ()
+            | Some emit -> emit { Protocol.key = Printf.sprintf "bedrock:%d" index;
+                call_id = Some id; name; fragment = "" });
            []
        | _ -> invalid "unsupported ConverseStream content block start")
   | "contentBlockDelta" ->
@@ -350,10 +356,14 @@ let decode_converse_event stream frame =
            [Text_delta text]
        | `Assoc ["toolUse", `Assoc ["input", `String fragment]] ->
            (match stream.active_block with
-            | Some (Tool_block (active, _, _, input)) when active = index ->
+            | Some (Tool_block (active, id, name, input)) when active = index ->
                 if Buffer.length input + String.length fragment > 1_048_576 then
                   invalid "ConverseStream tool input exceeds 1 MiB";
                 Buffer.add_string input fragment;
+                (match stream.on_tool_arguments with
+                 | None -> ()
+                 | Some emit -> emit { Protocol.key = Printf.sprintf "bedrock:%d" index;
+                     call_id = Some id; name; fragment });
                 []
             | _ -> invalid "mismatched ConverseStream tool input block")
        | _ -> invalid "unsupported ConverseStream content delta")

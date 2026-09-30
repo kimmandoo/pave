@@ -11,6 +11,10 @@ type event =
   | Text_delta of { turn_id : int; text : string }
   | Activity_phase of { turn_id : int; phase : Agent.phase }
   | Tool_event of { turn_id : int; event : Agent.tool_event }
+  | Draft_preview of {
+      turn_id : int; key : string; name : string;
+      preview : Write_preview.snapshot
+    }
   | Turn_completed of { turn_id : int }
   | Turn_cancelled of { turn_id : int }
   | Turn_failed of { turn_id : int; error : exn }
@@ -35,11 +39,19 @@ type approval = {
   mutable answer : bool option;
 }
 
+type draft = {
+  key : string;
+  mutable name : string;
+  decoder : Write_preview.t;
+  mutable pending : bool;
+}
+
 type notice =
   | Message of int * string
   | Delta of int * string
   | Phase of int * Agent.phase
   | Tool of int * Agent.tool_event
+  | Preview of int * draft
   | Approve of int * string * approval * (unit -> bool)
   | Approve_tool of int * Approval.request * approval * (unit -> bool)
   | Finished of int * completion
@@ -52,6 +64,7 @@ type t = {
   drain_bytes : bytes;
   guard : Mutex.t;
   notices : notice Queue.t;
+  drafts : (string, draft) Hashtbl.t;
   mutable approvals : approval list;
   steering : queued_submission Queue.t;
   follow_ups : queued_submission Queue.t;
@@ -79,7 +92,8 @@ let create ~run ~on_event ~on_approve ~on_queued
   Unix.set_nonblock write_fd;
   { read_fd; write_fd; wake_byte = Bytes.of_string "x";
     drain_bytes = Bytes.create 256;
-    guard = Mutex.create (); notices = Queue.create (); approvals = [];
+    guard = Mutex.create (); notices = Queue.create ();
+    drafts = Hashtbl.create 8; approvals = [];
     steering = Queue.create (); follow_ups = Queue.create ();
     worker = None; active_turn = None;
     next_turn_id = 0; closed = false;
@@ -133,7 +147,7 @@ let notify t turn notice =
       try ignore (Unix.write t.write_fd t.wake_byte 0 1)
       with
       | Unix.Unix_error (Unix.EINTR, _, _) -> write ()
-      | Unix.Unix_error (Unix.EAGAIN, _, _) -> () in
+      | Unix.Unix_error ((Unix.EAGAIN | Unix.EPIPE | Unix.EBADF), _, _) -> () in
     write ())
 
 let post t message =
@@ -148,7 +162,7 @@ let post t message =
       try ignore (Unix.write t.write_fd t.wake_byte 0 1)
       with
       | Unix.Unix_error (Unix.EINTR, _, _) -> write ()
-      | Unix.Unix_error (Unix.EAGAIN, _, _) -> () in
+      | Unix.Unix_error ((Unix.EAGAIN | Unix.EPIPE | Unix.EBADF), _, _) -> () in
     write ())
 
 let message t text =
@@ -164,8 +178,28 @@ let phase t value =
     (worker_turn t)
 
 let tool t event =
-  Option.iter (fun turn -> notify t turn (Tool (turn.id, event)))
-    (worker_turn t)
+  Option.iter (fun turn ->
+    match event with
+    | Agent.Tool_draft delta ->
+        let draft = with_guard t (fun () ->
+          if Atomic.get turn.cancelled then None else
+          let draft = match Hashtbl.find_opt t.drafts delta.key with
+            | Some draft -> Some draft
+            | None when Hashtbl.length t.drafts < 128 ->
+                let draft = { key = delta.key; name = delta.name;
+                  decoder = Write_preview.create (); pending = false } in
+                Hashtbl.add t.drafts delta.key draft; Some draft
+            | None -> None in
+          Option.bind draft (fun draft ->
+            draft.name <- delta.name;
+            Write_preview.feed draft.decoder delta.fragment;
+            if draft.pending then None else (
+              draft.pending <- true; Some draft))) in
+        Option.iter (fun draft -> notify t turn (Preview (turn.id, draft))) draft
+    | Agent.Tool_draft_ended { key; _ } ->
+        with_guard t (fun () -> Hashtbl.remove t.drafts key);
+        notify t turn (Tool (turn.id, event))
+    | _ -> notify t turn (Tool (turn.id, event))) (worker_turn t)
 
 let answer request result =
   Mutex.lock request.mutex;
@@ -173,6 +207,11 @@ let answer request result =
    | None -> request.answer <- Some result; Condition.signal request.condition
    | Some _ -> ());
   Mutex.unlock request.mutex
+
+let register_approval t turn request =
+  with_guard t (fun () ->
+    if t.closed || Atomic.get turn.cancelled then raise Provider.Cancelled;
+    t.approvals <- request :: t.approvals)
 
 let approve t command =
   let turn = match worker_turn t with
@@ -182,7 +221,7 @@ let approve t command =
   if cancel () then raise Provider.Cancelled;
   let request = { mutex = Mutex.create (); condition = Condition.create ();
     answer = None } in
-  with_guard t (fun () -> t.approvals <- request :: t.approvals);
+  register_approval t turn request;
   notify t turn (Approve (turn.id, command, request, cancel));
   Mutex.lock request.mutex;
   let rec await () = match request.answer with
@@ -201,7 +240,7 @@ let approve_tool t approval_request =
   if cancel () then raise Provider.Cancelled;
   let request = { mutex = Mutex.create (); condition = Condition.create ();
     answer = None } in
-  with_guard t (fun () -> t.approvals <- request :: t.approvals);
+  register_approval t turn request;
   notify t turn (Approve_tool (turn.id, approval_request, request, cancel));
   Mutex.lock request.mutex;
   let rec await () = match request.answer with
@@ -328,10 +367,20 @@ let drain t =
         if not (cancel_requested t id) then
           t.on_event (Activity_phase { turn_id = id; phase });
         handle ()
+    | Some (Preview (id, draft)) ->
+        let name, preview = with_guard t (fun () ->
+          draft.pending <- false;
+          draft.name, Write_preview.snapshot draft.decoder) in
+        if not (cancel_requested t id) then
+          t.on_event (Draft_preview {
+            turn_id = id; key = draft.key; name; preview });
+        handle ()
     | Some (Tool (id, event)) ->
         let terminal = match event with
-          | Agent.Tool_settled _ | Agent.Tool_aborted _ -> true
-          | Agent.Tool_started _ | Agent.Tool_updated _ -> false in
+          | Agent.Tool_settled _ | Agent.Tool_aborted _ |
+            Agent.Tool_draft_ended _ -> true
+          | Agent.Tool_draft _ | Agent.Tool_started _ | Agent.Tool_executing _ |
+            Agent.Tool_updated _ -> false in
         if terminal || not (cancel_requested t id) then
           t.on_event (Tool_event { turn_id = id; event });
         handle ()
@@ -363,6 +412,7 @@ let drain t =
         | Some _ ->
             (match t.worker with Some worker -> Thread.join worker | None -> ());
             t.worker <- None;
+            with_guard t (fun () -> Hashtbl.clear t.drafts);
             with_guard t (fun () -> t.active_turn <- None);
             emit_finish t id outcome;
             if not t.closed then (
@@ -381,9 +431,14 @@ let close t =
   if not t.closed then (
     Queue.clear t.steering;
     Queue.clear t.follow_ups;
+    cancel t;
     (match t.worker with Some worker -> Thread.join worker | None -> ());
-    t.worker <- None;
-    with_guard t (fun () -> t.active_turn <- None);
-    t.closed <- true;
-    Unix.close t.read_fd;
-    Unix.close t.write_fd)
+    with_guard t (fun () -> t.closed <- true);
+    Fun.protect ~finally:(fun () ->
+      t.worker <- None;
+      with_guard t (fun () ->
+        t.active_turn <- None;
+        Hashtbl.clear t.drafts;
+        Queue.clear t.notices);
+      Unix.close t.read_fd;
+      Unix.close t.write_fd) (fun () -> drain t))

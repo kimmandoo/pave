@@ -10,6 +10,8 @@ let chooser : Tui.chooser = {
   choices = [| model "unverified/suggestion" "Suggestion" |];
   allow_custom = true;
   dynamic = true;
+  segmented = false;
+  scope_action = None;
   status = Some "Loading available models";
   status_pages = [||];
   status_page = 0;
@@ -128,6 +130,30 @@ let () =
   scoped.filter <- "";
   scoped.selected <- 1;
   assert ((Tui.matches scoped).(scoped.selected).value = id_b);
+  let effort = { chooser with dynamic = false; segmented = true; plain = [];
+    choices = Array.of_list (List.map (fun level -> model level level)
+      ["Provider default"; "minimal"; "low"; "medium"; "high"; "xhigh"]);
+    selected = 5; intro = [|"Chosen model"; "provider@api#account/exact"|];
+    status = Some "Levels reported by fresh account listing";
+    filter = ""; filtered = None } in
+  List.iter (fun columns ->
+    let chips, selected_row = Tui.segment_rows ~columns effort in
+    assert (selected_row >= 0 && selected_row < Array.length chips &&
+      Array.for_all (fun row -> Notty.I.width row <= columns) chips);
+    let rendered = Buffer.create 128 in
+    Notty.Render.to_buffer rendered Notty.Cap.ansi (0, 0)
+      (columns, 1) chips.(selected_row);
+    let output = Buffer.contents rendered in
+    let contains part =
+      let rec find index =
+        index + String.length part <= String.length output &&
+        (String.sub output index (String.length part) = part || find (index + 1)) in
+      find 0 in
+    assert (contains "✓" && (columns < 18 || contains "xhigh"));
+    List.iter (fun height ->
+      let panel = Tui.effort_panel ~cols:columns ~height effort in
+      assert (Notty.I.width panel <= columns && Notty.I.height panel = height))
+      [1; 2; 4; 10]) [9; 18; 40; 100];
   let approval_rows = Tui.approval_body_rows ~columns:8
     ~measure:(fun text ->
       Notty.I.width (Notty.I.string Notty.A.empty text))

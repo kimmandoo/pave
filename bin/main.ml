@@ -68,6 +68,7 @@ let () =
     and logout = ref "" in
   let account_id = ref None and mask_secrets = ref false
     and enable_security_scan = ref false and terminal_images = ref false in
+  let enable_subagents = ref false in
   let local_tool_manifest = ref None in
   let disable_user_content = ref false
     and disable_project_content = ref false in
@@ -137,6 +138,8 @@ let () =
     "--allow-shell", Arg.Set allow_shell, "Offer model-requested shell commands for individual interactive approval (NOT sandboxed)";
     "--enable-security-scan", Arg.Set enable_security_scan,
       "Enable the opt-in repository security scan tool";
+    "--enable-subagents", Arg.Set enable_subagents,
+      "Enable explicitly approved read-only child agents in private saved sessions (disabled by default)";
     "--terminal-images", Arg.Set terminal_images,
       "Show attached images in explicitly identified Kitty/iTerm2 terminals (disabled by default)";
     "--system-prompt", Arg.String (fun text -> custom_prompt := Some text),
@@ -606,9 +609,11 @@ let () =
                | None -> []
                | Some _ ->
                    List.filter_map (fun (candidate : Pave.Provider_catalog.route) ->
-                    if Pave.Model_discovery.model_supports_endpoint ~registry
-                        ~provider:descriptor.id model ~endpoint:candidate.endpoint
-                    then Some candidate.name else None) descriptor.routes in
+                    Option.bind (Pave.Provider_catalog.route descriptor candidate.name)
+                      (fun route ->
+                        if Pave.Model_discovery.model_supports_endpoint ~registry
+                            ~provider:descriptor.id model ~endpoint:route.endpoint
+                        then Some route.name else None)) descriptor.routes in
              let status =
                if listing.source.id_source =
                    Pave.Model_catalog.Runtime_default then
@@ -1032,8 +1037,13 @@ let () =
                | None -> "\n");
             (match read_line () with "y" | "Y" | "yes" -> true | _ -> false) in
     let render_tool_event screen = function
-      | Pave.Agent.Tool_started { call_id; name; target } ->
-          Tui.tool_started ?target screen call_id name
+      | Pave.Agent.Tool_draft delta -> Tui.tool_draft screen delta
+      | Pave.Agent.Tool_draft_ended { key; call_id; valid } ->
+          Tui.tool_draft_ended screen key call_id valid
+      | Pave.Agent.Tool_started { call_id; name; target; write_content } ->
+          Tui.tool_started ?target ?write_content screen call_id name
+      | Pave.Agent.Tool_executing { call_id; _ } ->
+          Tui.tool_executing screen call_id
       | Pave.Agent.Tool_updated { call_id; name; received_bytes } ->
           Tui.tool_updated screen call_id name received_bytes
       | Pave.Agent.Tool_settled { call_id; name; result; is_error } ->
@@ -1049,8 +1059,11 @@ let () =
           call_id; name; side_effects_may_have_occurred; _ } ->
           ignore (Pave.Session.record_tool_aborted current ~call_id ~name
             ~side_effects_may_have_occurred)
-      | _, Pave.Agent.Tool_updated _ | None, _ -> () in
+      | _, (Pave.Agent.Tool_draft _ | Pave.Agent.Tool_draft_ended _ |
+          Pave.Agent.Tool_executing _ | Pave.Agent.Tool_updated _) | None, _ -> () in
     let emit_json_tool_event = function
+      | Pave.Agent.Tool_draft _ | Pave.Agent.Tool_draft_ended _ |
+        Pave.Agent.Tool_executing _ -> ()
       | Pave.Agent.Tool_started { name; _ } ->
           jsonl_emit [
             "type", `String "tool"; "name", `String name;
@@ -1093,7 +1106,8 @@ let () =
             let report = match event with
               | Pave.Agent.Tool_started { name; _ } ->
                   "[" ^ name ^ "]"
-              | Pave.Agent.Tool_updated _ -> ""
+              | Pave.Agent.Tool_draft _ | Pave.Agent.Tool_draft_ended _ |
+                Pave.Agent.Tool_executing _ | Pave.Agent.Tool_updated _ -> ""
               | Pave.Agent.Tool_settled { name; result; _ }
               | Pave.Agent.Tool_aborted { name; result; _ } ->
                   "[" ^ name ^ "] " ^ result in
@@ -1581,8 +1595,6 @@ let () =
       provider_state = None; attachments = [] } in
     let with_system_prompt text messages =
       if text = "" then messages else system_prompt_message text :: messages in
-    let record_compaction_usage usages =
-      List.iter record_usage usages in
     let latest_user_split messages =
       let _, last_user = List.fold_left (fun (index, found) message ->
         index + 1, if message.Pave.Protocol.role = "user" then Some index else found)
@@ -1662,8 +1674,7 @@ let () =
                     let native = native_openai || native_anthropic in
                     if signed_prefix && not native then
                       failwith "automatic summary compaction is disabled for older signed provider state on this route";
-                    let usages = ref [] in
-                    let on_usage tokens = usages := tokens :: !usages in
+                    let on_usage = record_usage in
                     let summary, provider_state =
                       let native_instruction =
                         Pave.Context_compaction.native_summary_instruction in
@@ -1716,10 +1727,11 @@ let () =
                          ignore (Pave.Session.compact ?provider_state current
                            ~summary ~first_kept_id)
                      | None -> ());
-                    record_compaction_usage (List.rev !usages);
                     Some projected)) in
     let start_child_job ~session ~provider ~authentication ?resolve_credential
         ?secret_mask ~tool_allowed ~kind ~label ~task () =
+      if not !enable_subagents then
+        failwith "subagents are disabled; launch with --enable-subagents";
       let history = Pave.Session.context session in
       let read_tools = ["read_file"; "list_files"; "glob"; "search"; "grep"] in
       Pave.Session_jobs.start (job_manager session) ~kind ~label
@@ -1780,7 +1792,7 @@ let () =
           not (List.mem name !disabled_tools) &&
           plugin_allows (fun (refs : Pave.Plugin_registry.capabilities) ->
             refs.tools) name in
-        if name = "task" then enabled && Option.is_some !journal
+        if name = "task" then enabled && !enable_subagents && Option.is_some !journal
         else if name = "repository_security_scan" then
           enabled && !enable_security_scan
         else if List.mem name Pave.Tools.session_tool_names then
@@ -1933,8 +1945,9 @@ let () =
         ~tool_available
         ~external_tools ~execute_external ~validate_external_tool
         ~external_approval_details
-        ~delegate_task
+        ?delegate_task:(if !enable_subagents then Some delegate_task else None)
         ~stream:(!stream || Option.is_some !ui || !output_format = "jsonl")
+        ~preview_tools:(Option.is_some !ui)
         ~approval_mode:!effective_approval_mode
         ~tool_approval:configured.tool_approval
         ~command_patterns:configured.command_patterns
@@ -2201,8 +2214,7 @@ let () =
               if native_anthropic then with_system_prompt compaction_system prefix
               else prefix in
             let native_tools = if native_anthropic then compaction_tools else [] in
-            let usages = ref [] in
-            let collect_usage tokens = usages := tokens :: !usages in
+            let collect_usage = record_usage in
             let native_fits = native && match active_context_window () with
               | None -> true
               | Some window_tokens ->
@@ -2279,20 +2291,24 @@ let () =
                  | Pave.Context_budget.Media_unmeasured -> ());
             ignore (Pave.Session.compact ?provider_state current
               ~summary ~first_kept_id);
-            record_compaction_usage (List.rev !usages);
             agent := None;
             on_event "Compacted conversation; full journal preserved."
            with exn -> on_event ("Error: " ^ error_message exn)) in
     let choose_model ?preferred selected =
       let display_name = ref None in
+      let picked_thinking = ref None in
       let selector = match selected with
         | Some selector -> selector
         | None ->
             (match !ui with
              | Some screen ->
                  let picked = match preferred with
-                   | None -> Model_picker.choose_all ~registry screen
-                       ~active:!active_descriptor ~current_route:!active_route.name ()
+                   | None -> Model_picker.browse ~registry screen
+                       ~active:!active_descriptor ~current_route:!active_route.name
+                       ?current_account_id:(Option.bind !active_identity
+                         (fun identity -> identity.account_id))
+                       ?current_model:(Option.map Pave.Model_identity.selector !active_identity)
+                       ~configure_effort:true ?current_thinking:!thinking_level ()
                    | Some (descriptor : Pave.Provider_catalog.descriptor) ->
                        let route_name = if descriptor.id = !active_descriptor.id
                          then !active_route.name else descriptor.default_route in
@@ -2305,12 +2321,16 @@ let () =
                              configured.default_account_id
                          | None -> None in
                        Model_picker.choose ~registry screen ~descriptor ~route_name
-                         ?account_id:selected_account_id
+                         ?account_id:selected_account_id ~configure_effort:true
+                         ?current_thinking:!thinking_level
+                         ?current_model:(Option.map Pave.Model_identity.selector !active_identity)
                          ~title:("Model · " ^ descriptor.id ^ " (current conversation)")
                          () in
                  display_name := Option.bind picked
                   (fun (selection : Model_picker.selection) ->
                     selection.display_name);
+                 picked_thinking := Option.bind picked
+                   (fun (selection : Model_picker.selection) -> selection.thinking);
                  Option.value ~default:""
                   (Option.map (fun (selection : Model_picker.selection) ->
                     selection.selector) picked)
@@ -2336,10 +2356,14 @@ let () =
               | None -> None in
             let picked = Model_picker.choose ~registry screen ~descriptor
               ~route_name:route.name ?account_id:selected_account_id
+              ~configure_effort:true ?current_thinking:!thinking_level
+              ?current_model:(Option.map Pave.Model_identity.selector !active_identity)
               ~title:("Model · " ^ descriptor.id ^ "@" ^ route.name) () in
             display_name := Option.bind picked
               (fun (selection : Model_picker.selection) ->
                 selection.display_name);
+            picked_thinking := Option.bind picked
+              (fun (selection : Model_picker.selection) -> selection.thinking);
             Option.value ~default:""
               (Option.map (fun (selection : Model_picker.selection) ->
                 selection.selector) picked)
@@ -2396,6 +2420,9 @@ let () =
             raise exn in
         apply_model_selection ?display_name:!display_name
           (descriptor, identity, route);
+        Option.iter (fun thinking ->
+          Option.iter (fun current -> Pave.Session.set_thinking current thinking) !journal;
+          thinking_level := thinking) !picked_thinking;
         on_event ("Active model: " ^ Pave.Model_identity.selector identity ^
           ". /setup saves a cross-workspace default.")
       ) else match !ui with
@@ -2870,6 +2897,7 @@ let () =
                 let choices = Pave.Interaction.suggestions
                   ~session:(Option.is_some !journal)
                   ~interactive:(Option.is_some !ui)
+                  ~subagents:!enable_subagents
                   ~external_commands:!external_commands prefix in
                 if choices = [] then (
                   Tui.alert screen "No matching command";
@@ -2901,9 +2929,12 @@ let () =
                 else
                   let initial_filter = String.sub draft !argument_start
                     (cursor - !argument_start) in
-                  (match Model_picker.choose_all ~initial_filter ~registry screen
-                    ~active:!active_descriptor
-                    ~current_route:!active_route.name () with
+                  (match Model_picker.browse ~initial_filter ~registry screen
+                    ~active:!active_descriptor ~current_route:!active_route.name
+                    ?current_account_id:(Option.bind !active_identity
+                      (fun identity -> identity.account_id))
+                    ?current_model:(Option.map Pave.Model_identity.selector !active_identity)
+                    () with
                    | None -> None
                    | Some (selection : Model_picker.selection) ->
                        Some { Tui.start = !argument_start;
@@ -2986,7 +3017,7 @@ let () =
         and paste_ranges = input.paste_ranges in
          let command = Pave.Interaction.parse ~external_commands:!external_commands
            ~session:(Option.is_some !journal)
-           ~interactive:(Option.is_some !ui) line in
+           ~interactive:(Option.is_some !ui) ~subagents:!enable_subagents line in
          let busy = match !runner with
            | Some active -> Pave.Turn_runner.busy active
            | None -> false in
@@ -3011,7 +3042,7 @@ let () =
                let lines = "Commands · type / then Tab to search" ::
                 Pave.Interaction.help ~external_commands:!external_commands
                   ~session:(Option.is_some !journal)
-                  ~interactive:(Option.is_some !ui) () in
+                  ~interactive:(Option.is_some !ui) ~subagents:!enable_subagents () in
                match !ui with
                | Some screen -> Tui.events screen (lines @ Tui.hotkeys)
                | None -> List.iter on_event lines)
@@ -3950,6 +3981,7 @@ let () =
       && Sys.getenv_opt "TERM" <> Some "dumb" then (
       let screen = Tui.create ~root ~version:Embedded_installer.version
         ~external_commands:!external_commands
+        ~subagents:!enable_subagents
         ?model_display_name:!active_model_display_name
         ~model:(selection_label !active_descriptor !active_identity !active_route)
         ~session:(!session <> "") () in
@@ -4003,6 +4035,8 @@ let () =
                    Tui.set_activity screen (Some ("Tool: " ^ name)))
           | Pave.Turn_runner.Tool_event { event; _ } ->
               render_tool_event screen event
+          | Pave.Turn_runner.Draft_preview { key; name; preview; _ } ->
+              Tui.tool_preview screen key name preview
           | Pave.Turn_runner.Background_notice { message } ->
               (match !runner with
                | Some active when Pave.Turn_runner.busy active -> ()

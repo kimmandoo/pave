@@ -104,12 +104,25 @@ let test_converse_stream_decoder () =
     bedrock_event "messageStop" (`Assoc ["stopReason", `String "tool_use"]);
     bedrock_event "metadata" (`Assoc ["usage", `Assoc [
       "inputTokens", `Int 9; "outputTokens", `Int 3]])] in
-  let stream = Wire.create_converse_stream () in
+  let drafts = ref [] in
+  let stream = Wire.create_converse_stream
+    ~on_tool_arguments:(fun delta -> drafts := delta :: !drafts) () in
   let events = List.concat_map (fun frame ->
     let pieces = List.init (String.length frame) (fun index ->
       String.sub frame index 1) in
     List.concat_map (Wire.feed_converse_stream stream) pieces) frames in
   Wire.finish_converse_stream stream;
+  let fragments key = List.rev !drafts
+    |> List.filter (fun (d : Pave.Protocol.tool_argument_delta) -> d.key = key)
+    |> List.map (fun (d : Pave.Protocol.tool_argument_delta) -> d.fragment)
+    |> String.concat "" in
+  let key_for_id id =
+    (List.find (fun (delta : Pave.Protocol.tool_argument_delta) ->
+      delta.call_id = Some id) !drafts).key in
+  let first_key = key_for_id "tool-a" and second_key = key_for_id "tool-b" in
+  assert (first_key <> second_key);
+  assert (fragments first_key = {|{"key":"alpha"}|});
+  assert (fragments second_key = "{}");
   let expected_usage = { Pave.Protocol.input_tokens = 9; output_tokens = 3;
     cached_input_tokens = None; cache_creation_input_tokens = None;
     reasoning_output_tokens = None; input_modality_tokens = None;

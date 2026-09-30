@@ -12,11 +12,12 @@ let max_diagnostics = 1_000
 let max_pending_edit_previews = 32
 let max_pending_edit_preview_bytes = 4 * max_frame_bytes
 
-(* [read] must return promptly when [close] is called. The launcher is injected
-   so protocol and lifecycle tests need no language-server executable. *)
+(* [read] must return promptly when [close] is called; [write] must obey its
+   deadline and cancellation predicate. Injected launchers keep protocol and
+   lifecycle tests independent of a language-server executable. *)
 type io = {
   read : bytes -> int -> int -> int;
-  write : string -> unit;
+  write : deadline:float -> cancel:(unit -> bool) -> string -> unit;
   close : unit -> unit;
   terminate : unit -> unit;
 }
@@ -59,6 +60,10 @@ type manager = {
   mutable preview_bytes : int;
 }
 
+let check_write_budget deadline cancel =
+  if (try cancel () with _ -> true) then fail "LSP request cancelled";
+  if Unix.gettimeofday () >= deadline then fail "LSP request timed out"
+
 let rec create_manager ?(launcher = default_launcher) () =
   { launch = launcher; lock = Mutex.create (); request_lock = Mutex.create ();
     write_lock = Mutex.create (); pending = Hashtbl.create 16;
@@ -77,16 +82,13 @@ and default_launcher ~program ~arguments ~cwd ~environment =
   List.iter (fun argument ->
     if String.contains argument '\000' || String.length argument > 4_096 then
       fail "invalid LSP server argument") arguments;
-  (* The fixed shell wrapper only changes directory and execs the exact argv.
-     Arguments and the path remain positional parameters, never shell source. *)
-  let child_in, parent_in = Unix.pipe () and parent_out, child_out = Unix.pipe () in
-  List.iter Unix.set_close_on_exec [child_in; parent_in; parent_out; child_out];
-  let argv = Array.of_list
-      (["/bin/sh"; "-c"; "cd \"$1\" || exit 127; shift; exec \"$@\"";
-       "pave-lsp"; cwd; program] @ arguments) in
-  let pid = Unix.create_process_env "/bin/sh" argv environment
-      child_in child_out Unix.stderr in
-  Unix.close child_in; Unix.close child_out;
+  (* Reuse the checked native launcher so the server owns a process group.
+     Stderr must stay separate from the JSON-RPC stream. *)
+  let pid, parent_in, parent_out =
+    try Workspace_process.spawn_native ~program ~arguments ~cwd ~environment
+          ~merge_stderr:false
+    with Workspace_process.Error message -> fail message in
+  Unix.clear_nonblock parent_out;
   let closed = ref false and close_lock = Mutex.create () in
   let close () =
     Mutex.lock close_lock;
@@ -97,32 +99,42 @@ and default_launcher ~program ~arguments ~cwd ~environment =
       Mutex.unlock close_lock)
     else Mutex.unlock close_lock
   in
+  let terminated = ref false and terminate_lock = Mutex.create () in
   let terminate () =
-    (try Unix.kill pid Sys.sigterm with Unix.Unix_error (Unix.ESRCH, _, _) -> ());
-    let rec reap remaining =
-      if remaining = 0 then (
-        (try Unix.kill pid Sys.sigkill with _ -> ());
-        (try ignore (Unix.waitpid [] pid) with _ -> ()))
-      else
-        try
-          match Unix.waitpid [Unix.WNOHANG] pid with
-          | 0, _ -> Thread.delay 0.01; reap (remaining - 1)
-          | _, Unix.WEXITED _ | _, Unix.WSIGNALED _ | _, Unix.WSTOPPED _ -> ()
-        with Unix.Unix_error (Unix.ECHILD, _, _) -> ()
-    in
-    reap 100
+    Mutex.lock terminate_lock;
+    Fun.protect ~finally:(fun () -> Mutex.unlock terminate_lock) (fun () ->
+      if not !terminated then (
+        terminated := true;
+        Workspace_process.terminate_group pid;
+        let rec reap () =
+          try ignore (Unix.waitpid [] pid)
+          with Unix.Unix_error (Unix.EINTR, _, _) -> reap ()
+             | Unix.Unix_error (Unix.ECHILD, _, _) -> () in
+        reap ()))
   in
   { read = (fun bytes offset length -> Unix.read parent_out bytes offset length);
-    write = (fun text ->
-      let bytes = Bytes.unsafe_of_string text in
+    write = (fun ~deadline ~cancel text ->
       let rec loop offset =
-        if offset < Bytes.length bytes then
-          try
-            let count = Unix.write parent_in bytes offset (Bytes.length bytes - offset) in
-            if count = 0 then fail "LSP server closed its input";
-            loop (offset + count)
-          with Unix.Unix_error (Unix.EINTR, _, _) -> loop offset
-      in loop 0);
+        check_write_budget deadline cancel;
+        if offset < String.length text then (
+          let remaining = deadline -. Unix.gettimeofday () in
+          let _, writable, _ =
+            try Unix.select [] [parent_in] [] (max 0. (min 0.05 remaining))
+            with Unix.Unix_error (Unix.EINTR, _, _) -> [], [], [] in
+          if writable = [] then loop offset
+          else
+            try
+              let count = Unix.write_substring parent_in text offset
+                  (min 16_384 (String.length text - offset)) in
+              if count = 0 then fail "LSP server closed its input";
+              loop (offset + count)
+            with
+            | Unix.Unix_error ((Unix.EINTR | Unix.EAGAIN | Unix.EWOULDBLOCK), _, _) ->
+                loop offset)
+      in
+      try loop 0 with exn ->
+        (* A partial frame cannot be resumed as a new JSON-RPC request. *)
+        close (); terminate (); raise exn);
     close; terminate }
 
 let with_lock lock fn =
@@ -281,18 +293,24 @@ let decode_message text =
   | Yojson.Json_error _ -> fail "malformed LSP JSON message"
   | Stack_overflow -> fail "LSP JSON nesting exceeds the limit"
 
-let send_raw manager text =
+let send_raw ?deadline ?(cancel = fun () -> false) manager text =
+  let deadline = Option.value deadline ~default:(Unix.gettimeofday () +. 30.) in
   let io = match manager.io with Some io -> io | None -> fail "LSP server is not running" in
-  with_lock manager.write_lock (fun () -> io.write (frame text))
+  let rec acquire () =
+    check_write_budget deadline cancel;
+    if not (Mutex.try_lock manager.write_lock) then (Thread.delay 0.01; acquire ()) in
+  acquire ();
+  Fun.protect ~finally:(fun () -> Mutex.unlock manager.write_lock)
+    (fun () -> io.write ~deadline ~cancel (frame text))
 
-let send_json manager message = send_raw manager (json message)
+let send_json ?deadline ?cancel manager message = send_raw ?deadline ?cancel manager (json message)
 
 let send_server_error manager id code message =
   send_json manager (`Assoc ["jsonrpc", `String "2.0"; "id", id;
     "error", `Assoc ["code", `Int code; "message", `String message]])
 
-let notification manager method_ params =
-  send_json manager (`Assoc ["jsonrpc", `String "2.0"; "method", `String method_; "params", params])
+let notification ?deadline ?cancel manager method_ params =
+  send_json ?deadline ?cancel manager (`Assoc ["jsonrpc", `String "2.0"; "method", `String method_; "params", params])
 
 let fail_pending manager message =
   with_lock manager.lock (fun () ->
@@ -447,30 +465,33 @@ let next_id manager = with_lock manager.lock (fun () ->
   manager.next_id <- manager.next_id + 1;
   manager.next_id)
 
-let request ?(timeout_seconds = 30.) ?(cancel = fun () -> false) manager method_ params =
+let request ?(timeout_seconds = 30.) ?deadline ?(cancel = fun () -> false) manager method_ params =
+  let deadline = Option.value deadline ~default:(Unix.gettimeofday () +. timeout_seconds) in
   let id = next_id manager in
   let pending = { condition = Condition.create (); response = None } in
   with_lock manager.lock (fun () -> Hashtbl.add manager.pending id pending);
-  (try send_json manager (`Assoc ["jsonrpc", `String "2.0"; "id", `Int id;
-      "method", `String method_; "params", params])
-   with exn -> with_lock manager.lock (fun () -> Hashtbl.remove manager.pending id); raise exn);
-  let started = Unix.gettimeofday () in
+  let cancel_remote () =
+    try notification ~deadline:(Unix.gettimeofday () +. 0.1)
+        manager "$/cancelRequest" (`Assoc ["id", `Int id])
+    with _ -> () in
   let rec await () =
     let response = with_lock manager.lock (fun () -> pending.response) in
     match response with
     | Some (`Assoc [("__failure", `String message)]) -> fail message
     | Some response -> response
-    | None when cancel () ->
-        notification manager "$/cancelRequest" (`Assoc ["id", `Int id]);
-        with_lock manager.lock (fun () -> Hashtbl.remove manager.pending id);
+    | None when (try cancel () with _ -> true) ->
+        cancel_remote ();
         fail "LSP request cancelled"
-    | None when Unix.gettimeofday () -. started > timeout_seconds ->
-        notification manager "$/cancelRequest" (`Assoc ["id", `Int id]);
-        with_lock manager.lock (fun () -> Hashtbl.remove manager.pending id);
+    | None when Unix.gettimeofday () >= deadline ->
+        cancel_remote ();
         fail "LSP request timed out"
     | None -> Thread.delay 0.01; await ()
   in
-  Fun.protect ~finally:(fun () -> with_lock manager.lock (fun () -> Hashtbl.remove manager.pending id)) await
+  Fun.protect ~finally:(fun () -> with_lock manager.lock (fun () -> Hashtbl.remove manager.pending id))
+    (fun () ->
+      send_json ~deadline ~cancel manager (`Assoc ["jsonrpc", `String "2.0"; "id", `Int id;
+        "method", `String method_; "params", params]);
+      await ())
 
 let response_result response =
   match member "error" response with
@@ -605,7 +626,7 @@ let require_identity manager owner root program arguments =
        | None, false -> identity)
   | None, _, _, _ -> fail "LSP server has not been started"
 
-let current_document manager root relative language_id =
+let current_document ?cancel manager root relative language_id =
   let absolute = try Workspace_path.regular_path root relative with Workspace_path.Error message -> fail message in
   let snapshot = try Workspace_edit.read_snapshot ~root ~path:relative with Workspace_edit.Error message -> fail message in
   let uri = file_uri absolute in
@@ -618,7 +639,7 @@ let current_document manager root relative language_id =
           if document.version = max_int then fail "LSP document version limit reached";
           document.version <- document.version + 1;
           document.text <- snapshot.contents; document.sha256 <- snapshot.sha256;
-          notification manager "textDocument/didChange" (`Assoc [
+          notification ?cancel manager "textDocument/didChange" (`Assoc [
             "textDocument", `Assoc ["uri", `String uri; "version", `Int document.version];
             "contentChanges", `List [`Assoc ["text", `String snapshot.contents]]]));
         document
@@ -627,11 +648,11 @@ let current_document manager root relative language_id =
         let document = { uri; language_id; version = 1; text = snapshot.contents;
                          sha256 = snapshot.sha256; diagnostics = [] } in
         Hashtbl.add manager.documents uri document;
-        notification manager "textDocument/didOpen" (`Assoc [
+        notification ?cancel manager "textDocument/didOpen" (`Assoc [
           "textDocument", `Assoc ["uri", `String uri; "languageId", `String language_id;
             "version", `Int document.version; "text", `String document.text]]);
         document)
-let did_close_documents manager =
+let did_close_documents ?deadline ?cancel manager =
   let uris = with_lock manager.lock (fun () ->
     if manager.documents_closed then []
     else (
@@ -639,7 +660,7 @@ let did_close_documents manager =
       Hashtbl.fold (fun _ document uris -> document.uri :: uris)
         manager.documents [])) in
   List.iter (fun uri ->
-    try notification manager "textDocument/didClose"
+    try notification ?deadline ?cancel manager "textDocument/didClose"
       (`Assoc ["textDocument", `Assoc ["uri", `String uri]])
     with _ -> ()) uris
 
@@ -949,7 +970,7 @@ let rec execute manager ~owner ~root ~program ~args ?(cancel = fun () -> false)
               fail "LSP manager cannot be reused with a different owner, workspace, or server configuration";
             close_on_exit := true;
             ignore (require_identity manager owner root program args);
-            did_close_documents manager;
+            did_close_documents ~cancel manager;
             let response = request ~cancel manager "shutdown" `Null in
             ignore (response_result response);
             with_lock manager.lock (fun () -> manager.shutdown_sent <- true);
@@ -970,7 +991,7 @@ let rec execute manager ~owner ~root ~program ~args ?(cancel = fun () -> false)
       let relative = required_string "path" arguments in
       let language_id = required_string "language_id" arguments in
       if String.length language_id > 128 then fail "LSP language_id exceeds the limit";
-      let document = current_document manager root relative language_id in
+      let document = current_document ~cancel manager root relative language_id in
       if action = "diagnostics" then (
         let diagnostics = with_lock manager.lock (fun () -> `List document.diagnostics) in
         let output = `Assoc ["uri", `String document.uri; "version", `Int document.version;
@@ -1082,16 +1103,17 @@ and close_manager manager =
         if should_shutdown then manager.shutdown_sent <- true;
         true, should_shutdown)) in
     if first_close then (
-      did_close_documents manager;
+      let deadline = Unix.gettimeofday () +. 2. in
+      did_close_documents ~deadline manager;
       (match manager.io with
        | None -> ()
        | Some io ->
            if should_shutdown then (
              (try
                 ignore (response_result
-                  (request ~timeout_seconds:2. manager "shutdown" `Null))
+                  (request ~deadline manager "shutdown" `Null))
               with _ -> ());
-             (try notification manager "exit" `Null with _ -> ()));
+             (try notification ~deadline manager "exit" `Null with _ -> ()));
            (try io.close () with _ -> ());
            (try io.terminate () with _ -> ());
            manager.io <- None);

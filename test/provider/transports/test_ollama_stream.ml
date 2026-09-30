@@ -15,7 +15,7 @@ let done_frame ?(reason="stop") ?(counts=[]) () =
     "role", `String "assistant"; "content", `String "" ];
     "done_reason", `String reason; "done", `Bool true ] @ counts)))
 let parse wire =
-  let t = Pave.Ollama_stream.create ~on_text:(fun _ -> ()) in
+  let t = Pave.Ollama_stream.create ~on_text:(fun _ -> ()) () in
   Pave.Ollama_stream.feed t wire;
   Pave.Ollama_stream.finish t
 let expect_invalid wire = match parse wire with
@@ -24,7 +24,7 @@ let expect_invalid wire = match parse wire with
 
 let () =
   let text = ref [] in
-  let t = Pave.Ollama_stream.create ~on_text:(fun fragment -> text := fragment :: !text) in
+  let t = Pave.Ollama_stream.create ~on_text:(fun fragment -> text := fragment :: !text) () in
   let args = `Assoc [ "query", `String "東京" ] in
   let wire = chunk "你" ^ chunk "好、東京" ^
     call_chunk [ tool "search" args ] ^ done_frame () in
@@ -36,7 +36,7 @@ let () =
   assert (result.tool_calls = [ { Pave.Protocol.id = "ollama:0:search";
     name = "search"; arguments = args } ]);
   assert (Pave.Ollama_stream.usage t = None);
-  let measured = Pave.Ollama_stream.create ~on_text:(fun _ -> ()) in
+  let measured = Pave.Ollama_stream.create ~on_text:(fun _ -> ()) () in
   Pave.Ollama_stream.feed measured (chunk "ok" ^
     done_frame ~counts:["prompt_eval_count", `Int 18;
       "eval_count", `Int 7] ());
@@ -50,7 +50,17 @@ let () =
     call_chunk [ tool ~index:0 "search" (`String {|{"query":"東|}) ] ^
     call_chunk [ tool ~index:0 "search" (`String {|京"}|}) ] ^
     done_frame ~reason:"tool_calls" () in
-  let partial = parse fragments in
+  let drafts = ref [] in
+  let parser = Pave.Ollama_stream.create ~on_text:(fun _ -> ())
+    ~on_tool_arguments:(fun delta -> drafts := delta :: !drafts) () in
+  String.iter (fun c -> Pave.Ollama_stream.feed parser (String.make 1 c)) fragments;
+  let partial = Pave.Ollama_stream.finish parser in
+  let draft_key = (List.hd !drafts).Pave.Protocol.key in
+  assert (List.rev !drafts = [
+    { Pave.Protocol.key = draft_key; call_id = Some "ollama:0:search"; name = "search";
+      fragment = {|{"query":"東|} };
+    { Pave.Protocol.key = draft_key; call_id = Some "ollama:0:search"; name = "search";
+      fragment = {|京"}|} } ]);
   assert (partial.tool_calls = [ { Pave.Protocol.id = "ollama:0:search";
     name = "search"; arguments = args } ]);
   let two = call_chunk [ tool "search" args; tool "read" (`Assoc []) ] ^
@@ -60,7 +70,7 @@ let () =
     [ "ollama:0:search"; "ollama:1:read" ]);
   let no_newline = chunk "完成" ^ String.trim (done_frame ()) in
   assert ((parse no_newline).content = Some "完成");
-  let t = Pave.Ollama_stream.create ~on_text:(fun _ -> ()) in
+  let t = Pave.Ollama_stream.create ~on_text:(fun _ -> ()) () in
   Pave.Ollama_stream.feed t (chunk "hello");
   assert (not (Pave.Ollama_stream.is_done t));
   expect_invalid (chunk "partial");
@@ -70,7 +80,7 @@ let () =
   expect_invalid (chunk "partial" ^ done_frame ~reason:"length" ());
   expect_invalid (chunk "partial" ^ done_frame ~reason:"load" ());
   expect_invalid (done_frame ());
-  let poisoned = Pave.Ollama_stream.create ~on_text:(fun _ -> ()) in
+  let poisoned = Pave.Ollama_stream.create ~on_text:(fun _ -> ()) () in
   (match Pave.Ollama_stream.feed poisoned
     (chunk "complete" ^ done_frame () ^ chunk "late") with
    | exception Pave.Protocol.Invalid_response _ -> ()

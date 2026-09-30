@@ -147,20 +147,23 @@ let usage item =
       first ^ "|" ^ second ^ " " ^ value
   | Required_word_and_text (first, second) -> first ^ " " ^ second
 
-let available ?(session = true) ?(interactive = true) item =
+let available ?(session = true) ?(interactive = true) ?(subagents = false) item =
   (not item.session_only || session) &&
-  (not item.interactive_only || interactive)
+  (not item.interactive_only || interactive) &&
+  (subagents || match item.action with
+    | A_delegate | A_plan | A_advisor | A_watchdog | A_loop | A_autoresearch -> false
+    | _ -> true)
 
-let suggestions ?(session = true) ?(interactive = true)
+let suggestions ?(session = true) ?(interactive = true) ?(subagents = false)
     ?(external_commands = []) prefix =
   if not (String.starts_with ~prefix:"/" prefix) then []
   else List.filter (fun item ->
-    available ~session ~interactive item &&
+    available ~session ~interactive ~subagents item &&
     String.starts_with ~prefix item.name) (commands @ external_commands)
 
-let help ?(session = true) ?(interactive = true)
+let help ?(session = true) ?(interactive = true) ?(subagents = false)
     ?(external_commands = []) () =
-  List.filter (available ~session ~interactive) (commands @ external_commands)
+  List.filter (available ~session ~interactive ~subagents) (commands @ external_commands)
   |> List.map (fun item ->
     let usage = usage item in
     item.name ^ (if usage = "" then "" else " " ^ usage) ^
@@ -262,7 +265,7 @@ let parse_arguments name grammar argument =
   | Required_word_and_text _, None ->
       invalid_arg (name ^ " requires two arguments")
 
-let parse ?(session = true) ?(interactive = true)
+let parse ?(session = true) ?(interactive = true) ?(subagents = false)
     ?(external_commands = []) line =
   let line = String.trim line in
   if not (String.starts_with ~prefix:"/" line) then Prompt line
@@ -279,7 +282,7 @@ let parse ?(session = true) ?(interactive = true)
     match List.find_opt (fun item -> item.name = name)
       (commands @ external_commands) with
     | None -> Unknown line
-    | Some item when not (available ~session ~interactive item) -> Unknown line
+    | Some item when not (available ~session ~interactive ~subagents item) -> Unknown line
     | Some item ->
         let arguments =
           try parse_arguments name item.grammar argument

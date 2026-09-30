@@ -102,8 +102,14 @@ let private_file stat =
 let same_inode a b = a.Unix.st_dev = b.Unix.st_dev && a.Unix.st_ino = b.Unix.st_ino
 let data_path store id = Filename.concat store.dir (id ^ ".data")
 let meta_path store id = Filename.concat store.dir (id ^ ".json")
+(* POSIX record locks are process-owned, so threads must serialize before
+   opening descriptors that could also release another thread's file lock. *)
+let process_mutex = Mutex.create ()
+
 
 let with_lock store action =
+  Mutex.lock process_mutex;
+  Fun.protect ~finally:(fun () -> Mutex.unlock process_mutex) (fun () ->
   let path = Filename.concat store.dir ".lock" in
   let rec open_lock () =
     try
@@ -126,7 +132,7 @@ let with_lock store action =
   let fd = open_lock () in
   Fun.protect ~finally:(fun () -> Unix.close fd) (fun () ->
     Unix.lockf fd Unix.F_LOCK 0;
-    Fun.protect ~finally:(fun () -> Unix.lockf fd Unix.F_ULOCK 0) action)
+    Fun.protect ~finally:(fun () -> Unix.lockf fd Unix.F_ULOCK 0) action))
 
 let write_all fd text =
   let rec loop offset =
@@ -201,6 +207,72 @@ let list store ?owner () =
     fail "invalid artifact owner" | _ -> ());
   with_lock store (fun () -> list_unlocked store |> List.filter (fun (item : item) ->
     match owner with None -> true | Some owner -> item.owner = owner))
+type retained_size = {
+  mutable declared : int;
+  mutable data : int;
+  mutable staging : int;
+}
+
+let storage_usage_unlocked store =
+  let files = Sys.readdir store.dir in
+  if Array.length files > max_artifacts * 4 + 1 then
+    fail "artifact directory contains too many retained files";
+  let sizes = Hashtbl.create (min max_artifacts (Array.length files)) in
+  let entry key =
+    match Hashtbl.find_opt sizes key with
+    | Some size -> size
+    | None ->
+        let size = { declared = 0; data = 0; staging = 0 } in
+        Hashtbl.add sizes key size;
+        size in
+  let add left right =
+    if right < 0 || right > max_total_bytes - left then
+      fail "artifact storage quota exceeded";
+    left + right in
+  let id_with_suffix name suffix =
+    if String.length name = 32 + String.length suffix &&
+       Filename.check_suffix name suffix then
+      let id = String.sub name 0 32 in
+      if valid_id id then Some id else None
+    else None in
+  Array.iter (fun filename ->
+    if filename <> ".lock" then (
+      let json_id = id_with_suffix filename ".json" in
+      let stored = match json_id with
+        | Some id ->
+            (match metadata store id with
+             | Some item when item.id = id -> Some item
+             | _ -> None)
+        | None -> None in
+      match stored with
+      | Some item -> (entry item.id).declared <- item.size
+      | None ->
+          let path = Filename.concat store.dir filename in
+          let stat = try Some (Unix.lstat path) with
+            | Unix.Unix_error (Unix.ENOENT, _, _) -> None in
+          (match stat with
+           | None -> () (* An active writer may abort its own staging file. *)
+           | Some stat ->
+               if not (private_file stat) || stat.Unix.st_size < 0 then
+                 fail "retained artifact files must be private, owned, and regular";
+               match json_id, id_with_suffix filename ".data" with
+               | None, Some id -> (entry id).data <- stat.Unix.st_size
+               | _ ->
+                   let staged_id = match json_id with
+                     | Some id -> Some id
+                     | None ->
+                         if String.starts_with ~prefix:"." filename then
+                           let name = String.sub filename 1 (String.length filename - 1) in
+                           match id_with_suffix name ".tmp" with
+                           | Some id -> Some id
+                           | None -> id_with_suffix name ".meta.tmp"
+                         else None in
+                   let size = entry (Option.value ~default:filename staged_id) in
+                   size.staging <- add size.staging stat.Unix.st_size))) files;
+  let total = Hashtbl.fold (fun _ size total ->
+    add (add total (max size.declared size.data)) size.staging) sizes 0 in
+  Hashtbl.length sizes, total
+
 
 let begin_write store ~owner ~name ~mime_type =
   if not (valid_id owner) then fail "invalid artifact owner";
@@ -241,10 +313,16 @@ let finish writer =
     Unix.close writer.fd;
     writer.closed <- true;
     with_lock writer.store (fun () ->
-      let existing = list_unlocked writer.store in
-      if List.length existing >= max_artifacts then fail "artifact count limit reached";
-      let total = List.fold_left (fun n (item : item) -> n + item.size) 0 existing in
-      if writer.size > max_total_bytes - total then fail "artifact storage quota exceeded";
+      (* Count retained data even without valid metadata, including active or
+         crash-left staging files. Never delete or adopt another writer's files. *)
+      (try
+         let count, _ = storage_usage_unlocked writer.store in
+         if count > max_artifacts then fail "artifact count limit reached"
+       with exn ->
+         (* Reclaim only this failed candidate while still holding the lock, so
+            a competing boundary writer can consume its released allowance. *)
+         (try Unix.unlink writer.temp_path with Unix.Unix_error _ -> ());
+         raise exn);
       let digest = Digestif.SHA256.(to_hex (get writer.digest)) in
       let item = { id = writer.id; owner = writer.owner; name = writer.name;
         mime_type = writer.mime_type; size = writer.size; sha256 = digest;

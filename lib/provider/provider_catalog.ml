@@ -473,7 +473,7 @@ let custom_model registry ~provider ~route ~model =
    that every returned ID works on the registered route. Manual IDs remain allowed. *)
 let unclassified_models ?(registry = builtin_registry) id =
   Option.is_some (custom_provider registry id) ||
-  List.mem id [ "stepfun"; "synthetic"; "wafer-serverless"; "zenmux";
+  List.mem id [ "openai"; "stepfun"; "synthetic"; "wafer-serverless"; "zenmux";
     "xiaomi"; "kilo"; "opencode-zen"; "opencode-go"; "charm-hyper";
     "yolo-auto"; "meta"; "vercel-ai-gateway"; "commandcode"; "minimax";
     "azure"; "amazon-bedrock" ]

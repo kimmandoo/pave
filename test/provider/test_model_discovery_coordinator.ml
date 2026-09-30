@@ -144,4 +144,37 @@ let () =
   assert (not (Coordinator.complete cancelled));
   assert ((List.hd after_cancel).Coordinator.status = Coordinator.Loading);
   Coordinator.close cancelled;
+
+  let saturation_child = Unix.fork () in
+  if saturation_child = 0 then (
+    try
+      let calls = Atomic.make 0 in
+      let count = 100_000 in
+      let requests = List.init count (fun index -> {
+        Coordinator.scope = {
+          provider = "many-accounts"; account_id = Some (string_of_int index);
+          route = "chat" };
+        run = (fun _ ->
+          ignore (Atomic.fetch_and_add calls 1);
+          Error Discovery.Missing_credential, None);
+      }) in
+      let coordinator = Coordinator.start ~max_workers:4 requests in
+      if not (wait_until (fun () -> Atomic.get calls = count) 5.) then exit 2;
+      let snapshots = await coordinator in
+      assert (Coordinator.complete coordinator &&
+        List.for_all (fun snapshot -> snapshot.Coordinator.status =
+          Coordinator.Failed Discovery.Missing_credential) snapshots);
+      Coordinator.close coordinator;
+      exit 0
+    with _ -> exit 3);
+  let saturation_status = ref None in
+  let settled = wait_until (fun () ->
+    match Unix.waitpid [Unix.WNOHANG] saturation_child with
+    | 0, _ -> false
+    | _, status -> saturation_status := Some status; true) 8. in
+  if not settled then (
+    Unix.kill saturation_child Sys.sigkill;
+    ignore (Unix.waitpid [] saturation_child);
+    failwith "saturated discovery wake pipe prevented cancellation");
+  assert (!saturation_status = Some (Unix.WEXITED 0));
   print_endline "bounded discovery snapshots, deadlines, and cancellation: ok"

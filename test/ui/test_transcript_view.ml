@@ -478,4 +478,33 @@ let () =
   let many = create () in
   for i = 1 to 11_000 do notice many (string_of_int i) done;
   expect "bounded logical transcript storage" (many.count <= max_rows);
+  let writes = create () in
+  let first = start_write writes and second = start_write writes in
+  let one = Pave.Write_preview.of_values ~path:"one.ml" ~content:"one\nlive" in
+  let two = Pave.Write_preview.of_values ~path:"two.ml" ~content:"two" in
+  write_preview writes first one "generating draft · not written";
+  write_preview writes second two "queued · not written";
+  let first_card = Hashtbl.find writes.writes first in
+  let second_card = Hashtbl.find writes.writes second in
+  expect "both independent write drafts are visible before completion"
+    (first_card.path = Some "one.ml" && second_card.path = Some "two.ml" &&
+     List.map (fun (row : row) -> row.text) first_card.code =
+       ["      1 │ one"; "      2 │ live"]);
+  write_state writes second "writing";
+  tool_result ~group:second writes "write_file" "Wrote two.ml";
+  finish_write writes second ~aborted:false ~is_error:false;
+  expect "out-of-order settlement preserves the other live card"
+    (Hashtbl.mem writes.writes first && not (Hashtbl.mem writes.writes second) &&
+     second_card.executing && heading_count writes Tool = 2 &&
+     String.ends_with ~suffix:"completed · written" second_card.title.text);
+  finish_write writes first ~aborted:true ~is_error:false;
+  expect "queued cancellation never presents a draft as written"
+    (not first_card.executing &&
+     String.ends_with ~suffix:"cancelled · not written" first_card.title.text);
+  let denied = start_write writes in
+  write_preview writes denied one "queued · not written";
+  let denied_card = Hashtbl.find writes.writes denied in
+  finish_write writes denied ~aborted:false ~is_error:true;
+  expect "denial and pre-execution error retain not-written status"
+    (String.ends_with ~suffix:"failed · not written" denied_card.title.text);
   print_endline "semantic transcript, cancellation, expansion and resize: ok"

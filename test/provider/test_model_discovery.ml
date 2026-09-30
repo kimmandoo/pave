@@ -90,6 +90,15 @@ let () =
   expect_error is_invalid_response
     (discover ~http:duplicate_http ~provider:"openai"
       ~credential:(Api_key openai_key) ());
+  List.iter (fun body ->
+    let http, calls = fixed_http openai_url openai_headers (Ok (200, body)) in
+    expect_error is_invalid_response
+      (discover ~http ~provider:"openai" ~credential:(Api_key openai_key) ());
+    assert (!calls = 1)) [
+      {|{"data":[{"id":"first"}],"data":[{"id":"second"}]}|};
+      {|{"data":[{"id":"first","id":"second"}]}|};
+      {|{"data":[{"id":"first","metadata":{"tools":true,"tools":false}}]}|}
+    ];
 
   let generations = ref 0 in
   let refresh_http ~url ~headers =
@@ -101,7 +110,14 @@ let () =
       ~credential:(Api_key openai_key) () in
   expect_models ["fresh-1"] (refresh ());
   expect_models ["fresh-2"] (refresh ());
-  assert (!generations = 2);
+  let failed_http, failed_calls = fixed_http openai_url openai_headers
+    (Error (Transport_error "fresh listing unavailable")) in
+  expect_error (function Transport_error _ -> true | _ -> false)
+    (discover ~http:failed_http ~provider:"openai"
+      ~credential:(Api_key openai_key) ());
+  assert (!failed_calls = 1);
+  expect_models ["fresh-3"] (refresh ());
+  assert (!generations = 3);
   let http, _ = fixed_http ollama_url [] (Ok (200,
     {|{"models":[{"name":"qwen2.5:7b","size":500},{"name":"llama3:latest"}]}|})) in
   expect_models ["qwen2.5:7b"; "llama3:latest"]
@@ -155,11 +171,11 @@ let () =
     assert (headers = gemini_headers);
     if !calls = 1 then (
       assert (url = google_url);
-      Ok (200, {|{"models":[{"name":"models/gemini-2.5-pro","inputTokenLimit":131072,"supportedGenerationMethods":["generateContent"]},{"name":"models/text-embedding-004","supportedGenerationMethods":["embedContent"]}],"nextPageToken":"next /?"}|}))
+      Ok (200, {|{"models":[{"name":"models/gemini-2.5-pro","inputTokenLimit":131072,"outputTokenLimit":8192,"supportedGenerationMethods":["generateContent"]},{"name":"models/text-embedding-004","supportedGenerationMethods":["embedContent"]}],"nextPageToken":"next /?"}|}))
     else (
       assert (!calls = 2);
       assert (url = google_url ^ "?pageToken=next%20%2F%3F");
-      Ok (200, {|{"models":[{"name":"models/gemini-2.5-pro-next","inputTokenLimit":999999,"supportedGenerationMethods":["generateContent"]},{"name":"models/gemini-2.5-flash","inputTokenLimit":65536,"supportedGenerationMethods":["generateContent"]}]}|})) in
+      Ok (200, {|{"models":[{"name":"models/gemini-2.5-pro-next","inputTokenLimit":999999,"outputTokenLimit":16384,"supportedGenerationMethods":["generateContent"]},{"name":"models/gemini-2.5-flash","inputTokenLimit":65536,"supportedGenerationMethods":["generateContent"]}]}|})) in
   let google_listing = match
       discover ~http ~provider:"google" ~credential:(Api_key gemini_key) () with
     | Ok listing -> listing
@@ -175,6 +191,9 @@ let () =
       "google", "generate", None, "models/gemini-2.5-pro-next", None,
         Some 999999;
       "google", "generate", None, "models/gemini-2.5-flash", None, Some 65536 ]);
+  assert (List.map (fun (model : Pave.Model_catalog.model) ->
+    model.capabilities.max_output_tokens) google_listing.models =
+      [Some 8192; Some 16384; None]);
   assert (google_listing.source.endpoint = Some google_url);
   assert (google_listing.source.id_source =
     Pave.Model_catalog.Pinned_account_listing);
@@ -270,8 +289,33 @@ let () =
       ~credential:(copilot_oauth key) ());
     assert (!calls = 1)) [
       "deepseek", deepseek_url;
-      "groq", groq_url;
-      "mistral", mistral_url ];
+      "groq", groq_url ];
+  let mistral_body =
+    {|{"data":[{"id":"org/new-chat/id","max_context_length":32768,"capabilities":{"completion_chat":true,"function_calling":true}},{"id":"org/embedding","capabilities":{"completion_chat":false,"function_calling":false}},{"id":"org/text-only","capabilities":{"completion_chat":true,"function_calling":false}},{"id":"org/fim","capabilities":{"completion_chat":false,"function_calling":true}}]}|} in
+  let http, calls = fixed_http mistral_url bearer (Ok (200, mistral_body)) in
+  (match discover ~http ~provider:"mistral" ~credential:(Api_key key) () with
+   | Error failure -> failwith (message failure)
+   | Ok listing ->
+       assert (model_ids listing = ["org/new-chat/id"]);
+       let model = List.hd listing.models in
+       assert (model.capabilities.tools = Some true &&
+         model.capabilities.context_window_tokens = Some 32768 &&
+         model.provenance.capability_source =
+           Some Pave.Model_catalog.Capability_response &&
+         model.provenance.retrieved_at = listing.source.retrieved_at));
+  assert (!calls = 1);
+  List.iter (fun body ->
+    let http, _ = fixed_http mistral_url bearer (Ok (200, body)) in
+    expect_error is_invalid_response
+      (discover ~http ~provider:"mistral" ~credential:(Api_key key) ())) [
+    {|{"data":[{"id":"missing"}]}|};
+    {|{"data":[{"id":"wrong-type","capabilities":{"completion_chat":true,"function_calling":"true"}}]}|};
+    {|{"data":[{"id":"ambiguous","capabilities":{"completion_chat":true,"completion_chat":false,"function_calling":true}}]}|}
+    ];
+  let unused ~url:_ ~headers:_ = failwith "unauthorized Mistral listing attempted" in
+  expect_error no_credential (discover ~http:unused ~provider:"mistral" ());
+  expect_error wrong_credential (discover ~http:unused ~provider:"mistral"
+    ~credential:(copilot_oauth key) ());
   let together_key = "private-together" in
   let together_headers = ["Authorization", "Bearer " ^ together_key] in
   let http, calls = fixed_http together_url together_headers (Ok (200,
@@ -294,8 +338,14 @@ let () =
   assert (!calls = 1);
   let http, calls = fixed_http venice_url bearer (Ok (200,
     {|{"object":"list","type":"text","data":[{"id":"live-chat/1","type":"text","model_spec":{"capabilities":{"supportsFunctionCalling":true}}},{"id":"chat-no-tools","type":"text","model_spec":{"capabilities":{"supportsFunctionCalling":false}}},{"id":"image-model","type":"image"},{"id":"live-chat/2","type":"text","model_spec":{"capabilities":{"supportsFunctionCalling":true}}}]}|})) in
-  expect_models ["live-chat/1"; "live-chat/2"]
-    (discover ~http ~provider:"venice" ~credential:(Api_key key) ());
+  (match discover ~http ~provider:"venice" ~credential:(Api_key key) () with
+   | Error failure -> failwith (message failure)
+   | Ok listing ->
+       assert (model_ids listing = ["live-chat/1"; "live-chat/2"]);
+       assert (List.for_all (fun (model : Pave.Model_catalog.model) ->
+         model.capabilities.tools = Some true &&
+         model.provenance.capability_source =
+           Some Pave.Model_catalog.Capability_response) listing.models));
   assert (!calls = 1);
   let http, _ = fixed_http venice_url bearer (Ok (200,
     {|{"data":[{"id":"unsafe-chat","type":"text","model_spec":{"capabilities":{}}}]}|})) in
@@ -381,9 +431,15 @@ let () =
       assert (!calls = 2);
       assert (url = fireworks_first ^ "&pageToken=next%20%2F%3F");
       Ok (200, {|{"models":[{"name":"accounts/fireworks/models/tool-two","supportsServerless":true,"supportsTools":true},{"name":"accounts/fireworks/models/tool-three","supportsServerless":true,"supportsTools":true},{"name":"accounts/fireworks/models/not-serving","supportsServerless":false,"supportsTools":true}]}|})) in
-  expect_models ["accounts/fireworks/models/tool-one";
-    "accounts/fireworks/models/tool-two"; "accounts/fireworks/models/tool-three"]
-    (discover ~http ~provider:"fireworks" ~credential:(Api_key key) ());
+  (match discover ~http ~provider:"fireworks" ~credential:(Api_key key) () with
+   | Error failure -> failwith (message failure)
+   | Ok listing ->
+       assert (model_ids listing = ["accounts/fireworks/models/tool-one";
+         "accounts/fireworks/models/tool-two"; "accounts/fireworks/models/tool-three"]);
+       assert (List.for_all (fun (model : Pave.Model_catalog.model) ->
+         model.capabilities.tools = Some true &&
+         model.provenance.capability_source =
+           Some Pave.Model_catalog.Capability_response) listing.models));
   assert (!calls = 2);
   let duplicate_calls = ref 0 in
   let duplicate_pages ~url ~headers =
@@ -524,11 +580,75 @@ let () =
     Pave.Model_catalog.Pinned_account_listing);
   assert (Option.is_some codex_listing.source.retrieved_at);
   assert (!calls = 1);
+  let reasoning_level level =
+    `Assoc ["effort", `String level; "description", `String "Reported effort"] in
+  let effort_listing account_id levels =
+    let body = Yojson.Basic.to_string (`Assoc ["models", `List [
+      `Assoc (["slug", `String "account-effort-model"] @ levels)]]) in
+    let http ~url ~headers =
+      assert (url = List.hd codex_urls);
+      assert (List.assoc "chatgpt-account-id" headers = account_id);
+      Ok (200, body) in
+    discover ~http ~provider:"openai-codex"
+      ~credential:(codex_oauth ("private-codex", account_id)) () in
+  let effort_model = function
+    | Ok { models = [model]; _ } -> model
+    | Ok _ -> failwith "unexpected effort account roster"
+    | Error failure -> failwith (message failure) in
+  let reported = effort_model (effort_listing "account-a"
+    ["supported_reasoning_levels", `List [
+      reasoning_level "low"; reasoning_level "ultra"; reasoning_level "future"]]) in
+  assert (reported.identity.account_id = Some "account-a");
+  assert (reported.capabilities.effort_levels = Some ["low"; "ultra"; "future"]);
+  assert (reported.provenance.id_source = Pave.Model_catalog.Pinned_account_listing);
+  assert (Pave.Provider.effort_choices Pave.Provider.Codex_responses
+    reported.capabilities.effort_levels = ["low"; "ultra"]);
+  let other = effort_model (effort_listing "account-b"
+    ["supported_reasoning_levels", `List [reasoning_level "high"]]) in
+  assert (other.identity.account_id = Some "account-b");
+  assert (other.capabilities.effort_levels = Some ["high"]);
+  let missing = effort_model (effort_listing "account-a" []) in
+  let empty = effort_model (effort_listing "account-a"
+    ["supported_reasoning_levels", `List []]) in
+  assert (missing.capabilities.effort_levels = None);
+  assert (empty.capabilities.effort_levels = Some []);
+  assert (Pave.Provider.effort_choices Pave.Provider.Codex_responses
+    missing.capabilities.effort_levels = []);
+  assert (Pave.Provider.effort_choices Pave.Provider.Codex_responses
+    empty.capabilities.effort_levels = []);
+  assert (Pave.Provider.effort_choices Pave.Provider.Umans_chat
+    (Some ["low"; "ultra"; "max"]) = ["low"; "max"]);
+  assert (Pave.Provider.effort_choices Pave.Provider.Openai_completions
+    (Some ["high"]) = []);
+  let boundary = List.init 16 (fun i -> reasoning_level
+    (string_of_int i ^ String.make (32 - String.length (string_of_int i)) 'x')) in
+  let bounded = effort_model (effort_listing "account-a"
+    ["supported_reasoning_levels", `List boundary]) in
+  assert (bounded.capabilities.effort_levels = Some (List.map (fun row ->
+    match Pave.Protocol.member "effort" row with `String level -> level | _ -> assert false)
+    boundary));
+  List.iter (fun metadata ->
+    expect_error is_invalid_response (effort_listing "account-a"
+      ["supported_reasoning_levels", metadata])) [
+    `Null; `String "high"; `List [`String "high"]; `List [`Assoc []];
+    `List [reasoning_level ""]; `List [reasoning_level "high\n"];
+    `List [reasoning_level "has space"]; `List [reasoning_level (String.make 33 'x')];
+    `List [reasoning_level "high"; reasoning_level "high"];
+    `List (boundary @ [reasoning_level "extra"]);
+    `List [`Assoc ["effort", `String "low"; "effort", `String "high"]]
+  ];
   let duplicate_codex, _ = fixed_http (List.hd codex_urls) codex_headers
     (Ok (200, {|{"models":[{"slug":"hidden-model","visibility":"hidden"},{"slug":"hidden-model"}]}|})) in
   expect_error is_invalid_response
     (discover ~http:duplicate_codex ~provider:"openai-codex"
       ~credential:codex_credential ());
+  List.iter (fun body ->
+    let http, _ = fixed_http (List.hd codex_urls) codex_headers (Ok (200, body)) in
+    expect_error is_invalid_response
+      (discover ~http ~provider:"openai-codex" ~credential:codex_credential ())) [
+    {|{"models":[{"slug":"first"}],"models":[{"slug":"second"}]}|};
+    {|{"models":[{"slug":"ambiguous","supported_in_api":true,"supported_in_api":false}]}|}
+    ];
   let calls = ref 0 in
   let http ~url ~headers =
     assert (headers = codex_headers);
@@ -764,6 +884,5 @@ let () =
     (discover ~http:no_request ~registry ~provider:"custom-dynamic"
       ~route_name:"unknown" ~credential:(Api_key dynamic_key) ());
   let identity_custom = List.hd explicit_listing.models in
-  assert (not (Pave.Provider_catalog.unclassified_models "openai"));
   assert (identity_custom.identity.config_revision <> None);
   print_endline "credentialed model discovery: ok"

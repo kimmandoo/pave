@@ -392,7 +392,7 @@ let exec_search program arguments environment =
     in
     try_directories (String.split_on_char ':' path)
 
-let spawn_native ~program ~arguments ~cwd ~environment =
+let spawn_native ~program ~arguments ~cwd ~environment ~merge_stderr =
   let stdin_read, stdin_write = Unix.pipe ~cloexec:true () in
   let stdout_read, stdout_write =
     try Unix.pipe ~cloexec:true ()
@@ -419,7 +419,7 @@ let spawn_native ~program ~arguments ~cwd ~environment =
            if cwd <> "" then Unix.chdir cwd;
            Unix.dup2 stdin_read Unix.stdin;
            Unix.dup2 stdout_write Unix.stdout;
-           Unix.dup2 stdout_write Unix.stderr;
+           if merge_stderr then Unix.dup2 stdout_write Unix.stderr;
            close_fd stdin_read; close_fd stdout_write;
            if Unix.write ready_write (Bytes.make 1 (Char.chr 0)) 0 1 <> 1 then
              fail "could not establish process session";
@@ -466,7 +466,7 @@ let spawn_native ~program ~arguments ~cwd ~environment =
 
 let spawn ~program ~arguments ~cwd ~environment ~pty_mode =
   if pty_mode then spawn_pty ~program ~arguments ~cwd ~environment
-  else spawn_native ~program ~arguments ~cwd ~environment
+  else spawn_native ~program ~arguments ~cwd ~environment ~merge_stderr:true
 
 let process_description program arguments =
   let rendered = Filename.quote_command program arguments in

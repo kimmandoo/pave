@@ -17,18 +17,26 @@ let ending reason = event "message_delta"
 let stop = event "message_stop" {|{"type":"message_stop"}|}
 
 let invalid wire =
-  let parser = Pave.Anthropic_stream.create ~on_text:(fun _ -> ()) in
+  let parser = Pave.Anthropic_stream.create ~on_text:(fun _ -> ()) () in
   match Pave.Anthropic_stream.feed parser wire; Pave.Anthropic_stream.finish parser with
   | exception Pave.Protocol.Invalid_response _ -> ()
   | _ -> failwith "expected invalid Anthropic stream"
 
 let () =
   let deltas = ref [] in
-  let parser = Pave.Anthropic_stream.create ~on_text:(fun delta -> deltas := delta :: !deltas) in
+  let drafts = ref [] in
+  let parser = Pave.Anthropic_stream.create
+    ~on_tool_arguments:(fun delta -> drafts := delta :: !drafts)
+    ~on_text:(fun delta -> deltas := delta :: !deltas) () in
   let wire = ": heartbeat\r\n\r\n" ^ start ^ text_start ^ text_delta ^ text_stop ^
     tool_start ^ tool_delta ^ tool_stop ^ ending "tool_use" ^ stop in
   String.iter (fun byte -> Pave.Anthropic_stream.feed parser (String.make 1 byte)) wire;
   let message = Pave.Anthropic_stream.finish parser in
+  let draft_key = (List.hd !drafts).Pave.Protocol.key in
+  assert (List.rev !drafts = [
+    { Pave.Protocol.key = draft_key; call_id = Some "toolu_1"; name = "read_file"; fragment = "" };
+    { Pave.Protocol.key = draft_key; call_id = Some "toolu_1"; name = "read_file";
+      fragment = {|{"path":"App.swift"}|} } ]);
   assert (List.rev !deltas = [ "Hi "; "there" ]);
   assert (message.content = Some "Hi there");
   assert (message.tool_calls = [ { Pave.Protocol.id = "toolu_1"; name = "read_file";
@@ -38,7 +46,7 @@ let () =
     {|{"type":"message_start","message":{"type":"message","role":"assistant","usage":{"input_tokens":2,"cache_creation_input_tokens":3,"cache_read_input_tokens":4}}}|} in
   let finish_metered = event "message_delta"
     {|{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":7}}|} in
-  let measured = Pave.Anthropic_stream.create ~on_text:(fun _ -> ()) in
+  let measured = Pave.Anthropic_stream.create ~on_text:(fun _ -> ()) () in
   Pave.Anthropic_stream.feed measured
     (start_metered ^ text_start ^ text_stop ^ finish_metered ^ stop);
   ignore (Pave.Anthropic_stream.finish measured);
@@ -48,7 +56,7 @@ let () =
       reasoning_output_tokens = None; input_modality_tokens = None;
       cached_input_modality_tokens = None; output_modality_tokens = None });
 
-  let unreported_cache = Pave.Anthropic_stream.create ~on_text:(fun _ -> ()) in
+  let unreported_cache = Pave.Anthropic_stream.create ~on_text:(fun _ -> ()) () in
   Pave.Anthropic_stream.feed unreported_cache
     (start ^ text_start ^ text_stop ^ finish_metered ^ stop);
   ignore (Pave.Anthropic_stream.finish unreported_cache);
@@ -57,7 +65,7 @@ let () =
       cached_input_tokens = None; cache_creation_input_tokens = None;
       reasoning_output_tokens = None; input_modality_tokens = None;
       cached_input_modality_tokens = None; output_modality_tokens = None });
-  let interrupted = Pave.Anthropic_stream.create ~on_text:(fun _ -> ()) in
+  let interrupted = Pave.Anthropic_stream.create ~on_text:(fun _ -> ()) () in
   Pave.Anthropic_stream.feed interrupted
     (start_metered ^ text_start ^ text_stop ^ finish_metered);
   assert (not (Pave.Anthropic_stream.is_done interrupted));
@@ -67,11 +75,11 @@ let () =
    | _ -> failwith "missing Anthropic message_stop must not finish successfully");
   assert (Pave.Anthropic_stream.usage interrupted = None);
   let text_only = start ^ text_start ^ text_delta ^ text_stop ^ ending "end_turn" ^ stop in
-  let parser = Pave.Anthropic_stream.create ~on_text:(fun _ -> ()) in
+  let parser = Pave.Anthropic_stream.create ~on_text:(fun _ -> ()) () in
   Pave.Anthropic_stream.feed parser text_only;
   assert ((Pave.Anthropic_stream.finish parser).content = Some "Hi there");
   assert (Pave.Anthropic_stream.is_finished parser);
-  let delayed_stop = Pave.Anthropic_stream.create ~on_text:(fun _ -> ()) in
+  let delayed_stop = Pave.Anthropic_stream.create ~on_text:(fun _ -> ()) () in
   Pave.Anthropic_stream.feed delayed_stop
     (start ^ text_start ^ text_delta ^ text_stop ^ ending "end_turn");
   assert (not (Pave.Anthropic_stream.is_finished delayed_stop));
@@ -86,7 +94,7 @@ let () =
   invalid (start ^ text_start ^ text_stop ^ ending "max_tokens" ^ stop);
   invalid (start ^ event "error"
     {|{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}|});
-  let poisoned = Pave.Anthropic_stream.create ~on_text:(fun _ -> ()) in
+  let poisoned = Pave.Anthropic_stream.create ~on_text:(fun _ -> ()) () in
   Pave.Anthropic_stream.feed poisoned text_only;
   (match Pave.Anthropic_stream.feed poisoned start with
    | exception Pave.Protocol.Invalid_response _ -> ()

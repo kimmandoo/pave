@@ -32,6 +32,28 @@ exception Error of string
 
 let max_active_jobs = 4
 let max_output_bytes = 1_048_576
+let max_summary_bytes = 4096
+let summary_truncation_marker = " [truncated]"
+
+let bounded_summary text =
+  if String.length text <= max_summary_bytes && Session_store.valid_utf8 text then text
+  else
+    let limit = max_summary_bytes - String.length summary_truncation_marker in
+    let output = Buffer.create (min limit (String.length text)) in
+    let exception Full in
+    let truncated =
+      try
+        ignore (Uutf.String.fold_utf_8 (fun () _ decoded ->
+          let character = match decoded with
+            | `Uchar character -> character
+            | `Malformed _ -> Uchar.rep in
+          let width = Uchar.utf_8_byte_length character in
+          if width > limit - Buffer.length output then raise Full;
+          Uutf.Buffer.add_utf_8 output character) () text);
+        false
+      with Full -> true in
+    if truncated then Buffer.add_string output summary_truncation_marker;
+    Buffer.contents output
 let valid_id id = String.length id = 32 &&
   String.for_all (function '0'..'9' | 'a'..'f' -> true | _ -> false) id
 
@@ -105,7 +127,7 @@ let parse_metadata ~owner ~id text =
   if field "version" <> `Int 1 || stored_id <> id || stored_owner <> owner ||
      not (valid_id id) || not (valid_id owner) || label = "" ||
      String.length label > 256 || kind = "" || String.length kind > 128 ||
-     String.length summary > 4096 ||
+     String.length summary > max_summary_bytes ||
      classify_float created_at = FP_nan || classify_float created_at = FP_infinite ||
      (match artifact with Some (artifact_owner, artifact_id) ->
         not (valid_id artifact_owner && valid_id artifact_id) | None -> false) then
@@ -212,7 +234,7 @@ let finish t runtime status summary artifact =
       let status, summary = if Atomic.get runtime.cancelled then
         Cancelled, "Cancelled. Provider usage may already have been charged." 
       else status, summary in
-      let job = { runtime.job with status; summary; artifact } in
+      let job = { runtime.job with status; summary = bounded_summary summary; artifact } in
       update t runtime job;
       Some job) in
   match completed with

@@ -14,6 +14,7 @@ type call = {
 
 type t = {
   on_text : string -> unit;
+  on_tool_arguments : (Protocol.tool_argument_delta -> unit) option;
   line : Buffer.t;
   content : Buffer.t;
   mutable content_seen : bool;
@@ -28,8 +29,8 @@ type t = {
   mutable usage : Protocol.usage option;
 }
 
-let create ~on_text =
-  { on_text; line = Buffer.create 256; content = Buffer.create 256;
+let create ?on_tool_arguments ~on_text () =
+  { on_text; on_tool_arguments; line = Buffer.create 256; content = Buffer.create 256;
     content_seen = false; after_cr = false; done_seen = false; failed = false;
     response_bytes = 0; next_call = 0; calls = ref [];
     indexed = Hashtbl.create 4; result = None; usage = None }
@@ -50,12 +51,21 @@ let required_name fn = match field "name" fn with
   | `String name when name <> "" -> name
   | _ -> invalid "missing tool name"
 
-let add_call t index name arguments =
+let add_call t index name arguments wire_arguments =
   if t.next_call >= max_tool_calls then invalid "too many tool calls";
   let call = { index = t.next_call; name; arguments } in
   t.next_call <- t.next_call + 1;
   t.calls := call :: !(t.calls);
-  (match index with Some index -> Hashtbl.add t.indexed index call | None -> ())
+  (match index with Some index -> Hashtbl.add t.indexed index call | None -> ());
+  (match t.on_tool_arguments with
+   | None -> ()
+   | Some emit ->
+       let fragment = match wire_arguments with
+         | `String part -> part
+         | args -> Yojson.Basic.to_string args in
+       emit { Protocol.key = Printf.sprintf "ollama:%d" call.index;
+         call_id = Some (Printf.sprintf "ollama:%d:%s" call.index name);
+         name; fragment })
 
 let handle_call t json =
   (match field "type" json with
@@ -79,10 +89,16 @@ let handle_call t json =
       (match call.arguments, arguments with
        | Complete _, _ -> invalid "duplicate completed tool call"
        | Fragments buffer, `String part ->
-           Buffer.add_string buffer part
+           Buffer.add_string buffer part;
+           (match t.on_tool_arguments with
+            | None -> ()
+            | Some emit -> emit { Protocol.key = Printf.sprintf "ollama:%d" call.index;
+                call_id = Some (Printf.sprintf "ollama:%d:%s" call.index call.name);
+                name = call.name; fragment = part })
        | _ -> invalid "invalid tool arguments fragment")
   | _ ->
       let name = required_name fn in
+      let wire_arguments = arguments in
       let arguments = match arguments with
         | `Assoc _ as args -> Complete args
         | `String part ->
@@ -91,7 +107,7 @@ let handle_call t json =
               Buffer.add_string buffer part;
               Fragments buffer
         | _ -> invalid "missing tool arguments" in
-      add_call t index name arguments
+      add_call t index name arguments wire_arguments
 
 let finish_calls t =
   List.rev_map (fun call ->

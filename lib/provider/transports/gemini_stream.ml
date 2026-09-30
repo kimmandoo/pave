@@ -1,6 +1,7 @@
 type t = {
   model : string;
   on_text : string -> unit;
+  on_tool_arguments : (Protocol.tool_argument_delta -> unit) option;
   content : Buffer.t;
   mutable text_seen : bool;
   mutable calls : Protocol.tool_call list;
@@ -80,6 +81,11 @@ let handle_chunk t json =
                     if Hashtbl.mem t.ids call.id then invalid "duplicate function call id";
                     Hashtbl.add t.ids call.id ();
                     t.call_count <- t.call_count + 1;
+                    (match t.on_tool_arguments with
+                     | None -> ()
+                     | Some emit -> emit { Protocol.key = Printf.sprintf "gemini:%d" t.call_count;
+                         call_id = Some call.id; name = call.name;
+                         fragment = Yojson.Basic.to_string call.arguments });
                     t.calls <- call :: t.calls) calls;
                   t.parts <- part :: t.parts) parts
             | _ -> invalid "missing candidate parts")
@@ -121,9 +127,9 @@ let handle_event t event data =
     handle_chunk t json;
     if t.finished then t.usage <- Gemini_wire.usage json)
 
-let create ~model ~on_text =
+let create ?on_tool_arguments ~model ~on_text () =
   if model = "" then invalid_arg "empty Gemini model";
-  let t = { model; on_text; content = Buffer.create 256; text_seen = false;
+  let t = { model; on_text; on_tool_arguments; content = Buffer.create 256; text_seen = false;
     signature_seen = false; parts = []; native_calls = Hashtbl.create 4;
     signatures = Hashtbl.create 4;
     calls = []; call_count = 0; ids = Hashtbl.create 4;

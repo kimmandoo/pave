@@ -49,7 +49,7 @@ let fake_lsp_io () =
           count in
     Mutex.unlock lock;
     count in
-  let write wire =
+  let write ~deadline:_ ~cancel:_ wire =
     let marker = "\r\n\r\n" in
     let body_start = Str.search_forward (Str.regexp_string marker) wire 0 +
       String.length marker in
@@ -1287,16 +1287,17 @@ esac
     let timeout = Pave.Tools.execute ~root ~name:"run_command"
       ~args:(`Assoc ["command", `String "sleep 3"; "timeout_seconds", `Int 1]) () in
     assert (contains timeout "Status: timed out");
-    let started = Unix.gettimeofday () in
+    let cancellation_requested = ref false in
     let cancelled = try
       ignore (Pave.Tools.execute
-        ~cancel:(fun () -> Unix.gettimeofday () -. started > 0.1)
+        ~cancel:(fun () -> !cancellation_requested)
+        ~on_progress:(fun bytes -> if bytes > 0 then cancellation_requested := true)
         ~root ~name:"run_command"
-        ~args:(`Assoc ["command", `String "sleep 5";
+        ~args:(`Assoc ["command", `String "printf 'started\\n'; sleep 5";
           "timeout_seconds", `Int 20]) ());
       false
     with Pave.Tools.Cancelled -> true in
-    assert (cancelled && Unix.gettimeofday () -. started < 2.);
+    assert (cancelled && !cancellation_requested);
     let ic = open_in outside in
     Fun.protect ~finally:(fun () -> close_in_noerr ic) (fun () ->
       assert (input_line ic = "outside secret")));

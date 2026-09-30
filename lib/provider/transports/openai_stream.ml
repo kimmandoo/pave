@@ -13,6 +13,7 @@ type call = {
 
 type t = {
   on_text : string -> unit;
+  on_tool_arguments : (Protocol.tool_argument_delta -> unit) option;
   mutable done_seen : bool;
   mutable finish_reason : string option;
   mutable content_seen : bool;
@@ -82,7 +83,16 @@ let parse_tool_delta t json =
         | Some part -> append t call.name part | None -> ());
        (match optional_string "function arguments" (field "arguments" fn) with
         | Some part -> append t call.arguments part | None -> ())
-   | _ -> invalid "invalid tool call function")
+   | _ -> invalid "invalid tool call function");
+  (match t.on_tool_arguments with
+   | None -> ()
+   | Some emit ->
+       let id = Buffer.contents call.id in
+       let fragment = match field "arguments" (field "function" json) with
+         | `String part -> part | _ -> "" in
+       emit { Protocol.key = Printf.sprintf "chat:%d" index;
+         call_id = (if id = "" then None else Some id);
+         name = Buffer.contents call.name; fragment })
 
 let parse_choice t json =
   (match field "index" json with
@@ -145,8 +155,8 @@ let handle_event t event data =
   else if t.done_seen then invalid "completion chunk after [DONE]"
   else parse_chunk t (parse_json data)
 
-let create ~on_text =
-  let t = { on_text; done_seen = false; finish_reason = None;
+let create ?on_tool_arguments ~on_text () =
+  let t = { on_text; on_tool_arguments; done_seen = false; finish_reason = None;
     content_seen = false; usage = None; failed = false;
     content = Buffer.create 256;
     calls = Hashtbl.create 4; response_bytes = 0; parser = None } in
