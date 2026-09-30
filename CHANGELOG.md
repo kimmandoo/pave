@@ -1,6 +1,7 @@
 # Changelog
 
 ## 2026-09-30
+- docs(readme): condensed the README into scannable highlights, install, quick-start, feature, provider and safety sections, and moved the detailed usage and provider references verbatim into `docs/USAGE.md` and `docs/PROVIDERS.md`.
 - release(distribution): published v0.1.73 after four-platform native tests and package smokes, verified all archive checksums and exercised an isolated v0.1.71 upgrade with shipped model/write TUI scenarios.
 - perf(parser): batched bounded SSE framing and printable tool-argument spans, removed repeated copies and per-scalar allocation, and retained efficient singleton fragments with identical Unicode, overflow and EOF behavior.
 - feat(tui): compacted model-specific effort confirmation, prioritized visible roster choices and viewport-sized paging, clarified write-card states and removed duplicate success rows while preserving expandable details.

@@ -1,6 +1,15 @@
 # Work checkpoint
 
 - **Date:** 2026-09-30
+- **Active task:** Completed the requested README cleanup. The README was reduced from 535 dense lines to a scannable overview (highlights, install table, quick start, shortcuts, features, provider categories, safety, documentation index, contribute). Detailed sections were moved verbatim into `docs/USAGE.md` and `docs/PROVIDERS.md` with tables of contents; relative links were adjusted.
+- **Changed files:** `README.md`, `docs/USAGE.md` (new), `docs/PROVIDERS.md` (new), `CONTRIBUTING.md`, `CHANGELOG.md`, `docs/WORK_CHECKPOINT.md`. Documentation only; no code, strategy code/default/selection changed; no backtest applies.
+- **Verification:** Checked that every relative link and in-page anchor in the new files resolves; no test reads README content.
+- **Exact next action:** None for this query. Unrelated work resumes at the AU01 backlog card only when requested.
+- **Blockers / limits:** None.
+
+## Previous session — provider/runtime repairs and v0.1.73
+
+- **Date:** 2026-09-30
 - **Active task:** Completed the requested provider/runtime repairs, opt-in child execution, model-specific effort/live-write surfaces and measured parser/TUI UX improvements. Implementation commits `0137cf5` and `ed4e175` were pushed; v0.1.73 publishes `ed4e1756d54506465266ccddfad46363c2715eaa`. The failed v0.1.72 tag was preserved and never published as a release.
 - **Backlog result:** Closed verified IO01 and SJ01–SJ04 acceptance and removed those completed cards; `task.md` retains 105 unique pending cards with resolved dependencies. AU01 remains the first unrelated backlog task, not a claim that all diagnostic/platform work is complete.
 - **Provider / runtime repair:** Preserved fresh capability/provenance, conservatively filtered mixed-task catalogs, rejected duplicate members, retained Gemini output limits and bounded buffered responses during receipt. Discovery wakes no longer block; failed-job diagnostics and artifact publication/inventory are bounded; validated compaction usage survives publication failure; turn shutdown cancels/joins; LSP writes/process groups, final-size edits and fragmented DAP framing were repaired.
