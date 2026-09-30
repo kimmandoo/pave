@@ -2,7 +2,7 @@
 
 ## 2026-09-30
 
-- release(distribution): prepared v0.1.77 with the responsive composer, compact animated startup mark and clearer suggestion/search/transcript navigation.
+- release(distribution): published v0.1.77 with the responsive composer, compact animated startup mark and clearer suggestion/search/transcript navigation; passed all four native release gates, verified all archive checksums and exercised the packaged macOS arm64 CLI/TUI.
 - feat(tui): clarified command/file suggestions with position counts, full-width selection and responsive name/detail columns; kept insertion, exact-command execution and cancellation hints readable in narrow windows, and prioritized latest-output navigation while scrolled.
 - fix(tui): showed explicit empty search results and filter-edit/cancel guidance in static pickers, preserved match counts beside shortened picker titles, and kept idle send hints visible after a conversation.
 - feat(tui): reduced the startup P mark and revealed it once with a short diagonal amber sweep; kept typing and resize responsive, stopped animation timers after settling, and preserved the ASCII animation without color.

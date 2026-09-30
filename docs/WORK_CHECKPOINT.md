@@ -3,12 +3,13 @@
 ## Current session — v0.1.77 TUI release
 
 - **Date:** 2026-09-30
-- **Active task:** Publishing the user-authorized v0.1.77 release containing `af499d1` and `c06022d`; no additional application changes.
+- **Active task:** Completed the user-authorized v0.1.77 release containing `af499d1` and `c06022d`; no additional application changes.
 - **Changed files:** `CHANGELOG.md`, `docs/WORK_CHECKPOINT.md`.
 - **Starting evidence:** Main was clean at `c06022d`, two commits ahead of origin; public latest release was v0.1.76 and remote v0.1.77 did not exist. GitHub CLI authentication was available.
-- **Verification:** `opam exec -- dune runtest --force -j 1`, `opam exec -- dune build @install` and `opam lint pave.opam` passed. Previous implementation PTYs covered input preservation, resizing, startup animation, suggestions/search and queued turns; hosted release gates and downloaded asset verification remain required.
-- **Exact next action:** After local verification, commit/push release preparation, create/push the new annotated v0.1.77 tag, wait for native release gates, then verify checksums, archive members and packaged execution.
-- **Blockers:** None currently. Do not mark publication complete before the workflow and asset checks pass.
+- **Verification:** `opam exec -- dune runtest --force -j 1`, `opam exec -- dune build @install` and `opam lint pave.opam` passed. Release preparation `6aeafc068566a86b0dac24cf69b4a55347aae993` and its annotated v0.1.77 tag were pushed. [Main CI 36729207720](https://github.com/kimmandoo/pave/actions/runs/36729207720) passed all four OCaml/platform jobs. [Release 36729214871](https://github.com/kimmandoo/pave/actions/runs/36729214871) passed Linux x86_64/aarch64, macOS arm64/x86_64 and publication.
+- **Published artifact proof:** [v0.1.77](https://github.com/kimmandoo/pave/releases/tag/v0.1.77) was public/non-draft/non-prerelease with exactly four archives plus SHA256SUMS; latest-release redirected to it with HTTP 200. Downloaded all five assets, verified every SHA-256 and exactly three regular members (`pave`, `LICENSE`, `THIRD_PARTY_NOTICES`) per archive. Packaged macOS arm64 passed `--help`/`--providers` (including Ollama/Apple); `otool -L` listed only `/usr/lib/libSystem.B.dylib`. Its real PTY showed v0.1.77, ten distinct startup frames and responsive 60×18→30×10 suggestions with full insertion/cancel/navigation labels. Release notes described the TUI changes. Temporary downloads/workspace/PTY were removed.
+- **Exact next action:** None. v0.1.77 was published and verified; do not retag or repeat publication.
+- **Limits / blockers:** No blockers. The installed user binary was not changed. No strategy changes or live vendor inference; other packaged architectures were executed by their native release runners.
 
 ## Current session — TUI navigation and feedback polish
 
