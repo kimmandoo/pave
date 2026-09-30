@@ -190,3 +190,12 @@ let resolve ~mode ~(decision : decision) ~user_policy =
     | Prompt -> Requires_prompt decision.reason
 
 let tier_name = function Read -> "read" | Write -> "write" | Exec -> "exec"
+
+(* Line prompts accept y/yes in any case, plus ㅛ, the y key under a Korean
+   two-set input method; anything else, including end of input, denies. *)
+let confirmed_answer = function
+  | None -> false
+  | Some line ->
+      match String.lowercase_ascii (String.trim line) with
+      | "y" | "yes" | "\xe3\x85\x9b" -> true
+      | _ -> false

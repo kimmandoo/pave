@@ -1,5 +1,13 @@
 # Work checkpoint
 
+## Current session — unintended approval denials
+
+- **Date:** 2026-09-30
+- **Active task:** Completed. Fixed approvals that were denied without the user refusing (Korean input `ㅛ`, stray UI wake bytes) and related input-method and prompt issues.
+- **Changed files:** `bin/ui/keybindings.ml` (`ㅛ` approve, IME Ignore, modified-jamo shortcut mapping), `bin/ui/tui.ml` (`caller_woken` stray-wake filter, approval ignores `Wake`, pickers tolerate wakes without callbacks, switch-input hint), `lib/tools/approval.ml` (`confirmed_answer`), `bin/main.ml` (line prompts), `test/ui/test_keybindings.ml`, `test/tools/test_approval.ml`, `docs/DESIGN_RULES.md`, `docs/TROUBLESHOOTING.md`, `CHANGELOG.md`.
+- **Verification:** `dune build @install` and `dune test --force` passed. tmux TUI with a loopback vLLM fixture issuing `web_fetch`: before the fix, `ㅛ` produced `Error: tool approval denied` (matching the user report); after it, `ㅜ` showed `Switch to English input: y=yes · other=no` and `ㅛ` approved, so the fetch completed. The stray-wake race has no deterministic automated test.
+- **Exact next action:** None. The fix is on main and not yet released (latest release v0.1.75).
+
 ## Current session — tool performance, parallel batches and v0.1.75
 
 - **Date:** 2026-09-30

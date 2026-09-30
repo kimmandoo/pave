@@ -1036,7 +1036,7 @@ let () =
         | Some screen -> Tui.confirm screen command
         | None ->
             Printf.eprintf "\nShell command in %s:\n%s\nApprove? [y/N] %!" root command;
-            (match read_line () with "y" | "Y" | "yes" -> true | _ -> false) in
+            Pave.Approval.confirmed_answer (try Some (read_line ()) with End_of_file -> None) in
     let approve_tool_request (request : Pave.Approval.request) =
       if not (Unix.isatty Unix.stdin) then false
       else match !ui with
@@ -1051,7 +1051,7 @@ let () =
               (match request.reason with
                | Some reason -> "\nPolicy: " ^ reason ^ "\n"
                | None -> "\n");
-            (match read_line () with "y" | "Y" | "yes" -> true | _ -> false) in
+            Pave.Approval.confirmed_answer (try Some (read_line ()) with End_of_file -> None) in
     let render_tool_event screen = function
       | Pave.Agent.Tool_draft delta -> Tui.tool_draft screen delta
       | Pave.Agent.Tool_draft_ended { key; call_id; valid } ->

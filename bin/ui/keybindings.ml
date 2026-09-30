@@ -143,6 +143,8 @@ let bindings =
 
     exact "approval.y" Approval (`ASCII 'y') [] Approve;
     exact "approval.upper-y" Approval (`ASCII 'Y') [] Approve;
+    (* The y key under a Korean two-set input method sends ㅛ. *)
+    exact "approval.hangul-y" Approval (`Uchar (Uchar.of_int 0x315B)) [] Approve;
 
     any ~help:search_help "search.escape" Search `Escape Cancel_search;
     exact "search.ctrl-g" Search (`ASCII 'G') [`Ctrl] Cancel_search;
@@ -237,10 +239,33 @@ let fallback focus event =
   | (Hints | Composer), `Key (`ASCII char, []) when Char.code char >= 32 ->
       Some (Insert_ascii char)
   | (Hints | Composer), `Key (`Uchar uchar, []) -> Some (Insert_uchar uchar)
+  (* Other input-method characters are ambiguous; they neither approve nor deny. *)
+  | Approval, `Key (`Uchar _, []) -> Some Ignore
   | Approval, `Key _ -> Some Reject
   | _ -> None
 
-let resolve bindings focus event =
+(* Korean two-set layout: compatibility jamo sent for each Latin key. *)
+let hangul_keys = [
+  0x3142, 'q'; 0x3148, 'w'; 0x3137, 'e'; 0x3131, 'r'; 0x3145, 't';
+  0x315B, 'y'; 0x3155, 'u'; 0x3151, 'i'; 0x3150, 'o'; 0x3154, 'p';
+  0x3141, 'a'; 0x3134, 's'; 0x3147, 'd'; 0x3139, 'f'; 0x314E, 'g';
+  0x3157, 'h'; 0x3153, 'j'; 0x314F, 'k'; 0x3163, 'l'; 0x314B, 'z';
+  0x314C, 'x'; 0x314A, 'c'; 0x314D, 'v'; 0x3160, 'b'; 0x315C, 'n';
+  0x3161, 'm'; 0x3143, 'Q'; 0x3149, 'W'; 0x3138, 'E'; 0x3132, 'R';
+  0x3146, 'T'; 0x3152, 'O'; 0x3156, 'P'
+]
+
+let rec resolve bindings focus event =
+  match event with
+  | `Key (`Uchar uchar, (_ :: _ as modifiers)) ->
+      (* A shortcut typed with a Korean input method still means its Latin
+         key; plain jamo stay text. *)
+      (match List.assoc_opt (Uchar.to_int uchar) hangul_keys with
+       | Some key -> resolve bindings focus (`Key (`ASCII key, modifiers))
+       | None -> resolve_exact bindings focus event)
+  | _ -> resolve_exact bindings focus event
+
+and resolve_exact bindings focus event =
   let rec find owner = function
     | [] -> None
     | binding :: rest when binding.focus <> owner -> find owner rest

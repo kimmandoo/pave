@@ -1,6 +1,10 @@
 # Changelog
 
 ## 2026-09-30
+- fix(tui): approved tool and shell actions when the y key is pressed under a Korean input method (`ㅛ`), which had been denied as "other key"; other input-method characters now show a switch-input hint instead of denying.
+- fix(tui): stopped a late internal wake-up from silently denying an open approval or crashing a picker opened without a wake callback.
+- fix(tui): kept Alt shortcuts such as Alt+O, Alt+B/F and Alt+Y working while a Korean input method is active.
+- fix(cli): accepted `Y`, `yes` with surrounding spaces and `ㅛ` at terminal `[y/N]` approval prompts, and treated end of input as a denial instead of an error.
 - release(distribution): published v0.1.75 with the workspace scan and parallel tool batch performance work after CI passed, verified all four archive checksums and ran the packaged Linux binary.
 - perf(agent): ran parallel shared tool calls in a sliding window of four instead of fixed waves, so one slow call no longer holds back the rest, and settled each finished prefix of results immediately in provider order.
 - perf(tools): serialized concurrent workspace tree walks behind one scan lock, which roughly halved a mixed parallel batch (search, grep and twelve reads: 687 ms to 326 ms) that thread contention had made slower than running it serially.

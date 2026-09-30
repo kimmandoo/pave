@@ -14,6 +14,22 @@ let () =
     (`Key (`ASCII 'y', [])) = Some Keybindings.Approve);
   assert (Keybindings.resolve Keybindings.bindings Keybindings.Approval
     (`Key (`ASCII 'n', [])) = Some Keybindings.Reject);
+  (* Alt shortcuts typed under a Korean input method keep their meaning. *)
+  assert (Keybindings.resolve Keybindings.bindings Keybindings.Composer
+    (`Key (`Uchar (Uchar.of_int 0x3150), [`Meta])) = Some Keybindings.Toggle_details);
+  assert (Keybindings.resolve Keybindings.bindings Keybindings.Composer
+    (`Key (`Uchar (Uchar.of_int 0x3160), [`Meta])) = Some Keybindings.Word_left);
+  assert (Keybindings.resolve Keybindings.bindings Keybindings.Composer
+    (`Key (`Uchar (Uchar.of_int 0x3150), [])) = Some (Keybindings.Insert_uchar (Uchar.of_int 0x3150)));
+  (* Korean input sends ㅛ for the y key; other IME text must not decide. *)
+  assert (Keybindings.resolve Keybindings.bindings Keybindings.Approval
+    (`Key (`Uchar (Uchar.of_int 0x315B), [])) = Some Keybindings.Approve);
+  assert (Keybindings.resolve Keybindings.bindings Keybindings.Approval
+    (`Key (`Uchar (Uchar.of_int 0x315C), [])) = Some Keybindings.Ignore);
+  assert (Keybindings.resolve Keybindings.bindings Keybindings.Approval
+    (`Key (`Escape, [])) = Some Keybindings.Reject);
+  assert (Keybindings.resolve Keybindings.bindings Keybindings.Approval
+    (`Key (`Uchar (Uchar.of_int 0x315B), [`Meta])) = Some Keybindings.Reject);
   assert (Keybindings.resolve Keybindings.bindings Keybindings.Paste
     (`Key (`ASCII 'C', [`Ctrl])) = Some Keybindings.Ignore);
   assert (Keybindings.focus ~paste:true ~overlay:(Some Keybindings.Approval)

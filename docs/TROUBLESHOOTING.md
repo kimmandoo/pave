@@ -1,5 +1,12 @@
 # Troubleshooting
 
+### [2026-09-30] Tool approvals were denied without the user refusing
+
+- **Context / Symptom:** A `web_fetch` approval card appeared and then settled as `Error: tool approval denied` although the user meant to approve. Reproduced in tmux by sending `ㅛ` to the approval card.
+- **Root Cause:** With a Korean input method active, the y key sends `ㅛ` (U+315B), and approval treated every key other than ASCII `y`/`Y` as a denial. Separately, `enqueue_ui_event` queues an event before writing the wake byte, so the UI thread could handle the event first and later read the leftover byte as a bare `Wake`. The approval loop's catch-all denied on that `Wake`, and `choose`/`read` raised `invalid_arg` when it arrived without an `on_wake` callback.
+- **Solution:** Bound `ㅛ` to Approve and made other non-ASCII keys show a switch-input hint. `next_input` now drops a wake unless the caller's own wake fd is readable. Approval ignores `Wake`, and pickers ignore wakes that have no callback. Modified jamo resolve as their Latin shortcut keys, and line prompts use `Approval.confirmed_answer`.
+- **Prevention / Reference:** Test modal key handling with non-ASCII input, for example `tmux send-keys -l "ㅛ"`, and never let a catch-all branch treat non-key events as a user decision.
+
 ### [2026-09-30] Parallel read-only tool batches ran slower than serial
 
 - **Context / Symptom:** A batch of `search` + `grep` took about 300 ms when run one after another but 600-700 ms through `Tool_scheduler`, whose shared calls run on system threads.

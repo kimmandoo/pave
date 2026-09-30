@@ -51,4 +51,9 @@ let () =
   expect "wildcards match without regex semantics"
     (A.glob_matches "rm *" "rm -rf /tmp" &&
      not (A.glob_matches "rm *" "echo rm -rf /tmp"));
+  expect "line prompts accept y, yes and the Korean y key, and deny the rest"
+    (A.confirmed_answer (Some " Y ") && A.confirmed_answer (Some "yes") &&
+     A.confirmed_answer (Some "\xe3\x85\x9b") &&
+     not (A.confirmed_answer (Some "")) && not (A.confirmed_answer (Some "n")) &&
+     not (A.confirmed_answer (Some "yes please")) && not (A.confirmed_answer None));
   print_endline "approval tiers, precedence and compound command policy: ok"

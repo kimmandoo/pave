@@ -1935,6 +1935,14 @@ let process_ui_event t = function
       `Return `Wake
   | Shutdown -> `Return `End
 
+let caller_woken = function
+  | None -> false
+  | Some fd ->
+      (try
+         let ready, _, _ = Unix.select [fd] [] [] 0. in
+         ready <> []
+       with Unix.Unix_error (Unix.EINTR, _, _) -> true)
+
 let rec next_input ?wake_fd t =
   match pop_ui_event t with
   | Some queued ->
@@ -1951,6 +1959,11 @@ let rec next_input ?wake_fd t =
         | Some fd -> [t.ui_read_fd; fd] in
       (match Terminal_input.event ~wake_fds ?timeout t.input with
       | `Wake when ui_events_pending t -> next_input ?wake_fd t
+      | `Wake when not (caller_woken wake_fd) ->
+          (* A producer queues its event before writing the wake byte, so the
+             byte can outlive an event already handled; never surface it. *)
+          drain_ui_pipe t;
+          next_input ?wake_fd t
       | event ->
           enqueue_ui_event t (Terminal_event event);
           next_input ?wake_fd t)
@@ -2047,8 +2060,7 @@ let read ?wake_fd ?on_wake ?on_interrupt ?on_dequeue ?on_completion t =
     match next_input ?wake_fd t with
     | `End -> None
     | `Wake ->
-        (match on_wake with Some callback -> callback ()
-         | None -> invalid_arg "Tui.read: wake_fd requires on_wake");
+        Option.iter (fun callback -> callback ()) on_wake;
         loop ()
     | `Resize _ -> paint_resized t; loop ()
     | `Tick -> paint t; loop ()
@@ -2425,8 +2437,7 @@ let choose ?(allow_custom = false) ?(intro = []) ?(plain = [])
       match next_input ?wake_fd t with
       | `End -> None
       | `Wake ->
-          (match on_wake with Some callback -> callback ()
-           | None -> invalid_arg "Tui.choose: wake_fd requires on_wake");
+          Option.iter (fun callback -> callback ()) on_wake;
           loop ()
       | `Resize _ -> paint t; loop ()
       | `Paste `Start -> t.paste <- true; loop ()
@@ -2577,7 +2588,7 @@ let confirm_review_now t ~title ~label ~body ~max_bytes ~wrap
             alert t (if fits () then label else resize_notice);
             decision ()
         | `Tick -> paint t; decision ()
-        | `Mouse _ -> decision ()
+        | `Wake | `Mouse _ -> decision ()
         | `Paste `Start -> t.paste <- true; decision ()
         | `Paste `End ->
             t.paste <- false;
@@ -2591,6 +2602,9 @@ let confirm_review_now t ~title ~label ~body ~max_bytes ~wrap
                 alert t resize_notice;
                 decision ()
             | Some Keybindings.Reject -> false
+            | Some Keybindings.Ignore ->
+                alert t "Switch to English input: y=yes · other=no";
+                decision ()
             | _ -> false)
         | _ -> false in
       let accepted = decision () in
