@@ -6,6 +6,7 @@ let max_walk_entries = 10_000
 let max_search_bytes = 16_777_216
 let max_matches = 100
 let max_regex_line = 4096
+let regex_scan_seconds = 3.0
 
 exception Tool_error of string
 
@@ -191,8 +192,24 @@ let optional_bool name default args =
   | `Bool value -> value
   | _ -> fail (name ^ " must be a boolean")
 
+(* Boyer-Moore-Horspool: skip ahead by the shift of the window's last byte. *)
 let find_from text needle start =
   let text_len = String.length text and needle_len = String.length needle in
+  if needle_len >= 3 then (
+    let shift = Array.make 256 needle_len in
+    for i = 0 to needle_len - 2 do
+      shift.(Char.code needle.[i]) <- needle_len - 1 - i
+    done;
+    let last = needle.[needle_len - 1] in
+    let rec scan i =
+      if i + needle_len > text_len then None
+      else
+        let tail = text.[i + needle_len - 1] in
+        let rec same k = k < 0 || (text.[i + k] = needle.[k] && same (k - 1)) in
+        if tail = last && same (needle_len - 2) then Some i
+        else scan (i + shift.(Char.code tail)) in
+    scan start)
+  else
   let rec matches i j =
     j = needle_len || (text.[i + j] = needle.[j] && matches i (j + 1))
   in
@@ -203,7 +220,21 @@ let find_from text needle start =
   in
   scan start
 (* A segment cannot cross a separator; memoization also bounds repeated stars. *)
-let glob_segment pattern name =
+let glob_metacharacter = function '*' | '?' | '[' | '\\' -> true | _ -> false
+
+let rec glob_segment pattern name =
+  let plen = String.length pattern in
+  let literal from = not (String.exists glob_metacharacter
+    (String.sub pattern from (plen - from))) in
+  (* Most ignore rules and globs are literal names or `*.ext`; match those
+     without allocating a memo table per candidate. *)
+  if not (String.exists glob_metacharacter pattern) then String.equal pattern name
+  else if plen > 0 && pattern.[0] = '*' && literal 1 then
+    String.length name >= plen - 1 &&
+    String.ends_with ~suffix:(String.sub pattern 1 (plen - 1)) name
+  else glob_segment_memo pattern name
+
+and glob_segment_memo pattern name =
   let plen = String.length pattern and nlen = String.length name in
   let memo = Hashtbl.create 32 in
   let rec matches pi ni =
@@ -238,25 +269,46 @@ let glob_segment pattern name =
   in
   matches 0 0
 
-let glob_parts pattern path =
+(* Compile a segment glob once per rule rather than per candidate path. *)
+let segment_matcher pattern =
+  let plen = String.length pattern in
+  if not (String.exists glob_metacharacter pattern) then String.equal pattern
+  else if plen > 0 && pattern.[0] = '*' &&
+          not (String.exists glob_metacharacter (String.sub pattern 1 (plen - 1))) then
+    let suffix = String.sub pattern 1 (plen - 1) in
+    String.ends_with ~suffix
+  else glob_segment_memo pattern
+
+(* Split the pattern once; `**`-free patterns compare segment by segment and
+   only `**` needs the memoized search. *)
+let glob_parts pattern =
   let patterns = Array.of_list (String.split_on_char '/' pattern) in
-  let names = Array.of_list (String.split_on_char '/' path) in
-  let memo = Hashtbl.create 32 in
-  let rec matches i j =
-    match Hashtbl.find_opt memo (i, j) with
-    | Some answer -> answer
-    | None ->
-        let answer =
-          if i = Array.length patterns then j = Array.length names
-          else if patterns.(i) = "**" then
-            matches (i + 1) j ||
-            (j < Array.length names && matches i (j + 1))
-          else j < Array.length names &&
-            glob_segment patterns.(i) names.(j) && matches (i + 1) (j + 1) in
-        Hashtbl.add memo (i, j) answer;
-        answer
-  in
-  matches 0 0
+  let segments = Array.map (fun segment ->
+    if segment = "**" then None else Some (segment_matcher segment)) patterns in
+  let recursive = Array.exists Option.is_none segments in
+  fun path ->
+    let names = Array.of_list (String.split_on_char '/' path) in
+    if not recursive then
+      Array.length names = Array.length segments &&
+      (let rec all index = index = Array.length names ||
+         ((Option.get segments.(index)) names.(index) && all (index + 1)) in all 0)
+    else
+      let memo = Hashtbl.create 32 in
+      let rec matches i j =
+        match Hashtbl.find_opt memo (i, j) with
+        | Some answer -> answer
+        | None ->
+            let answer =
+              if i = Array.length segments then j = Array.length names
+              else match segments.(i) with
+                | None -> matches (i + 1) j ||
+                    (j < Array.length names && matches i (j + 1))
+                | Some segment -> j < Array.length names &&
+                    segment names.(j) && matches (i + 1) (j + 1) in
+            Hashtbl.add memo (i, j) answer;
+            answer
+      in
+      matches 0 0
 
 let valid_glob pattern =
   if pattern = "" || String.length pattern > 512 ||
@@ -268,10 +320,11 @@ let valid_glob pattern =
 
 type ignore_rule = {
   base : string;
-  pattern : string;
+  base_prefix : string;
   directory_only : bool;
   negated : bool;
   basename_only : bool;
+  matches : string -> bool;
 }
 
 let ignore_rules absolute base =
@@ -303,34 +356,34 @@ let ignore_rules absolute base =
               String.sub pattern 1 (String.length pattern - 1) else pattern in
             if String.length pattern > 512 then fail ("gitignore rule exceeds 512 bytes: " ^ path);
             if pattern = "" then None
-            else Some { base; pattern; directory_only; negated;
-                        basename_only = not anchored && not (String.contains pattern '/') })
+            else
+              let basename_only = not anchored && not (String.contains pattern '/') in
+              Some { base; base_prefix = (if base = "" then "" else base ^ "/");
+                     directory_only; negated; basename_only;
+                     matches = if basename_only then segment_matcher pattern
+                       else glob_parts pattern })
   with Unix.Unix_error (Unix.ENOENT, _, _) -> []
 
 let ignored rules relative is_directory =
+  let basename = lazy (Filename.basename relative) in
   List.fold_left (fun excluded rule ->
-    let local =
-      if rule.base = "" then Some relative
-      else
-        let prefix = rule.base ^ "/" in
-        if String.length relative > String.length prefix &&
-           String.sub relative 0 (String.length prefix) = prefix then
-          Some (String.sub relative (String.length prefix)
-                  (String.length relative - String.length prefix))
-        else None in
-    match local with
-    | None -> excluded
-    | Some local ->
-        if rule.directory_only && not is_directory then excluded
-        else
-          let matches =
-            if rule.basename_only then glob_segment rule.pattern (Filename.basename local)
-            else glob_parts rule.pattern local in
-          if matches then not rule.negated else excluded) false rules
+    (* Only a rule that could flip the current decision needs matching. *)
+    if rule.negated <> excluded || (rule.directory_only && not is_directory) then excluded
+    else if rule.base_prefix <> "" &&
+            not (String.length relative > String.length rule.base_prefix &&
+                 String.starts_with ~prefix:rule.base_prefix relative) then excluded
+    else
+      let matches =
+        if rule.basename_only then rule.matches (Lazy.force basename)
+        else if rule.base_prefix = "" then rule.matches relative
+        else rule.matches (String.sub relative (String.length rule.base_prefix)
+          (String.length relative - String.length rule.base_prefix)) in
+      if matches then not rule.negated else excluded) false rules
 
-let matching_glob pattern relative =
-  if String.contains pattern '/' then glob_parts pattern relative
-  else glob_segment pattern (Filename.basename relative)
+let matching_glob pattern =
+  if String.contains pattern '/' then glob_parts pattern
+  else let segment = segment_matcher pattern in
+    fun relative -> segment (Filename.basename relative)
 
 let fuzzy_separator character =
   match Uchar.to_int character with
@@ -387,7 +440,10 @@ let skip_directory = function
   | "node_modules" | "DerivedData" | ".gradle" | ".dart_tool" | "Pods" -> true
   | _ -> false
 
-let walk ?(hidden = true) ?cancel ?visit_directory root relative visit =
+(* [stop] ends a walk whose caller already has all the output it can return;
+   [descend] prunes directories that cannot contain a wanted path. *)
+let walk ?(hidden = true) ?cancel ?(stop = fun () -> false) ?(descend = fun _ -> true)
+    ?visit_directory root relative visit =
   let check_cancel () =
     match cancel with Some cancelled when cancelled () -> raise Cancelled | _ -> () in
   check_cancel ();
@@ -427,12 +483,13 @@ let walk ?(hidden = true) ?cancel ?visit_directory root relative visit =
       in List.sort String.compare (collect [])) in
     List.iter (fun name ->
       check_cancel ();
+      if stop () then truncated := true else
       let child = Filename.concat absolute name in
       let relative = if prefix = "" then name else prefix ^ "/" ^ name in
       try
         match (Unix.lstat child).Unix.st_kind with
         | Unix.S_DIR when not (skip_directory name) &&
-                          (hidden || name.[0] <> '.') &&
+                          (hidden || name.[0] <> '.') && descend relative &&
                           not (ignored rules relative true) ->
             Option.iter (fun visit -> visit relative child) visit_directory;
             directory child relative (rules @ ignore_rules child relative)
@@ -450,6 +507,23 @@ type fuzzy_match = { path : string; is_directory : bool; score : int }
 let compare_fuzzy_match left right =
   let by_score = compare right.score left.score in
   if by_score <> 0 then by_score else String.compare left.path right.path
+
+(* Concurrent tree walks hand the OCaml runtime lock back and forth on every
+   readdir/stat/read, which made a parallel batch slower than running it
+   serially. Walks take turns; waiting releases the runtime lock, so cheap
+   shared calls such as read_file still overlap. Reentrant per thread. *)
+let scan_lock = Mutex.create ()
+let scan_owner = Atomic.make (-1)
+
+let scanning work =
+  let self = Thread.id (Thread.self ()) in
+  if Atomic.get scan_owner = self then work ()
+  else (
+    Mutex.lock scan_lock;
+    Atomic.set scan_owner self;
+    Fun.protect work ~finally:(fun () ->
+      Atomic.set scan_owner (-1);
+      Mutex.unlock scan_lock))
 
 let fuzzy_file_search ?cancel root args =
   let query = fuzzy_query (required_string "query" args) in
@@ -493,6 +567,9 @@ let fuzzy_file_search ?cancel root args =
     "truncated", `Bool (walk_truncated || !total_matches > !result_count)
   ])
 
+let fuzzy_file_search ?cancel root args =
+  scanning (fun () -> fuzzy_file_search ?cancel root args)
+
 let append_bounded output text limit =
   if Buffer.length output + String.length text <= limit then (Buffer.add_string output text; true)
   else false
@@ -501,7 +578,7 @@ let list_files root args =
   let relative = optional_string "path" "." args in
   let output = Buffer.create 4096 in
   let count = ref 0 and overflow = ref false in
-  let walk_limit = walk root relative (fun name _ ->
+  let walk_limit = walk ~stop:(fun () -> !overflow) root relative (fun name _ ->
     if !count < 500 && not !overflow then
       if append_bounded output (name ^ "\n") (max_read_bytes - 128) then incr count
       else overflow := true
@@ -510,6 +587,8 @@ let list_files root args =
   if !count = 0 && not (walk_limit || !overflow) then "No files found" else Buffer.contents output
 (* Str's backtracking is not time-bounded. Limit candidate lines and allow
    only one repetition operator; reject quantified groups and backreferences. *)
+let list_files root args = scanning (fun () -> list_files root args)
+
 let validate_regex pattern =
   if String.length pattern > 512 then fail "regex exceeds 512-byte limit";
   let length = String.length pattern in
@@ -545,14 +624,27 @@ let glob root args =
   let hidden = optional_bool "hidden" false args in
   let output = Buffer.create 4096 in
   let count = ref 0 and overflow = ref false in
-  let walk_limit = walk ~hidden root relative (fun name _ ->
-    if matching_glob pattern name then
+  let segments = Array.of_list (String.split_on_char '/' pattern) in
+  let descend directory =
+    (* Compare the directory with the pattern's leading segments up to `**`. *)
+    let parts = Array.of_list (String.split_on_char '/' directory) in
+    let rec fits index =
+      if index >= Array.length parts then true
+      else if index >= Array.length segments - 1 then false
+      else segments.(index) = "**" ||
+        (glob_segment segments.(index) parts.(index) && fits (index + 1)) in
+    Array.length segments = 1 || fits 0 in
+  let wanted = matching_glob pattern in
+  let walk_limit = walk ~hidden ~stop:(fun () -> !overflow) ~descend root relative (fun name _ ->
+    if wanted name then
       if !count < limit && not !overflow then
         if append_bounded output (name ^ "\n") (max_read_bytes - 128) then incr count
         else overflow := true
       else overflow := true) in
   if walk_limit || !overflow then Buffer.add_string output "[truncated; narrow the glob or path]\n";
   if !count = 0 && not (walk_limit || !overflow) then "No files found" else Buffer.contents output
+
+let glob root args = scanning (fun () -> glob root args)
 
 let search_matches root args ~regex =
   let query = required_string "pattern" args in
@@ -570,43 +662,68 @@ let search_matches root args ~regex =
   let hidden = optional_bool "hidden" false args in
   let output = Buffer.create 4096 in
   let matches = ref 0 and scanned = ref 0 and truncated = ref false in
-  let walk_limit = walk ~hidden root relative (fun name path ->
-    if file_glob <> "" && not (matching_glob file_glob name) then ()
+  (* Str backtracking is bounded per line; a deadline bounds the whole scan. *)
+  let deadline = Unix.gettimeofday () +. regex_scan_seconds in
+  let wanted = if file_glob = "" then fun _ -> true else matching_glob file_glob in
+  let walk_limit = walk ~hidden ~stop:(fun () -> !truncated) root relative (fun name path ->
+    if file_glob <> "" && not (wanted name) then ()
     else
       let size = (Unix.stat path).Unix.st_size in
       if size > max_write_bytes then ()
-      else if !scanned + size > (if regex then 262_144 else max_search_bytes) then truncated := true
+      else if !scanned + size > max_search_bytes then truncated := true
       else if not !truncated then (
         scanned := !scanned + size;
         let contents = Workspace_path.read_bounded path max_write_bytes in
-        if not (String.contains contents '\000') then (
-          let length = String.length contents in
-          let rec lines start number =
-            if start < length && not !truncated then (
-              let finish = try String.index_from contents start '\n' with Not_found -> length in
-              if regex && finish - start > max_regex_line then truncated := true
-              else (
-                let line = String.sub contents start (finish - start) in
-                let match_line = if case_sensitive then line else String.lowercase_ascii line in
-                let matched = match compiled with
-                  | None -> find_from match_line match_query 0 <> None
-                  | Some expression ->
-                      (try ignore (Str.search_forward expression match_line 0); true
-                       with Not_found -> false) in
-                if matched then (
-                  if !matches >= limit then truncated := true
+        (* Lowercasing once keeps offsets aligned with the original contents. *)
+        let haystack = if case_sensitive then contents else String.lowercase_ascii contents in
+        let length = String.length contents in
+        let emit number start finish =
+          if !matches >= limit then truncated := true
+          else (
+            let line = String.sub contents start (finish - start) in
+            let preview = if String.length line > 240 then String.sub line 0 240 ^ "..." else line in
+            if append_bounded output (Printf.sprintf "%s:%d:%s\n" name number preview)
+                (max_read_bytes - 128) then incr matches
+            else truncated := true) in
+        let line_end start = try String.index_from contents start '\n' with Not_found -> length in
+        let binary () = String.contains contents '\000' in
+        match compiled with
+          | None ->
+              (* Jump between literal hits instead of splitting every line. *)
+              if not (String.contains match_query '\n') &&
+                 find_from haystack match_query 0 <> None && not (binary ()) then (
+                let rec hits from line_start number =
+                  if not !truncated then match find_from haystack match_query from with
+                    | None -> ()
+                    | Some position ->
+                        let rec advance start number =
+                          let finish = line_end start in
+                          if finish < position then advance (finish + 1) (number + 1)
+                          else start, finish, number in
+                        let start, finish, number = advance line_start number in
+                        emit number start finish;
+                        if finish < length then hits (finish + 1) (finish + 1) (number + 1) in
+                hits 0 0 1)
+          | Some _ when binary () -> ()
+          | Some expression ->
+              let rec lines start number =
+                if Unix.gettimeofday () > deadline then truncated := true
+                else if start < length && not !truncated then (
+                  let finish = line_end start in
+                  if finish - start > max_regex_line then truncated := true
                   else (
-                    let preview = if String.length line > 240 then String.sub line 0 240 ^ "..." else line in
-                    if append_bounded output (Printf.sprintf "%s:%d:%s\n" name number preview)
-                        (max_read_bytes - 128) then incr matches
-                    else truncated := true)));
-              lines (finish + 1) (number + 1))
-          in lines 0 1))) in
+                    let matched =
+                      try ignore (Str.search_forward expression
+                            (String.sub haystack start (finish - start)) 0); true
+                      with Not_found -> false in
+                    if matched then emit number start finish);
+                  lines (finish + 1) (number + 1))
+              in lines 0 1)) in
   if walk_limit || !truncated then Buffer.add_string output "[truncated; narrow the path, glob or query]\n";
   if !matches = 0 && not (walk_limit || !truncated) then "No matches found" else Buffer.contents output
 
-let search root args = search_matches root args ~regex:false
-let grep root args = search_matches root args ~regex:true
+let search root args = scanning (fun () -> search_matches root args ~regex:false)
+let grep root args = scanning (fun () -> search_matches root args ~regex:true)
 let read_text_page root relative args =
   let path = Workspace_path.regular_path root relative in
   let requested_offset = optional_int "offset" 0 ~minimum:0 ~maximum:max_int args in
@@ -1401,6 +1518,9 @@ let mobile_project ?cancel root args =
   if !output_truncated && subroot <> "" then
     "Mobile inventory output exceeded its limit; narrow workspace and retry. No commands suggested.\n"
   else if !truncated then result ^ truncation_notice else result
+
+let mobile_project ?cancel root args =
+  scanning (fun () -> mobile_project ?cancel root args)
 
 let run_command ?cancel ?on_progress root args =
   let command = required_string "command" args in
@@ -2546,6 +2666,9 @@ let repository_security_scan ?cancel root args =
         "findings", `List (List.map finding findings)
       ])
   | _ -> fail "format must be summary or sarif"
+
+let repository_security_scan ?cancel root args =
+  scanning (fun () -> repository_security_scan ?cancel root args)
 
 let is_shell_tool = function
   | "run_command" | "start_process" | "start_shell" | "xcode_preflight"

@@ -1,6 +1,11 @@
 # Changelog
 
 ## 2026-09-30
+- perf(agent): ran parallel shared tool calls in a sliding window of four instead of fixed waves, so one slow call no longer holds back the rest, and settled each finished prefix of results immediately in provider order.
+- perf(tools): serialized concurrent workspace tree walks behind one scan lock, which roughly halved a mixed parallel batch (search, grep and twelve reads: 687 ms to 326 ms) that thread contention had made slower than running it serially.
+- perf(tools): sped up workspace walks and searches on a 20k-file tree: `list_files` 188 to 4 ms, `glob` 189 to 3 ms, `fuzzy_file_search` 187 to 50 ms, `search` 370 to 145 ms, by precompiling glob and ignore patterns, pruning directories a glob cannot match, stopping walks once limits are reached, using a skip-table substring search, jumping between literal hits instead of splitting every line, and reading files without an extra copy.
+- fix(tools): stopped `grep` from silently missing matches after the first 256 KiB of scanned text; regex scans now share the 16 MiB search budget with a 3-second deadline and report truncation.
+- fix(tools): rejected a file that grows past the read limit exactly at the boundary instead of returning one byte over the limit.
 - fix(agent): normalized unambiguous model argument spellings before schema validation for built-in, `task` and external tools, so optional `null` values, `"5"`/`5.0` integers, `"true"` booleans, JSON-encoded objects/arrays, lone strings for string arrays and differently cased enum values no longer fail tool calls.
 - fix(provider): decoded tool arguments on every transport through one shared decoder that unwraps double-encoded or Markdown-fenced objects, and returned still-malformed arguments to the model as a correctable tool error instead of failing the whole turn.
 - fix(tools): named the offending value, the allowed range and the accepted arguments in tool validation errors, and let `ast_edit` ignore empty strings echoed for unused operation fields.

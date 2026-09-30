@@ -1,5 +1,12 @@
 # Troubleshooting
 
+### [2026-09-30] Parallel read-only tool batches ran slower than serial
+
+- **Context / Symptom:** A batch of `search` + `grep` took about 300 ms when run one after another but 600-700 ms through `Tool_scheduler`, whose shared calls run on system threads.
+- **Root Cause:** OCaml 5 system threads in one domain share the runtime lock. A tree walk releases and reacquires it on every `readdir`/`stat`/`read`, so two concurrent walks forced a thread handoff per syscall. Moving the work to extra domains is unsafe here because `Unix.fork` (MCP clients, workspace processes, auth helpers) fails while another domain runs.
+- **Solution:** Added a reentrant `scanning` lock in `lib/tools/tools.ml` around the tree-walking tools. Waiting on a `Mutex` releases the runtime lock, so walks take turns without contention while cheap calls such as `read_file` still overlap. The scheduler also became a sliding window with immediate in-order settlement.
+- **Prevention / Reference:** Benchmark parallel batches against serial execution, not only single calls; a parallel batch should never be slower than the serial sum.
+
 ### [2026-09-30] Long streamed replies were killed after 120 seconds
 
 - **Context / Symptom:** A healthy stream from a local vLLM fixture sending one token per second ended after token 118 with `Transport error: provider stream timed out after response data (stream idle or total request timeout)`.

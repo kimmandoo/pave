@@ -57,14 +57,29 @@ let read_bounded path limit =
   let size = (Unix.stat path).Unix.st_size in
   if size > limit then fail (Printf.sprintf "file exceeds %d-byte limit: %s" limit path);
   with_fd path [Unix.O_RDONLY] 0 (fun fd ->
+    (* Read the stat-sized file into its final string; one extra byte
+       detects growth, which falls back to the bounded incremental read. *)
+    let direct = Bytes.create size and probe = Bytes.create 1 in
+    let rec fill offset =
+      if offset >= size then offset
+      else match Unix.read fd direct offset (size - offset) with
+        | 0 -> offset
+        | count -> fill (offset + count) in
+    let filled = fill 0 in
+    let grew = filled = size && Unix.read fd probe 0 1 = 1 in
+    if not grew then
+      (if filled = size then Bytes.unsafe_to_string direct
+       else Bytes.sub_string direct 0 filled) else
     let buffer = Bytes.create 8192 in
-    let result = Buffer.create (min size limit) in
+    let result = Buffer.create (min (2 * size + 1) (limit + 1)) in
+    Buffer.add_bytes result direct;
+    Buffer.add_bytes result probe;
     let rec loop () =
+      if Buffer.length result > limit then
+        fail (Printf.sprintf "file exceeds %d-byte limit: %s" limit path);
       let count = Unix.read fd buffer 0 (min 8192 (limit + 1 - Buffer.length result)) in
       if count <> 0 then (
         Buffer.add_subbytes result buffer 0 count;
-        if Buffer.length result > limit then
-          fail (Printf.sprintf "file exceeds %d-byte limit: %s" limit path);
         loop ())
     in
     loop ();

@@ -1,6 +1,15 @@
 # Work checkpoint
 
-## Current session — model-agnostic tool arguments and provider-labelled picker
+## Current session — tool performance, parallel batches and v0.1.75
+
+- **Date:** 2026-09-30
+- **Active task:** Performance and correctness pass over workspace tools and the parallel tool scheduler, then release v0.1.75.
+- **Changed files:** `lib/tools/tools.ml` (Horspool `find_from`, precompiled glob/ignore matchers, walk `stop`/`descend` pruning, literal hit jumping, one-pass case folding, regex 3 s deadline with 16 MiB budget, `scanning` lock), `lib/tools/workspace_path.ml` (copy-free `read_bounded`, boundary growth fix), `lib/agent/tool_scheduler.ml` (sliding window, immediate ordered settlement), `test/tools/test_tools.ml`, `test/agent/test_tool_scheduler.ml`, `docs/DESIGN_RULES.md`, `docs/TROUBLESHOOTING.md`, `CHANGELOG.md`.
+- **Benchmarks (20k files, 83 MB, 30-rule .gitignore):** list_files 188→4 ms; glob 189→3 ms; fuzzy 187→50 ms; search 370→145 ms; case-insensitive search 389→180 ms; grep 209 ms (truncated at 256 KiB, no results) → 170 ms complete; mixed parallel batch (search, grep, 12 reads) 687→326 ms.
+- **Verification:** `dune build @install` and `dune test --force` passed. The new scheduler test fails on the old wave scheduler and passed 20/20 runs on the new one. Loopback vLLM fixture through the real CLI: a six-call parallel batch (search, grep, glob, list_files, two reads) returned correct results in call order and the turn finished with `done`.
+- **Exact next action:** Push main, wait for CI, tag v0.1.75 and verify four archives plus SHA256SUMS.
+
+## Previous session — model-agnostic tool arguments and provider-labelled picker
 
 - **Date:** 2026-09-30
 - **Active task:** Completed. Audited every tool-argument path for failures that depend on how a particular model spells arguments, and labelled model picker screens with the provider.

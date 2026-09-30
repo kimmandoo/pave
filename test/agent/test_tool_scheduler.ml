@@ -104,4 +104,47 @@ let () =
    | [| Pave.Tool_scheduler.Completed "completed before cancellation";
         Pave.Tool_scheduler.Skipped |] -> ()
    | _ -> failwith "tool scheduler executed a call after cancellation");
+  (* One slow shared call must not hold back later shared calls, and a
+     finished prefix settles before the tail completes. *)
+  let mutex = Mutex.create () and condition = Condition.create () in
+  let fast_done = ref 0 and release = ref false in
+  let slow () =
+    Mutex.lock mutex;
+    while not !release do Condition.wait condition mutex done;
+    Mutex.unlock mutex;
+    "slow" in
+  let fast () =
+    Mutex.lock mutex;
+    incr fast_done;
+    Condition.broadcast condition;
+    Mutex.unlock mutex;
+    "fast" in
+  let settled = ref [] in
+  let jobs = Array.of_list (
+    task Pave.Tool_scheduler.Shared fast ::
+    task Pave.Tool_scheduler.Shared slow ::
+    List.init 6 (fun _ -> task Pave.Tool_scheduler.Shared fast)) in
+  let scheduler = Thread.create (fun () ->
+    ignore (Pave.Tool_scheduler.run ~cancelled:(fun () -> false)
+      ~on_complete:(fun index _ ->
+        Mutex.lock mutex;
+        settled := index :: !settled;
+        Condition.broadcast condition;
+        Mutex.unlock mutex) jobs)) () in
+  let deadline = Unix.gettimeofday () +. 5. in
+  let rec await predicate =
+    Mutex.lock mutex;
+    let ready = predicate () in
+    Mutex.unlock mutex;
+    if not ready && Unix.gettimeofday () < deadline then (
+      Thread.delay 0.001; await predicate)
+    else ready in
+  assert (await (fun () -> !fast_done = 7));
+  assert (await (fun () -> !settled = [0]));
+  Mutex.lock mutex;
+  release := true;
+  Condition.broadcast condition;
+  Mutex.unlock mutex;
+  Thread.join scheduler;
+  assert (List.rev !settled = [0; 1; 2; 3; 4; 5; 6; 7]);
   print_endline "tool scheduler: ok"

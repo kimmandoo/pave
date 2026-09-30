@@ -141,6 +141,28 @@ let () =
     assert (Pave.Workspace_path.read_bounded
       (Filename.concat root "snapshot.txt") 65_536 = "A B\n");
 
+    create "empty.txt" "";
+    assert (Pave.Workspace_path.read_bounded (Filename.concat root "empty.txt") 16 = "");
+    create "exact.txt" "0123456789";
+    assert (Pave.Workspace_path.read_bounded (Filename.concat root "exact.txt") 10 = "0123456789");
+    assert (rejected (fun () -> Pave.Workspace_path.read_bounded
+      (Filename.concat root "exact.txt") 9));
+    (* A FIFO stats as empty but yields bytes, exercising the growth fallback. *)
+    let fifo_read limit =
+      let fifo = Filename.concat root "growing.fifo" in
+      Unix.mkfifo fifo 0o600;
+      Fun.protect ~finally:(fun () -> Sys.remove fifo) (fun () ->
+        match Unix.fork () with
+        | 0 ->
+            let oc = open_out fifo in output_string oc "abcdef"; close_out oc; Unix._exit 0
+        | child ->
+            Fun.protect ~finally:(fun () -> ignore (Unix.waitpid [] child)) (fun () ->
+              try Ok (Pave.Workspace_path.read_bounded fifo limit)
+              with Pave.Workspace_path.Error message -> Error message)) in
+    assert (fifo_read 16 = Ok "abcdef");
+    assert (Result.is_error (fifo_read 0));
+    assert (Result.is_error (fifo_read 3));
+
     create "ast_sample.ml" "let old = old + 1\n(* old *)\nlet text = \"old\"\n";
     let ast_snapshot = Pave.Workspace_edit.read_snapshot ~root ~path:"ast_sample.ml" in
     let ast_args dry_run language = `Assoc [
@@ -545,6 +567,18 @@ let () =
       "src/Folder.swift/inside.txt"));
     assert (contains (tool root "glob" ["pattern", "*.tmp"]) "keep.tmp");
     assert (not (contains (tool root "glob" ["pattern", "*.tmp"]) "hidden.tmp"));
+    (* Directory pruning must not change which paths each pattern shape matches. *)
+    let depth_one = tool root "glob" ["pattern", "src/*.swift"] in
+    assert (contains depth_one "src/Match.swift");
+    assert (not (contains depth_one "src/nested/Keep.swift"));
+    assert (contains (tool root "glob" ["pattern", "src/nested/*.swift"]) "src/nested/Keep.swift");
+    assert (contains (tool root "glob" ["pattern", "src/*/Keep.swift"]) "src/nested/Keep.swift");
+    assert (contains (tool root "glob" ["pattern", "src/**/Keep.swift"]) "src/nested/Keep.swift");
+    assert (contains (tool root "glob" ["pattern", "**/nested/*.swift"]) "src/nested/Keep.swift");
+    assert (not (contains (tool root "glob" ["pattern", "*/Keep.swift"]) "src/nested/Keep.swift"));
+    assert (contains (tool root "glob" ["pattern", "src/Match.swift"]) "src/Match.swift");
+    assert (not (contains (tool root "glob" ["pattern", "**/*.log"]) "src/hidden.log"));
+    assert (contains (tool root "glob" ["pattern", "**/*.log"]) "src/keep.log");
     let matches = tool root "grep" ["pattern", "needle-[0-9][0-9][0-9]"] in
     assert (contains matches "src/Match.swift:1:needle-123");
     assert (contains matches "src/keep.log:1:needle-555");
@@ -590,6 +624,23 @@ let () =
       ["pattern", `String "needle"; "limit", `Int 1]) "[truncated;");
     assert (contains (tool_json root "glob"
       ["pattern", `String "*.swift"; "limit", `Int 1]) "[truncated;");
+    (* Concurrent walks take turns on the scan lock and still match serial results. *)
+    let scans = [ "glob", ["pattern", "**/*.swift"]; "search", ["pattern", "needle"];
+      "grep", ["pattern", "needle-[0-9]+"]; "list_files", [] ] in
+    let serial = List.map (fun (name, fields) -> tool root name fields) scans in
+    let parallel = Array.make (List.length scans) "" in
+    let threads = List.mapi (fun index (name, fields) ->
+      Thread.create (fun () -> parallel.(index) <- tool root name fields) ()) scans in
+    List.iter Thread.join threads;
+    assert (Array.to_list parallel = serial);
+    (* Regex scans used to stop silently after 256 KiB of input. *)
+    create "late-match.txt" (String.concat "" (List.init 40_000 (fun _ -> "filler line\n"))
+      ^ "late-needle-42\n");
+    assert (contains (tool root "grep" ["pattern", "late-needle-[0-9]+"])
+      "late-match.txt:40001:late-needle-42");
+    assert (contains (tool root "search" ["pattern", "late-needle-42"]) "late-match.txt");
+    Sys.remove (Filename.concat root "late-match.txt");
+    files := List.filter (( <> ) (Filename.concat root "late-match.txt")) !files;
     create "src/long-line.txt" (String.make 5000 'a' ^ "needle-333\n");
     assert (contains (tool root "grep" ["pattern", "needle"; "path", "src"])
       "[truncated;");
