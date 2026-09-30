@@ -1,5 +1,15 @@
 # Work checkpoint
 
+## Current session — v0.1.77 TUI release
+
+- **Date:** 2026-09-30
+- **Active task:** Publishing the user-authorized v0.1.77 release containing `af499d1` and `c06022d`; no additional application changes.
+- **Changed files:** `CHANGELOG.md`, `docs/WORK_CHECKPOINT.md`.
+- **Starting evidence:** Main was clean at `c06022d`, two commits ahead of origin; public latest release was v0.1.76 and remote v0.1.77 did not exist. GitHub CLI authentication was available.
+- **Verification:** `opam exec -- dune runtest --force -j 1`, `opam exec -- dune build @install` and `opam lint pave.opam` passed. Previous implementation PTYs covered input preservation, resizing, startup animation, suggestions/search and queued turns; hosted release gates and downloaded asset verification remain required.
+- **Exact next action:** After local verification, commit/push release preparation, create/push the new annotated v0.1.77 tag, wait for native release gates, then verify checksums, archive members and packaged execution.
+- **Blockers:** None currently. Do not mark publication complete before the workflow and asset checks pass.
+
 ## Current session — TUI navigation and feedback polish
 
 - **Date:** 2026-09-30
