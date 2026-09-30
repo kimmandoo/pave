@@ -1,6 +1,11 @@
 # Changelog
 
 ## 2026-09-30
+- fix(provider): stopped cutting off healthy streamed replies at a 120-second total request limit; streams now fail only after 120 seconds without data or a one-hour total, and buffered replies allow 600 seconds, with the applicable limit named in the timeout error.
+- fix(provider): reported output-token-limit stops (`length`, `max_tokens`, `MAX_TOKENS`) on every native route as a plain truncation error that explains the partial reply was not kept, instead of a generic invalid-completion error.
+- fix(provider): accepted OpenAI-compatible tool calls whose arguments are omitted or blank as parameterless `{}` calls in streamed and buffered replies.
+- fix(provider): distinguished streams whose connection closed before the reply finished from streams missing only the `[DONE]` terminator.
+- fix(cli): noted when a model finishes without any reply text, and started prompt-mode errors and tool reports on a fresh line instead of appending them to partially streamed text.
 - fix(tui): cleared a previous model's effort when switching models without an explicit effort pick, reported the resulting effort in the model-change note, and showed the active effort in the composer header.
 - fix(tui): skipped the effort panel when a model offered no selectable levels, preselected the current model in `/model`, and listed ready provider scopes first while marking scopes that need sign-in or an API key.
 - fix(tui): kept the composer top border and model header intact when a long model name filled the header, and gave the model name priority over the workspace path.

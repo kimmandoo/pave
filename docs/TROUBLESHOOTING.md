@@ -1,5 +1,12 @@
 # Troubleshooting
 
+### [2026-09-30] Long streamed replies were killed after 120 seconds
+
+- **Context / Symptom:** A healthy stream from a local vLLM fixture sending one token per second ended after token 118 with `Transport error: provider stream timed out after response data (stream idle or total request timeout)`.
+- **Root Cause:** `post_stream` reused the buffered request's curl options, including `max-time 120`, so a stream's total duration was capped at two minutes on top of its idle check.
+- **Solution:** Gave `curl_options` an explicit `max_seconds`: buffered requests use 600 s, while streams use a 120 s idle limit (`speed-time`/`speed-limit`) plus a one-hour total cap. The timeout message now names the applicable limits.
+- **Prevention / Reference:** Exercise long streams against a loopback fixture (for example 130 tokens at 1 s each) rather than only short replies; the same fixture confirmed the 130-second stream completes.
+
 ### [2026-09-30] Composer header lost its border when the model name was shortened
 
 - **Context / Symptom:** At about 60 columns with a long model name, the composer's top row rendered as a bare `────` line with no corners and no model header, while the sides and bottom still drew a box.

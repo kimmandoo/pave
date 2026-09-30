@@ -361,6 +361,8 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
     match reply.tool_calls with
     | [] ->
         append t reply;
+        if Option.value ~default:"" reply.content = "" then
+          t.on_event "The model finished without a reply.";
         (match reply.content with
          | Some text -> (match t.secret_mask with
              | Some mask -> Secret_mask.redact mask text

@@ -1,6 +1,15 @@
 # Work checkpoint
 
-## Current session — model / effort selection fixes and TUI UX pass
+## Current session — provider prompt/response fixes
+
+- **Date:** 2026-09-30
+- **Active task:** Completed. Wired providers against loopback OpenAI-compatible (vLLM route) fixtures, sent prompts headless and in the TUI, and fixed every response-path bug found.
+- **Fixes:** Streams no longer hit a 120 s total curl cap (120 s idle / 3600 s total; buffered 600 s). Output-token-limit stops on OpenAI-compatible, Anthropic, Gemini and Ollama routes raise `Protocol.truncated` with a plain message. Omitted/blank Chat Completions tool arguments parse as `{}`. Early connection close is reported separately from a missing `[DONE]`. An empty final reply emits "The model finished without a reply." Prompt-mode errors/tool reports start on a fresh line after streamed text.
+- **Changed files:** `lib/core/protocol.ml`, `lib/provider/provider.ml`, `lib/provider/transports/{openai_stream,anthropic_stream,anthropic_wire,gemini_stream,gemini_wire,ollama_wire}.ml`, `lib/agent/agent.ml`, `bin/main.ml`, `test/core/test_protocol.ml`, `test/provider/transports/test_openai_stream.ml`, `CHANGELOG.md`, `docs/{DESIGN_RULES,TROUBLESHOOTING,WORK_CHECKPOINT}.md`. The pre-existing uncommitted README emoji removal was not part of this session and was left unstaged.
+- **Verification:** `opam exec --switch=/tmp/pave-ci55 -- dune build @install -j 4` and `dune runtest --force -j 4` passed. Loopback fixture scenarios (text, tool, multitool, reasoning, usage, empty, length, bad JSON, cut, no-[DONE], 429/500/401/context-400/HTML-502, parameterless tool, buffered) behaved correctly headless in stream and buffered modes; a 130 s one-token-per-second stream failed at 120 s before the fix and completed (exit 0, 133 s) after. TUI PTY checks covered a tool turn, truncation, early close (partial text absent from the journal) and empty reply.
+- **Blockers / limits:** No live vendor entitlement was exercised. Inline `<think>…</think>` text from servers without a reasoning parser is still shown verbatim.
+
+## Previous session — model / effort selection fixes and TUI UX pass
 
 - **Date:** 2026-09-30
 - **Active task:** Completed the user request to fix provider / model-effort / model-selection bugs, followed by a whole-TUI UX pass.

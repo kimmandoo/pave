@@ -297,7 +297,7 @@ let parse_response json =
   (match member "stop_reason" json with
    | `String "end_turn" when tool_calls = [] -> ()
    | `String "tool_use" when tool_calls <> [] -> ()
-   | `String "max_tokens" -> invalid "max_tokens (truncated response)"
+   | `String "max_tokens" -> Protocol.truncated "stop_reason max_tokens"
    | `String "refusal" -> invalid "refusal"
    | `String reason -> invalid ("unexpected stop_reason: " ^ reason)
    | _ -> invalid "missing stop_reason");

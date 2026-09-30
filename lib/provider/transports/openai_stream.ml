@@ -123,6 +123,7 @@ let parse_choice t json =
   (match field "finish_reason" json with
    | `Null -> ()
    | `String ("stop" | "tool_calls" as reason) -> t.finish_reason <- Some reason
+   | `String "length" -> Protocol.truncated "finish_reason length"
    | `String reason -> invalid ("unexpected finish_reason: " ^ reason)
    | _ -> invalid "invalid finish_reason")
 
@@ -181,7 +182,10 @@ let finish t =
   try
     (match t.parser with Some parser -> Sse.finish parser
       | None -> invalid "SSE parser was not initialized");
-    if not t.done_seen then invalid "missing [DONE] event";
+    if not t.done_seen then
+      invalid (if t.finish_reason = None
+        then "stream ended before the reply finished (connection closed early)"
+        else "stream ended without the [DONE] terminator");
     if t.finish_reason = None then invalid "missing finish_reason";
     let calls = Hashtbl.fold (fun _ call acc -> call :: acc) t.calls []
       |> List.sort (fun a b -> Int.compare a.index b.index) in
@@ -192,7 +196,10 @@ let finish t =
       if id = "" || name = "" then invalid "empty tool call id or name";
       if Hashtbl.mem ids id then invalid "duplicate tool call id";
       Hashtbl.add ids id ();
-      let arguments = try Yojson.Basic.from_string (Buffer.contents call.arguments)
+      let raw = Buffer.contents call.arguments in
+      (* Compatible servers omit the arguments of parameterless tools. *)
+      let arguments = if String.trim raw = "" then `Assoc [] else
+        try Yojson.Basic.from_string raw
         with Yojson.Json_error _ -> invalid "invalid function arguments JSON" in
       (match arguments with `Assoc _ -> () | _ -> invalid "tool arguments must be an object");
       { Protocol.id = id; name; arguments }) calls in

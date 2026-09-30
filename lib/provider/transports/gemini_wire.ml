@@ -299,6 +299,7 @@ let request ~model messages tools =
 
 let parse_candidate ~model candidate =
   let finish = required_string "finishReason" candidate in
+  if finish = "MAX_TOKENS" then Protocol.truncated "finishReason MAX_TOKENS";
   if finish <> "STOP" then invalid ("generation finished with " ^ finish);
   (match field "index" candidate with
    | `Null | `Int 0 -> ()

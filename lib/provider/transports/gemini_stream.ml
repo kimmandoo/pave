@@ -93,6 +93,7 @@ let handle_chunk t json =
       (match field "finishReason" candidate with
        | `Null -> ()
        | `String "STOP" -> t.finished <- true
+       | `String "MAX_TOKENS" -> Protocol.truncated "finishReason MAX_TOKENS"
        | `String reason -> invalid ("generation finished with " ^ reason)
        | _ -> invalid "invalid finish reason")
   | _ -> invalid "missing or ambiguous candidates"

@@ -197,6 +197,7 @@ let finish t =
     (match t.reason with
      | Some "end_turn" when calls = [] -> ()
      | Some "tool_use" when calls <> [] -> ()
+     | Some "max_tokens" -> Protocol.truncated "stop_reason max_tokens"
      | Some reason -> invalid ("unexpected stop_reason: " ^ reason)
      | None -> assert false);
     { Protocol.role = "assistant"; content = (if Buffer.length text = 0 then None else Some (Buffer.contents text));

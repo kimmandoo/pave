@@ -126,7 +126,7 @@ let check_done_reason json has_calls =
   match field "done_reason" json with
   | `Null | `String "stop" -> ()
   | `String "tool_calls" when has_calls -> ()
-  | `String "length" -> invalid "length (truncated response)"
+  | `String "length" -> Protocol.truncated "done_reason length"
   | `String "load" -> invalid "load (no response generated)"
   | `String reason -> invalid ("unexpected done_reason: " ^ reason)
   | _ -> invalid "invalid done_reason"

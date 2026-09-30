@@ -48,6 +48,19 @@ let () =
   expect_invalid (fun () -> parse_completion (`Assoc [ "choices", `List [ `Assoc [
     "finish_reason", `String "length";
     "message", message_to_json assistant ] ] ]));
+  (match parse_completion (`Assoc [ "choices", `List [ `Assoc [
+    "finish_reason", `String "length";
+    "message", message_to_json assistant ] ] ]) with
+   | exception Invalid_response message ->
+       assert (String.starts_with ~prefix:truncated_prefix message)
+   | _ -> assert false);
+  (match parse_completion (`Assoc [ "choices", `List [ `Assoc [
+    "finish_reason", `String "tool_calls";
+    "message", `Assoc [ "role", `String "assistant"; "tool_calls", `List [ `Assoc [
+      "id", `String "call"; "type", `String "function";
+      "function", `Assoc [ "name", `String "list_files" ] ] ] ] ] ] ]) with
+   | { tool_calls = [ { arguments = `Assoc []; _ } ]; _ } -> ()
+   | _ -> assert false);
   let choice = match member "choices" completed with
     | `List [choice] -> choice | _ -> assert false in
   expect_invalid (fun () -> parse_completion (`Assoc [

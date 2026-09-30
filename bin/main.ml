@@ -8,6 +8,22 @@ let error_message = function
   | Failure text | Sys_error text | Invalid_argument text -> text
   | exn -> Printexc.to_string exn
 
+(* Headless streaming writes reply text to stdout without a trailing newline;
+   end that line before stderr output so errors never share it. *)
+let stdout_mid_line = ref false
+let write_stdout text =
+  if text <> "" then (
+    print_string text;
+    flush stdout;
+    stdout_mid_line := not (String.ends_with ~suffix:"\n" text))
+let end_stdout_line () =
+  if !stdout_mid_line then (
+    print_newline ();
+    stdout_mid_line := false)
+let eprint_after_stdout text =
+  end_stdout_line ();
+  prerr_endline text
+
 let () =
   let root = ref "." and model = ref "" in
   let exit_kind = ref Pave.Session.Normal in
@@ -950,7 +966,7 @@ let () =
         | Some screen when Thread.id (Thread.self ()) <> ui_thread ->
             Tui.post_message screen message
         | Some screen -> Tui.event screen message
-        | None -> print_endline message; flush stdout in
+        | None -> write_stdout (message ^ "\n") in
     let job_managers :
         (string * (Pave.Session.t * Pave.Session_jobs.t)) list ref = ref [] in
     let process_managers :
@@ -1013,7 +1029,7 @@ let () =
       if !output_format = "jsonl" then jsonl_delta delta
       else match !ui with
         | Some screen -> Tui.delta screen delta
-        | None -> print_string delta; flush stdout in
+        | None -> write_stdout delta in
     let approve_command command =
       if not (Unix.isatty Unix.stdin) then false
       else match !ui with
@@ -1112,7 +1128,7 @@ let () =
               | Pave.Agent.Tool_aborted { name; result; _ } ->
                   "[" ^ name ^ "] " ^ result in
             if report <> "" then
-              if !prompt_supplied then prerr_endline report
+              if !prompt_supplied then eprint_after_stdout report
               else on_event report in
     let worker_event message = match !runner with
       | Some current -> Pave.Turn_runner.message current message
@@ -3999,7 +4015,7 @@ let () =
              exit 130
          | exn ->
              jsonl_outcome "failed" 1;
-             prerr_endline ("Error: " ^ error_message exn);
+             eprint_after_stdout ("Error: " ^ error_message exn);
              exit 1)
       else (
         send !prompt;
@@ -4152,5 +4168,5 @@ let () =
   | exn ->
       exit_kind := Pave.Session.Fatal;
       jsonl_outcome "failed" 1;
-      prerr_endline ("Error: " ^ error_message exn);
+      eprint_after_stdout ("Error: " ^ error_message exn);
       exit 1

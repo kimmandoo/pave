@@ -147,6 +147,19 @@ let () =
     (event (chunk (calls [ call 0 ~id:"call" ~name:"read" ~arguments:"{}" () ]))
      ^ event (chunk ~finish:(`String "stop") (`Assoc []))));
   invalid (fun () -> stream (event (chunk ~finish:(`String "length") (text "short")) ^ done_event));
+  (match stream (event (chunk ~finish:(`String "length") (text "short")) ^ done_event) with
+   | exception Protocol.Invalid_response message ->
+       assert (String.starts_with ~prefix:Protocol.truncated_prefix message)
+   | _ -> assert false);
+  (match stream (event (chunk (text "cut"))) with
+   | exception Protocol.Invalid_response message ->
+       assert (message = "stream ended before the reply finished (connection closed early)")
+   | _ -> assert false);
+  let noargs = stream
+    (event (chunk (calls [ call 0 ~id:"call" ~name:"list_files" () ]))
+     ^ event (chunk ~finish:(`String "tool_calls") (`Assoc [])) ^ done_event) in
+  assert (noargs.tool_calls = [
+    { Protocol.id = "call"; name = "list_files"; arguments = `Assoc [] } ]);
   invalid (fun () -> stream
     (event "{\"error\":{\"message\":\"rate limited\"}}" ^ done_event));
   invalid (fun () -> stream ("event: error\ndata: {\"message\":\"rate limited\"}\n\n"));

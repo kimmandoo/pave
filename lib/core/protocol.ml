@@ -47,6 +47,13 @@ type message = {
 
 exception Invalid_response of string
 
+(* Every wire reports a reply cut off by the output-token limit with the same
+   user-facing text, so callers need not know each vendor's reason code. *)
+let truncated_prefix = "Response stopped at the model's output token limit"
+let truncated reason =
+  raise (Invalid_response (truncated_prefix ^ " (" ^ reason ^
+    "). The partial reply was not added to the conversation; ask for a shorter answer or smaller steps."))
+
 let valid_image_content mime_type data =
   String.starts_with ~prefix:"image/" mime_type &&
   String.length mime_type > String.length "image/" && data <> ""
@@ -317,8 +324,12 @@ let parse_call json =
   let id = member "id" json |> string in
   let fn = member "function" json in
   let name = member "name" fn |> string in
-  let args = member "arguments" fn |> string in
-  let arguments = try Yojson.Basic.from_string args
+  (* Compatible servers omit or blank the arguments of parameterless tools. *)
+  let args = match member "arguments" fn with
+    | `Null -> ""
+    | value -> string value in
+  let arguments = if String.trim args = "" then `Assoc [] else
+    try Yojson.Basic.from_string args
     with Yojson.Json_error _ -> raise (Invalid_response "invalid function arguments JSON") in
   if id = "" || name = "" then raise (Invalid_response "empty tool call id or name");
   { id; name; arguments }
@@ -392,6 +403,7 @@ let parse_completion json =
       (match finish with
       | `String "stop" when msg.tool_calls = [] -> msg
       | `String "tool_calls" when msg.tool_calls <> [] -> msg
+      | `String "length" -> truncated "finish_reason length"
       | `String reason -> raise (Invalid_response ("unexpected finish_reason: " ^ reason))
       | _ -> raise (Invalid_response "missing finish_reason"))
   | `List [] -> raise (Invalid_response "missing choices")

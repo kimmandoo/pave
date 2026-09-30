@@ -267,13 +267,24 @@ let run_curl ?on_chunk ?is_done ?is_finished ?cancel configuration =
       | Unix.WSIGNALED signal | Unix.WSTOPPED signal ->
           raise (Provider_error (Printf.sprintf
             "Transport error: curl terminated (signal %d)" signal)))
+(* Buffered replies arrive all at once, so only a total limit applies. Streams
+   are bounded by an idle limit plus a generous total cap, so long but healthy
+   generations and slow local prompt processing are not cut off. *)
+let buffered_max_seconds = 600
+let stream_idle_seconds = 120
+let stream_max_seconds = 3600
+
 let curl_timeout_message ~streaming ~response_body_seen =
   if not streaming then
-    "Transport error: provider request timed out before a response was available"
+    Printf.sprintf
+      "Transport error: provider request timed out before a response was available (%d s limit)"
+      buffered_max_seconds
   else
     let phase = if response_body_seen then
-      "after response data (stream idle or total request timeout)"
-      else "before the first response data byte" in
+      Printf.sprintf "after response data (no data for %d s, or the %d s total limit)"
+        stream_idle_seconds stream_max_seconds
+      else Printf.sprintf "before the first response data byte (no data for %d s)"
+        stream_idle_seconds in
     "Transport error: provider stream timed out " ^ phase
 
 
@@ -494,7 +505,7 @@ let request_body ?max_request_bytes ~local ~endpoint ~headers body_json =
   body
 
 
-let curl_options ~local ~endpoint ~headers ~body_path =
+let curl_options ~local ~max_seconds ~endpoint ~headers ~body_path =
   let option name value = name ^ " = " ^ quote_config value ^ "\n" in
   "silent\n"
   ^ option "url" endpoint
@@ -503,7 +514,7 @@ let curl_options ~local ~endpoint ~headers ~body_path =
   ^ String.concat "" (List.map (option "header") headers)
   ^ option "data-binary" ("@" ^ body_path)
   ^ option "connect-timeout" "10"
-  ^ option "max-time" "120"
+  ^ option "max-time" (string_of_int max_seconds)
   ^ option "proto" (if String.starts_with ~prefix:"https://" endpoint
     then "=https" else "=http")
   ^ (if local then option "proxy" "" ^ option "noproxy" "*" ^
@@ -525,7 +536,8 @@ let post_json ?max_request_bytes ?(local = false) ?cancel
         raise (Provider_error "completion response exceeds 16 MiB");
       Buffer.add_string received chunk in
     let configuration =
-      curl_options ~local ~endpoint ~headers ~body_path
+      curl_options ~local ~max_seconds:buffered_max_seconds
+        ~endpoint ~headers ~body_path
       ^ option "output" "/dev/stdout"
       ^ option "max-filesize" (string_of_int max_response_bytes)
       ^ option "write-out" "%{http_code}" in
@@ -575,10 +587,11 @@ let post_stream ?max_request_bytes ?(local = false) ?cancel ~endpoint ~headers
       close_out header_output;
       let option name value = name ^ " = " ^ quote_config value ^ "\n" in
       let configuration =
-        curl_options ~local ~endpoint ~headers ~body_path
+        curl_options ~local ~max_seconds:stream_max_seconds
+          ~endpoint ~headers ~body_path
         ^ "no-buffer\n"
         ^ option "dump-header" header_path
-        ^ option "speed-time" "30"
+        ^ option "speed-time" (string_of_int stream_idle_seconds)
         ^ option "speed-limit" "1" in
       let status = ref None in
       let response_body_seen = ref false in
@@ -695,6 +708,9 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage
     raise (Provider_error "OAuth access token unavailable");
   let parse_with_secret secret f =
     try f () with
+    | Protocol.Invalid_response message
+      when String.starts_with ~prefix:Protocol.truncated_prefix message ->
+        raise (Provider_error message)
     | Protocol.Invalid_response message ->
         raise (Provider_error ("invalid completion response: " ^
           redact secret message)) in
