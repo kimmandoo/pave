@@ -3,17 +3,17 @@
 ## Current session — release-only v0.1.76
 
 - **Date:** 2026-09-30
-- **Active task:** Preparing the user-authorized v0.1.76 release only; application code remains unchanged.
+- **Active task:** Completed the user-authorized v0.1.76 release only; application code remained unchanged.
 - **Changed files:** `CHANGELOG.md`, `docs/WORK_CHECKPOINT.md`. Untracked `scratch/` was left untouched.
-- **Verification:** The existing implementation checkpoint recorded passing install build, full tests and native TUI/installer checks. Public latest-release redirect resolved v0.1.75; remote v0.1.76 was unused.
-- **Exact next action:** Commit this release metadata, publish the new v0.1.76 tag, observe the existing four-platform native release workflow and verify the published archives before recording completion.
+- **Verification:** Release commit `b7a1d8a99010aa29de8082398901914f899fa288` and annotated tag `v0.1.76` were pushed. [Release run 36692710745](https://github.com/kimmandoo/pave/actions/runs/36692710745) completed successfully: Linux x86_64/aarch64, macOS arm64/x86_64 and publication. The public latest-release redirect resolved v0.1.76; all four downloaded archives matched `SHA256SUMS` and contained exactly the three regular files `pave`, `LICENSE`, `THIRD_PARTY_NOTICES`. The packaged Linux x86_64 executable passed `--help` and `--providers` (including Ollama). No installed user binary was changed in this release session; temporary verification files were removed.
+- **Exact next action:** None. [v0.1.76](https://github.com/kimmandoo/pave/releases/tag/v0.1.76) was published and verified.
 
 ## Current session — provider-first model picker, install animation
 - **Date:** 2026-09-30
 - **Active task:** Completed. `/model` goes provider → (API/account when several) → model; `install.sh` animates in a terminal.
 - **Changed files:** `bin/ui/model_picker.ml` (`provider_groups`, `provider_label`, `scope_choice_label`, new `browse`), `bin/ui/tui.ml` (footer `Tab providers`), `install.sh` (`animate`, `stop_animation`, curl stderr capture), `test/ui/test_model_picker.ml`, `docs/DESIGN_RULES.md`, `CHANGELOG.md`.
 - **Verification:** `dune build @install` and `dune test --force` passed. tmux TUI with a loopback vLLM fixture: `/model` showed `Models · provider` with `vLLM (local) · vllm  (current)` first and credential-less providers last; Enter opened the vLLM listing, Esc returned to providers, Tab from Ollama returned with Ollama preselected, Amazon Bedrock asked `converse`/`converse-stream`, picking `m` set the active model. `cat install.sh | dash` in tmux installed v0.1.75 into a scratch dir with the animation; piped output and `PAVE_UPDATE_OUTPUT=1` phase lines were unchanged; a missing tag printed curl's 404 on its own line; Ctrl-C exited 1 with the line cleared.
-- **Exact next action:** None. On main, not released (latest release v0.1.75); v0.1.76 awaits the user's go-ahead.
+- **Exact next action:** None. These verified main-branch changes were included in the published v0.1.76 release.
 
 ## Current session — update without API quota, progress animation
 

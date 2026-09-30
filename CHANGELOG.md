@@ -2,7 +2,7 @@
 
 ## 2026-09-30
 
-- release(distribution): prepared v0.1.76 from the existing main-branch provider picker, approval and installer/update changes without changing application code.
+- release(distribution): published v0.1.76 from the existing main-branch provider picker, approval and installer/update changes without changing application code; passed all four native release gates, verified all archive checksums and ran the packaged Linux executable.
 - feat(tui): made `/model` choose a provider first and then its model: the provider list puts the current provider first, then ready providers, then ones needing sign-in or an API key; a provider with several APIs or accounts asks which one; Esc or Tab in the model list returns to the providers, while `/model <filter>` still searches the current provider directly.
 - feat(install): showed the cat-paving progress animation during a first install from a terminal, labelled by the installer phase, and kept curl errors off the animation line; piped and `pave update` output is unchanged.
 - fix(update): found the latest release through the GitHub release-page redirect instead of the REST API, so repeated `pave update` and `pave update --check` runs no longer spend the anonymous 60-requests-per-hour API quota; the API remains a fallback, and its rate-limit failure is named.
