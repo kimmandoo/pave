@@ -420,10 +420,10 @@ let write_label path =
 let start_write t =
   let id = group t in
   heading t ~kind:Tool ~group:id ~provisional:false
-    "write_file · generating draft · not written";
+    "write_file";
   let title = t.rows.(t.count - 1) in
   add_line t ~kind:Tool ~group:id ~provisional:false ~style:Tool_state
-    "draft · not written";
+    "generating draft · not written";
   let state = t.rows.(t.count - 1) in
   Hashtbl.add t.writes id { title; state; code = []; path = None;
     executing = false };
@@ -437,19 +437,23 @@ let dirty_write t id =
 
 let write_state t id state =
   Option.iter (fun card ->
-    set_text card.title (write_label card.path ^ " · " ^ state);
-    set_text card.state (write_label card.path ^ " · " ^ state);
+    set_text card.title (write_label card.path);
+    set_text card.state state;
     if state = "writing" then card.executing <- true;
     dirty_write t id) (Hashtbl.find_opt t.writes id)
 
 let write_preview t id (preview : Pave.Write_preview.snapshot) state =
   Option.iter (fun card ->
     card.path <- preview.path;
-    set_text card.title (write_label card.path ^ " · " ^ state);
-    set_text card.state (Printf.sprintf
-      "%s · %s · %d lines · %d earlier lines omitted · %d bytes omitted"
-      (write_label card.path) state preview.total_lines
-      preview.omitted_lines preview.omitted_bytes);
+    set_text card.title (write_label card.path);
+    let omitted =
+      (if preview.omitted_lines = 0 then "" else
+        Printf.sprintf " · %d earlier lines omitted" preview.omitted_lines) ^
+      (if preview.omitted_bytes = 0 then "" else
+        Printf.sprintf " · %d bytes omitted" preview.omitted_bytes) in
+    set_text card.state (Printf.sprintf "%s · %d %s%s"
+      state preview.total_lines
+      (if preview.total_lines = 1 then "line" else "lines") omitted);
     let rec update rows lines = match rows, lines with
       | row :: rows, (number, text) :: lines ->
           set_text row (Printf.sprintf "%7d │ %s" number text);
@@ -499,6 +503,9 @@ let tool_result ?group:existing ?(aborted = false) ?(is_error = false) t name re
   let length = String.fold_left (fun count char ->
     if char = '\n' then count + 1 else count) 1 result in
   let compact_read = name = "read_file" && not error in
+  let write = Hashtbl.find_opt t.writes id in
+  Option.iter (fun card ->
+    card.state.kind <- if error then Error else Tool) write;
   for i = 0 to t.count - 1 do
     let row = t.rows.(i) in
     if row.group = id && row.kind = Tool && row.style = Heading then (
@@ -506,7 +513,7 @@ let tool_result ?group:existing ?(aborted = false) ?(is_error = false) t name re
       let label = if String.ends_with ~suffix:" · running" row.text then
         String.sub row.text 0 (String.length row.text -
           String.length " · running")
-        else name in
+        else if Option.is_some write then row.text else name in
       if error then row.kind <- Error;
       if compact_read then (
         row.style <- Tool_summary;
@@ -514,7 +521,7 @@ let tool_result ?group:existing ?(aborted = false) ?(is_error = false) t name re
           label length (if length = 1 then "line" else "lines")))
       else set_text row label)
   done;
-  if not compact_read then
+  if not compact_read && Option.is_none write then
     add_line t ~kind:(if error then Error else Tool) ~group:id
       ~provisional:false ~style:Tool_state
       (Printf.sprintf "%s · %d %s · collapsed" outcome length
@@ -548,7 +555,8 @@ let tool_result ?group:existing ?(aborted = false) ?(is_error = false) t name re
           set_row t index ~style:Diff_header ~markdown:false (excerpt line);
           status_preview := None
       | None -> ());
-    if not compact_read && not !previewed && String.trim line <> "" &&
+    if not compact_read && (Option.is_none write || error) &&
+      not !previewed && String.trim line <> "" &&
       not (String.starts_with ~prefix:"```" line) then (
       previewed := true;
       let style, preview =

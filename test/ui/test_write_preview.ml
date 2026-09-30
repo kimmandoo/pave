@@ -42,4 +42,26 @@ let () =
   let fragmented = decode (split_bytes {|{"path":"a","content":"\uD83D\uDE80\nfinal"}|}) in
   assert (fragmented.lines = [1, "🚀"; 2, "final"]);
   assert (text (decode [ {|{"content":"\uD800x"}|} ]) = "�x");
+  (* Span eviction must drop whole UTF-8 scalars, even when ASCII follows a
+     wrapped ring or replaces its entire retained tail. *)
+  List.iter (fun (content, expected, omitted) ->
+    let json = {|{"path":"src/a.ml","content":"|} ^ content ^ {|"}|} in
+    List.iter (fun width ->
+      let decoder = create () in
+      let rec fragments offset =
+        if offset < String.length json then (
+          let size = min width (String.length json - offset) in
+          feed decoder (String.sub json offset size);
+          fragments (offset + size)) in
+      fragments 0;
+      let preview = snapshot decoder in
+      assert (preview.path = Some "src/a.ml");
+      assert (preview.lines = [1, expected]);
+      assert (preview.omitted_bytes = omitted))
+      [1; 3; 17; 255; 256; 257; String.length json])
+    [String.make 255 'x' ^ "🚀", String.make 252 'x' ^ "🚀", 3;
+     "🚀" ^ String.make 255 'x', String.make 255 'x', 4;
+     "🚀" ^ String.make 256 'x', String.make 256 'x', 4;
+     String.make 300 'x' ^ "é" ^ String.make 3 'y',
+       String.make 251 'x' ^ "éyyy", 49];
   print_endline "incremental bounded write preview: ok"

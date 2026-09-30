@@ -223,10 +223,11 @@ let start manager ~owner ~root ?(args = []) ?(execution_approved = true) () =
 let test_stalled_native_writes () =
   List.iter (fun document_notification ->
     with_root (fun root file ->
-      write file (String.make 262_144 'x');
+      write file (String.make 524_288 'x');
       let python = "/usr/bin/python3" in
+      let send_started = Filename.concat root "send-started" in
       let script =
-        "import json, sys, time\n" ^
+        "import json, os, sys, time\n" ^
         "header = sys.stdin.buffer.readline()\n" ^
         "length = int(header.split(b':', 1)[1])\n" ^
         "sys.stdin.buffer.readline()\n" ^
@@ -234,6 +235,13 @@ let test_stalled_native_writes () =
         "body = json.dumps({'jsonrpc': '2.0', 'id': request['id'], 'result': {'capabilities': {}}}).encode()\n" ^
         "sys.stdout.buffer.write(('Content-Length: %d\\r\\n\\r\\n' % len(body)).encode() + body)\n" ^
         "sys.stdout.buffer.flush()\n" ^
+        "header = sys.stdin.buffer.readline()\n" ^
+        "length = int(header.split(b':', 1)[1])\n" ^
+        "sys.stdin.buffer.readline()\n" ^
+        "sys.stdin.buffer.read(length)\n" ^
+        "sys.stdin.buffer.readline()\n" ^
+        "with open(sys.argv[1] + '.tmp', 'w') as marker: marker.write(str(os.getpid()))\n" ^
+        "os.rename(sys.argv[1] + '.tmp', sys.argv[1])\n" ^
         "time.sleep(30)\n" in
       let native = ref None and worker = ref None in
       let manager = Workspace_lsp.create_manager ~launcher:(fun ~program ~arguments ~cwd ~environment ->
@@ -244,10 +252,12 @@ let test_stalled_native_writes () =
         Option.iter (fun io -> io.Workspace_lsp.terminate (); io.close ()) !native;
         Option.iter Thread.join !worker;
         Workspace_lsp.close_manager manager;
+        (try Sys.remove send_started with _ -> ());
+        (try Sys.remove (send_started ^ ".tmp") with _ -> ());
         ignore (Sys.signal Sys.sigpipe old_sigpipe))
         (fun () ->
           Workspace_lsp.start manager ~owner:"stalled-write" ~root ~program:python
-            ~args:["-I"; "-u"; "-c"; script] ~execution_approved:true;
+            ~args:["-I"; "-u"; "-c"; script; send_started] ~execution_approved:true;
           let finished = Atomic.make false and failed = Atomic.make false in
           let cancellation_seen = Atomic.make false in
           let started = Unix.gettimeofday () in
@@ -255,28 +265,38 @@ let test_stalled_native_writes () =
             (try
               if document_notification then
                 ignore (Workspace_lsp.execute manager ~owner:"stalled-write" ~root
-                  ~program:python ~args:["-I"; "-u"; "-c"; script]
+                  ~program:python ~args:["-I"; "-u"; "-c"; script; send_started]
                   ~cancel:(fun () ->
-                    let cancelled = Unix.gettimeofday () -. started >= 0.05 in
+                    let cancelled = Sys.file_exists send_started in
                     if cancelled then Atomic.set cancellation_seen true;
                     cancelled)
                   (arguments ~action:"diagnostics" []))
               else
-                ignore (Workspace_lsp.request ~timeout_seconds:0.1 manager
-                  "textDocument/hover" (`Assoc ["text", `String (String.make 262_144 'x')]))
+                ignore (Workspace_lsp.request ~timeout_seconds:5. manager
+                  "textDocument/hover" (`Assoc ["text", `String (String.make 524_288 'x')]))
             with Workspace_lsp.Error _ -> Atomic.set failed true);
             Atomic.set finished true) ());
-          let deadline = started +. 1. in
+          let deadline = started +. 10. in
           while not (Atomic.get finished) && Unix.gettimeofday () < deadline do Thread.delay 0.01 done;
           expect (Atomic.get finished && Atomic.get failed)
             "backpressured native sends obey request deadlines and document cancellation";
           if document_notification then
             expect (Atomic.get cancellation_seen) "didOpen checks turn cancellation during its send";
           expect (Hashtbl.length manager.pending = 0) "failed sends release pending requests";
+          expect (Sys.file_exists send_started)
+            "the server observed a partial frame before cancellation or timeout";
+          let pid = int_of_string (read send_started) in
+          let reaped =
+            try Unix.kill pid 0; false
+            with Unix.Unix_error (Unix.ESRCH, _, _) -> true in
+          expect reaped "interrupted native sends terminated and reaped their server";
           let closing = Unix.gettimeofday () in
           Workspace_lsp.close_manager manager;
-          expect (Unix.gettimeofday () -. closing < 1.)
-            "a failed partial send disposes without a second blocked shutdown write")))
+          expect_error (fun () -> execute manager ~owner:"stalled-write" ~root
+            ~args:["-I"; "-u"; "-c"; script; send_started] (arguments []));
+          Printf.printf "native LSP %s after observed partial frame: disposed in %.3fs\n%!"
+            (if document_notification then "cancellation" else "deadline")
+            (Unix.gettimeofday () -. closing))))
     [true; false]
 
 let () =

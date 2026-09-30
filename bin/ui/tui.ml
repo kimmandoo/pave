@@ -702,11 +702,14 @@ let matches chooser =
   | _ ->
       let query = String.lowercase_ascii chooser.filter in
       let includes text =
+        if query = "" then true else
         let value = String.lowercase_ascii text in
         let n = String.length value and m = String.length query in
+        let rec equal_at pos index =
+          index = m || (value.[pos + index] = query.[index] &&
+            equal_at pos (index + 1)) in
         let rec find pos =
-          pos + m <= n &&
-          (String.sub value pos m = query || find (pos + 1)) in
+          pos + m <= n && (equal_at pos 0 || find (pos + 1)) in
         find 0 in
       let found = ref [] and models = ref 0 in
       Array.iter (fun (item : candidate) ->
@@ -731,7 +734,7 @@ let matches chooser =
 
 let candidate_label chooser item =
   (if chooser.dynamic then
-    if item.action then "↩ " else "• "
+    if item.action then "↩ " else ""
    else if item.custom then "Use: " else "") ^ sanitize item.label
 
 let chooser_empty_message chooser =
@@ -746,8 +749,9 @@ let segment_rows ~columns chooser =
   let selected_row = ref 0 in
   Array.iteri (fun index (item : candidate) ->
     let selected = index = chooser.selected in
-    let label = (if selected then "[✓ " else "[ ") ^
-      sanitize item.label ^ " ]" in
+    let name = if item.value = "Provider default" then "default"
+      else sanitize item.label in
+    let label = (if selected then "[✓ " else "[ ") ^ name ^ " ]" in
     let label = shorten_width columns label in
     let chip = I.string (if selected then selected_attr else muted) label in
     let needed = I.width chip + (if !row = [] then 0 else 1) in
@@ -762,30 +766,73 @@ let segment_rows ~columns chooser =
   Array.of_list (List.rev !rows), !selected_row
 
 let effort_panel ~cols ~height chooser =
-  let chips, selected_row = segment_rows ~columns:(max 1 (cols - 4)) chooser in
-  let intro = Array.to_list chooser.intro |> List.concat_map (fun text ->
-    Array.to_list (wrap_chooser_text ~columns:(max 1 (cols - 4))
-      ~max_rows:2 text)) in
-  let status = Option.to_list chooser.status |> List.concat_map (fun text ->
-    Array.to_list (wrap_chooser_text ~columns:(max 1 (cols - 4))
-      ~max_rows:3 text)) in
-  let header_rows = if height >= 5 then min 3 (List.length intro) else 0 in
-  let chip_room = max 0 (height - 1 - header_rows) in
+  let columns = max 1 (cols - 4) in
+  let chips, selected_row = segment_rows ~columns chooser in
+  (* Identity and the selected chip take precedence over metadata. *)
+  let intro_count = min (Array.length chooser.intro) (max 0 (min 2 (height - 2))) in
+  let chip_room = max 0 (height - 1 - intro_count) in
   let chip_count = min chip_room (Array.length chips) in
   let chip_start = max 0 (min selected_row (Array.length chips - chip_count)) in
-  let status_room = max 0 (height - 1 - header_rows - chip_count - 1) in
+  let status_room = max 0 (height - 1 - intro_count - chip_count) in
+  let status = match chooser.status with
+    | Some text -> wrap_chooser_text ~columns ~max_rows:status_room text
+    | None -> [||] in
   I.vcat (List.init (max 0 height) (fun row ->
-    if row = 0 then styled_line cols accent ("  ▌  " ^ chooser.title)
-    else if row <= header_rows then
-      styled_line cols text_attr ("  " ^ List.nth intro (row - 1))
-    else if row <= header_rows + chip_count then
-      I.hsnap ~align:`Left cols I.(void 2 1 <|>
-        chips.(chip_start + row - header_rows - 1))
+    if row = 0 then styled_line cols accent
+      ("  " ^ (if cols < 24 then "Effort" else chooser.title) ^
+        Printf.sprintf " · %d/%d" (chooser.selected + 1)
+          (Array.length chooser.choices))
+    else if row <= intro_count then
+      let index = if intro_count = 1 then min 1 (Array.length chooser.intro - 1)
+        else row - 1 in
+      styled_line cols (if row = 1 then text_attr else muted)
+        ("  " ^ shorten_middle columns chooser.intro.(index))
+    else if row <= intro_count + chip_count then
+      I.hsnap ~align:`Middle cols chips.(chip_start + row - intro_count - 1)
     else
-      let index = row - header_rows - chip_count - 2 in
-      if index >= 0 && index < min status_room (List.length status) then
-        styled_line cols muted ("  " ^ List.nth status index)
+      let index = row - intro_count - chip_count - 1 in
+      if index < Array.length status then
+        styled_line cols muted ("  " ^ status.(index))
       else I.void cols 1))
+
+(* Reserve a useful roster viewport before adding discovery prose. The same
+   row budget drives Page Up/Down, so a page never skips unseen choices. *)
+let chooser_sections ~cols ~height chooser =
+  let found = matches chooser in
+  let count = Array.length found in
+  let status_text = match chooser.status_pages with
+    | [||] -> chooser.status
+    | pages ->
+        let summary = Option.value ~default:"" chooser.status in
+        let detail = Printf.sprintf "Provider status %d/%d: %s"
+          (chooser.status_page + 1) (Array.length pages)
+          pages.(chooser.status_page) in
+        Some (if summary = "" then detail else summary ^ " · " ^ detail) in
+  let empty_height =
+    if chooser.dynamic && chooser.matched_models = 0 &&
+      height >= (if count > 0 then 3 else 2) then 1 else 0 in
+  let choice_room = min count (max 0 (min 3 (height - 1 - empty_height))) in
+  let remaining = max 0 (height - 1 - empty_height - choice_room) in
+  let intro_height =
+    if chooser.filter <> "" || cols < 30 then 0
+    else min remaining (min (Array.length chooser.intro)
+      (if height >= 10 then 2 else if height >= 6 then 1 else 0)) in
+  let remaining = remaining - intro_height in
+  let status_lines = match status_text with
+    | Some text -> wrap_chooser_text ~columns:(max 1 (cols - 4))
+        ~max_rows:(min remaining (if count > 0 then 1 else 3)) text
+    | None -> [||] in
+  let remaining = remaining - Array.length status_lines in
+  let detail_lines =
+    if cols >= 45 && height >= 8 && count > 0 then
+      match found.(max 0 (min (count - 1) chooser.selected)).detail with
+      | Some text -> wrap_chooser_text ~columns:(max 1 (cols - 4))
+          ~max_rows:(min 2 remaining) text
+      | None -> [||]
+    else [||] in
+  let page = max 0 (height - 1 - intro_height - empty_height -
+    Array.length status_lines - Array.length detail_lines) in
+  intro_height, status_lines, empty_height, detail_lines, page
 
 (* The last paint knows the real body height after the editor, activity and
    attachment rows; the fixed estimate only covers the first frame. *)
@@ -1066,59 +1113,11 @@ let paint t =
         let count = Array.length found in
         chooser.selected <- max 0 (min (count - 1) chooser.selected);
         let status_prefix = "  · " in
-        let status_text = match chooser.status_pages with
-          | [||] -> chooser.status
-          | pages ->
-              let summary = Option.value ~default:"" chooser.status in
-              let detail = Printf.sprintf "Provider status %d/%d: %s"
-                (chooser.status_page + 1) (Array.length pages)
-                pages.(chooser.status_page) in
-              Some (if summary = "" then detail
-                else summary ^ " · " ^ detail) in
-        let intro_spacer =
-          cols >= 52 && body_height >= 9 && chooser.filter = "" &&
-          Array.length chooser.intro > 0 in
-        let compact_intro =
-          cols >= 30 && cols < 52 && body_height >= 4 &&
-          chooser.filter = "" && Array.length chooser.intro > 0 in
-        let intro_rows =
-          if intro_spacer then min 3 (Array.length chooser.intro) + 1
-          else if compact_intro then 1
-          else 0 in
-        let empty_height =
-          if chooser.dynamic && chooser.matched_models = 0 &&
-            body_height >= (if count > 0 then 3 else 2) then 1 else 0 in
-        let status_max_rows = max 0
-          (min 3 (body_height - 1 - empty_height -
-            (if count > 0 then 1 else 0) - intro_rows)) in
-        let status_lines = match status_text with
-          | Some status when body_height >= 3 ->
-              wrap_chooser_text
-                ~columns:(max 1 (cols - measure_text status_prefix))
-                ~max_rows:status_max_rows status
-          | _ -> [||] in
+        let intro_height, status_lines, empty_height, detail_lines, page =
+          chooser_sections ~cols ~height:body_height chooser in
         let status_height = Array.length status_lines in
         let detail_prefix = "  ↳ " in
-        let detail_lines =
-          if cols >= 45 && body_height >= 6 && count > 0 then
-            match found.(chooser.selected).detail with
-            | Some detail ->
-                wrap_chooser_text
-                  ~columns:(max 1 (cols - measure_text detail_prefix))
-                  ~max_rows:(min 4 (body_height - 2 - status_height -
-                    intro_rows - empty_height)) detail
-            | None -> [||]
-          else [||] in
         let detail_height = Array.length detail_lines in
-        let minimum_choices =
-          if compact_intro then min 1 count else min 3 count in
-        let intro_height =
-          if body_height - 1 - status_height - detail_height - empty_height -
-              intro_rows >= minimum_choices
-          then intro_rows else 0 in
-        let page = max 0
-          (body_height - 1 - intro_height - status_height -
-            detail_height - empty_height) in
         if chooser.selected < chooser.offset then chooser.offset <- chooser.selected;
         if page > 0 && chooser.selected >= chooser.offset + page then
           chooser.offset <- chooser.selected - page + 1;
@@ -1131,8 +1130,7 @@ let paint t =
              else Printf.sprintf "  ▌  %s  ·  %d matches"
                 chooser.title count)
           else if i <= intro_height then
-            if intro_spacer && i = intro_height then I.void cols 1
-            else styled_line cols muted ("  " ^ chooser.intro.(i - 1))
+            styled_line cols muted ("  " ^ chooser.intro.(i - 1))
           else if i <= intro_height + status_height then
             let index = i - intro_height - 1 in
             styled_line cols muted
@@ -1154,13 +1152,10 @@ let paint t =
               let marker = if index = chooser.selected then
                 (if cols < 40 then "❯ " else "  ❯ ")
               else if cols < 40 then "  " else "    " in
-              let label = candidate_label chooser choice in
               let width = max 0 (cols - measure marker) in
               let label = if chooser.dynamic && not choice.action then
-                let prefix = "• " in
-                prefix ^ shorten_model_label
-                  (max 0 (width - measure prefix)) (sanitize choice.label)
-                else shorten_width width label in
+                shorten_model_label width (sanitize choice.label)
+                else shorten_width width (candidate_label chooser choice) in
               styled_line cols
                 (if index = chooser.selected then selected_attr
                  else if choice.action then muted else text_attr)
@@ -1195,9 +1190,10 @@ let paint t =
   let footer_text = match t.chooser with
     | Some chooser when chooser.segmented ->
         if cols < 9 || rows < 2 then "Resize · Esc cancel"
-        else if cols < 24 then "←→ ↵ Esc"
-        else if cols < 55 then "←→ effort · ↵ confirm · Esc cancel"
-        else "  ←/→ effort · Enter confirm model + effort · Esc cancel"
+        else if cols < 24 then "←→ ↵ apply Esc"
+        else if cols < 55 then "←→ effort · ↵ apply · Esc cancel"
+        else if cols < 85 then "↵ apply · Esc cancel · ←→ effort · Home/End"
+        else enter_key ^ " apply model + effort · Esc cancel · ←/→ effort · Home/End"
     | Some chooser ->
         let found = matches chooser in
         let number = if Array.length found = 0 then 0 else chooser.selected + 1 in
@@ -1214,28 +1210,18 @@ let paint t =
           (if cols < 35 then "  No models · Esc cancel"
            else "  No available models · Esc cancel") ^ status ^ status_page
         else
-        if body_height < 2 then (
-          let prefix = Printf.sprintf "  %d/%d "
-            number (Array.length found) in
-          let select_hint = if cols >= 20 then " ↵" else "" in
-          let width = max 0 (cols - measure prefix - measure select_hint) in
-          let label = if Array.length found = 0 then
-              shorten_width width "(no match)"
-            else
-              let choice = found.(chooser.selected) in
-              if chooser.dynamic && not choice.action then
-                shorten_model_label width (sanitize choice.label)
-              else shorten_middle width (sanitize choice.label) in
-          prefix ^ label ^ select_hint)
+        if body_height < 2 then
+          (if cols < 24 then "↑↓ ↵ select Esc" else "↑↓ ↵ select · Esc cancel")
+        else if cols < 24 then "↑↓ ↵ select Esc"
         else if cols < 55 then
-          Printf.sprintf "  %d/%d · %s select · Esc cancel%s%s"
-            number (Array.length found) enter_key status status_page
-        else if cols < 75 then
-          Printf.sprintf "  %d/%d · ↑↓ move · %s select · Esc cancel%s%s"
-            number (Array.length found) enter_key status status_page
+          Printf.sprintf "↑↓ ↵ select · Esc cancel%s"
+            (if chooser.scope_action <> None && cols >= 40 then " · Tab scope" else "")
+        else if cols < 85 then
+          Printf.sprintf "%s select · Esc cancel · ↑↓/PgUp/Dn · %d/%d%s"
+            enter_key number (Array.length found) status_page
         else
-          Printf.sprintf "  %d/%d · ↑↓/PgUp/PgDn move · %s select · Esc cancel%s%s"
-            number (Array.length found) enter_key status status_page
+          Printf.sprintf "%s select · Esc cancel · ↑↓/PgUp/Dn · Home/End · %d/%d%s"
+            enter_key number (Array.length found) status_page
     | None when hint_height > 0 ->
         (match List.nth hints t.hint_selected with
          | Command_hint selected ->
@@ -1293,13 +1279,24 @@ let paint t =
     | Some chooser, _ when chooser.segmented ->
         let selected = if Array.length chooser.choices = 0 then ""
           else chooser.choices.(chooser.selected).label in
-        [| styled_line cols selected_attr ("  ✓ " ^ selected) |], 0, 0
+        let label = if body_height < 3 then selected
+          else if selected = "Provider default" then "No override"
+          else "Use override" in
+        [| styled_line cols muted ("  " ^ shorten_middle (max 1 (cols - 4)) label) |],
+        0, 0
     | Some chooser, _ ->
+        let found = matches chooser in
         let filter = sanitize chooser.filter in
         let col = measure filter in
         let left_crop = max 0 (col - field_width + 1) in
-        [| composer_row ~cols ~rows ~marker:"❯ "
-            (I.hcrop left_crop 0 (I.string text_attr filter)) |],
+        let content =
+          if body_height < 2 && Array.length found > 0 then
+            I.string text_attr (shorten_model_label field_width
+              (sanitize found.(chooser.selected).label))
+          else if filter = "" then
+            I.string muted (shorten_width field_width "Type to filter")
+          else I.hcrop left_crop 0 (I.string text_attr filter) in
+        [| composer_row ~cols ~rows ~marker:"❯ " content |],
         0, min (cols - 1) (prefix_width + col - left_crop)
     | None, Some query ->
         let query = sanitize query in
@@ -2395,7 +2392,7 @@ let choose ?(allow_custom = false) ?(intro = []) ?(plain = [])
       | `Paste `End -> t.paste <- false; paint t; loop ()
       | `Key _ as event ->
           let action = Keybindings.resolve t.bindings (key_focus t) event in
-          let action = if segmented then match event with
+          let action = if segmented && not t.paste then match event with
             | `Key (`Arrow `Left, []) -> Some Keybindings.Move_up
             | `Key (`Arrow `Right, []) -> Some Keybindings.Move_down
             | _ -> action
@@ -2422,12 +2419,18 @@ let choose ?(allow_custom = false) ?(intro = []) ?(plain = [])
               paint t; loop ()
           | Some Keybindings.Page_up when can_select () ->
               chooser.touched <- true;
-              chooser.selected <- max 0 (chooser.selected - view_height t);
+              let cols, rows = Notty_unix.Term.size t.term in
+              let height = max 0 (rows - 5 - (if Option.is_some t.activity then 1 else 0)) in
+              let _, _, _, _, page = chooser_sections ~cols ~height chooser in
+              chooser.selected <- max 0 (chooser.selected - max 1 page);
               paint t; loop ()
           | Some Keybindings.Page_down when can_select () ->
               chooser.touched <- true;
+              let cols, rows = Notty_unix.Term.size t.term in
+              let height = max 0 (rows - 5 - (if Option.is_some t.activity then 1 else 0)) in
+              let _, _, _, _, page = chooser_sections ~cols ~height chooser in
               chooser.selected <- max 0 (min (Array.length (matches chooser) - 1)
-                (chooser.selected + view_height t));
+                (chooser.selected + max 1 page));
               paint t; loop ()
           | Some Keybindings.First when can_select () ->
               chooser.touched <- true;

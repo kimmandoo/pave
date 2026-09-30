@@ -1,5 +1,19 @@
 # Troubleshooting
 
+### [2026-09-30] Manual native UI smoke linked mixed interface generations
+
+- **Context / Symptom:** A standalone native panel link launched while Dune was rebuilding dependencies failed with `make inconsistent assumptions over interface Pave__Sse`.
+- **Root Cause:** The manual linker read an old `Tui.cmi` and newly rebuilt provider/core interfaces before the complete executable dependency graph had settled.
+- **Solution:** Waited for the single full Dune build/test invocation to finish before linking the throwaway driver from one coherent set of objects. No production API compatibility shim or package change was added.
+- **Prevention / Reference:** Serialize manual native object linking after Dune, including implementation-only changes that rebuild inferred interfaces.
+
+### [2026-09-30] Intel macOS release exposed a pre-send cancellation assumption
+
+- **Context / Symptom:** Release run `36663417694` for immutable tag `v0.1.72` stopped on Intel macOS with `Failure("a failed partial send disposes without a second blocked shutdown write")`. The other three native platforms passed; no release was published.
+- **Root Cause:** The regression armed cancellation 50 ms before document preparation and assumed every error meant a partial native write. `send_raw` can correctly cancel before entering the transport, leaving a healthy server eligible for its two-second graceful shutdown. The hosted log did not identify which send phase occurred. A native local pre-send cancellation reproduced the invalid `<1s` assertion with one predicate call and 2.130-second graceful cleanup.
+- **Solution:** Made the controlled server acknowledge receipt of the large frame header through an atomically renamed PID marker. Cancellation now follows that observed phase; the deadline case allows preparation before exercising backpressure. Replaced the incidental one-second cleanup assertion with observable direct-child termination/reaping and rejection of further operations on the closed manager. Both actual native paths disposed in 0.000 seconds locally; the configured deadline still bounded the stalled request.
+- **Prevention / Reference:** The downloaded public diagnostic archive matched its GitHub-reported SHA-256. Keep failed tags immutable; validate the corrected regression on the next four-platform release, not by moving `v0.1.72`. No production timeout or exception was suppressed.
+
 ### [2026-09-30] Local model picker rejected an overridden native server address
 
 - **Context / Symptom:** A real `/model` PTY fetched one model from an `LM_STUDIO_BASE_URL` loopback fixture, but showed `0 route-compatible listed IDs · 1 excluded`. The permanent picker regression failed before the repair at `test/ui/test_model_picker.ml:186`.

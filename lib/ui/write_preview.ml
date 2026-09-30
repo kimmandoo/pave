@@ -42,29 +42,67 @@ let create () = {
   line_number = 1; omitted_bytes = 0; invalid = false;
 }
 let line_text t =
-  String.init t.line_bytes (fun offset ->
-    Bytes.get t.line ((t.line_start + offset) mod max_line_bytes))
+  let text = Bytes.create t.line_bytes in
+  let first = min t.line_bytes (max_line_bytes - t.line_start) in
+  Bytes.blit t.line t.line_start text 0 first;
+  Bytes.blit t.line 0 text first (t.line_bytes - first);
+  Bytes.unsafe_to_string text
+
+let discard_scalar t =
+  let first = Char.code (Bytes.get t.line t.line_start) in
+  let removed = if first < 128 then 1 else if first < 224 then 2
+    else if first < 240 then 3 else 4 in
+  t.line_start <- (t.line_start + removed) land (max_line_bytes - 1);
+  t.line_bytes <- t.line_bytes - removed;
+  t.omitted_bytes <- t.omitted_bytes + removed
+
+let put_byte t byte =
+  Bytes.set t.line ((t.line_start + t.line_bytes) land (max_line_bytes - 1))
+    (Char.chr byte);
+  t.line_bytes <- t.line_bytes + 1
 
 let append_scalar t code =
   let size = if code < 128 then 1 else if code < 2048 then 2
     else if code < 65536 then 3 else 4 in
-  while t.line_bytes + size > max_line_bytes do
-    let first = Char.code (Bytes.get t.line t.line_start) in
-    let removed = if first < 128 then 1 else if first < 224 then 2
-      else if first < 240 then 3 else 4 in
-    t.line_start <- (t.line_start + removed) mod max_line_bytes;
-    t.line_bytes <- t.line_bytes - removed;
-    t.omitted_bytes <- t.omitted_bytes + removed
-  done;
-  let put byte =
-    Bytes.set t.line ((t.line_start + t.line_bytes) mod max_line_bytes)
-      (Char.chr byte);
-    t.line_bytes <- t.line_bytes + 1 in
-  if size = 1 then put code else (
-    put (((0xff lsl (8 - size)) land 0xff) lor (code lsr (6 * (size - 1))));
+  while t.line_bytes + size > max_line_bytes do discard_scalar t done;
+  if size = 1 then put_byte t code else (
+    put_byte t (((0xff lsl (8 - size)) land 0xff) lor (code lsr (6 * (size - 1))));
     for shift = size - 2 downto 0 do
-      put (0x80 lor ((code lsr (6 * shift)) land 0x3f))
+      put_byte t (0x80 lor ((code lsr (6 * shift)) land 0x3f))
     done)
+
+(* Printable ASCII cannot split a scalar, so retain/copy only its bounded tail. *)
+let append_ascii t bytes start length =
+  if length >= max_line_bytes then (
+    t.omitted_bytes <- t.omitted_bytes + t.line_bytes + length - max_line_bytes;
+    Bytes.blit_string bytes (start + length - max_line_bytes) t.line 0 max_line_bytes;
+    t.line_start <- 0;
+    t.line_bytes <- max_line_bytes)
+  else (
+    while t.line_bytes + length > max_line_bytes do discard_scalar t done;
+    let offset = (t.line_start + t.line_bytes) land (max_line_bytes - 1) in
+    let first = min length (max_line_bytes - offset) in
+    Bytes.blit_string bytes start t.line offset first;
+    Bytes.blit_string bytes (start + first) t.line 0 (length - first);
+    t.line_bytes <- t.line_bytes + length)
+
+let ascii_span t field bytes start length =
+  match field with
+  | Ignore -> ()
+  | Key ->
+      Buffer.add_substring t.key bytes start (min length (max 0 (32 - Buffer.length t.key)))
+  | Path ->
+      let retained = min length (512 - Buffer.length t.path) in
+      Buffer.add_substring t.path bytes start retained;
+      if retained <> length then t.path_safe <- false
+  | Content -> append_ascii t bytes start length
+
+let rec ascii_end bytes offset length =
+  if offset = length then offset
+  else
+    let byte = Char.code bytes.[offset] in
+    if byte < 32 || byte >= 127 || byte = 34 || byte = 92 then offset
+    else ascii_end bytes (offset + 1) length
 
 let unsafe_scalar code = code < 32 || (code >= 127 && code <= 159) ||
   code = 0x61c || code = 0x200e || code = 0x200f ||
@@ -98,11 +136,11 @@ let unicode t field code =
       scalar t field (0x10000 + ((high - 0xd800) lsl 10) + code - 0xdc00)
   | high ->
       t.high <- None;
-      Option.iter (fun _ -> scalar t field 0xfffd) high;
+      (match high with None -> () | Some _ -> scalar t field 0xfffd);
       if code >= 0xd800 && code <= 0xdbff then t.high <- Some code
       else scalar t field code
 let flush_high t field =
-  Option.iter (fun _ -> scalar t field 0xfffd) t.high;
+  (match t.high with None -> () | Some _ -> scalar t field 0xfffd);
   t.high <- None
 let rec utf_byte t field byte =
   if t.utf_left > 0 then
@@ -124,9 +162,11 @@ let hex = function
   | 'a'..'f' as c -> Char.code c - 87
   | 'A'..'F' as c -> Char.code c - 55
   | _ -> -1
-let feed t fragment =
-  String.iter (fun c -> if not t.invalid then
-    match t.string_field with
+let rec feed_from t fragment offset length =
+  if offset < length && not t.invalid then (
+    let c = fragment.[offset] in
+    let next = ref (offset + 1) in
+    (match t.string_field with
     | Some field ->
         (match t.escape with
          | Hex (count, value) ->
@@ -159,6 +199,11 @@ let feed t fragment =
                      t.phase <- Colon)
                    else t.phase <- Comma))
              else if Char.code c < 32 then t.invalid <- true
+             else if t.utf_left = 0 && t.high = None && Char.code c < 127 then (
+               let stop = ascii_end fragment (offset + 1) length in
+               if stop = offset + 1 then scalar t field (Char.code c)
+               else ascii_span t field fragment offset (stop - offset);
+               next := stop)
              else (flush_high t field; utf_byte t field (Char.code c)))
     | None ->
         if c = '"' then (
@@ -177,7 +222,9 @@ let feed t fragment =
           if c = ':' && t.phase = Colon then t.phase <- Value
           else if c = ',' then t.phase <- Keys
           else if c <> ' ' && c <> '\n' && c <> '\r' && c <> '\t' &&
-            t.phase <> Value then t.invalid <- true)) fragment
+            t.phase <> Value then t.invalid <- true));
+    feed_from t fragment !next length)
+let feed t fragment = feed_from t fragment 0 (String.length fragment)
 let safe_path path =
   path <> "" && Filename.is_relative path &&
   not (String.contains path ':' || String.contains path '\\') &&

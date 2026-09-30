@@ -27,6 +27,29 @@ let stream ?on_tool_arguments ?(on_text = fun _ -> ()) wire =
   Openai_stream.finish parser
 
 let () =
+  let framing =
+    ":comment\r\nevent: named\rdata:  first\ndata:second\r\n\r\n" ^
+    "database: ignored\neventually: ignored\ndata\r\r" in
+  for width = 1 to String.length framing do
+    let events = ref [] in
+    let parser = Sse.create ~on_event:(fun name data ->
+      events := (name, data) :: !events) in
+    let rec fragments offset =
+      if offset < String.length framing then (
+        let size = min width (String.length framing - offset) in
+        Sse.feed parser (String.sub framing offset size);
+        fragments (offset + size)) in
+    fragments 0;
+    Sse.finish parser;
+    assert (List.rev !events = [Some "named", " first\nsecond"; None, ""])
+  done;
+  let bounded = Sse.create ~on_event:(fun _ _ -> ()) in
+  Sse.feed bounded (":" ^ String.make (Sse.max_event_bytes - 1) 'x' ^ "\n");
+  Sse.finish bounded;
+  invalid (fun () -> Sse.feed bounded (":" ^ String.make Sse.max_event_bytes 'x' ^ "\n"));
+  let bounded = Sse.create ~on_event:(fun _ _ -> ()) in
+  Sse.feed bounded ("data: " ^ String.make (Sse.max_event_bytes - 6) 'x' ^ "\n");
+  invalid (fun () -> Sse.feed bounded "data: xxxxxx\n");
   let deltas = ref [] in
   let parser = Openai_stream.create ~on_text:(fun part -> deltas := part :: !deltas) () in
   let wire = ": heartbeat\r\n\r\n"

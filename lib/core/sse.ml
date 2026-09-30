@@ -20,38 +20,65 @@ let dispatch t =
   t.data_present <- false;
   t.event_name <- None
 
+(* A complete line in a chunk needs no intermediate line/name/value strings.
+   Only a line split across chunks is accumulated in [t.line]. *)
+let process_span t bytes start length =
+  if length = 0 then dispatch t
+  else if bytes.[start] <> ':' then (
+    let stop = start + length in
+    let colon = ref start in
+    while !colon < stop && bytes.[!colon] <> ':' do incr colon done;
+    let name_length = !colon - start in
+    let value_start = if !colon = stop then stop else !colon + 1 in
+    let value_start =
+      if value_start < stop && bytes.[value_start] = ' ' then value_start + 1
+      else value_start in
+    let value_length = stop - value_start in
+    if name_length = 4 && bytes.[start] = 'd' && bytes.[start + 1] = 'a' &&
+      bytes.[start + 2] = 't' && bytes.[start + 3] = 'a' then (
+      let extra = value_length + (if t.data_present then 1 else 0) in
+      if extra > max_event_bytes - Buffer.length t.data then invalid "SSE event exceeds 1 MiB";
+      if t.data_present then Buffer.add_char t.data '\n';
+      Buffer.add_substring t.data bytes value_start value_length;
+      t.data_present <- true)
+    else if name_length = 5 && bytes.[start] = 'e' && bytes.[start + 1] = 'v' &&
+      bytes.[start + 2] = 'e' && bytes.[start + 3] = 'n' &&
+      bytes.[start + 4] = 't' then
+      t.event_name <- Some (String.sub bytes value_start value_length))
+
 let process_line t =
   let line = Buffer.contents t.line in
   Buffer.clear t.line;
-  if line = "" then dispatch t
-  else if line.[0] <> ':' then (
-    let name, value = match String.index_opt line ':' with
-      | None -> line, ""
-      | Some colon ->
-          let start = colon + 1 in
-          let start = if start < String.length line && line.[start] = ' ' then start + 1 else start in
-          String.sub line 0 colon, String.sub line start (String.length line - start) in
-    match name with
-    | "data" ->
-        let extra = String.length value + (if t.data_present then 1 else 0) in
-        if extra > max_event_bytes - Buffer.length t.data then invalid "SSE event exceeds 1 MiB";
-        if t.data_present then Buffer.add_char t.data '\n';
-        Buffer.add_string t.data value;
-        t.data_present <- true
-    | "event" -> t.event_name <- Some value
-    | _ -> ())
+  process_span t line 0 (String.length line)
 
-let feed t bytes =
-  String.iter (fun byte ->
-    if t.after_cr && byte = '\n' then t.after_cr <- false
+let rec line_end bytes offset length =
+  if offset = length || bytes.[offset] = '\r' || bytes.[offset] = '\n' then offset
+  else line_end bytes (offset + 1) length
+
+let rec feed_from t bytes offset length =
+  if offset < length then
+    if t.after_cr && bytes.[offset] = '\n' then (
+      t.after_cr <- false;
+      feed_from t bytes (offset + 1) length)
     else (
       t.after_cr <- false;
-      match byte with
-      | '\r' -> process_line t; t.after_cr <- true
-      | '\n' -> process_line t
-      | _ ->
-          if Buffer.length t.line >= max_event_bytes then invalid "SSE line exceeds 1 MiB";
-          Buffer.add_char t.line byte)) bytes
+      let stop = line_end bytes offset length in
+      let span_length = stop - offset in
+      if span_length > max_event_bytes - Buffer.length t.line then
+        invalid "SSE line exceeds 1 MiB";
+      if stop = length then (
+        if span_length = 1 then Buffer.add_char t.line bytes.[offset]
+        else Buffer.add_substring t.line bytes offset span_length)
+      else (
+        if Buffer.length t.line = 0 then process_span t bytes offset span_length
+        else (
+          if span_length = 1 then Buffer.add_char t.line bytes.[offset]
+          else Buffer.add_substring t.line bytes offset span_length;
+          process_line t);
+        t.after_cr <- bytes.[stop] = '\r';
+        feed_from t bytes (stop + 1) length))
+
+let feed t bytes = feed_from t bytes 0 (String.length bytes)
 
 let finish t =
   if Buffer.length t.line <> 0 || t.data_present || t.event_name <> None then

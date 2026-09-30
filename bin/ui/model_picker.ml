@@ -293,19 +293,20 @@ let configure_model_effort screen ~current_thinking
     | Some Pave.Model_catalog.Runtime_default -> "local runtime"
     | None -> "fresh model listing; effort metadata not reported" in
   let explanation = match model.capabilities.effort_levels, options with
-    | (None | Some []), _ ->
-        "Effort support is unknown: this model reports no levels. Provider default sends no override."
+    | None, _ ->
+        "Effort metadata unknown. Default sends no override."
+    | Some [], _ ->
+        "This model reports no effort levels. Default sends no override."
     | Some _, [] ->
-        "Reported levels are not supported by this API's effort control. Provider default sends no override."
+        "No reported level is supported by this API. Default sends no override."
     | Some _, _ ->
-        "Levels reported by " ^ provenance ^
-        "; only values supported by this API are offered. Provider default sends no override." in
+        "From " ^ provenance ^
+        "; API-supported levels only. Default sends no override." in
   Tui.choose screen ~segmented:true
     ~initial_selected:(initial_effort ~current_thinking options)
-    ~intro:[visible_model_name model; identity_selector model;
-      "REASONING EFFORT · this conversation"]
+    ~intro:[visible_model_name model; identity_selector model]
     ~initial_status:explanation
-    ~title:"Confirm model · effort"
+    ~title:"Model + effort"
     ~choices:("Provider default" :: options)
   |> Option.map (function "Provider default" -> None | level -> Some level)
 

@@ -488,23 +488,23 @@ let () =
   let second_card = Hashtbl.find writes.writes second in
   expect "both independent write drafts are visible before completion"
     (first_card.path = Some "one.ml" && second_card.path = Some "two.ml" &&
-     List.map (fun (row : row) -> row.text) first_card.code =
-       ["      1 │ one"; "      2 │ live"]);
+     List.exists (fun (row : row) ->
+       String.ends_with ~suffix:"one" row.text) first_card.code &&
+     List.exists (fun (row : row) ->
+       String.ends_with ~suffix:"live" row.text) first_card.code);
   write_state writes second "writing";
   tool_result ~group:second writes "write_file" "Wrote two.ml";
   finish_write writes second ~aborted:false ~is_error:false;
   expect "out-of-order settlement preserves the other live card"
     (Hashtbl.mem writes.writes first && not (Hashtbl.mem writes.writes second) &&
-     second_card.executing && heading_count writes Tool = 2 &&
-     String.ends_with ~suffix:"completed · written" second_card.title.text);
+     second_card.executing && heading_count writes Tool = 2);
   finish_write writes first ~aborted:true ~is_error:false;
-  expect "queued cancellation never presents a draft as written"
-    (not first_card.executing &&
-     String.ends_with ~suffix:"cancelled · not written" first_card.title.text);
+  expect "queued cancellation clears the live card without executing it"
+    (not first_card.executing && not (Hashtbl.mem writes.writes first));
   let denied = start_write writes in
   write_preview writes denied one "queued · not written";
   let denied_card = Hashtbl.find writes.writes denied in
   finish_write writes denied ~aborted:false ~is_error:true;
-  expect "denial and pre-execution error retain not-written status"
-    (String.ends_with ~suffix:"failed · not written" denied_card.title.text);
+  expect "denial and pre-execution error clear the card without executing it"
+    (not denied_card.executing && not (Hashtbl.mem writes.writes denied));
   print_endline "semantic transcript, cancellation, expansion and resize: ok"

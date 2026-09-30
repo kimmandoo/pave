@@ -1,6 +1,10 @@
 # Changelog
 
 ## 2026-09-30
+- perf(parser): batched bounded SSE framing and printable tool-argument spans, removed repeated copies and per-scalar allocation, and retained efficient singleton fragments with identical Unicode, overflow and EOF behavior.
+- feat(tui): compacted model-specific effort confirmation, prioritized visible roster choices and viewport-sized paging, clarified write-card states and removed duplicate success rows while preserving expandable details.
+- fix(tui): ignored bracketed-paste arrow sequences in effort selection so pasted control bytes could not change the confirmed override.
+- test(lsp): synchronized native partial-send cancellation with server receipt and replaced incidental cleanup timing with observable process reaping and closed-manager rejection after the Intel release failure.
 - feat(tui): scoped model discovery to the active provider/API/account with on-demand scope switching and added a focused, resizable model-effort confirmation panel using only fresh native-supported levels.
 - fix(provider): preserved Codex account-reported effort levels, applied selected reasoning effort to Standard and Lite requests, rejected unsupported account/model overrides before inference and resolved dynamic local endpoints consistently during model selection.
 - test(provider): verified disjoint effort levels for two models in one account, rejected cross-model overrides before inference and exercised distinct model-specific TUI choices without typed/pasted bypass.
