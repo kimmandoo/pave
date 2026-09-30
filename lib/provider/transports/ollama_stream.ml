@@ -43,9 +43,7 @@ let parse_json line =
   try Yojson.Basic.from_string line
   with Yojson.Json_error _ -> invalid "invalid NDJSON frame"
 
-let parse_arguments text =
-  let json = parse_json text in
-  match json with `Assoc _ -> json | _ -> invalid "tool arguments must be an object"
+let parse_arguments text = Protocol.decode_tool_arguments text
 
 let required_name fn = match field "name" fn with
   | `String name when name <> "" -> name

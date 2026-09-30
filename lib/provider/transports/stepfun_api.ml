@@ -125,12 +125,7 @@ let parse_completion json =
             Protocol.member "id" call,
             Protocol.member "name" function_json, arguments with
           | `String "function", `String id, `String name, `String args
-            when id <> "" && name <> "" ->
-              (match (try Some (Yojson.Basic.from_string args)
-                with Yojson.Json_error _ -> None) with
-              | Some (`Assoc _) -> ()
-              | _ -> raise (Protocol.Invalid_response
-                  "invalid StepFun function arguments"))
+            when id <> "" && name <> "" -> ignore args
           | _ -> raise (Protocol.Invalid_response
               "incomplete StepFun function call")) calls;
         true

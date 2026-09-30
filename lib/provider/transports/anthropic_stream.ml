@@ -187,7 +187,7 @@ let finish t =
       | Text part -> Buffer.add_buffer text part
       | Tool (id, name, input, partial) ->
           let arguments = if Buffer.length partial = 0 then input else
-            parse_json (Buffer.contents partial) in
+            Protocol.decode_tool_arguments (Buffer.contents partial) in
           (match arguments with `Assoc _ -> () | _ -> invalid "tool input must be an object");
           if List.exists (fun (call : Protocol.tool_call) -> call.id = id) !calls then
             invalid "duplicate tool id";

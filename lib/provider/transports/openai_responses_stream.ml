@@ -119,10 +119,6 @@ let handle_item_done t json =
        | `Null | `String "completed" -> ()
        | _ -> invalid "incomplete function call");
       let args = string_field "arguments" output in
-      (match (try Yojson.Basic.from_string args
-              with Yojson.Json_error _ -> invalid "invalid function arguments JSON") with
-       | `Assoc _ -> ()
-       | _ -> invalid "tool arguments must be an object");
       if Buffer.length call.args > 0 && Buffer.contents call.args <> args then
         invalid "function arguments delta mismatch";
       (match call.args_done with

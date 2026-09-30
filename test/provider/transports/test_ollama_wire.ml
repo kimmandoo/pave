@@ -109,7 +109,9 @@ let () =
     (completion ~reason:"tool_calls" message));
   expect_invalid (fun () -> Pave.Ollama_wire.parse_completion
     (completion (native_message "assistant" "" [])));
-  expect_invalid (fun () -> Pave.Ollama_wire.parse_completion
+  assert ((Pave.Ollama_wire.parse_completion
     (completion (native_message "assistant" "" [ "tool_calls", `List [
-      native_call "search" (`String "{broken") ] ])));
+      native_call "search" (`String "{broken") ] ]))).tool_calls
+    |> List.map (fun (call : Pave.Protocol.tool_call) -> call.arguments) =
+    [ `Assoc [Pave.Protocol.invalid_arguments_key, `String "{broken"] ]);
   print_endline "Ollama native wire: ok"

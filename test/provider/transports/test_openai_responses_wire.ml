@@ -107,8 +107,9 @@ let () =
     "status", `String "completed";
     "incomplete_details", `Assoc ["reason", `String "max_output_tokens"];
     "output", `List [message [text "partial"]] ]));
-  invalid (fun () -> Openai_responses_wire.parse_completion
-    (completed [ function_call "call_A" "read_file" "{broken" ]));
+  assert ((Openai_responses_wire.parse_completion
+    (completed [ function_call "call_A" "read_file" "{broken" ])).tool_calls =
+    [ call "call_A" "read_file" (`Assoc [Protocol.invalid_arguments_key, `String "{broken"]) ]);
   invalid (fun () -> Openai_responses_wire.parse_completion
     (completed [ function_call "call_A" "read_file" "{}";
       function_call "call_A" "read_file" "{}" ]));

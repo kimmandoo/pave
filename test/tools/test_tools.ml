@@ -632,6 +632,30 @@ let () =
     assert (contains (tool_json root "read_file"
       ["path", `String "pages.txt"; "offset", `Int 0; "line", `Int 1])
       "offset: 0; bytes: 19; lines: 1-3");
+    (* Model-specific spellings normalize to the advertised schema types. *)
+    let normalized = Pave.Tools.normalize_tool_arguments ~name:"read_file" ~args:(`Assoc [
+      "path", `String "pages.txt"; "offset", `Null; "line", `String "2";
+      "max_lines", `Float 1.0; "max_bytes", `Null ]) in
+    assert (normalized = `Assoc ["path", `String "pages.txt"; "line", `Int 2; "max_lines", `Int 1]);
+    Pave.Tools.validate_arguments ~name:"read_file" ~args:normalized;
+    assert (contains (tool_json root "read_file"
+      (match normalized with `Assoc fields -> fields | _ -> [])) "second\n");
+    assert (Pave.Tools.normalize_tool_arguments ~name:"glob" ~args:(`Assoc [
+      "pattern", `String "*.txt"; "hidden", `String "TRUE"; "limit", `String "x" ]) =
+      `Assoc ["pattern", `String "*.txt"; "hidden", `Bool true; "limit", `String "x"]);
+    assert (Pave.Tools.normalize_tool_arguments ~name:"android_devices" ~args:(`Assoc [
+      "action", `String "AVDs"; "subroot", `Int 7 ]) =
+      `Assoc ["action", `String "avds"; "subroot", `String "7"]);
+    let rejection args =
+      try Pave.Tools.validate_arguments ~name:"read_file" ~args; "" with
+      | Pave.Tools.Tool_error message -> message in
+    let unexpected = rejection (`Assoc ["path", `String "a"; "encoding", `String "utf-8"]) in
+    assert (contains unexpected "unexpected argument: arguments.encoding");
+    assert (contains unexpected "Accepted arguments: path (string, required), offset (integer >=0)");
+    assert (contains (rejection (`Assoc ["path", `String "a"; "max_lines", `Int 5000]))
+      "arguments.max_lines=5000 is outside its allowed range 1..1000");
+    assert (contains (rejection (`Assoc [Pave.Protocol.invalid_arguments_key, `String "{bad"]))
+      "not a valid JSON object; resend");
     assert (rejected (fun () -> tool_json root "read_file"
       ["path", `String "pages.txt"; "line", `Int 9]));
     create "large.txt" (String.make 70_000 'x' ^ "\nTARGET-END\n");

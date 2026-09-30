@@ -1,6 +1,14 @@
 # Work checkpoint
 
-## Current session — read_file defaulted paging fix
+## Current session — model-agnostic tool arguments and provider-labelled picker
+
+- **Date:** 2026-09-30
+- **Active task:** Completed. Audited every tool-argument path for failures that depend on how a particular model spells arguments, and labelled model picker screens with the provider.
+- **Changed files:** `lib/core/protocol.ml` (`decode_tool_arguments`, invalid-arguments marker), eleven transports under `lib/provider/transports/`, `lib/tools/tools.ml` (`normalize_arguments`, richer validation errors, `ast_edit` empty-string tolerance), `lib/agent/agent.ml` (normalization before dispatch, malformed-argument error), `bin/ui/model_picker.ml`, `bin/main.ml`, `bin/ui/tui.ml`, tests in `test/tools/test_tools.ml`, `test/ui/test_model_picker.ml` and four transport tests, `docs/DESIGN_RULES.md`, `CHANGELOG.md`.
+- **Verification:** `dune build @install` and `dune test --force` passed. Loopback vLLM fixture through the real CLI: `offset:null,line:"2",max_lines:1.0` read line 2; `offset:0,line:1` read the file; `{broken` returned a resend error to the model and the turn continued to `done`; double-encoded `glob` arguments ran. tmux PTY: `/model` title `Models · vLLM (local) · vllm@chat`, row `m  · vLLM (local)  (current)`, scope list `OpenAI · openai@chat …`; header shows `m · vllm` at 60 and 44 columns.
+- **Exact next action:** None for this task.
+
+## Previous session — read_file defaulted paging fix
 
 - **Date:** 2026-09-30
 - **Active task:** Completed. Fixed `read_file` rejecting model calls that echo defaults (`offset: 0` + `line`, or `line: 1` + `offset`), which caused repeated failed reads in a live session.

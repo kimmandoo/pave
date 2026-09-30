@@ -320,17 +320,43 @@ in
 
 
 
+(* Models sometimes emit malformed arguments. Carry them to the tool loop as an
+   error marker so the model can resend, rather than failing the whole turn. *)
+let invalid_arguments_key = "__pave_invalid_arguments"
+
+let decode_tool_arguments raw =
+  let parse text = try Some (Yojson.Basic.from_string text) with Yojson.Json_error _ -> None in
+  let rec as_object depth text =
+    match parse text with
+    | Some (`Assoc _ as arguments) -> Some arguments
+    | Some (`String inner) when depth < 2 && String.trim inner <> "" -> as_object (depth + 1) inner
+    | Some (`String _) -> Some (`Assoc [])
+    | Some _ -> None
+    | None when depth = 0 ->
+        (* Recover one object wrapped in prose or a Markdown fence. *)
+        (match String.index_opt text '{', String.rindex_opt text '}' with
+         | Some first, Some last when last > first ->
+             (match parse (String.sub text first (last - first + 1)) with
+              | Some (`Assoc _ as arguments) -> Some arguments
+              | _ -> None)
+         | _ -> None)
+    | None -> None in
+  if String.trim raw = "" then `Assoc []
+  else match as_object 0 raw with
+    | Some arguments -> arguments
+    | None ->
+        let shown = if String.length raw > 512 then String.sub raw 0 512 ^ "..." else raw in
+        `Assoc [invalid_arguments_key, `String shown]
+
 let parse_call json =
   let id = member "id" json |> string in
   let fn = member "function" json in
   let name = member "name" fn |> string in
   (* Compatible servers omit or blank the arguments of parameterless tools. *)
-  let args = match member "arguments" fn with
-    | `Null -> ""
-    | value -> string value in
-  let arguments = if String.trim args = "" then `Assoc [] else
-    try Yojson.Basic.from_string args
-    with Yojson.Json_error _ -> raise (Invalid_response "invalid function arguments JSON") in
+  let arguments = match member "arguments" fn with
+    | `Null -> `Assoc []
+    | `Assoc _ as arguments -> arguments
+    | value -> decode_tool_arguments (string value) in
   if id = "" || name = "" then raise (Invalid_response "empty tool call id or name");
   { id; name; arguments }
 

@@ -565,8 +565,7 @@ let parse_stream ?(assigned_model="") ?(selected_model="") ?(cascade_id="") body
   let tool_calls = List.map (fun id ->
     let name,args = Hashtbl.find calls id in
     if not (valid_id name) then bad "invalid streamed tool name";
-    let arguments = try Yojson.Basic.from_string args
-      with Yojson.Json_error _ -> bad "invalid streamed tool arguments" in
+    let arguments = Protocol.decode_tool_arguments args in
     ({ id; name; arguments } : Protocol.tool_call)) (List.rev !order) in
   if !stop = 3 && tool_calls = [] then bad "Devin response stopped at token limit";
   let content = Buffer.contents output_text in

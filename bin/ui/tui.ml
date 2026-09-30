@@ -1080,12 +1080,21 @@ let paint t =
             else prefix ^ shorten_middle room (single_line t.root) in
           let identity_space = max 0 (min (space / 3)
             (space - measure root - 20)) in
-          let detail = if width < 66 || model_scope = "" ||
-              identity_space < 12 then ""
-            else "  ·  " ^ shorten_middle (min 28 identity_space) model_scope in
-          let name_width = max 0 (space - measure root - measure detail) in
+          (* Narrow headers keep the provider and drop only the route/account. *)
+          let provider = match String.index_opt model_scope '@' with
+            | Some split -> String.sub model_scope 0 split
+            | None -> model_scope in
+          let detail, inline_provider = if model_scope = "" then "", ""
+            else if width >= 66 && identity_space >= 12 then
+              "  ·  " ^ shorten_middle (min 28 identity_space) model_scope, ""
+            else if space - measure root >= measure provider + 16 then
+              "", " · " ^ shorten_middle (min 16 (measure provider)) provider
+            else "", "" in
+          let name_width = max 0 (space - measure root - measure detail -
+            measure inline_provider) in
           I.(string accent badge <|>
             string text_attr (display_model name_width) <|>
+            string muted inline_provider <|>
             string accent effort <|>
             string muted state <|>
             string muted root <|>

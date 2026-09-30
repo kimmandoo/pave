@@ -9,10 +9,8 @@ let required_string name json = match field name json with
 
 let object_arguments = function
   | `Assoc _ as arguments -> arguments
-  | `String text ->
-      (match (try Yojson.Basic.from_string text with Yojson.Json_error _ -> invalid "invalid tool arguments JSON") with
-       | `Assoc _ as arguments -> arguments
-       | _ -> invalid "tool arguments must be an object")
+  | `String text -> Protocol.decode_tool_arguments text
+  | `Null -> `Assoc []
   | _ -> invalid "tool arguments must be an object"
 
 let tool_schema json =

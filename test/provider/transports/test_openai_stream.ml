@@ -128,9 +128,12 @@ let () =
   assert (List.rev !late = [
     { Protocol.key = late_key; call_id = None; name = ""; fragment = {|{"path":"x","content":"hi"}|} };
     { Protocol.key = late_key; call_id = Some "late"; name = "write_file"; fragment = "" } ]);
-  invalid (fun () -> stream ~on_tool_arguments:(fun _ -> ())
+  (* Malformed arguments reach the tool loop as a marker the model can fix. *)
+  assert ((stream ~on_tool_arguments:(fun _ -> ())
     (event (chunk (calls [call 0 ~id:"bad" ~name:"write_file" ~arguments:"{" ()]))
-     ^ event (chunk ~finish:(`String "tool_calls") (`Assoc [])) ^ done_event));
+     ^ event (chunk ~finish:(`String "tool_calls") (`Assoc [])) ^ done_event)).tool_calls = [
+    { Protocol.id = "bad"; name = "write_file";
+      arguments = `Assoc [Protocol.invalid_arguments_key, `String "{"] } ]);
   assert (response.content = None);
   assert (response.tool_calls = [
     { Protocol.id = "first"; name = "read";
@@ -167,9 +170,21 @@ let () =
     (event (chunk (calls [ call 0 ~id:"duplicate" ~name:"a" ~arguments:"{}" ();
                            call 1 ~id:"duplicate" ~name:"b" ~arguments:"{}" () ]))
      ^ event (chunk ~finish:(`String "tool_calls") (`Assoc [])) ^ done_event));
-  invalid (fun () -> stream
+  assert ((stream
     (event (chunk (calls [ call 0 ~id:"call" ~name:"read" ~arguments:"[]" () ]))
-     ^ event (chunk ~finish:(`String "tool_calls") (`Assoc [])) ^ done_event));
+     ^ event (chunk ~finish:(`String "tool_calls") (`Assoc [])) ^ done_event)).tool_calls = [
+    { Protocol.id = "call"; name = "read";
+      arguments = `Assoc [Protocol.invalid_arguments_key, `String "[]"] } ]);
+  assert ((stream
+    (event (chunk (calls [ call 0 ~id:"call" ~name:"read"
+      ~arguments:{|"{\"path\":\"a.txt\"}"|} () ]))
+     ^ event (chunk ~finish:(`String "tool_calls") (`Assoc [])) ^ done_event)).tool_calls = [
+    { Protocol.id = "call"; name = "read"; arguments = `Assoc ["path", `String "a.txt"] } ]);
+  assert ((stream
+    (event (chunk (calls [ call 0 ~id:"call" ~name:"read"
+      ~arguments:"```json\n{\"path\":\"a.txt\"}\n```" () ]))
+     ^ event (chunk ~finish:(`String "tool_calls") (`Assoc [])) ^ done_event)).tool_calls = [
+    { Protocol.id = "call"; name = "read"; arguments = `Assoc ["path", `String "a.txt"] } ]);
   invalid (fun () -> stream
     (event (chunk (`Assoc ["refusal", `String "No"])) ^
      event (chunk ~finish:(`String "stop") (`Assoc [])) ^ done_event));

@@ -197,9 +197,7 @@ let parse_completion ~model json =
         if Hashtbl.mem ids id then invalid "duplicate tool call id";
         Hashtbl.add ids id ();
         let raw = required_string "arguments" item in
-        let arguments = try Yojson.Basic.from_string raw
-          with Yojson.Json_error _ -> invalid "invalid function arguments JSON" in
-        (match arguments with `Assoc _ -> () | _ -> invalid "tool arguments must be an object");
+        let arguments = decode_tool_arguments raw in
         calls := { id; name; arguments } :: !calls
     | `String "reasoning" ->
         (match member "summary" item with

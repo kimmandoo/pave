@@ -89,8 +89,12 @@ let () =
    | exception Pave.Protocol.Invalid_response _ -> ()
    | _ -> failwith "invalid Ollama stream was accepted by finish");
   expect_invalid (done_frame () ^ chunk "too late");
-  expect_invalid (call_chunk [ tool ~index:0 "search" (`String "{broken") ] ^ done_frame ());
-  expect_invalid (call_chunk [ tool "search" (`String "{broken") ] ^ done_frame ());
+  List.iter (fun wire ->
+    assert ((parse wire).tool_calls
+      |> List.map (fun (call : Pave.Protocol.tool_call) -> call.arguments) =
+      [ `Assoc [Pave.Protocol.invalid_arguments_key, `String "{broken"] ]))
+    [ call_chunk [ tool ~index:0 "search" (`String "{broken") ] ^ done_frame ();
+      call_chunk [ tool "search" (`String "{broken") ] ^ done_frame () ];
   expect_invalid (call_chunk [ tool ~index:0 "search" args ] ^
     call_chunk [ tool ~index:0 "search" args ] ^ done_frame ());
   print_endline "Ollama native stream: ok"

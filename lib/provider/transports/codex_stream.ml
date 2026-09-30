@@ -183,9 +183,6 @@ let handle_done t json =
       (match item.args_done with
       | Some prior when prior <> args -> invalid "arguments done / final item mismatch"
       | _ -> ());
-      (match (try Yojson.Basic.from_string args with Yojson.Json_error _ ->
-        invalid "invalid function arguments JSON") with
-      | `Assoc _ -> () | _ -> invalid "tool arguments must be an object");
       if not item.args_seen then (
         match t.on_tool_arguments with
         | None -> ()

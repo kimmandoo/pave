@@ -79,6 +79,12 @@ let () =
   assert (List.map snd rows =
     ["GPT-4o · shared-id  (current)"; "GPT-4o · gpt-4o-mini"]);
   assert (List.map snd (Model_picker.row_labels [model_a]) = ["shared-id"]);
+  assert (List.map snd (Model_picker.row_labels ~provider:"OpenAI" ~current_model:exact_a
+    [named_a]) = ["GPT-4o  · OpenAI  (current)"]);
+  let vllm = descriptor "vllm" in
+  assert (Model_picker.scope_title vllm
+    { Pave.Model_discovery_coordinator.provider = "vllm"; route = "chat"; account_id = None } =
+    vllm.display_name ^ " · vllm@chat");
   let slash_listing = listing ~provider:"abliteration" ~route:"chat"
     ~account_id:"team-a" ~ids:["org/model"] () in
   let slash_model = List.hd

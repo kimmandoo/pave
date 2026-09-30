@@ -198,10 +198,7 @@ let finish t =
       Hashtbl.add ids id ();
       let raw = Buffer.contents call.arguments in
       (* Compatible servers omit the arguments of parameterless tools. *)
-      let arguments = if String.trim raw = "" then `Assoc [] else
-        try Yojson.Basic.from_string raw
-        with Yojson.Json_error _ -> invalid "invalid function arguments JSON" in
-      (match arguments with `Assoc _ -> () | _ -> invalid "tool arguments must be an object");
+      let arguments = Protocol.decode_tool_arguments raw in
       { Protocol.id = id; name; arguments }) calls in
     (match t.finish_reason, calls with
      | Some "tool_calls", [] -> invalid "finish_reason tool_calls without tool calls"

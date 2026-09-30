@@ -84,12 +84,7 @@ let parse_completion ~endpoint ~model json =
       let fn = Protocol.member "function" call in
       match Protocol.member "type" call,
         Protocol.member "arguments" fn with
-      | `String "function", `String arguments ->
-          (match (try Some (Yojson.Basic.from_string arguments)
-            with Yojson.Json_error _ -> None) with
-          | Some (`Assoc _) -> ()
-          | _ -> raise (Protocol.Invalid_response
-              "invalid Coding Plan function arguments"))
+      | `String "function", `String _ -> ()
       | _ -> raise (Protocol.Invalid_response
           "invalid Coding Plan function call")) calls
   | _ -> ());

@@ -2948,7 +2948,7 @@ let apply_edits ?cancel ?context root args =
 
 let ast_operation args =
   let operation = required_string "operation" args in
-  let present name = field name args <> `Null in
+  let present name = match field name args with `Null | `String "" -> false | _ -> true in
   match operation with
   | "rename_identifier" ->
       if present "target" || present "replacement" then
@@ -3331,11 +3331,111 @@ let approval_request ?cancel ?context ~root ~name ~args (decision : Approval.dec
   { Approval.tool_name = name; tier = decision.tier; impact; details;
     reason = decision.reason }
 
+let parameters_schema definitions name =
+  match List.find_opt (fun json -> function_name json = `String name) definitions with
+  | Some json -> Some (Protocol.member "parameters" (Protocol.member "function" json))
+  | None -> None
+
+(* Models differ in how they spell optional or scalar values: null for an
+   omitted field, "5" or 5.0 for an integer, "true" for a boolean, a lone string
+   for a one-item array, or a differently cased enum value. Rewrite only these
+   unambiguous spellings; schema validation still decides what is accepted. *)
+let rec normalize_value schema value =
+  let type_name = match Protocol.member "type" schema with `String value -> value | _ -> "" in
+  let enum = match Protocol.member "enum" schema with `List values -> values | _ -> [] in
+  let integer_text text =
+    let text = String.trim text in
+    if text <> "" && String.for_all (fun c -> (c >= '0' && c <= '9') || c = '-') text
+    then int_of_string_opt text else None in
+  let value = match type_name, value with
+    | "integer", `Float number when Float.is_integer number &&
+        Float.abs number < 4.0e15 -> `Int (int_of_float number)
+    | "integer", `String text ->
+        (match integer_text text with Some number -> `Int number | None -> value)
+    | "number", `String text ->
+        (match integer_text text, float_of_string_opt (String.trim text) with
+         | Some number, _ -> `Int number
+         | None, Some number when Float.is_finite number -> `Float number
+         | _ -> value)
+    | "boolean", `String text ->
+        (match String.lowercase_ascii (String.trim text) with
+         | "true" -> `Bool true | "false" -> `Bool false | _ -> value)
+    | "string", `Int number -> `String (string_of_int number)
+    | "string", `Bool flag -> `String (string_of_bool flag)
+    | ("object" | "array"), `String text ->
+        (match (try Some (Yojson.Basic.from_string text) with Yojson.Json_error _ -> None),
+               type_name with
+         | Some (`Assoc _ as parsed), "object" | Some (`List _ as parsed), "array" -> parsed
+         | _, "array" when Protocol.member "type" (Protocol.member "items" schema) = `String "string" ->
+             `List [value]
+         | _ -> value)
+    | _ -> value in
+  let value = match value with
+    | `String text when enum <> [] && not (List.mem value enum) ->
+        let folded = String.lowercase_ascii (String.trim text) in
+        (match List.filter (function
+            | `String candidate -> String.lowercase_ascii candidate = folded
+            | _ -> false) enum with
+         | [unique] -> unique
+         | _ -> value)
+    | _ -> value in
+  match value with
+  | `Assoc fields ->
+      let properties = match Protocol.member "properties" schema with
+        | `Assoc properties -> properties | _ -> [] in
+      let required = match Protocol.member "required" schema with
+        | `List names -> List.filter_map (function `String name -> Some name | _ -> None) names
+        | _ -> [] in
+      `Assoc (List.filter_map (fun (field, field_value) ->
+        match List.assoc_opt field properties, field_value with
+        | Some field_schema, `Null
+          when not (List.mem field required) &&
+               Protocol.member "type" field_schema <> `String "null" -> None
+        | Some field_schema, _ -> Some (field, normalize_value field_schema field_value)
+        | None, _ -> Some (field, field_value)) fields)
+  | `List items when type_name = "array" ->
+      let item_schema = Protocol.member "items" schema in
+      if item_schema = `Null then value
+      else `List (List.map (normalize_value item_schema) items)
+  | _ -> value
+
+let normalize_arguments ~schema args =
+  match args with `Assoc _ -> normalize_value schema args | _ -> args
+
+let normalize_tool_arguments ~name ~args =
+  match parameters_schema definitions name with
+  | Some schema -> normalize_arguments ~schema args
+  | None -> args
+
+let describe_parameters schema =
+  let properties = match Protocol.member "properties" schema with
+    | `Assoc properties -> properties | _ -> [] in
+  let required = match Protocol.member "required" schema with
+    | `List names -> names | _ -> [] in
+  String.concat ", " (List.map (fun (field, field_schema) ->
+    let type_name = match Protocol.member "type" field_schema with
+      | `String value -> value | _ -> "value" in
+    let range = match Protocol.member "minimum" field_schema,
+                      Protocol.member "maximum" field_schema with
+      | `Int low, `Int high when high < max_int -> Printf.sprintf " %d..%d" low high
+      | `Int low, _ -> Printf.sprintf " >=%d" low
+      | _ -> "" in
+    let values = match Protocol.member "enum" field_schema with
+      | `List values -> " one of " ^ String.concat "|" (List.filter_map (function
+          | `String value -> Some value | _ -> None) values)
+      | _ -> "" in
+    Printf.sprintf "%s (%s%s%s%s)" field type_name range values
+      (if List.mem (`String field) required then ", required" else ""))
+    properties)
+
 let validate_arguments ~name ~args =
-  let schema =
-    match List.find_opt (fun json -> function_name json = `String name) definitions with
-    | Some json -> Protocol.member "parameters" (Protocol.member "function" json)
+  let schema = match parameters_schema definitions name with
+    | Some schema -> schema
     | None -> fail ("unknown tool: " ^ name) in
+  (match Protocol.member Protocol.invalid_arguments_key args with
+   | `String received ->
+       fail ("arguments were not a valid JSON object; resend the call with one JSON object. Received: " ^ received)
+   | _ -> ());
   let schema_fields key schema =
     match Protocol.member key schema with
     | `Assoc fields -> fields
@@ -3379,7 +3479,12 @@ let validate_arguments ~name ~args =
          let maximum = bound "maximum" schema in
          if (match minimum with Some limit -> number < limit | None -> false) ||
             (match maximum with Some limit -> number > limit | None -> false)
-         then fail (label ^ " is outside its allowed range")
+         then fail (Printf.sprintf "%s=%d is outside its allowed range%s" label number
+           (match minimum, maximum with
+            | Some low, Some high -> Printf.sprintf " %d..%d" low high
+            | Some low, None -> Printf.sprintf " >=%d" low
+            | None, Some high -> Printf.sprintf " <=%d" high
+            | None, None -> ""))
      | `Assoc fields ->
          let field_names = List.map fst fields in
          if List.length field_names <> List.length (List.sort_uniq String.compare field_names) then
@@ -3408,7 +3513,9 @@ let validate_arguments ~name ~args =
            (Printf.sprintf "%s[%d]" label index) item_schema item) values
      | _ -> ())
   in
-  validate_value "arguments" schema args
+  try validate_value "arguments" schema args
+  with Tool_error message ->
+    fail (Printf.sprintf "%s. Accepted arguments: %s" message (describe_parameters schema))
 
 type prepared_execution =
   ?cancel:(unit -> bool) -> ?on_progress:(int -> unit) -> ?approved:bool -> unit ->

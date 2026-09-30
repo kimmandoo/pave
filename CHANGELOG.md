@@ -1,6 +1,10 @@
 # Changelog
 
 ## 2026-09-30
+- fix(agent): normalized unambiguous model argument spellings before schema validation for built-in, `task` and external tools, so optional `null` values, `"5"`/`5.0` integers, `"true"` booleans, JSON-encoded objects/arrays, lone strings for string arrays and differently cased enum values no longer fail tool calls.
+- fix(provider): decoded tool arguments on every transport through one shared decoder that unwraps double-encoded or Markdown-fenced objects, and returned still-malformed arguments to the model as a correctable tool error instead of failing the whole turn.
+- fix(tools): named the offending value, the allowed range and the accepted arguments in tool validation errors, and let `ast_edit` ignore empty strings echoed for unused operation fields.
+- feat(tui): showed the provider's readable name in model picker titles, loading status, scope choices and model rows, and kept the provider beside the model name in narrow composer headers.
 - fix(tools): accepted `read_file` calls that echo default paging values (`offset: 0` with a line, or `line: 1` with an offset) instead of rejecting them as conflicting, which had left models retrying the same failing read; only two distinct positions are still rejected, now with a retry hint.
 - release(distribution): published v0.1.74 with the provider response fixes and README update after four-platform native release builds, verified archive checksums and a packaged fixture smoke; profiling of streaming, TUI rendering, startup and large journals found no bottleneck requiring change.
 - docs(readme): removed emoji markers from the README highlights for consistent terminal and plain-text rendering.

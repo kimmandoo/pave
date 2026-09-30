@@ -326,7 +326,8 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
             call.id = id && call.name = metadata.draft_name) calls) in
         let valid = match call with
           | Some call when call.name = "write_file" ->
-              (try Tools.validate_arguments ~name:call.name ~args:call.arguments;
+              (try Tools.validate_arguments ~name:call.name
+                  ~args:(Tools.normalize_tool_arguments ~name:call.name ~args:call.arguments);
                 true with Tools.Tool_error _ -> false)
           | Some _ -> true | None -> false in
         emit_tool_event t (Tool_draft_ended {
@@ -393,6 +394,13 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
                 |> Secret_mask.mask_tool_arguments mask
                 |> Secret_mask.restore_tool_arguments mask }
             | None -> call in
+          let call = { call with arguments =
+            match List.find_opt (fun definition ->
+              Protocol.member "name" (Protocol.member "function" definition) =
+                `String call.name) (task_definition :: t.external_tools) with
+            | Some definition -> Tools.normalize_arguments call.arguments
+                ~schema:(Protocol.member "parameters" (Protocol.member "function" definition))
+            | None -> Tools.normalize_tool_arguments ~name:call.name ~args:call.arguments } in
           let prepared = ref None in
           let tracked_path : Tools.file_location option ref = ref None in
           let on_progress = match call.name, t.on_tool_event with
@@ -426,6 +434,12 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
              | None -> ()
              | Some notify -> notify (Tool call.name));
             try
+              match Protocol.member Protocol.invalid_arguments_key call.arguments with
+              | `String received ->
+                  complete ("Error: tool arguments were not a valid JSON object; " ^
+                    "resend the call with one JSON object matching the tool schema. Received: " ^
+                    received)
+              | _ ->
               if call.name = "task" then (
                 if not (t.tool_available "task") then
                   complete "Error: child-agent delegation is no longer available"

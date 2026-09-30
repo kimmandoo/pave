@@ -153,6 +153,13 @@ let scope_label (scope : Pave.Model_discovery_coordinator.scope) =
    | None -> ""
    | Some account -> "#" ^ Pave.Model_identity.encode_component account)
 
+(* Pair the readable provider name with the exact scope so every picker
+   screen says whose models are listed. *)
+let scope_title (descriptor : Pave.Provider_catalog.descriptor) scope =
+  let name = Tui.single_line descriptor.display_name |> String.trim in
+  if name = "" || name = descriptor.id then scope_label scope
+  else name ^ " · " ^ scope_label scope
+
 let listing_status ?registry (descriptor : Pave.Provider_catalog.descriptor)
     _scope (listing : Pave.Model_discovery.listing) models =
   if listing.source.id_source =
@@ -191,7 +198,7 @@ let identity_label (model : Pave.Model_discovery.model) =
 
 (* Rows in a single-scope list omit the scope already shown in the title;
    repeated display names fall back to the exact upstream ID. *)
-let row_labels ?current_model (models : Pave.Model_discovery.model list) =
+let row_labels ?provider ?current_model (models : Pave.Model_discovery.model list) =
   let names = List.map visible_model_name models in
   List.map (fun (model : Pave.Model_discovery.model) ->
     let name = visible_model_name model in
@@ -199,6 +206,9 @@ let row_labels ?current_model (models : Pave.Model_discovery.model list) =
     let upstream = Tui.single_line model.identity.upstream_id in
     let label = if shared && name <> upstream then name ^ " · " ^ upstream
       else name in
+    let label = match provider with
+      | Some provider when provider <> "" -> label ^ "  · " ^ provider
+      | _ -> label in
     let selector = identity_selector model in
     selector, (if current_model = Some selector then label ^ "  (current)"
       else label)) models
@@ -407,14 +417,15 @@ let choose ?registry screen ~(descriptor : Pave.Provider_catalog.descriptor)
       match Pave.Model_discovery_coordinator.poll coordinator with
       | [{ scope; status = Pave.Model_discovery_coordinator.Loading }] ->
           Tui.update_choices screen ~verified:[]
-            ~status:(Some ("Checking " ^ scope_label scope ^ "…")) ()
+            ~status:(Some ("Checking " ^ scope_title descriptor scope ^ "…")) ()
       | [{ scope; status = Ready listing }] ->
           let routed_models = eligible_models ~registry descriptor scope listing in
           List.iter (fun model ->
             Hashtbl.replace fresh_models (identity_selector model) model) routed_models;
           let values = List.map identity_selector routed_models in
           let details = model_details ~registry descriptor routed_models in
-          let labels = row_labels ?current_model routed_models in
+          let labels = row_labels ~provider:(Tui.single_line descriptor.display_name)
+            ?current_model routed_models in
           Tui.update_choices screen ~verified:values ~details ~labels
             ?preferred:current_model
             ~status:(Some (listing_status ~registry descriptor scope listing
@@ -505,16 +516,16 @@ let browse ?registry ?initial_filter ?(configure_effort = false)
         ~scope_action:switch_action ~plain:[switch_action]
         ~intro:["Type to filter · Tab switches provider / API / account.";
           "Applies to this conversation only; /setup saves a default."]
-        ~title:("Models · " ^ scope_label scope) () with
+        ~title:("Models · " ^ scope_title descriptor scope) () with
     | Some selection when selection.selector = switch_action ->
         let scopes = available_scopes ~registry () in
         let scopes = if List.exists (fun (candidate, _) -> candidate = scope) scopes
           then scopes else (scope, descriptor) :: scopes in
         let label (candidate, descriptor) =
-          if candidate = scope then scope_label candidate ^ "  (current)"
-          else if scope_ready ~registry descriptor candidate then
-            scope_label candidate
-          else scope_label candidate ^ "  · needs sign-in or API key" in
+          let title = scope_title descriptor candidate in
+          if candidate = scope then title ^ "  (current)"
+          else if scope_ready ~registry descriptor candidate then title
+          else title ^ "  · needs sign-in or API key" in
         let current, others = List.partition (fun (candidate, _) ->
           candidate = scope) scopes in
         let ready, missing = List.partition (fun (candidate, descriptor) ->

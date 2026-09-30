@@ -2359,7 +2359,9 @@ let () =
                          ?account_id:selected_account_id ~configure_effort:true
                          ?current_thinking:!thinking_level
                          ?current_model:(Option.map Pave.Model_identity.selector !active_identity)
-                         ~title:("Model · " ^ descriptor.id ^ " (current conversation)")
+                         ~title:("Model · " ^ Model_picker.scope_title descriptor
+                           { provider = descriptor.id; route = route_name;
+                             account_id = selected_account_id } ^ " (current conversation)")
                          () in
                  display_name := Option.bind picked
                   (fun (selection : Model_picker.selection) ->
@@ -2393,7 +2395,9 @@ let () =
               ~route_name:route.name ?account_id:selected_account_id
               ~configure_effort:true ?current_thinking:!thinking_level
               ?current_model:(Option.map Pave.Model_identity.selector !active_identity)
-              ~title:("Model · " ^ descriptor.id ^ "@" ^ route.name) () in
+              ~title:("Model · " ^ Model_picker.scope_title descriptor
+                { provider = descriptor.id; route = route.name;
+                  account_id = selected_account_id }) () in
             display_name := Option.bind picked
               (fun (selection : Model_picker.selection) ->
                 selection.display_name);
