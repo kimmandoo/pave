@@ -1,5 +1,16 @@
 # Work checkpoint
 
+## Current session — TUI navigation and feedback polish
+
+- **Date:** 2026-09-30
+- **Active task:** Completed the requested general TUI UI/UX pass, scoped to observed problems in suggestions, picker searches and transcript navigation.
+- **Changed files:** `bin/ui/tui.ml`, `docs/DESIGN_RULES.md`, `docs/USAGE.md`, `docs/TROUBLESHOOTING.md`, `CHANGELOG.md`, `docs/WORK_CHECKPOINT.md`.
+- **Implementation:** Added suggestion position/count headers, responsive name/detail columns and full-width selection; retained a marker/bold in NO_COLOR. Fit complete prioritized action labels in the footer, distinguish exact-command execution from partial insertion, keep send hints after replies, and show visible row range plus Ctrl+End latest when scrolled. Static picker searches now show explicit empty results and edit/cancel guidance; title shortening preserves result counts. Kept provider/status navigation available in empty dynamic pickers.
+- **Verification:** `opam exec -- dune build @install` and `opam exec -- dune runtest` passed on the final source. Actual CLI PTYs reproduced clipped suggestions, blank unmatched settings and identical latest/scrolled footers before changes. Afterward, 30×10, 18×8, 60×14 and 90×20/24 captures exercised command selection across resize, Tab insertion followed by a separate Return, exact `/help` versus `/hel`, Escape/Backspace, empty/recovered settings filters, and Ctrl+End restoring the latest output without draft mutation. A checked long Unicode file path inserted unchanged via Tab; its suffix and MIME/size stayed readable. Terminal cell attributes proved the full-width selected background and NO_COLOR bold marker. A held loopback vLLM turn showed busy cancellation/steering hints and queued a second prompt; exactly two requests received `test` then `next`, and idle send hints returned after completion.
+- **Limits:** Observed through a PTY terminal emulator, not a graphical terminal application. No live vendor inference, release, installed-binary replacement or strategy changes; no backtest applies.
+- **Final picker proof:** At 60×14 an unavailable vLLM listing retained its diagnostic and showed the complete `Tab providers` shortcut; Tab returned to the provider list. The final 30×10 unmatched settings filter still displayed both Backspace edit and Esc cancel. Rebuilt and reran affected tests after applying the same whole-label budget to ordinary picker footers.
+- **Exact next action:** None for this request. Unrelated backlog cards in `task.md` remain unchanged.
+
 ## Current session — responsive composer and animated startup mark
 
 - **Date:** 2026-09-30

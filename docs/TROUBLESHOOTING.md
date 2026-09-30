@@ -1,5 +1,12 @@
 # Troubleshooting
 
+### [2026-09-30] Static picker searches went blank with selection hints
+
+- **Context / Symptom:** In the real 30×10 CLI TUI, filtering `/settings` to an unmatched string left an empty body and still showed `↑↓ ↵ select · Esc cancel`; the title's match count was clipped. Slash hints also clipped `/model` argument syntax and the key guide at the right edge.
+- **Root Cause:** Empty-result space and messages were reserved only for dynamic model pickers. Titles and suggestion rows were assembled as long strings and cropped, while the footer assumed a selectable row existed in static pickers.
+- **Solution:** Reserved empty-result space for both static and dynamic lists, paired empty searches with edit/cancel hints, budgeted title/count separately, and used responsive suggestion columns and whole-item keyboard hints.
+- **Prevention / Reference:** PTY smoke covered empty/recovered filters at 30×10 and 18×8, command/file selection and insertion, color/NO_COLOR highlighting, exact-command versus partial insertion, scroll-to-latest and queued-turn completion.
+
 ### [2026-09-30] Narrow composer retained a partial box after resize
 
 - **Context / Symptom:** An actual CLI PTY resized from 80 columns to 11×10 showed a bare input gutter and straight top rule, but retained the rounded bottom border. Input chrome changed inconsistently across the width breakpoint.

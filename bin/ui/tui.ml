@@ -603,6 +603,29 @@ let shorten_middle width text =
     String.sub text 0 prefix_end ^ "…" ^
     String.sub text suffix_start (String.length text - suffix_start)
 
+(* Keep actionable hints whole; omit lower-priority items instead of clipping
+   a key combination halfway through. Only the first item may need shortening. *)
+let fit_labels cols = function
+  | [] -> ""
+  | first :: rest ->
+      let first = shorten_width cols first in
+      let output = Buffer.create (min 128 (max 0 cols)) in
+      Buffer.add_string output first;
+      let used = ref (measure_text first) in
+      List.iter (fun label ->
+        let cells = measure_text label in
+        if label <> "" && !used + 3 + cells <= cols then (
+          Buffer.add_string output " · ";
+          Buffer.add_string output label;
+          used := !used + 3 + cells)) rest;
+      Buffer.contents output
+
+let choice_line cols selected text =
+  if not selected then styled_line cols text_attr text
+  else
+    let line = I.hsnap ~align:`Left cols (I.string selected_attr text) in
+    I.(line </> char selected_attr ' ' cols 1)
+
 let shorten_model_label width label =
   if width < 5 then shorten_width width label else
   match String.index_opt label ' ' with
@@ -734,8 +757,9 @@ let candidate_label chooser item =
    else if item.custom then "Use: " else "") ^ sanitize item.label
 
 let chooser_empty_message chooser =
-  if chooser.filter <> "" then "No available models match this search"
-  else "No available models yet"
+  if chooser.filter <> "" then "No matches. Edit the filter."
+  else if chooser.dynamic then "No available models yet"
+  else "No choices available"
 
 (* Segments wrap rather than disappearing off-screen. The selected chip is
    kept visible even when the terminal only has room for one chip row. *)
@@ -805,7 +829,7 @@ let chooser_sections ~cols ~height chooser =
           pages.(chooser.status_page) in
         Some (if summary = "" then detail else summary ^ " · " ^ detail) in
   let empty_height =
-    if chooser.dynamic && chooser.matched_models = 0 &&
+    if (count = 0 || (chooser.dynamic && chooser.matched_models = 0)) &&
       height >= (if count > 0 then 3 else 2) then 1 else 0 in
   let choice_room = min count (max 0 (min 3 (height - 1 - empty_height))) in
   let remaining = max 0 (height - 1 - empty_height - choice_room) in
@@ -927,26 +951,27 @@ let insert_hint t = function
           dismiss_hint t))
       else t.status <- "Completion exceeds the composer input limit"
 
-let hint_row cols selected = function
-  | Command_hint item ->
-      let marker = if selected then "  ❯ " else "    " in
-      let usage = Pave.Interaction.usage item in
-      let usage = if usage = "" then "" else " " ^ usage in
-      I.hsnap ~align:`Left cols I.(
-        string (if selected then accent else text_attr) (marker ^ item.name) <|>
-        string (if selected then text_attr else muted)
-          (usage ^ " · " ^ item.summary))
-  | File_hint (_, candidate) ->
-      let marker = if selected then "  ❯ " else "    " in
-      let label = single_line candidate.path ^
-        (if candidate.is_directory then "/" else "") in
-      let detail = match candidate.preview with
-        | None -> "directory"
-        | Some (mime, size) ->
-            single_line mime ^ " · " ^ received_bytes_text size in
-      I.hsnap ~align:`Left cols I.(
-        string (if selected then accent else text_attr) (marker ^ label) <|>
-        string (if selected then text_attr else muted) (" · " ^ detail))
+let hint_row cols selected hint =
+  let label, detail = match hint with
+    | Command_hint item -> single_line item.name, single_line item.summary
+    | File_hint (_, candidate) ->
+        let label = single_line candidate.path ^
+          (if candidate.is_directory then "/" else "") in
+        let detail = match candidate.preview with
+          | None -> "directory"
+          | Some (mime, size) ->
+              single_line mime ^ " · " ^ received_bytes_text size in
+        label, detail in
+  let marker = if selected then "❯ " else "  " in
+  let room = max 0 (cols - 2) in
+  let label_width = if cols < 36 then room else min room (max 16 (cols / 3)) in
+  let label = shorten_middle label_width label in
+  let detail_width = room - label_width - 2 in
+  let text = if detail_width < 8 then marker ^ label
+    else marker ^ label ^
+      String.make (label_width - measure_text label + 2) ' ' ^
+      shorten_width detail_width detail in
+  choice_line cols selected text
 
 let paint t =
   let cols, rows = Notty_unix.Term.size t.term in
@@ -1154,13 +1179,14 @@ let paint t =
           chooser.offset <- chooser.selected - page + 1;
         chooser.offset <- min chooser.offset (max 0 (count - page));
         I.vcat (List.init body_height (fun i ->
-          if i = 0 then styled_line cols accent
-            (if chooser.dynamic then
-              Printf.sprintf "  ▌  %s  ·  %d available"
-                chooser.title chooser.matched_models
-             else if chooser.filter = "" then "  ▌  " ^ chooser.title
-             else Printf.sprintf "  ▌  %s  ·  %d match%s"
-                chooser.title count (if count = 1 then "" else "es"))
+          if i = 0 then
+            let count = if chooser.filter = "" && not chooser.dynamic then ""
+              else if chooser.dynamic then Printf.sprintf "%d available" chooser.matched_models
+              else Printf.sprintf "%d matches" count in
+            let title_width = max 0 (cols - 4 - measure count) in
+            composer_header ~cols
+              (I.string accent (shorten_middle title_width chooser.title))
+              (I.string muted count)
           else if i <= intro_height then
             styled_line cols muted ("  " ^ chooser.intro.(i - 1))
           else if i <= intro_height + status_height then
@@ -1169,7 +1195,8 @@ let paint t =
               ((if index = 0 then status_prefix else "     ") ^
                 status_lines.(index))
           else if i <= intro_height + status_height + empty_height then
-            styled_line cols text_attr ("  " ^ chooser_empty_message chooser)
+            styled_line cols muted
+              ("  " ^ shorten_width (max 0 (cols - 2)) (chooser_empty_message chooser))
           else if i <= intro_height + status_height + empty_height +
               detail_height then
             let index = i - intro_height - status_height - empty_height - 1 in
@@ -1188,9 +1215,9 @@ let paint t =
               let label = if chooser.dynamic && not choice.action then
                 shorten_model_label width (sanitize choice.label)
                 else shorten_width width (candidate_label chooser choice) in
-              styled_line cols
-                (if index = chooser.selected then selected_attr
-                 else if choice.action then muted else text_attr)
+              if chooser.selected = index then
+                choice_line cols true (marker ^ label)
+              else styled_line cols (if choice.action then muted else text_attr)
                 (marker ^ label)))
     | None when total = 0 && hint_height > 0 -> I.void cols body_height
     | None ->
@@ -1229,42 +1256,41 @@ let paint t =
         else enter_key ^ " apply model + effort · Esc cancel · ←/→ effort · Home/End"
     | Some chooser ->
         let found = matches chooser in
+        let available = max 0 (cols - (if cols >= 24 then 2 else 0)) in
         let number = if Array.length found = 0 then 0 else chooser.selected + 1 in
-        let status = match chooser.status with
-          | Some text when body_height < 3 -> " · " ^ single_line text
-          | _ -> "" in
-        let status_page = if chooser.scope_action <> None then " · Tab providers"
+        let status_page = if chooser.scope_action <> None then "Tab providers"
           else if Array.length chooser.status_pages = 0 then ""
-          else Printf.sprintf " · Tab status %d/%d"
+          else Printf.sprintf "Tab status %d/%d"
             (chooser.status_page + 1) (Array.length chooser.status_pages) in
         if cols < 9 || rows < 2 then
           "Resize terminal to at least 9×2 · Esc cancel"
-        else if chooser.dynamic && Array.length found = 0 then
-          (if cols < 35 then "  No models · Esc cancel"
-           else "  No available models · Esc cancel") ^ status ^ status_page
+        else if Array.length found = 0 then
+          fit_labels available
+            ((if chooser.filter = "" then "Esc cancel"
+              else if cols < 28 then "Bksp edit" else "Backspace edit") ::
+             (if chooser.filter = "" then []
+              else [if cols < 28 then "Esc" else "Esc cancel"]) @
+             [status_page; single_line (Option.value ~default:"" chooser.status)])
         else
-        if body_height < 2 then
-          (if cols < 24 then "↑↓ ↵ select Esc" else "↑↓ ↵ select · Esc cancel")
-        else if cols < 24 then "↑↓ ↵ select Esc"
-        else if cols < 55 then
-          Printf.sprintf "↑↓ ↵ select · Esc cancel%s"
-            (if chooser.scope_action <> None && cols >= 40 then " · Tab providers" else "")
-        else if cols < 85 then
-          Printf.sprintf "%s select · Esc cancel · ↑↓/PgUp/Dn · %d/%d%s"
-            enter_key number (Array.length found) status_page
-        else
-          Printf.sprintf "%s select · Esc cancel · ↑↓/PgUp/Dn · Home/End · %d/%d%s"
-            enter_key number (Array.length found) status_page
+          fit_labels available
+            [(if cols < 40 then "↵" else enter_key) ^ " select";
+             (if cols < 24 then "Esc" else "Esc cancel");
+             status_page; "↑↓";
+             Printf.sprintf "%d/%d" number (Array.length found);
+             "PgUp/Dn"; "Home/End"]
     | None when hint_height > 0 ->
-        (match List.nth hints t.hint_selected with
-         | Command_hint selected ->
-             "  " ^ selected.name ^ " · " ^ selected.summary
-         | File_hint (_, selected) ->
-             let detail = match selected.preview with
-               | None -> "directory"
-               | Some (mime, size) ->
-                   single_line mime ^ " · " ^ received_bytes_text size in
-             "  @" ^ single_line selected.path ^ " · " ^ detail)
+        let selected = List.nth hints t.hint_selected in
+        let exact, detail = match selected with
+          | Command_hint item ->
+              item.name = Pave.Composer.text t.editor,
+              item.name ^ " " ^ Pave.Interaction.usage item
+          | File_hint (_, item) -> false, single_line item.path in
+        let accept = if exact then (if cols < 24 then "↵" else enter_key) ^ " run"
+          else if cols < 24 then "Tab add" else "Tab insert" in
+        fit_labels cols
+          (accept :: (if cols < 24 then "Esc" else "Esc close") ::
+           (if cols < 40 then "↑↓" else "↑↓ move") ::
+           (if exact then ["Tab insert"; detail] else [detail]))
     | None ->
         let status = match Pave.Composer.search_query t.editor with
           | None -> t.status
@@ -1274,31 +1300,26 @@ let paint t =
               | None -> "(no match)"
               | Some value -> sanitize (String.split_on_char '\n' value |> List.hd)) ^
               " · Ctrl+R older · " ^ enter_key ^ " recall · Esc cancel" in
-        let status = if status = idle_status && Option.is_some t.activity then
-          if cols < 45 then "Ctrl+C cancel · " ^ enter_key ^ " steer"
-          else "Ctrl+C cancel · " ^ enter_key ^ " steer · " ^
-            meta_key ^ "+" ^ enter_key ^ " queue"
-        else if status = idle_status && cols >= 45 then
-          enter_key ^ " send · / commands · @ files · " ^
-          (if total = 0 then "Ctrl+R history · /help"
-           else "PgUp/Dn scroll · " ^ meta_key ^ "+O details")
-        else status in
-        (if cols < 45 then
-          (if status = idle_status then
-            (if t.queue > 0 then Printf.sprintf "q%d · " t.queue else "") ^
-            (if total = 0 then
-              (if cols < 20 then "  /help"
-               else "  Type a prompt · /help")
-             else if cols < 20 then "  PgUp/Dn"
-             else if cols < 29 then "  PgUp/Dn · " ^ meta_key ^ "+O"
-             else "  PgUp/Dn · " ^ meta_key ^ "+O details")
-           else status)
-        else
-          (if total = 0 then "  "
-           else if visible_last = visible_first then
-             Printf.sprintf "  [0/%d] " total
-           else Printf.sprintf "  [%d-%d/%d] "
-             (visible_first + 1) visible_last total) ^ status) ^
+        let status = if status <> idle_status then status
+          else
+            let position = if total = 0 then ""
+              else if visible_last = visible_first then Printf.sprintf "0/%d" total
+              else Printf.sprintf "%d-%d/%d"
+                (visible_first + 1) visible_last total in
+            let queue = if t.queue = 0 then "" else Printf.sprintf "%d queued" t.queue in
+            let submit = (if cols < 24 then "↵" else enter_key) ^
+              (if Option.is_some t.activity then " steer" else " send") in
+            let hints = if Option.is_some t.activity then
+                ["Ctrl+C cancel"; queue; submit; meta_key ^ "+" ^ enter_key ^ " queue"]
+              else if t.scroll > 0 then
+                ["Ctrl+End latest"; position; "PgUp/Dn scroll"; submit; "/help"]
+              else
+                [submit; "/ commands"; "@ files"; "/help";
+                 (if total = 0 then "Ctrl+R history" else "PgUp/Dn scroll");
+                 (if total = 0 then "" else meta_key ^ "+O details");
+                 position] in
+            fit_labels cols hints in
+        status ^
         (if attachment_height > 0 then ""
          else match t.pending_attachments with
          | [] -> ""
@@ -1313,7 +1334,8 @@ let paint t =
     | Some _ when cols >= 24 &&
         not (String.starts_with ~prefix:" " footer_text) -> "  " ^ footer_text
     | _ -> footer_text in
-  let footer = styled_line cols text_attr (shorten_width cols footer_text) in
+  let footer_attr = if t.status = idle_status && t.overlays = [] then muted else text_attr in
+  let footer = styled_line cols footer_attr (shorten_width cols footer_text) in
   let first_line = max 0 (min (editor_row - editor_height + 1)
     (Array.length editor_lines - editor_height)) in
   let prompt_rows, cursor_row, cursor_col =
@@ -1404,16 +1426,14 @@ let paint t =
       else
         let index = row - (body_height - hint_height) in
         if index = 0 then
-          styled_line cols accent
-            (match List.hd hints with
-             | Command_hint _ ->
-                 "  / Commands · ↑↓ move · Tab/" ^ enter_key ^
-                   " insert · Esc close"
-             | File_hint _ ->
-                 "  @ Files" ^
-                 (if t.hint_truncated then " · incomplete" else "") ^
-                 " · ↑↓ move · Tab/" ^ enter_key ^
-                   " insert · Esc close")
+          let title = match List.hd hints with
+            | Command_hint _ -> if cols < 24 then "/" else "/ Commands"
+            | File_hint _ -> if cols < 24 then "@" else "@ Files" in
+          let count = Printf.sprintf "%d/%d%s" (t.hint_selected + 1) hint_count
+            (if t.hint_truncated then "+" else "") in
+          composer_header ~cols
+            (I.string accent (shorten_width (max 0 (cols - measure count - 4)) title))
+            (I.string muted count)
         else
           let choice = List.nth hints (t.hint_offset + index - 1) in
           hint_row cols (t.hint_offset + index - 1 = t.hint_selected) choice);
