@@ -1,8 +1,6 @@
 open Notty
 
 (* Transcript limits live in Transcript_view; no duplicate storage here. *)
-let prompt = "  ❯ "
-
 type candidate = {
   value : string;
   label : string;
@@ -93,6 +91,10 @@ type t = {
   mutable input : Terminal_input.t;
   root : string;
   version : string;
+  logo_frames : I.t array;
+  mutable logo_started : float option;
+  mutable logo_frame : int;
+  mutable logo_finished : bool;
   mutable model : string;
   mutable model_display_name : string option;
   mutable effort : string option;
@@ -280,7 +282,7 @@ let selected_attr = if no_color then A.(st bold)
   else A.(fg black ++ bg lightcyan ++ st bold)
 let measure_text chunk = I.width (I.string text_attr chunk)
 
-(* Filled user bubbles, state-tinted tool blocks and a muted rounded composer.
+(* Filled user bubbles, state-tinted tool blocks and a ruled composer.
    NO_COLOR keeps the shapes without backgrounds. *)
 let rgb hex = A.rgb_888 ~r:((hex lsr 16) land 0xff) ~g:((hex lsr 8) land 0xff)
   ~b:(hex land 0xff)
@@ -304,29 +306,37 @@ let idle_status =
 
 let hotkeys = Keybindings.hotkeys Keybindings.bindings
 
-(* Widen the SVG's P at terminal scale; the tile stays transparent. *)
-let startup_logo version =
+(* A smaller SVG-derived P, revealed by one diagonal amber sweep. Frames are
+   built once; the event loop only schedules them while the mark is visible. *)
+let logo_tick = 0.045
+
+let startup_logo_frames version =
   let mint = I.string accent "##" and shadow = I.string frame_attr "++"
   and cursor = I.string warning "**" and blank = I.string A.empty "  " in
-  let pixel = function
-    | '#' -> mint | '+' -> shadow | '*' -> cursor | _ -> blank in
-  let mark = I.vcat (List.map (fun row ->
-    I.hcat (List.init (String.length row) (fun index -> pixel row.[index])))
-    [ "    ##########    ";
-      "    ############  ";
-      "    ############+ ";
-      "    ####    ####+ ";
-      "    ####    ####+ ";
-      "    ####    ####+ ";
-      "    ############+ ";
-      "    ############+ ";
-      "    ##########+++ ";
-      "    ####++++++++  ";
-      "    ####          ";
-      "    ####          ";
-      "    ####        * " ]) in
-  I.(mark <-> void 1 1 <->
-    string accent ("        P A V E  " ^ version))
+  let pixels = [|
+    " #########  ";
+    " ########## ";
+    " ###    ###+";
+    " ###    ###+";
+    " ##########+";
+    " ##########+";
+    " ########+++";
+    " ###+++++++ ";
+    " ###        ";
+    " ###      * " |] in
+  let title = I.string accent ("P A V E  " ^ version) in
+  let logo_width = max 24 (I.width title) in
+  Array.init 18 (fun frame ->
+    let mark = I.vcat (Array.to_list (Array.mapi (fun row text ->
+      I.hcat (List.init (String.length text) (fun col ->
+        let step = col + row / 2 in
+        if step > frame || text.[col] = ' ' then blank
+        else if step = frame then cursor
+        else match text.[col] with
+          | '#' -> mint | '+' -> shadow | '*' -> cursor | _ -> blank)))
+      pixels)) in
+    I.(hsnap ~align:`Middle logo_width mark <-> void logo_width 1 <->
+      hsnap ~align:`Middle logo_width title))
 
 let sanitize = Transcript_view.sanitize
 let single_line = Transcript_view.single_line
@@ -469,43 +479,27 @@ let styled_visual cols (visual : Transcript_view.visual) =
 let styled_line width attr text =
   I.hsnap ~align:`Left width (I.string attr text)
 
-(* A rounded composer box needs room for its frame; tiny terminals keep the
-   bare prompt gutter so every row still reaches the draft. *)
-let composer_boxed ~cols ~rows = cols >= 12 && rows >= 6
-
-let composer_chrome ~cols ~rows =
-  if composer_boxed ~cols ~rows then 4, 2
-  else
-    let width = I.width (I.string accent prompt) in
-    if cols <= width then 0, 0 else width, 0
+(* A stable two-cell gutter avoids width-dependent frame geometry. Leave
+   enough room for a wide grapheme; the smallest terminals omit the gutter. *)
+let composer_chrome ~cols ~rows:_ =
+  if cols < 4 then 0, 0 else 2, 0
 
 let composer_field_width ~cols ~rows =
   let left, right = composer_chrome ~cols ~rows in
   max 1 (cols - left - right)
 
 let composer_row ~cols ~rows ~marker content =
-  let left, right = composer_chrome ~cols ~rows in
+  let left, _ = composer_chrome ~cols ~rows in
   let field = I.hsnap ~align:`Left (composer_field_width ~cols ~rows) content in
-  if composer_boxed ~cols ~rows then
-    I.(string frame_attr "│ " <|> string accent marker <|> field <|>
-       string frame_attr " │")
-  else if left = 0 && right = 0 then field
-  else I.(string accent ("  " ^ marker) <|> field)
+  if left = 0 then field
+  else I.(string accent marker <|> field)
 
-(* Status content docks into the top rule as `╭─ left ─── right ─╮`. *)
-let composer_top ~cols left right =
-  let fill = cols - 6 - I.width left - I.width right in
-  if fill < 1 then I.uchar frame_attr (Uchar.of_int 0x2500) cols 1
-  else I.(string frame_attr "╭─ " <|> left <|> string frame_attr " " <|>
-    uchar frame_attr (Uchar.of_int 0x2500) (fill - 1) 1 <|>
-    (if width right = 0 then string frame_attr "─"
-     else string frame_attr " " <|> right) <|> string frame_attr "─╮")
-
-let composer_bottom cols =
-  if cols < 2 then I.uchar frame_attr (Uchar.of_int 0x2500) cols 1
-  else I.(string frame_attr "╰" <|>
-    uchar frame_attr (Uchar.of_int 0x2500) (cols - 2) 1 <|>
-    string frame_attr "╯")
+(* Metadata is independent of the rules, so shortening it cannot break a
+   border or change the input field's geometry. *)
+let composer_header ~cols left right =
+  let gap = max 0 (cols - I.width left - I.width right - 2) in
+  I.hsnap ~align:`Left cols
+    I.(string A.empty "  " <|> left <|> void gap 1 <|> right)
 
 let activity_frames =
   [| "⠋"; "⠙"; "⠹"; "⠸"; "⠼"; "⠴"; "⠦"; "⠧"; "⠇"; "⠏" |]
@@ -957,7 +951,6 @@ let hint_row cols selected = function
 let paint t =
   let cols, rows = Notty_unix.Term.size t.term in
   let cols = max 1 cols and rows = max 1 rows in
-  let boxed = composer_boxed ~cols ~rows in
   let prefix_width, _ = composer_chrome ~cols ~rows in
   let field_width = composer_field_width ~cols ~rows in
   let measure = measure_text in
@@ -1038,11 +1031,10 @@ let paint t =
   let indicators = if String.starts_with ~prefix:"· " indicators then
       String.sub indicators 3 (String.length indicators - 3)
     else indicators in
-  let indicators = if indicators = "" then I.empty
-    else I.string muted (shorten_width (max 0 (cols / 3)) indicators ^ " ") in
-  (* composer_top needs at least one fill cell besides its six frame cells. *)
-  let identity_width = max 0 (cols - 7 - I.width indicators -
-    (if I.width indicators = 0 then 0 else 1)) in
+  let indicators = if indicators = "" || cols < 32 then I.empty
+    else I.string muted (shorten_width (max 0 (cols / 3)) indicators) in
+  let identity_width = max 0 (cols - 2 - I.width indicators -
+    (if I.width indicators = 0 then 0 else 2)) in
   let identity = match t.location_cache with
     | Some (width, image) when width = identity_width -> image
     | _ ->
@@ -1101,9 +1093,8 @@ let paint t =
             string muted detail) in
       t.location_cache <- Some (width, image);
       image in
-  let composer_top_row = if boxed then composer_top ~cols identity indicators
-    else I.uchar frame_attr (Uchar.of_int 0x2500) cols 1 in
-  let composer_bottom_row = composer_bottom cols in
+  let header = composer_header ~cols identity indicators in
+  let rule = I.uchar frame_attr (Uchar.of_int 0x2500) cols 1 in
   let layout = match t.layout_cache with
     | Some (width, revision, layout)
       when width = cols && revision = t.transcript.revision -> layout
@@ -1123,6 +1114,28 @@ let paint t =
       let spare = max 0 (rows - activity_height - 1 - editor_height) in
       let start = max 0 (total - spare - t.scroll) in
       start, min total (start + spare) in
+  let final_logo_frame = Array.length t.logo_frames - 1 in
+  let logo = t.logo_frames.(final_logo_frame) in
+  let logo_visible = total = 0 && t.chooser = None && hint_height = 0 &&
+    cols >= I.width logo && body_height >= I.height logo in
+  if not t.logo_finished then (
+    if total > 0 || t.chooser <> None || hint_height > 0 ||
+       (t.logo_started <> None && not logo_visible) then
+      t.logo_finished <- true
+    else if logo_visible then (
+      let now = Unix.gettimeofday () in
+      let started = match t.logo_started with
+        | Some started -> started
+        | None -> t.logo_started <- Some now; now in
+      let frame = min final_logo_frame
+        (int_of_float (max 0. (now -. started) /. logo_tick)) in
+      if frame <> t.logo_frame then (
+        t.logo_frame <- frame;
+        t.body_cache <- None);
+      if frame = final_logo_frame then t.logo_finished <- true);
+    if t.logo_finished then (
+      t.logo_frame <- final_logo_frame;
+      t.body_cache <- None));
   let body = match t.chooser with
     | Some chooser when chooser.segmented ->
         effort_panel ~cols ~height:body_height chooser
@@ -1179,6 +1192,7 @@ let paint t =
                 (if index = chooser.selected then selected_attr
                  else if choice.action then muted else text_attr)
                 (marker ^ label)))
+    | None when total = 0 && hint_height > 0 -> I.void cols body_height
     | None ->
         (match t.body_cache with
         | Some (width, height, revision, body)
@@ -1186,7 +1200,7 @@ let paint t =
         | _ ->
             let body =
               if total = 0 then (
-                let logo = startup_logo t.version in
+                let logo = t.logo_frames.(t.logo_frame) in
                 let logo_width = I.width logo
                 and logo_height = I.height logo in
                 if cols < logo_width || body_height < logo_height then
@@ -1338,7 +1352,10 @@ let paint t =
         Array.init editor_height (fun index ->
           let line_index = first_line + index in
           let line = editor_lines.(line_index) in
-          let marker = if line_index = 0 then "❯ " else "  " in
+          let marker = if index = 0 && first_line > 0 then "↑ "
+            else if index = editor_height - 1 &&
+                line_index < Array.length editor_lines - 1 then "↓ "
+            else if line_index = 0 then "❯ " else "  " in
           let raw = String.sub (Pave.Composer.text t.editor)
             line.start (line.stop - line.start) in
           let content = match selection with
@@ -1353,6 +1370,9 @@ let paint t =
                 I.(string text_attr (sanitize before) <|>
                    string selected_attr (sanitize selected) <|>
                    string text_attr (sanitize after))
+            | _ when Pave.Composer.text t.editor = "" ->
+                I.string muted (shorten_width field_width
+                  "Message · / commands · @ files")
             | _ -> I.string text_attr (sanitize raw) in
           let content = if field_width = 1 &&
               measure (sanitize raw) > 1 then I.string text_attr "?"
@@ -1397,8 +1417,8 @@ let paint t =
         else
           let choice = List.nth hints (t.hint_offset + index - 1) in
           hint_row cols (t.hint_offset + index - 1 = t.hint_selected) choice);
-    [| I.void cols 1 |]; activity_rows; attachment_rows;
-    [| composer_top_row |]; prompt_rows; [| composer_bottom_row; footer |] ] in
+    [| header |]; activity_rows; attachment_rows;
+    [| rule |]; prompt_rows; [| rule; footer |] ] in
 
   let activity_row =
     if Array.length activity_rows = 0 then -1
@@ -1472,6 +1492,10 @@ let paint_resized t =
       t.layout_cache <- Some (cols, t.transcript.revision, next);
       t.revision <- t.revision + 1
   | _ -> ());
+  (* Terminal emulators may reflow cells on resize, even on rows whose images
+     compare equal. The cached screen no longer describes the physical one. *)
+  t.previous <- None;
+  t.cursor_position <- None;
   paint t
 
 let mouse_scroll_delta (event : Notty.Unescape.event) =
@@ -1544,6 +1568,8 @@ let create ?(keybinding_overrides = []) ?(version = "source")
   let t = try {
     term; input = Terminal_input.create term;
     root; version = single_line version; model; model_display_name;
+    logo_frames = startup_logo_frames (single_line version);
+    logo_started = None; logo_frame = 0; logo_finished = false;
     effort = None; session; subagents;
     external_commands;
     editor = Pave.Composer.create ();
@@ -1951,9 +1977,17 @@ let rec next_input ?wake_fd t =
       | `Return `Tick -> paint t; next_input ?wake_fd t
       | `Return event -> event)
   | None ->
-      let timeout = next_tick_timeout ~now:(Unix.gettimeofday ())
+      let now = Unix.gettimeofday () in
+      let timeout = next_tick_timeout ~now
         ~last_paint:t.last_paint ~stream_pending:t.stream_pending
         ~activity_started:t.activity_started in
+      let timeout = match t.logo_started with
+        | Some started when not t.logo_finished ->
+            let next_frame = started +.
+              (float_of_int (t.logo_frame + 1) *. logo_tick) in
+            let delay = max 0. (next_frame -. now) in
+            Some (match timeout with None -> delay | Some other -> min delay other)
+        | _ -> timeout in
       let wake_fds = match wake_fd with
         | None -> [t.ui_read_fd]
         | Some fd -> [t.ui_read_fd; fd] in

@@ -2,6 +2,8 @@
 
 ## 2026-09-30
 
+- feat(tui): reduced the startup P mark and revealed it once with a short diagonal amber sweep; kept typing and resize responsive, stopped animation timers after settling, and preserved the ASCII animation without color.
+- fix(tui): replaced the resize-sensitive input box with simple horizontal rules and a separate model/status row, widened the draft field, added empty-input hints and hidden-line arrows, and repainted the full physical screen after resize to clear stale cells.
 - release(distribution): published v0.1.76 from the existing main-branch provider picker, approval and installer/update changes without changing application code; passed all four native release gates, verified all archive checksums and ran the packaged Linux executable.
 - feat(tui): made `/model` choose a provider first and then its model: the provider list puts the current provider first, then ready providers, then ones needing sign-in or an API key; a provider with several APIs or accounts asks which one; Esc or Tab in the model list returns to the providers, while `/model <filter>` still searches the current provider directly.
 - feat(install): showed the cat-paving progress animation during a first install from a terminal, labelled by the installer phase, and kept curl errors off the animation line; piped and `pave update` output is unchanged.

@@ -1,5 +1,16 @@
 # Work checkpoint
 
+## Current session — responsive composer and animated startup mark
+
+- **Date:** 2026-09-30
+- **Active task:** Completed the requested input-area redesign/resizing repair and the additional smaller, animated startup logo.
+- **Changed files:** `bin/ui/tui.ml`, `docs/DESIGN_RULES.md`, `docs/TROUBLESHOOTING.md`, `CHANGELOG.md`, `docs/WORK_CHECKPOINT.md`.
+- **Implementation:** Replaced the rounded composer with two simple rules, separate width-prioritized metadata and a stable input gutter. Added empty-draft guidance and hidden-line arrows; resize invalidates physical-screen/cursor caches. Reduced the logo canvas from 36×15 to 24×12 (including spacing/label for `source`) and cached an 18-frame diagonal amber reveal. The existing event loop schedules the roughly 0.8-second animation without blocking input; it stops permanently when finished or hidden after starting and does not replay on resize.
+- **Verification:** `opam exec -- dune build @install` and `opam exec -- dune runtest` passed; the final animation build reran affected TUI, chooser, model-picker and CLI tests successfully. Actual CLI PTYs reproduced the pre-fix partial border at 11×10, then exercised 120×24, 80×16, 30×10, 18×3, 11×10, 4×6 and 1×1. A loopback vLLM completion received the exact Korean/combining-character/multiline draft after shrink/grow and cursor editing; active status and the completed reply remained visible at 18×3. Color/NO_COLOR and slash-hint resize/dismissal were exercised. Startup capture observed 12 distinct screens, a settled compact mark and no further terminal output while idle; input during the NO_COLOR animation survived resize and reached the fixture unchanged. Resizing after completion did not restart animation.
+- **Limits:** PTY rendering was observed through a terminal emulator, not a graphical terminal application. No live vendor inference, release, installed-binary replacement or strategy change was performed.
+- **Overlay proof:** Opening `/` during the reveal hid the whole mark rather than leaving its top half behind the suggestions. Escape restored the completed mark with no animation replay or subsequent idle terminal output; the final build and affected tests passed afterward.
+- **Exact next action:** None for these requests; retain the unrelated backlog in `task.md`.
+
 ## Current session — release-only v0.1.76
 
 - **Date:** 2026-09-30

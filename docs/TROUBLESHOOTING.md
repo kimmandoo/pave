@@ -1,5 +1,12 @@
 # Troubleshooting
 
+### [2026-09-30] Narrow composer retained a partial box after resize
+
+- **Context / Symptom:** An actual CLI PTY resized from 80 columns to 11×10 showed a bare input gutter and straight top rule, but retained the rounded bottom border. Input chrome changed inconsistently across the width breakpoint.
+- **Root Cause:** Only the input rows and top rule used `composer_boxed`; the bottom border was unconditional at heights of six rows or more. Resize also reused equal cached row images although a terminal emulator may have reflowed the physical cells.
+- **Solution:** Replaced the box with width-independent horizontal rules and a separate metadata row, used a stable two-cell gutter (omitted below four columns), and invalidated the physical-screen/cursor cache on resize. Kept the existing four-row chrome budget and short-terminal fallback.
+- **Prevention / Reference:** Actual CLI PTY checks covered 120×24, 80×16, 30×10, 18×3, 11×10, 4×6 and 1×1, color/NO_COLOR, slash hints and active/completed replies. Korean, combining-character and multiline draft bytes reached a loopback provider unchanged after shrink/grow cycles.
+
 ### [2026-09-30] Tool approvals were denied without the user refusing
 
 - **Context / Symptom:** A `web_fetch` approval card appeared and then settled as `Error: tool approval denied` although the user meant to approve. Reproduced in tmux by sending `ㅛ` to the approval card.
