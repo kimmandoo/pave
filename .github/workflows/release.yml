@@ -32,7 +32,7 @@ jobs:
             os: darwin
             arch: x86_64
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: ocaml/setup-ocaml@v3
         with:
           ocaml-compiler: 'ocaml-variants.5.5.1+options,ocaml-option-no-compression'
