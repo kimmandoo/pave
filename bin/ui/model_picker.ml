@@ -286,8 +286,8 @@ let model_detail ?registry (descriptor : Pave.Provider_catalog.descriptor)
       observed.tm_hour observed.tm_min observed.tm_sec)
     model.provenance.retrieved_at in
   match List.filter_map Fun.id
-    [context; output_limit; tools; efforts; endpoints; compaction;
-     Some (identity_selector model); display_name; capability_source;
+    [Some (identity_selector model); context; output_limit; tools; efforts;
+     endpoints; compaction; display_name; capability_source;
      id_source; retrieved_at; tokenizer; listing_endpoint] with
   | [] -> None
   | parts -> Some (String.concat " · " parts)

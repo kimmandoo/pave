@@ -754,6 +754,13 @@ let toggle t ~first:_ ~last =
       t.revision <- t.revision + 1;
       Some id
 
+let ascii_clusters = Array.init 95 (fun i -> String.make 1 (Char.chr (i + 32)))
+
+let rec printable_ascii text index =
+  index = String.length text ||
+  (let code = Char.code text.[index] in
+   code >= 32 && code <= 126 && printable_ascii text (index + 1))
+
 let wrap_lines ~columns ~measure ~on_line ?on_range text =
   let columns = max 1 columns in
   let buffer = Buffer.create (min max_line_bytes columns) in
@@ -790,19 +797,25 @@ let wrap_lines ~columns ~measure ~on_line ?on_range text =
     Buffer.add_substring buffer content byte_count suffix_length;
     used := suffix_width;
     break_at := None in
-  ignore (Uuseg_string.fold_utf_8 `Grapheme_cluster
-    (fun () chunk ->
-      let width = max 0 (measure chunk) in
-      if !used > 0 && !used + width > columns then
-        (match !break_at with
-         | Some (byte_count, prefix_width, prefix_end)
-           when byte_count < Buffer.length buffer ->
-             split_at byte_count prefix_width prefix_end
-         | _ -> push ());
-      add_chunk chunk width;
-      if chunk = " " || chunk = "\t" then
-        break_at := Some (Buffer.length buffer, !used, !source_end))
-    () text);
+  let add_cluster () chunk =
+    let width = max 0 (measure chunk) in
+    if !used > 0 && !used + width > columns then
+      (match !break_at with
+       | Some (byte_count, prefix_width, prefix_end)
+         when byte_count < Buffer.length buffer ->
+           split_at byte_count prefix_width prefix_end
+       | _ -> push ());
+    add_chunk chunk width;
+    if chunk = " " || chunk = "\t" then
+      break_at := Some (Buffer.length buffer, !used, !source_end) in
+  (* Only an entirely printable-ASCII line has one grapheme per byte:
+     a later combining mark can otherwise extend an earlier ASCII letter. *)
+  if printable_ascii text 0 then (
+    for index = 0 to String.length text - 1 do
+      add_cluster () ascii_clusters.(Char.code text.[index] - 32)
+    done)
+  else
+    ignore (Uuseg_string.fold_utf_8 `Grapheme_cluster add_cluster () text);
   push ()
 
 let wrap ~columns ~measure text =

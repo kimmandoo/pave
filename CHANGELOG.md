@@ -2,6 +2,9 @@
 
 ## 2026-10-01
 
+- feat(tui): exposed selected model identity on narrow pickers, prioritized useful detail over explanatory prose, and made omitted introductions explicit.
+- fix(tui): named the actual safe action on cramped decision screens, hid unavailable consent shortcuts and included the control gutter in the fit budget.
+- perf(tui): reused unchanged composer wrapping within the renderer and bypassed Unicode segmentation for printable-ASCII transcript lines while preserving grapheme, source-range and measurement behavior.
 - chore(history): sanitized historical source references and configuration identifiers across all branches, tags and commit messages, preserved legal notices, and atomically published the rewritten history with explicit remote leases.
 - fix(tools): kept malformed HTML inside the search fallback chain, bounded UTF-8 titles including truncation markers, rejected partial Kagi error responses, withheld raw Firecrawl error payloads, preserved cancellation and planned only paging-compatible providers before approval.
 - fix(tui): required complete approval headings, scope, controls and consequences to fit before consent; wrapped narrow layouts, kept denied writes visibly unexecuted and trusted typed tool outcomes instead of error-like file contents.

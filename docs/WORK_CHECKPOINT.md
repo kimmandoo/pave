@@ -1,5 +1,17 @@
 # Work checkpoint
 
+## Current session — TUI usability, rendering efficiency and v0.1.78
+
+- **Date:** 2026-10-01
+- **Active task:** Completed requested TUI UI/UX/performance changes and local verification; preparing the user-authorized v0.1.78 release. Starting main was `cb01dac`, clean and synchronized with origin. Public latest was v0.1.77; v0.1.78 was absent from remote tags.
+- **Changed files:** `bin/ui/{tui,model_picker,transcript_view}.ml`, `test/ui/{test_chooser_dynamic,test_transcript_view}.ml`, `CHANGELOG.md`, `docs/{DESIGN_RULES,USAGE,TROUBLESHOOTING,WORK_CHECKPOINT}.md`.
+- **UI/UX:** Cramped decisions use the actual heading and safe option/key and show only safe-action/resize guidance while locked. Shortcut budgets include the gutter. Narrow pickers retain selected detail after reserving roster slots, show the exact model selector before capability/provenance text, and visibly shorten introductory prose.
+- **Efficiency:** The renderer retains one immutable-draft/field-width composer wrapping result; cursor position remains current and the general Composer API is unchanged. Transcript wrapping uses a printable-ASCII fast path with fixed clusters and a nonallocating predicate; Unicode/control text retains original grapheme segmentation, source ranges and caller measurement.
+- **Verification:** `opam exec -- dune build @install`, `opam exec -- dune runtest` and `opam lint pave.opam` passed. Real CLI/tmux scenarios passed in color and NO_COLOR at 24×7/12, 36×18, 100×28 and 18×8: correct safe action, locked discard, model-detail changes, two-stage model cancellation, scroll/resize recovery and exact Korean/combining-character draft transmission. Standalone native cache smoke passed 70 edit/cursor/history/paste/undo/width cases.
+- **Measured results:** 1,000 real unchanged PTY paints with a 16,000-byte ASCII draft used 0.492→0.0074 CPU seconds and 1,184,896,096→18,320,096 allocated bytes; Unicode draft 0.405→0.0075 s and 565,953,576→16,305,576 bytes. Ten normal ASCII-stream runs used 0.444→0.255 s and 866,405,536→639,282,976 bytes; twenty long-line runs 1.178→0.816 s and 2,813,789,696→2,385,637,216 bytes. Unicode streaming remained approximately 0.108→0.109 s with slightly fewer allocations. All streaming visual digests and 32/80/120-column viewport shapes matched baseline. These are local controlled workloads, not universal speedup claims.
+- **Limits:** No strategy changes/backtest, live vendor inference, physical graphical-terminal inspection or installed-binary replacement. Unrelated backlog remains unchanged. No historical rewrite is part of this session.
+- **Exact next action:** Commit verified changes, push main and verify CI, publish a new annotated v0.1.78 tag, await all native release gates, verify downloaded assets/checksums and packaged CLI/TUI, then record release evidence. Do not mark publication complete before the public release and its assets are verified.
+
 ## Current session — search, consent and response review
 
 - **Date:** 2026-10-01

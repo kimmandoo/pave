@@ -1,5 +1,19 @@
 # Troubleshooting
 
+### [2026-10-01] Narrow decision hints and selected model details were misleading
+
+- **Context / Symptom:** The actual 24×12 discard dialog said `n/Esc deny`, although its safe choice was Keep conversation on `k`. At 36×18, a truncated model row had no selected-item detail despite spare space; introductory prose ended abruptly.
+- **Root Cause:** The insufficient-room fallback hard-coded tool-approval language, detail rows had a width-only admission threshold and model identity followed long capability metadata. Intro rows used raw clipping.
+- **Solution:** Derived compact hints from the actual safe option, budgeted the gutter, admitted useful detail after reserving roster rows and moved the exact selector first. Shortened introductions explicitly with ellipses.
+- **Prevention / Reference:** Actual CLI/tmux acceptance covered 24×7/12 safe decisions, 36×18 selection changes, 100×28 to 18×8 resize/scroll, color and NO_COLOR, cancellation, and exact Korean/combining-character draft bytes received by a loopback model.
+
+### [2026-10-01] Unchanged drafts and ASCII transcript reflow allocated repeatedly
+
+- **Context / Symptom:** A native PTY benchmark of 1,000 unchanged paints with a 16,000-byte draft allocated about 1.18 GB and used 0.492 CPU seconds. Normal ASCII streaming repeatedly allocated Unicode segmentation state.
+- **Root Cause:** Paint, hint-room and resize paths independently recomputed identical composer wrapping. Transcript wrapping always used grapheme segmentation, even when every byte was printable ASCII.
+- **Solution:** Kept one TUI-owned wrapping result under immutable draft identity and field width, without caching the general Composer measurement API. Printable-ASCII transcript wrapping uses fixed one-byte clusters; all other text keeps the original grapheme path. Used a nonallocating ASCII predicate and shared cluster callback to avoid introducing a Unicode-path allocation regression.
+- **Prevention / Reference:** The same draft paint benchmark fell to 18.3 MB and 0.0074 CPU seconds; a Unicode draft fell from 566 MB/0.405 s to 16.3 MB/0.0075 s. Cache equivalence held across 70 edit/cursor/paste/undo/history/width cases. Streaming visual digests were identical for ASCII, long lines and Unicode; measurements are controlled local workloads, not universal latency guarantees.
+
 ### [2026-10-01] Full history cleanup required branch and tag replacement
 
 - **Context / Symptom:** Removing identifiers from the current tree and latest message was insufficient: earlier commits, release tags and dependency-update branches still retained historical source references.

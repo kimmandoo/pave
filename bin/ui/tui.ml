@@ -118,6 +118,7 @@ type t = {
   subagents : bool;
   mutable external_commands : Pave.Interaction.shortcut list;
   editor : Pave.Composer.t;
+  mutable editor_layout : (int * string * Pave.Composer.line array) option;
   transcript : Transcript_view.t;
   tool_groups : (string, int) Hashtbl.t;
   draft_groups : (string, int) Hashtbl.t;
@@ -298,6 +299,17 @@ let error = if no_color then A.empty else A.(fg lightred)
 let selected_attr = if no_color then A.(st bold)
   else A.(fg black ++ bg lightcyan ++ st bold)
 let measure_text chunk = I.width (I.string text_attr chunk)
+
+(* Measurement is fixed by this renderer; the general Composer API stays pure.
+   Cursor movement does not change wrapping, and every edit installs a new string. *)
+let editor_lines t columns =
+  let text = Pave.Composer.text t.editor in
+  match t.editor_layout with
+  | Some (width, previous, lines) when width = columns && previous == text -> lines
+  | _ ->
+      let lines = Pave.Composer.layout ~columns ~measure:measure_text t.editor in
+      t.editor_layout <- Some (columns, text, lines);
+      lines
 
 (* Filled user bubbles, state-tinted tool blocks and a ruled composer.
    NO_COLOR keeps the shapes without backgrounds. *)
@@ -849,6 +861,14 @@ let chooser_sections ~cols ~height chooser =
       height >= (if count > 0 then 3 else 2) then 1 else 0 in
   let choice_room = min count (max 0 (min 3 (height - 1 - empty_height))) in
   let remaining = max 0 (height - 1 - empty_height - choice_room) in
+  let detail_lines =
+    if count > 0 then
+      match found.(max 0 (min (count - 1) chooser.selected)).detail with
+      | Some text -> wrap_chooser_text ~columns:(max 1 (cols - 4))
+          ~max_rows:(min 2 remaining) text
+      | None -> [||]
+    else [||] in
+  let remaining = remaining - Array.length detail_lines in
   let intro_height =
     if chooser.filter <> "" || cols < 30 then 0
     else min remaining (min (Array.length chooser.intro)
@@ -858,14 +878,6 @@ let chooser_sections ~cols ~height chooser =
     | Some text -> wrap_chooser_text ~columns:(max 1 (cols - 4))
         ~max_rows:(min remaining (if count > 0 then 1 else 3)) text
     | None -> [||] in
-  let remaining = remaining - Array.length status_lines in
-  let detail_lines =
-    if cols >= 45 && height >= 8 && count > 0 then
-      match found.(max 0 (min (count - 1) chooser.selected)).detail with
-      | Some text -> wrap_chooser_text ~columns:(max 1 (cols - 4))
-          ~max_rows:(min 2 remaining) text
-      | None -> [||]
-    else [||] in
   let page = max 0 (height - 1 - intro_height - empty_height -
     Array.length status_lines - Array.length detail_lines) in
   intro_height, status_lines, empty_height, detail_lines, page
@@ -920,8 +932,7 @@ let hint_matches t =
 let hint_room t =
   let cols, rows = Notty_unix.Term.size t.term in
   let field_width = composer_field_width ~cols ~rows in
-  let measure = measure_text in
-  let lines = Pave.Composer.layout ~columns:field_width ~measure t.editor in
+  let lines = editor_lines t field_width in
   let height = min 4 (max 1 (min (rows - 4) (Array.length lines))) in
   rows - 4 - height >= 2
 
@@ -1046,10 +1057,15 @@ let approval_screen ~cols ~rows ~activity_rows view =
   let heading_height = Array.length (approval_wrap cols view.heading) in
   let preview_height = approval_budget ~rows ~activity
     (header, button_rows, notice_height) in
+  let safe_key, safe_label, _ = view.buttons.(0) in
+  let safe_hint =
+    (if safe_key = "Esc" then "Esc" else safe_key ^ "/Esc") ^ " " ^ safe_label in
   if rows < 8 || preview_height < 0 then
     Array.init rows (fun index ->
-      if index = rows - 1 then line warning "n/Esc deny · resize"
-      else if index = 0 then line accent "Approval needs room"
+      if index = rows - 1 then
+        line warning (fit_labels cols [safe_hint; "resize"])
+      else if index = 0 then line accent view.heading
+      else if index = 1 then line warning "Resize to review"
       else I.void cols 1), -1
   else
     let preview = approval_preview cols view in
@@ -1076,8 +1092,9 @@ let approval_screen ~cols ~rows ~activity_rows view =
       (Array.to_list (Array.map (fun (key, _, _) -> key) view.buttons))) in
     let first_label = let _, label, _ = view.buttons.(0) in
       String.lowercase_ascii label in
-    let controls = fit_labels cols
-      (if cols < 40 then ["←→ choose"; "↵ ok"; keys]
+    let controls = fit_labels (max 0 (cols - 2))
+      (if not fits then [safe_hint; "Resize to review"]
+       else if cols < 40 then ["←→ choose"; "↵ ok"; keys]
        else ["←→/Tab choose"; enter_key ^ " confirm"; keys ^ " keys";
              "Esc " ^ first_label]) in
     Array.concat [
@@ -1105,7 +1122,7 @@ let paint t =
   let prefix_width, _ = composer_chrome ~cols ~rows in
   let field_width = composer_field_width ~cols ~rows in
   let measure = measure_text in
-  let editor_lines = Pave.Composer.layout ~columns:field_width ~measure t.editor in
+  let editor_lines = editor_lines t field_width in
   let editor_row, editor_col =
     Pave.Composer.position ~measure t.editor editor_lines in
   let activity_height = if Option.is_some t.activity then 1 else 0 in
@@ -1315,7 +1332,8 @@ let paint t =
               (I.string accent (shorten_middle title_width chooser.title))
               (I.string muted count)
           else if i <= intro_height then
-            styled_line cols muted ("  " ^ chooser.intro.(i - 1))
+            styled_line cols muted
+              ("  " ^ shorten_width (max 0 (cols - 2)) chooser.intro.(i - 1))
           else if i <= intro_height + status_height then
             let index = i - intro_height - 1 in
             styled_line cols muted
@@ -1327,7 +1345,7 @@ let paint t =
           else if i <= intro_height + status_height + empty_height +
               detail_height then
             let index = i - intro_height - status_height - empty_height - 1 in
-            styled_line cols muted
+            styled_line cols text_attr
               ((if index = 0 then detail_prefix else "    ") ^
                 detail_lines.(index))
           else
@@ -1632,8 +1650,7 @@ let paint_resized t =
       let editor_height = match t.chooser, Pave.Composer.search_query t.editor with
         | Some _, _ | None, Some _ -> 1
         | None, None ->
-            let editor_lines = Pave.Composer.layout ~columns:field_width
-              ~measure t.editor in
+            let editor_lines = editor_lines t field_width in
             min 4 (max 1 (min editor_space (Array.length editor_lines))) in
       let height = max 0 (rows - 4 - editor_height - activity_height) in
       let anchor = ref None in
@@ -1727,6 +1744,7 @@ let create ?(keybinding_overrides = []) ?(version = "source")
     effort = None; session; subagents;
     external_commands;
     editor = Pave.Composer.create ();
+    editor_layout = None;
     transcript = Transcript_view.create (); tool_groups = Hashtbl.create 8;
     draft_groups = Hashtbl.create 8; draft_decoders = Hashtbl.create 8;
     scroll = 0; chooser = None; overlays = []; approval_view = None;

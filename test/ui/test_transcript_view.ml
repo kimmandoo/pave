@@ -136,6 +136,25 @@ let () =
   expect "word wrapping preserves text and viewport row count"
     (String.concat "" (Array.to_list prose_lines) = prose &&
      wrapped_count ~columns:26 ~measure prose = Array.length prose_lines);
+  let word_ranges = wrap_ranges ~columns:4 ~measure "ab cd ef" in
+  expect "word wrapping keeps exact source ranges for inline styles"
+    (Array.map (fun segment ->
+       segment.rendered, segment.start_byte, segment.end_byte) word_ranges =
+     [| "ab ", 0, 3; "cd ", 3, 6; "ef", 6, 8 |]);
+  let varied_measure = function
+    | "a" -> -1
+    | "W" -> 3
+    | _ -> 1 in
+  let varied_ranges =
+    wrap_ranges ~columns:2 ~measure:varied_measure "aW b" in
+  expect "ASCII wrapping respects zero-width and oversized measured clusters"
+    (Array.map (fun segment ->
+       segment.rendered, segment.start_byte, segment.end_byte) varied_ranges =
+     [| "a? ", 0, 3; "b", 3, 4 |]);
+  expect "an ASCII prefix never separates a later combining cluster"
+    (wrap ~columns:3 ~measure "ab e\204\129" = [|"ab "; "e\204\129"|]);
+  expect "control-containing text retains grapheme segmentation"
+    (wrap ~columns:1 ~measure:String.length "a\r\nb" = [|"a"; "?"; "b"|]);
   let markdown = create () in
   delta markdown "# Heading\n```ocaml\nlet x = 1\n```\n- bullet\n> quote\n";
   finish markdown;

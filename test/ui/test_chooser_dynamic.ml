@@ -127,6 +127,24 @@ let () =
   scoped.filter <- "";
   scoped.selected <- 1;
   assert ((Tui.matches scoped).(scoped.selected).value = id_b);
+  let detail_a = "계정-A/model-with-an-exact-identifier"
+  and detail_b = "계정-B/model-with-an-exact-identifier" in
+  let detailed = { scoped with
+    choices = [| { a with detail = Some detail_a };
+      { b with detail = Some detail_b }; model "third" "Third" |];
+    intro = [| "Choose an available model"; "Filter by identity" |];
+    status = Some "Available models loaded"; filtered = None } in
+  List.iter (fun cols ->
+    detailed.selected <- 1;
+    let _, _, _, detail, page = Tui.chooser_sections
+      ~cols ~height:6 detailed in
+    assert (String.concat "" (Array.to_list detail) = detail_b && page >= 3);
+    assert (Array.for_all (fun line -> measure line <= cols - 4) detail);
+    detailed.selected <- 0;
+    let _, _, _, detail, page = Tui.chooser_sections
+      ~cols ~height:6 detailed in
+    assert (String.concat "" (Array.to_list detail) = detail_a && page >= 3))
+    [24; 36; 80];
   let review : Tui.approval_view = {
     heading = "Tool permission"; context = "One action";
     lines = ["Tool: write_file"; "Tier: WRITE"; "Path: reviewed.txt"; "Content: exact"];
