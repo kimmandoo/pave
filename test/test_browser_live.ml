@@ -32,8 +32,22 @@ let () =
         Printf.printf "screenshot: %d b64 bytes\n%!" (String.length data);
         let tools = B.list_tools m ~id in
         Printf.printf "tools: %s\n%!" (j tools);
+        let named = B.list_tools m ~id ~name:"echo" in
+        Printf.printf "named: %s\n%!" (j named);
         let call = B.call_tool m ~id ~name:"echo"
           ~arguments:(`Assoc ["text", `String "hi"]) ~timeout_seconds:5. in
-        Printf.printf "call: %s\n%!" (j call));
+        Printf.printf "call: %s\n%!" (j call);
+        let events = B.tool_events m ~id in
+        Printf.printf "events: %s\n%!" (j events);
+        (match Sys.getenv_opt "SMOKE_FRAME_URL" with
+         | Some frame_url ->
+             let nav2 = B.navigate m ~id ~url:frame_url ~timeout_seconds:15. in
+             Printf.printf "nav2: %s\n%!" (j nav2);
+             let tools2 = B.list_tools m ~id in
+             Printf.printf "frame tools: %s\n%!" (j tools2);
+             let sub = B.call_tool m ~id ~name:"subTool"
+               ~arguments:(`Assoc ["v", `Int 7]) ~timeout_seconds:5. in
+             Printf.printf "subframe call: %s\n%!" (j sub)
+         | None -> ()));
       print_endline "live done"
   | _ -> print_endline "test_browser_live: skipped (set CHROME_BIN and SMOKE_URL)"

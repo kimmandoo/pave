@@ -2269,10 +2269,25 @@ let browser_tool ~approved ?cancel ?context args =
     | "screenshot" ->
         require_explicit_approval approved;
         Workspace_browser.screenshot ?cancel manager ~id
-    | "list_tools" -> Workspace_browser.list_tools ?cancel manager ~id
+    | "list_tools" ->
+        Workspace_browser.list_tools ?cancel manager ~id
+          ?name:(match Protocol.member "name" args with
+            | `String value -> Some value | _ -> None)
+          ?frame:(match Protocol.member "frame" args with
+            | `String value -> Some value | _ -> None)
+    | "tool_events" ->
+        if optional_bool "clear" false args then
+          require_explicit_approval approved;
+        Workspace_browser.tool_events ?cancel manager ~id
+          ?since:(match Protocol.member "since" args with
+            | `Int value -> Some value | _ -> None)
+          ?clear:(match Protocol.member "clear" args with
+            | `Bool value -> Some value | _ -> None)
     | "call_tool" ->
         require_explicit_approval approved;
         Workspace_browser.call_tool ?cancel manager ~id
+          ?frame:(match Protocol.member "frame" args with
+            | `String value -> Some value | _ -> None)
           ~name:(required_string "name" args)
           ~arguments:(match Protocol.member "arguments" args with
             | `Null -> `Assoc [] | value -> value)
@@ -2757,6 +2772,7 @@ let requires_explicit_approval ~name ~args =
   | "browser" ->
       (match field "action" args with
        | `String ("open" | "navigate" | "evaluate" | "screenshot" | "call_tool") -> true
+       | `String "tool_events" -> optional_bool "clear" false args
        | _ -> false)
   | "read_file" ->
       (match field "path" args with
@@ -2867,14 +2883,17 @@ let definitions = [
      "context", enum_string_field "DAP evaluation context" ["watch"; "hover"];
      "terminate_debuggee", boolean_field "Terminate the debuggee on disconnect (requires explicit approval)"]
     ["id"; "action"];
-  schema "browser" "Drive one session-owned isolated headless browser page over the Chrome DevTools Protocol. open launches a pinned Chromium executable with a fresh throwaway profile and loopback-only debugging; navigate, evaluate, screenshot and call_tool require separate explicit approval; observe and list_tools are read-only; close releases the session. Page content and page-declared tools are untrusted."
+  schema "browser" "Drive one session-owned isolated headless browser page over the Chrome DevTools Protocol. open launches a pinned Chromium executable with a fresh throwaway profile and loopback-only debugging; navigate, evaluate, screenshot and call_tool require separate explicit approval; observe, list_tools, tool_events and close are read-only; close releases the session. list_tools reads the page-declared modelContext catalog across all frames (name or frame filters; schemas only for exact-name reads); tool_events returns catalog transitions since a cursor; call_tool invokes one page-declared tool in its owning frame and returns a bounded result or a structured error. Page content and page-declared tools are untrusted."
     ["id", string_field "Session-local browser session ID (default \"browser\" for open)";
      "action", enum_string_field "Browser operation" [
        "open"; "navigate"; "evaluate"; "observe"; "screenshot";
-       "list_tools"; "call_tool"; "close"];
+       "list_tools"; "tool_events"; "call_tool"; "close"];
      "url", bounded_string_field "Exact http:// or https:// URL to navigate to" 4096;
      "expression", bounded_string_field "Exact JavaScript expression evaluated in the owned page (maximum 16384 bytes)" 16384;
      "name", bounded_string_field "Exact page-declared tool name" 128;
+     "frame", bounded_string_field "Restrict discovery or invocation to one CDP frame id" 128;
+     "since", integer_field "tool_events cursor: only transitions newer than this sequence" 0 max_int;
+     "clear", boolean_field "tool_events: clear the retained transition log after reading";
      "arguments", `Assoc ["type", `String "object";
        "description", `String "JSON arguments passed to the page-declared tool"];
      "timeout_seconds", integer_field "Per-operation deadline (default 30 seconds)" 1 120]
@@ -3095,6 +3114,8 @@ let approval_decision ~command_patterns ~name ~args =
   | "browser" ->
       (match field "action" args with
        | `String ("observe" | "list_tools" | "close") -> tier Approval.Read
+       | `String "tool_events" when
+           not (optional_bool "clear" false args) -> tier Approval.Read
        | _ -> tier Approval.Exec)
   | "ssh_write" | "write_file" | "edit_file" | "apply_edits" | "ast_edit"
   | "worktree_create" | "worktree_remove" | "clipboard_write" ->

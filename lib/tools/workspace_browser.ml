@@ -60,8 +60,11 @@ let max_session_seconds = 900.
 let max_linger_seconds = 300.
 let viewport_width = 1280
 let viewport_height = 800
-let max_list_tools = 16
-let max_tool_field_bytes = 160
+let max_page_tools = 16
+let max_tool_description_bytes = 160
+let max_tool_summary_bytes = 4096
+let max_page_result_bytes = 65_536
+let max_catalog_events = 256
 let browser_variable = Web_search.browser_variable
 
 (* ------------------------------------------------------------------ *)
@@ -129,17 +132,26 @@ type ws_transport = {
 
 let close_socket fd = try Unix.close fd with Unix.Unix_error _ -> ()
 
-let rec read_exact cancel fd buffer offset remaining =
-  if remaining <> 0 then begin
-    check_cancel cancel;
-    let readable, _, _ =
-      try Unix.select [fd] [] [] 5.0
-      with Unix.Unix_error (Unix.EINTR, _, _) -> [fd], [], [] in
-    if readable = [] then fail "browser connection timed out waiting for data";
-    match Unix.read fd buffer offset remaining with
-    | 0 -> fail "browser connection closed unexpectedly"
-    | count -> read_exact cancel fd buffer (offset + count) (remaining - count)
-  end
+let read_exact cancel fd buffer offset remaining =
+  (* Five seconds of silence is still a dead connection; the shorter select
+     slice just keeps cancel and drain quiet-deadlines responsive. *)
+  let idle_deadline = Unix.gettimeofday () +. 5. in
+  let rec loop offset remaining =
+    if remaining <> 0 then begin
+      check_cancel cancel;
+      let readable, _, _ =
+        try Unix.select [fd] [] [] 0.25
+        with Unix.Unix_error (Unix.EINTR, _, _) -> [fd], [], [] in
+      if readable = [] then begin
+        if Unix.gettimeofday () > idle_deadline then
+          fail "browser connection timed out waiting for data";
+        loop offset remaining
+      end else
+        match Unix.read fd buffer offset remaining with
+        | 0 -> fail "browser connection closed unexpectedly"
+        | count -> loop (offset + count) (remaining - count)
+    end in
+  loop offset remaining
 
 let write_all fd text =
   let rec loop offset =
@@ -309,6 +321,10 @@ type connection = {
   close : unit -> unit;
   mutable next_id : int;
   io_lock : Mutex.t;
+  (* Execution contexts per page session: CDP frame id -> main-world context
+     id, plus the reverse index for destruction events. *)
+  contexts : (string, int) Hashtbl.t;
+  context_frames : (int, string) Hashtbl.t;
 }
 
 let ws_connection transport =
@@ -319,9 +335,77 @@ let ws_connection transport =
       | `Text message -> message);
     close = (fun () -> ws_close transport);
     next_id = 1;
-    io_lock = Mutex.create () }
+    io_lock = Mutex.create ();
+    contexts = Hashtbl.create 8;
+    context_frames = Hashtbl.create 8 }
 
 let cdp_close connection = connection.close ()
+
+(* Runtime execution-context events carry the sessionId of the owning page
+   session; the key keeps separate page sessions isolated on one browser
+   connection. Only default main-world contexts are recorded. *)
+let context_key session_id frame_id = session_id ^ "\000" ^ frame_id
+
+let note_context_event connection json =
+  match member "method" json with
+  | `String "Runtime.executionContextCreated" ->
+      (match member "sessionId" json with
+       | `String session_id ->
+           let context = member "context" (member "params" json) in
+           let aux = member "auxData" context in
+           (* CDP reports the owning frame inside auxData, not on the
+              context object itself. *)
+           let is_default = match member "isDefault" aux with
+             | `Bool value -> value | _ -> false in
+           if is_default then
+             (match member "frameId" aux, member "id" context with
+              | `String frame_id, `Int context_id ->
+                  let key = context_key session_id frame_id in
+                  Hashtbl.replace connection.contexts key context_id;
+                  Hashtbl.replace connection.context_frames
+                    context_id (session_id ^ "\000" ^ key)
+              | _ -> ())
+       | _ -> ())
+  | `String "Runtime.executionContextDestroyed" ->
+      (match member "executionContextId" (member "params" json) with
+       | `Int context_id ->
+           (match Hashtbl.find_opt connection.context_frames context_id with
+            | Some packed ->
+                Hashtbl.remove connection.context_frames context_id;
+                Hashtbl.remove connection.contexts packed
+            | None -> ())
+       | _ -> ())
+  | `String "Runtime.executionContextsCleared" ->
+      (match member "sessionId" json with
+       | `String session_id ->
+           Hashtbl.filter_map_inplace (fun key value ->
+             if starts_with key (session_id ^ "\000") then None else Some value)
+             connection.contexts;
+           let stale = Hashtbl.fold (fun context_id packed acc ->
+             if starts_with packed session_id then context_id :: acc else acc)
+             connection.context_frames [] in
+           List.iter (Hashtbl.remove connection.context_frames) stale
+       | _ -> Hashtbl.reset connection.contexts;
+              Hashtbl.reset connection.context_frames)
+  | _ -> ()
+
+(* Collects already-buffered events after Runtime.enable or a navigate; gives
+   up once the wire is quiet for a short window. Best-effort only. *)
+let drain_connection ?(quiet = 0.12) connection =
+  let deadline = Unix.gettimeofday () +. quiet in
+  let still_waiting () = Unix.gettimeofday () < deadline in
+  with_lock connection.io_lock (fun () ->
+    let rec loop () =
+      match (try Some (connection.receive ~cancel:(fun () -> not (still_waiting ())))
+             with Error _ | Cancelled | End_of_file | Unix.Unix_error _ -> None) with
+      | None -> ()
+      | Some message ->
+          (match (try Yojson.Basic.from_string message with _ -> `Null) with
+           | `Assoc _ as json when member "id" json = `Null ->
+               note_context_event connection json
+           | _ -> ());
+          if still_waiting () then loop () in
+    loop ())
 
 let send_cdp ?(cancel = fun () -> false) ?session_id connection ~method_ ~params () =
   with_lock connection.io_lock (fun () ->
@@ -349,6 +433,7 @@ let send_cdp ?(cancel = fun () -> false) ?session_id connection ~method_ ~params
                   (match List.assoc_opt "message" error_fields with
                    | Some (`String text) -> text | _ -> "unknown error"))
             | _ -> member "result" json)
+       | `Assoc _ as json -> note_context_event connection json; wait ()
        | _ -> wait ()) in
     wait ())
 
@@ -461,6 +546,14 @@ and session = {
   operation_lock : Mutex.t;
   mutable closed : bool;
   mutable pending : bool;
+  (* Page-declared tool catalog per frame ("frameId\000name" -> untrusted
+     rendered record) plus the observed transition log. *)
+  mutable native_available : bool;
+  mutable root_frame : string;
+  catalog : (string, Yojson.Basic.t) Hashtbl.t;
+  mutable catalog_events : Yojson.Basic.t list;
+  mutable event_sequence : int;
+  mutable dropped_before : int;
 }
 
 let create_manager ~owner =
@@ -519,81 +612,128 @@ let web_tools_hook = {js|
 (() => {
   try {
     if (window.__paveWebTools) return;
-    const registry = new Map();
-    const record = (tool) => {
-      if (!tool || typeof tool !== "object") return tool;
-      const name = String(tool.name || "");
-      if (name) registry.set(name, tool);
-      return tool;
+    const owners = [navigator, document];
+    const existing = document.modelContext || navigator.modelContext;
+    const nativeAvailable = existing !== undefined;
+    const tools = new Map();
+    const target = new EventTarget();
+    const clone = (value) => {
+      if (value === undefined) return undefined;
+      try { return JSON.parse(JSON.stringify(value)); }
+      catch (_) { return undefined; }
     };
-    window.__paveWebTools = {
-      list() {
-        return [...registry.values()].map(tool => ({
-          name: String(tool.name || ""),
-          description: String(tool.description || ""),
-          inputSchema: tool.inputSchema,
-          annotations: tool.annotations
-        }));
-      },
-      count() { return registry.size; },
-      async call(name, args) {
-        const tool = registry.get(String(name));
-        if (!tool) throw new Error("unknown page tool: " + name);
-        if (typeof tool.execute === "function")
-          return await tool.execute(args === undefined ? {} : args);
-        return await tool;
-      },
-      _record: record
+    const describe = (tool) => ({
+      name: tool.name,
+      description: typeof tool.description === "string" ? tool.description : "",
+      inputSchema: clone(tool.inputSchema),
+      annotations: clone(tool.annotations)
+    });
+    let polyfill;
+    const notify = () => {
+      const event = new Event("toolchange");
+      try { target.dispatchEvent(event); } catch (_) {}
+      if (polyfill && typeof polyfill.ontoolchange === "function") {
+        try { polyfill.ontoolchange(event); } catch (_) {}
+      }
     };
-    const patch = (owner) => {
-      try {
-        if (!owner || !owner.modelContext) return;
-        const mc = owner.modelContext;
-        for (const key of ["registerTool", "provide"]) {
-          const original = mc[key];
-          if (typeof original === "function" && !original.__paveWrapped) {
-            const wrapped = function (...args) {
-              for (const arg of args) {
-                if (Array.isArray(arg)) arg.forEach(record); else record(arg);
-              }
-              const out = original.apply(this, args);
-              if (out && out.tools && Array.isArray(out.tools)) out.tools.forEach(record);
-              return out;
-            };
-            wrapped.__paveWrapped = true;
-            mc[key] = wrapped;
+    const remember = (tool, signal) => {
+      if (!tool || typeof tool.name !== "string" ||
+          !/^[A-Za-z0-9_.-]{1,128}$/.test(tool.name))
+        throw new TypeError("page tool names use 1-128 ASCII letters, digits, '_', '-' or '.'");
+      if (typeof (tool.execute || tool.handler) !== "function")
+        throw new TypeError("page tool " + JSON.stringify(tool.name) + " requires an execute or handler function");
+      tools.set(tool.name, tool);
+      if (signal) signal.addEventListener("abort", () => {
+        if (tools.get(tool.name) === tool) { tools.delete(tool.name); notify(); }
+      }, { once: true });
+      notify();
+    };
+    const bridge = {
+      nativeAvailable,
+      snapshot() {
+        return [...tools.values()].map(describe)
+          .sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+      },
+      async invoke(name, input) {
+        const tool = tools.get(String(name));
+        if (!tool) throw new Error("no page-declared tool named " + JSON.stringify(name));
+        const execute = tool.execute || tool.handler;
+        const controller = new AbortController();
+        return await execute(input === undefined ? {} : input,
+          { signal: controller.signal });
+      },
+      uninstall() {
+        if (existing) {
+          try {
+            if (typeof bridge.__originalRegister === "function")
+              existing.registerTool = bridge.__originalRegister;
+            if (typeof bridge.__originalUnregister === "function")
+              existing.unregisterTool = bridge.__originalUnregister;
+            delete bridge.__originalRegister;
+            delete bridge.__originalUnregister;
+          } catch (_) {}
+        } else if (polyfill) {
+          for (const owner of owners) {
+            try { if (owner.modelContext === polyfill) delete owner.modelContext; }
+            catch (_) {}
           }
         }
-        if (typeof mc.unregisterTool === "function" && !mc.unregisterTool.__paveWrapped) {
-          const original = mc.unregisterTool;
-          const wrapped = function (name) {
-            registry.delete(String(name));
-            return original.apply(this, arguments);
-          };
-          wrapped.__paveWrapped = true;
-          mc.unregisterTool = wrapped;
-        }
-      } catch (_) {}
+        delete window.__paveWebTools;
+      }
     };
-    patch(navigator);
-    patch(document);
-    if (!navigator.modelContext && !document.modelContext) {
-      const shim = {
-        registerTool(tool) { record(tool); return tool; },
-        provide(target) {
-          if (target && target.tools && Array.isArray(target.tools))
-            target.tools.forEach(record);
-          return target;
+    const registerTool = async (tool, options) => {
+      if (typeof bridge.__originalRegister === "function")
+        await bridge.__originalRegister(tool, options);
+      remember(tool, options && options.signal);
+    };
+    const unregisterTool = async (name) => {
+      if (typeof bridge.__originalUnregister === "function")
+        await bridge.__originalUnregister(name);
+      if (tools.delete(String(name))) notify();
+    };
+    if (existing) {
+      try {
+        bridge.__originalRegister = typeof existing.registerTool === "function"
+          ? existing.registerTool.bind(existing) : undefined;
+        bridge.__originalUnregister = typeof existing.unregisterTool === "function"
+          ? existing.unregisterTool.bind(existing) : undefined;
+        Object.defineProperty(existing, "registerTool",
+          { configurable: true, writable: true, value: registerTool });
+        if (bridge.__originalUnregister)
+          Object.defineProperty(existing, "unregisterTool",
+            { configurable: true, writable: true, value: unregisterTool });
+      } catch (_) {}
+    } else {
+      polyfill = {
+        registerTool,
+        unregisterTool,
+        async provideContext(context) {
+          const record = context && typeof context === "object" ? context : undefined;
+          const provided = Array.isArray(context) ? context : record && record.tools;
+          if (!Array.isArray(provided))
+            throw new TypeError("provideContext() expects an array or { tools: [...] }");
+          for (const tool of provided) await registerTool(tool);
         },
-        unregisterTool(name) { registry.delete(String(name)); },
-        clearContext() { registry.clear(); },
-        get tools() { return [...registry.values()]; }
+        async provide(context) { return this.provideContext(context); },
+        async getTools() { return bridge.snapshot(); },
+        async executeTool(tool, params) {
+          return await bridge.invoke(tool && tool.name, params === undefined ? {} : params);
+        },
+        clearContext() { if (tools.size) { tools.clear(); notify(); } },
+        addEventListener: target.addEventListener.bind(target),
+        removeEventListener: target.removeEventListener.bind(target),
+        dispatchEvent: target.dispatchEvent.bind(target),
+        ontoolchange: null
       };
-      try { Object.defineProperty(navigator, "modelContext", { value: shim }); }
-      catch (_) {}
-      try { Object.defineProperty(document, "modelContext", { value: shim }); }
-      catch (_) {}
+      for (const owner of owners) {
+        try {
+          Object.defineProperty(owner, "modelContext",
+            { configurable: true, enumerable: false, value: polyfill });
+        } catch (_) {}
+      }
     }
+    Object.defineProperty(window, "__paveWebTools",
+      { configurable: true, enumerable: false, value: bridge });
   } catch (_) {}
 })();
 |js}
@@ -615,16 +755,20 @@ let require_connection session =
   | Some connection, Some cdp_session -> connection, cdp_session
   | _ -> fail "browser session has no attached page"
 
-let evaluate_raw ?(cancel = fun () -> false) session ~expression ~timeout_seconds =
+let evaluate_raw ?(cancel = fun () -> false) ?context_id session ~expression
+    ~timeout_seconds =
   let connection, cdp_session = require_connection session in
   send_cdp ~cancel ~session_id:cdp_session connection
     ~method_:"Runtime.evaluate"
-    ~params:(`Assoc [
+    ~params:(`Assoc ([
       "expression", `String expression;
       "returnByValue", `Bool true;
       "awaitPromise", `Bool true;
       "timeout", `Int (int_of_float (timeout_seconds *. 1000.));
-      "userGesture", `Bool false ])
+      "userGesture", `Bool false ] @
+      (match context_id with
+       | Some context_id -> ["contextId", `Int context_id]
+       | None -> [])))
     ()
 
 let evaluation_text json =
@@ -653,10 +797,24 @@ let evaluation_text json =
             | _, value -> Yojson.Basic.to_string value)
        | other -> Yojson.Basic.to_string other)
 
-let bounded_result label text =
-  if String.length text > max_result_bytes then
-    fail (label ^ " exceeds its size limit");
-  text
+(* Truncates on a UTF-8 code-point boundary so previews never split a
+   multi-byte character. *)
+let utf8_prefix text limit =
+  if String.length text <= limit then text
+  else
+    let rec boundary index =
+      if index > 0 && (Char.code text.[index] land 0xc0) = 0x80 then
+        boundary (index - 1)
+      else index in
+    String.sub text 0 (boundary limit)
+
+(* Delimited untrusted-content boundary for page-provided text that must not
+   be mistaken for host output. *)
+let untrusted_boundary text =
+  let nonce = Digestif.SHA1.(to_hex (digest_string (random_bytes 16))) in
+  "[BEGIN UNTRUSTED PAGE CONTENT " ^ nonce ^ "]\n" ^
+  utf8_prefix text (max_page_result_bytes / 2) ^
+  "\n[END UNTRUSTED PAGE CONTENT " ^ nonce ^ "]"
 
 (* ------------------------------------------------------------------ *)
 (* Public operations                                                  *)
@@ -667,7 +825,61 @@ let pending_session manager ~id =
   { id; manager; connection = None; cdp_session_id = None; target_id = "";
     child = None; created_at = Unix.gettimeofday ();
     last_used_at = Unix.gettimeofday ();
-    operation_lock = Mutex.create (); closed = false; pending = true }
+    operation_lock = Mutex.create (); closed = false; pending = true;
+    native_available = false; root_frame = ""; catalog = Hashtbl.create 8;
+    catalog_events = []; event_sequence = 0; dropped_before = 0 }
+
+(* Every known frame id from Page.getFrameTree, root first. *)
+let frame_ids json =
+  let rec collect node acc =
+    let frame = member "frame" node in
+    let acc = match member "id" frame with
+      | `String frame_id -> frame_id :: acc | _ -> acc in
+    match member "childFrames" node with
+    | `List children ->
+        List.fold_left (fun acc child -> collect child acc) acc children
+    | _ -> acc in
+  match member "frameTree" json with
+  | `Assoc _ as tree -> List.rev (collect tree [])
+  | _ -> []
+
+(* Runs an expression inside one frame's main world. The root frame can use
+   the session's default context; subframes need their recorded context id. *)
+let evaluate_in_frame ?(cancel = fun () -> false) session ~cdp_session
+    ~frame_id ~is_root ~expression ~timeout_seconds =
+  match session.connection with
+  | None -> `Skipped
+  | Some connection ->
+      let context_id =
+        Hashtbl.find_opt connection.contexts (context_key cdp_session frame_id) in
+      (match context_id, is_root with
+       | None, false -> `Skipped
+       | context_id, _ ->
+           `Done (evaluate_raw ~cancel ?context_id session ~expression
+             ~timeout_seconds))
+
+(* Installs the bridge into the current main world of every frame; the
+   addScriptToEvaluateOnNewDocument preload only covers future documents.
+   Best-effort: a missing frame tree or context just skips that frame. *)
+let install_bridge ?(cancel = fun () -> false) session =
+  match session.connection, session.cdp_session_id with
+  | Some connection, Some cdp_session ->
+      (match (try
+          Some (send_cdp ~cancel ~session_id:cdp_session connection
+            ~method_:"Page.getFrameTree" ~params:(`Assoc []) ())
+        with Error _ | Cancelled -> None) with
+       | None -> ()
+       | Some tree ->
+           let ids = frame_ids tree in
+           (match ids with
+            | [] -> ()
+            | root :: _ ->
+                session.root_frame <- root;
+                List.iter (fun frame_id ->
+                  ignore (evaluate_in_frame ~cancel session ~cdp_session
+                    ~frame_id ~is_root:(frame_id = root)
+                    ~expression:web_tools_hook ~timeout_seconds:5.)) ids))
+  | _ -> ()
 
 (* [spawn]/[connect] are injectable for in-process tests; production defaults
    launch the pinned executable and open its loopback WebSocket. *)
@@ -719,6 +931,9 @@ let open_session ?(env = Sys.getenv_opt) ?(cancel = fun () -> false)
              ~method_:"Page.enable" ~params:(`Assoc []) ());
            ignore (send_cdp ~cancel ~session_id:cdp_session_id connection
              ~method_:"Runtime.enable" ~params:(`Assoc []) ());
+           (* Runtime.enable streams executionContextCreated events; buffer
+              them before evaluating into specific frame contexts. *)
+           drain_connection connection;
            ignore (send_cdp ~cancel ~session_id:cdp_session_id connection
              ~method_:"Page.addScriptToEvaluateOnNewDocument"
              ~params:(`Assoc ["source", `String web_tools_hook]) ());
@@ -729,6 +944,9 @@ let open_session ?(env = Sys.getenv_opt) ?(cancel = fun () -> false)
                target_id;
                child = Some child;
                pending = false } in
+           (* The preload only covers future documents; install the bridge
+              into frames that already exist too. *)
+           install_bridge ~cancel session;
            with_lock manager.lock (fun () ->
              match Hashtbl.find_opt manager.sessions id with
              | Some placeholder when placeholder.pending ->
@@ -826,15 +1044,19 @@ let navigate ?(cancel = fun () -> false) manager ~id ~url ~timeout_seconds =
       check_cancel cancel;
       if Unix.gettimeofday () > deadline then
         fail "page load did not settle within the navigation timeout";
-      let probe =
-        evaluate_raw ~cancel session ~timeout_seconds:5.
-          ~expression:"document.readyState" in
-      (match member "result" probe with
-       | `Assoc fields ->
-           (match field "value" fields with
-            | `String "complete" -> ()
+      (* Mid-navigation the previous context can still answer or the new one
+         may not exist yet; treat evaluation errors as "not ready". *)
+      (match (try Some (evaluate_raw ~cancel session ~timeout_seconds:5.
+                  ~expression:"document.readyState")
+              with Error _ -> None) with
+       | Some probe ->
+           (match member "result" probe with
+            | `Assoc fields ->
+                (match field "value" fields with
+                 | `String "complete" -> ()
+                 | _ -> Thread.delay 0.1; await_ready ())
             | _ -> Thread.delay 0.1; await_ready ())
-       | _ -> Thread.delay 0.1; await_ready ()) in
+       | None -> Thread.delay 0.1; await_ready ()) in
     await_ready ();
     `Assoc [
       "frame_id", `String frame_id;
@@ -848,9 +1070,17 @@ let evaluate ?(cancel = fun () -> false) manager ~id ~expression ~timeout_second
   let session = lookup manager ~id in
   session_operation ~cancel session (fun () ->
     let answer = evaluate_raw ~cancel session ~expression ~timeout_seconds in
-    `Assoc [
+    (* Oversized results are truncated, not failed: the page already computed
+       them and refusing mid-result would abort otherwise valid work. *)
+    let result = evaluation_text answer in
+    let truncated = String.length result > max_result_bytes in
+    `Assoc ([
       "session", `String id;
-      "result", `String (bounded_result "page evaluation" (evaluation_text answer)) ])
+      "result", `String (utf8_prefix result max_result_bytes) ] @
+      (if truncated
+       then ["truncated", `Bool true;
+             "original_bytes", `Int (String.length result)]
+       else [])))
 
 let observe ?(cancel = fun () -> false) manager ~id =
   let session = lookup manager ~id in
@@ -889,56 +1119,228 @@ let screenshot ?(cancel = fun () -> false) manager ~id =
       "data", `String data;
       "bytes", `Int (String.length data) ])
 
-(* Mirrors the in-page catalog; native modelContext or the installed hook both
-   record through __paveWebTools. Every field is page-provided and untrusted. *)
-let list_tools ?(cancel = fun () -> false) manager ~id =
+(* ------------------------------------------------------------------ *)
+(* Page-declared tool catalog (modelContext bridge)                    *)
+
+let bridge_snapshot_expression = {js|
+(window.__paveWebTools ? JSON.stringify({
+  nativeAvailable: !!window.__paveWebTools.nativeAvailable,
+  origin: location.origin,
+  tools: window.__paveWebTools.snapshot()
+}) : null)|js}
+
+let member_string key json =
+  match member key json with `String value -> value | _ -> ""
+
+let catalog_key frame_id name = frame_id ^ "\000" ^ name
+
+(* One untrusted rendered catalog record per tool. Schemas and annotations
+   are retained here but only emitted for exact-name reads. *)
+let catalog_entry ~frame_id ~origin tool =
+  `Assoc [
+    "name", `String (member_string "name" tool);
+    "description", `String (member_string "description" tool);
+    "inputSchema", member "inputSchema" tool;
+    "annotations", member "annotations" tool;
+    "frameId", `String frame_id;
+    "origin", `String origin ]
+
+let record_event session ~kind entry =
+  session.event_sequence <- session.event_sequence + 1;
+  let event = `Assoc [
+    "sequence", `Int session.event_sequence;
+    "type", `String kind;
+    "name", member "name" entry;
+    "frameId", member "frameId" entry;
+    "origin", member "origin" entry;
+    "timestamp", `Int (int_of_float (Unix.gettimeofday () *. 1000.));
+    "untrusted", `Bool true ] in
+  session.catalog_events <- event :: session.catalog_events;
+  if List.length session.catalog_events > max_catalog_events then begin
+    session.catalog_events <-
+      List.filteri (fun index _ -> index < max_catalog_events)
+        session.catalog_events;
+    (* Events are newest-first; the oldest retained sequence bounds
+       what "since" can still see. *)
+    match List.nth_opt session.catalog_events
+            (List.length session.catalog_events - 1) with
+    | Some oldest ->
+        session.dropped_before <-
+          (match member "sequence" oldest with `Int n -> n | _ -> 0)
+    | None -> ()
+  end
+
+(* Re-reads every frame's bridge snapshot and records catalog transitions.
+   Frames without a reachable context are skipped, matching detached-frame
+   behavior. *)
+let refresh_catalog ?(cancel = fun () -> false) session =
+  let connection, cdp_session = require_connection session in
+  drain_connection connection;
+  let tree =
+    send_cdp ~cancel ~session_id:cdp_session connection
+      ~method_:"Page.getFrameTree" ~params:(`Assoc []) () in
+  let ids = frame_ids tree in
+  (match ids with
+   | root :: _ -> session.root_frame <- root
+   | [] -> ());
+  let next = Hashtbl.create 8 in
+  List.iter (fun frame_id ->
+    let is_root = session.root_frame = frame_id in
+    ignore (try
+        evaluate_in_frame ~cancel session ~cdp_session ~frame_id
+          ~is_root ~expression:web_tools_hook ~timeout_seconds:5.
+      with Error _ | Cancelled -> `Skipped);
+    match (try
+        evaluate_in_frame ~cancel session ~cdp_session ~frame_id ~is_root
+          ~expression:bridge_snapshot_expression ~timeout_seconds:5.
+      with Error _ | Cancelled -> `Skipped) with
+    | `Skipped -> ()
+    | `Done answer ->
+        (match member "result" answer with
+         | `Assoc fields ->
+             (match field "value" fields with
+              | `String text ->
+                  (match (try Yojson.Basic.from_string text with _ -> `Null) with
+                   | `Assoc _ as snapshot ->
+                       (match member "nativeAvailable" snapshot with
+                        | `Bool true -> session.native_available <- true
+                        | _ -> ());
+                       let origin = member_string "origin" snapshot in
+                       let origin = if origin = "" then "null" else origin in
+                       (match member "tools" snapshot with
+                        | `List tools ->
+                            List.iter (fun tool ->
+                              let entry = catalog_entry ~frame_id ~origin tool in
+                              Hashtbl.replace next
+                                (catalog_key frame_id (member_string "name" entry))
+                                entry) tools
+                        | _ -> ())
+                   | _ -> ())
+              | _ -> ())
+         | _ -> ())) ids;
+  Hashtbl.iter (fun key entry ->
+    match Hashtbl.find_opt session.catalog key with
+    | None -> record_event session ~kind:"registered" entry
+    | Some previous ->
+        if Yojson.Basic.to_string previous <> Yojson.Basic.to_string entry then
+          record_event session ~kind:"updated" entry) next;
+  Hashtbl.iter (fun key entry ->
+    if not (Hashtbl.mem next key) then
+      record_event session ~kind:"unregistered" entry) session.catalog;
+  Hashtbl.reset session.catalog;
+  Hashtbl.iter (Hashtbl.replace session.catalog) (Hashtbl.copy next)
+
+let catalog_status session =
+  if session.native_available || Hashtbl.length session.catalog > 0
+  then "ready" else "unavailable"
+
+let catalog_entries session ?name ?frame () =
+  Hashtbl.fold (fun _ entry acc ->
+    let matches_name = match name with
+      | None -> true
+      | Some wanted -> member_string "name" entry = wanted in
+    let matches_frame = match frame with
+      | None -> true
+      | Some wanted -> member_string "frameId" entry = wanted in
+    if matches_name && matches_frame then entry :: acc else acc)
+    session.catalog []
+  |> List.sort (fun a b ->
+       let by_name = compare (member "name" a) (member "name" b) in
+       if by_name <> 0 then by_name else
+         compare (member "frameId" a) (member "frameId" b))
+
+(* Exact-name reads expose full metadata (schemas, annotations); the default
+   projection is a bounded summary that omits them and truncates
+   descriptions. *)
+let list_tools ?(cancel = fun () -> false) ?name ?frame manager ~id =
   let session = lookup manager ~id in
   session_operation ~cancel session (fun () ->
-    let answer =
-      evaluate_raw ~cancel session ~timeout_seconds:10.
-        ~expression:"JSON.stringify(window.__paveWebTools ? \
-          window.__paveWebTools.list() : null)" in
-    match member "result" answer with
-    | `Assoc fields ->
-        (match field "value" fields with
-         | `String "null" | `Null ->
-             `Assoc [
-               "session", `String id;
-               "status", `String "unavailable";
-               "tools", `List [];
-               "untrusted", `Bool true ]
-         | `String text ->
-             (match (try Yojson.Basic.from_string text with _ -> `Null) with
-              | `List tools ->
-                  let render = function
-                    | `Assoc fields ->
-                        let name = match List.assoc_opt "name" fields with
-                          | Some (`String name) -> name | _ -> "" in
-                        let description = match List.assoc_opt "description" fields with
-                          | Some (`String description) -> description | _ -> "" in
-                        `Assoc [
-                          "name", `String (if String.length name > max_tool_field_bytes
-                            then String.sub name 0 max_tool_field_bytes else name);
-                          "description", `String
-                            (if String.length description > max_tool_field_bytes
-                             then String.sub description 0 max_tool_field_bytes
-                             else description) ]
-                    | _ -> `Assoc ["name", `String ""; "description", `String ""] in
-                  `Assoc [
-                    "session", `String id;
-                    "status", `String "ready";
-                    "tools", `List (List.map render
-                      (List.filteri (fun index _ -> index < max_list_tools) tools));
-                    "truncated", `Bool (List.length tools > max_list_tools);
-                    "untrusted", `Bool true ]
-              | _ -> fail "page tool catalog returned malformed data")
-         | _ -> fail "page tool catalog returned no data")
-    | _ -> fail "page tool catalog returned no data")
+    refresh_catalog ~cancel session;
+    let entries = catalog_entries session ?name ?frame () in
+    let status = catalog_status session in
+    let base = [
+      "session", `String id;
+      "status", `String status ] in
+    let reason =
+      if status = "unavailable"
+      then ["reason", `String
+        "the page declared no modelContext tools and no registration surface is available"]
+      else [] in
+    match name with
+    | Some _ ->
+        `Assoc (base @ reason @ [
+          "tools", `List (List.map (fun entry -> `Assoc (
+            match entry with
+            | `Assoc fields -> ("untrusted", `Bool true) :: fields
+            | other -> ["untrusted", `Bool true; "value", other])) entries);
+          "truncated", `Bool false;
+          "untrusted", `Bool true ])
+    | None ->
+        let tools, _, truncated =
+          List.fold_left (fun (tools, bytes, truncated) entry ->
+            if List.length tools >= max_page_tools then
+              (tools, bytes, true)
+            else
+              let full = member_string "description" entry in
+              let description = utf8_prefix full max_tool_description_bytes in
+              let truncated =
+                truncated || String.length description < String.length full in
+              let record = `Assoc [
+                "name", member "name" entry;
+                "description", `String description;
+                "frameId", member "frameId" entry;
+                "origin", member "origin" entry;
+                "untrusted", `Bool true ] in
+              let record_bytes =
+                String.length (Yojson.Basic.to_string record) + 1 in
+              if bytes + record_bytes > max_tool_summary_bytes then
+                (tools, bytes, true)
+              else (record :: tools, bytes + record_bytes, truncated))
+            ([], 128, false) entries in
+        let truncated = truncated || List.length tools < List.length entries in
+        `Assoc (base @ reason @ [
+          "tools", `List (List.rev tools);
+          "truncated", `Bool truncated;
+          "untrusted", `Bool true ]))
 
-let call_tool ?(cancel = fun () -> false) manager ~id ~name ~arguments
+let call_failure ~id ~name error = `Assoc [
+  "session", `String id;
+  "name", `String name;
+  "ok", `Bool false;
+  "error", `String (untrusted_boundary error);
+  "untrusted", `Bool true ]
+
+(* Wraps a page result: under the cap it passes through as the JSON value;
+   over the cap it becomes a delimited preview instead of failing. *)
+let page_result_json ~id ~name encoded =
+  match (try Some (Yojson.Basic.from_string encoded) with _ -> None) with
+  | None -> call_failure ~id ~name "page tool result was not JSON data"
+  | Some value ->
+      let bytes = String.length encoded in
+      if bytes <= max_page_result_bytes then
+        `Assoc [
+          "session", `String id;
+          "name", `String name;
+          "ok", `Bool true;
+          "result", value;
+          "untrusted", `Bool true ]
+      else
+        `Assoc [
+          "session", `String id;
+          "name", `String name;
+          "ok", `Bool true;
+          "result", `Assoc [
+            "preview", `String (untrusted_boundary
+              (utf8_prefix encoded (max_page_result_bytes / 4)));
+            "truncated", `Bool true;
+            "originalBytes", `Int bytes ];
+          "truncated", `Bool true;
+          "originalBytes", `Int bytes;
+          "untrusted", `Bool true ]
+
+let call_tool ?(cancel = fun () -> false) ?frame manager ~id ~name ~arguments
     ~timeout_seconds =
-  let name = bounded_text "page tool name" max_tool_name_bytes name in
-  if String.trim name = "" then fail "page tool name must not be empty";
+  let name = valid_token "page tool name" max_tool_name_bytes name in
   let arguments = match arguments with
     | `Null -> `Assoc []
     | `Assoc _ as value -> value
@@ -949,14 +1351,87 @@ let call_tool ?(cancel = fun () -> false) manager ~id ~name ~arguments
   let timeout_seconds = valid_timeout "page tool timeout" timeout_seconds in
   let session = lookup manager ~id in
   session_operation ~cancel session (fun () ->
-    let expression =
-      "(window.__paveWebTools ? window.__paveWebTools.call(" ^
-      json_string_literal name ^ ", " ^ arguments_text ^
-      ") : Promise.reject(new Error('page has no modelContext tools')))" in
-    let answer =
-      evaluate_raw ~cancel session ~expression ~timeout_seconds in
-    `Assoc [
+    refresh_catalog ~cancel session;
+    let matches = catalog_entries session ~name ?frame () in
+    match matches with
+    | [] -> call_failure ~id ~name ("no page-declared tool named " ^
+        json_string_literal name ^
+        (match frame with
+         | Some frame -> " in frame " ^ json_string_literal frame
+         | None -> ""))
+    | _ :: _ :: _ ->
+        let frames = String.concat ", " (List.map (fun entry ->
+          member_string "frameId" entry) matches) in
+        call_failure ~id ~name
+          ("page tool " ^ json_string_literal name ^
+           " exists in multiple frames: " ^ frames)
+    | [entry] ->
+        let frame_id = member_string "frameId" entry in
+        let cdp_session = match session.cdp_session_id with
+          | Some value -> value | None -> "" in
+        let expression =
+          "(async () => { const b = window.__paveWebTools; \
+           if (!b) return {ok:false, error:'page tool bridge is unavailable'}; \
+           try { const r = await b.invoke(" ^ json_string_literal name ^ ", " ^
+           arguments_text ^ "); \
+           return {ok:true, encoded: JSON.stringify(r === undefined ? null : r)}; } \
+           catch (e) { return {ok:false, error: e && e.message ? e.message : String(e)}; } })()" in
+        (match evaluate_in_frame ~cancel session ~cdp_session ~frame_id
+           ~is_root:(frame_id = session.root_frame)
+           ~expression ~timeout_seconds with
+         | `Skipped -> call_failure ~id ~name
+             "the owning frame has no reachable context"
+         | `Done answer ->
+             (match member "result" answer with
+              | `Assoc fields ->
+                  (match field "value" fields with
+                   | `Assoc _ | `String _ ->
+                       let envelope = match field "value" fields with
+                         | `String text ->
+                             (try Yojson.Basic.from_string text with _ -> `Null)
+                         | `Assoc _ as value -> value
+                         | _ -> `Null in
+                       (match member "ok" envelope with
+                        | `Bool true ->
+                            (match member "encoded" envelope with
+                             | `String encoded ->
+                                 page_result_json ~id ~name encoded
+                             | _ -> call_failure ~id ~name
+                                 "page tool result was not serializable")
+                        | `Bool false ->
+                            call_failure ~id ~name
+                              (member_string "error" envelope)
+                        | _ -> call_failure ~id ~name
+                            "page tool returned a malformed envelope")
+                   | _ ->
+                       (match member "exceptionDetails" answer with
+                        | `Assoc _ as detail ->
+                            call_failure ~id ~name
+                              (member_string "text" detail)
+                        | _ -> call_failure ~id ~name
+                            "page tool call produced no response"))
+              | _ -> call_failure ~id ~name
+                  "page tool call produced no response")))
+
+let tool_events ?(cancel = fun () -> false) ?since ?clear manager ~id =
+  let session = lookup manager ~id in
+  session_operation ~cancel session (fun () ->
+    refresh_catalog ~cancel session;
+    let since = match since with Some value -> value | None -> 0 in
+    let kept = List.filter (fun event ->
+      match member "sequence" event with
+      | `Int sequence -> sequence > since
+      | _ -> false) session.catalog_events in
+    let truncated = since < session.dropped_before in
+    let result = `Assoc [
       "session", `String id;
-      "name", `String name;
-      "result", `String (bounded_result "page tool result" (evaluation_text answer));
-      "untrusted", `Bool true ])
+      "events", `List (List.rev kept);
+      "cursor", `Int session.event_sequence;
+      "truncated", `Bool truncated;
+      "untrusted", `Bool true ] in
+    (match clear with
+     | Some true ->
+         session.catalog_events <- [];
+         session.dropped_before <- 0
+     | _ -> ());
+    result)
