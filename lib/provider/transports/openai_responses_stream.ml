@@ -221,7 +221,13 @@ let handle_event t event data =
     | "response.function_call_arguments.delta" -> handle_arguments t ~done_event:false json
     | "response.function_call_arguments.done" -> handle_arguments t ~done_event:true json
     | "response.completed" -> handle_completed t json
-    | "error" | "response.failed" | "response.incomplete" -> invalid "response failed or incomplete"
+    | "error" ->
+        invalid (match Openai_responses_wire.error_detail json with
+          | Some detail -> "provider error: " ^ detail
+          | None -> "response failed or incomplete")
+    | "response.failed" | "response.incomplete" ->
+        Openai_responses_wire.reject_unfinished ~invalid (field "response" json);
+        invalid "response failed or incomplete"
     | _ when String.length kind >= 9 && String.sub kind 0 9 = "response." -> ()
     | _ -> invalid "unknown event")
 

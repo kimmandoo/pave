@@ -86,6 +86,11 @@
  (libraries pave unix yojson))
 
 (test
+ (name test_agent_empty_reply)
+ (modules test_agent_empty_reply)
+ (libraries pave unix yojson))
+
+(test
  (name test_openai_stream)
  (modules test_openai_stream)
  (libraries pave unix yojson))

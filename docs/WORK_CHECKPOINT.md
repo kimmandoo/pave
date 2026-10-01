@@ -1,5 +1,16 @@
 # Work checkpoint
 
+## Current session — agent request/response logic audit
+
+- **Date:** 2026-10-01
+- **Active task:** Completed the requested audit of the agent request/response path (agent loop, tool scheduler, curl transport, SSE parser, Chat Completions/Anthropic/Responses/Codex/Gemini stream parsers) and fixed the two confirmed defects.
+- **Starting evidence:** Main was at `aed9426` with only untracked `scratch/` (left untouched). No strategy changes; no backtest applies.
+- **Fixes:** (1) Responses-family wires (OpenAI Responses, Azure, Bedrock Mantle, Codex buffered and streamed) mapped `incomplete_details.reason = max_output_tokens` to a generic "incomplete response" instead of the shared truncation text the design requires, and dropped the provider's message for `error`/`response.failed`/`response.incomplete`. Added `Openai_responses_wire.error_detail`/`reject_unfinished` and used them in all four parsers. (2) `Agent.run` appended an assistant reply with no text and no tool calls; Anthropic, Responses and Chat Completions replay reject that turn, so every later request in the session failed. Such replies are now reported but not retained.
+- **Reviewed and intentionally unchanged:** `stop` finish reason with tool calls and unsigned Gemini tool calls fail by explicit design rule; Anthropic `max_tokens` remains hard-coded at 4096 (large `write_file` content can hit the truncation path — a product decision, not changed here).
+- **Changed files:** `lib/agent/agent.ml`, `lib/provider/transports/{openai_responses_wire,openai_responses_stream,codex_stream,codex_wire}.ml`, `test/agent/test_agent_empty_reply.ml` (new), `test/dune`, `test/provider/transports/{test_openai_responses_stream,test_openai_responses_wire,test_codex_stream}.ml`, `CHANGELOG.md`, `docs/{DESIGN_RULES,WORK_CHECKPOINT}.md`.
+- **Verification:** New assertions failed against the pre-fix source (stashed) and pass afterward. `opam exec -- dune build @install` and `opam exec -- dune runtest` passed (exit 0). No live vendor inference or PTY smoke was run; the agent fix was exercised through the loopback HTTP fixture.
+- **Exact next action:** None for this request. Backlog in `task.md` unchanged.
+
 ## Current session — queue control, approvals, response waiting and last-used model
 
 - **Date:** 2026-09-30

@@ -361,9 +361,11 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
     Provider.check_cancel cancel;
     match reply.tool_calls with
     | [] ->
-        append t reply;
+        (* An empty assistant turn is rejected when history is replayed
+           (Anthropic, Responses, Chat Completions), so it is not retained. *)
         if Option.value ~default:"" reply.content = "" then
-          t.on_event "The model finished without a reply.";
+          t.on_event "The model finished without a reply."
+        else append t reply;
         (match reply.content with
          | Some text -> (match t.secret_mask with
              | Some mask -> Secret_mask.redact mask text

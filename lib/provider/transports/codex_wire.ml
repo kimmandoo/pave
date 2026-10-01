@@ -158,10 +158,9 @@ let parse_completion ~model json =
   | `Null -> ()
   | `String actual when actual = model -> ()
   | _ -> invalid "completion model mismatch");
+  Openai_responses_wire.reject_unfinished ~invalid json;
   (match member "status" json with
   | `String "completed" -> ()
-  | `String "incomplete" -> invalid "incomplete response (possibly truncated)"
-  | `String "failed" -> invalid "failed response"
   | _ -> invalid "response not completed");
   (match member "error" json with `Null -> () | _ -> invalid "response error");
   (match member "incomplete_details" json with `Null -> () | _ -> invalid "incomplete response details");

@@ -163,11 +163,35 @@ let request ?(stream = false) ~model messages tools =
     fields @ [ "tools", `List (List.map tool_schema tools) ] in
   `Assoc (if stream then fields @ [ "stream", `Bool true ] else fields)
 
+let error_detail json =
+  let message error = match member "message" error, member "code" error with
+    | `String text, _ when text <> "" -> Some text
+    | _, `String code when code <> "" -> Some code
+    | _ -> None in
+  match message json with
+  | Some _ as detail -> detail
+  | None -> message (member "error" json)
+
+(* Name why a response did not complete; an output-token stop uses the shared
+   truncation text like every other wire. *)
+let reject_unfinished ~invalid response =
+  match member "status" response with
+  | `String "incomplete" ->
+      (match member "reason" (member "incomplete_details" response) with
+       | `String "max_output_tokens" ->
+           truncated "incomplete_details max_output_tokens"
+       | `String reason when reason <> "" -> invalid ("incomplete response: " ^ reason)
+       | _ -> invalid "incomplete response")
+  | `String "failed" ->
+      (match error_detail response with
+       | Some detail -> invalid ("failed response: " ^ detail)
+       | None -> invalid "failed response")
+  | _ -> ()
+
 let parse_completion json =
+  reject_unfinished ~invalid json;
   (match member "status" json with
    | `String "completed" -> ()
-   | `String "incomplete" -> invalid "incomplete response"
-   | `String "failed" -> invalid "failed response"
    | _ -> invalid "response not completed");
   (match member "error" json with `Null -> () | _ -> invalid "response error");
   (match member "incomplete_details" json with

@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-01
+
+- fix(provider): reported OpenAI Responses, Azure, Bedrock Mantle and Codex output-token stops with the shared truncation message and surfaced the provider's stated reason for failed, incomplete and streamed error responses instead of a generic failure.
+- fix(agent): stopped retaining empty assistant replies in conversation history, so a reply with no text or tool calls no longer makes every later Anthropic, Responses or Chat Completions request in the session fail.
+
 ## 2026-09-30
 
 - fix(tui): made ordinary and modified Return/Enter queue follow-ups without cancelling active work, kept interruption explicit, clarified queue feedback down to 18 columns, and protected draft attachments during queue restoration.

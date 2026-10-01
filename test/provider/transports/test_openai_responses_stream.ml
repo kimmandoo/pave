@@ -144,6 +144,25 @@ let () =
   invalid ("data: [DONE]\r\n\r\n");
   invalid ("event: error\r\ndata: {\"type\":\"error\",\"message\":\"bad\"}\r\n\r\n");
   invalid ("event: response.completed\r\ndata: {bad}\r\n\r\n");
+  let rejection wire = match stream wire with
+    | exception Protocol.Invalid_response message -> message
+    | _ -> failwith "expected rejected Responses stream" in
+  let contains needle haystack =
+    let n = String.length needle and h = String.length haystack in
+    let rec scan i = i + n <= h && (String.sub haystack i n = needle || scan (i + 1)) in
+    scan 0 in
+  assert (String.starts_with ~prefix:Protocol.truncated_prefix
+    (rejection (added 0 initial_message ^
+      event "response.incomplete" [ "response", `Assoc [
+        "status", `String "incomplete";
+        "incomplete_details", `Assoc ["reason", `String "max_output_tokens"] ] ])));
+  assert (contains "content_filter" (rejection
+    (event "response.incomplete" [ "response", `Assoc [
+      "status", `String "incomplete";
+      "incomplete_details", `Assoc ["reason", `String "content_filter"] ] ])));
+  assert (contains "unavailable" (rejection failed));
+  assert (contains "rate limit reached" (rejection
+    ("event: error\r\ndata: {\"type\":\"error\",\"code\":\"rate_limit_exceeded\",\"message\":\"rate limit reached\"}\r\n\r\n")));
   let poisoned = Openai_responses_stream.create ~on_text:(fun _ -> ()) () in
   Openai_responses_stream.feed poisoned
     (completion [ final_message ] ^ "data: [DONE]\r\n\r\n");

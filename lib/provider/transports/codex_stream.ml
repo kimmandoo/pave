@@ -265,6 +265,7 @@ let handle_completed t json =
   if t.completed <> None then invalid "duplicate response completion";
   let response = field "response" json in
   check_id t (optional_id "id" response);
+  Openai_responses_wire.reject_unfinished ~invalid response;
   if field "status" response <> `String "completed" then invalid "response incomplete or failed";
   if field "error" response <> `Null || field "incomplete_details" response <> `Null then
     invalid "response error or truncation";
@@ -351,7 +352,13 @@ let handle_event t event data =
       "response.reasoning_text.delta" | "response.reasoning_text.done" ->
         ignore (find t ~kind:"reasoning" json)
     | "response.completed" | "response.done" -> handle_completed t json
-    | "error" | "response.failed" | "response.incomplete" -> invalid "response failed or incomplete"
+    | "error" ->
+        invalid (match Openai_responses_wire.error_detail json with
+          | Some detail -> "provider error: " ^ detail
+          | None -> "response failed or incomplete")
+    | "response.failed" | "response.incomplete" ->
+        Openai_responses_wire.reject_unfinished ~invalid (field "response" json);
+        invalid "response failed or incomplete"
     | "response.metadata" -> ()
     | "response.output_text.annotation.added" ->
         invalid "unsupported Codex output annotation"

@@ -170,6 +170,16 @@ let () =
     added initial_message ^ done_item final_message ^
     event "response.completed" ["response", `Assoc [
       "id", `String "wrong-response-id"; "status", `String "completed"]]);
+  (match stream (added initial_message ^ event "response.incomplete" [
+      "response", `Assoc ["status", `String "incomplete";
+        "incomplete_details", `Assoc ["reason", `String "max_output_tokens"]]]) with
+   | exception Protocol.Invalid_response reason ->
+       assert (String.starts_with ~prefix:Protocol.truncated_prefix reason)
+   | _ -> failwith "Codex output-token stop must be reported as truncation");
+  (match stream (event "error" ["message", `String "usage limit reached"]) with
+   | exception Protocol.Invalid_response reason ->
+       assert (String.ends_with ~suffix:"provider error: usage limit reached" reason)
+   | _ -> failwith "Codex error event must not finish successfully");
   let poisoned = Codex_stream.create ~model ~on_text:(fun _ -> ()) () in
   Codex_stream.feed poisoned (completed ~output:[final_message] ());
   (match Codex_stream.feed poisoned (event "response.created" ["id", `String "resp_1"]) with

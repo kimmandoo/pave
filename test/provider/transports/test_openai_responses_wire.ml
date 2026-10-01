@@ -103,6 +103,13 @@ let () =
     [ assistant None [ use ]; Protocol.tool_result "wrong" "result" ] []);
   invalid (fun () -> Openai_responses_wire.parse_completion
     (`Assoc [ "status", `String "incomplete"; "output", `List [ message [ text "partial" ] ] ]));
+  (match Openai_responses_wire.parse_completion (`Assoc [
+      "status", `String "incomplete";
+      "incomplete_details", `Assoc ["reason", `String "max_output_tokens"];
+      "output", `List [ message [ text "partial" ] ] ]) with
+   | exception Protocol.Invalid_response reason ->
+       assert (String.starts_with ~prefix:Protocol.truncated_prefix reason)
+   | _ -> failwith "output-token stop must be reported as truncation");
   invalid (fun () -> Openai_responses_wire.parse_completion (`Assoc [
     "status", `String "completed";
     "incomplete_details", `Assoc ["reason", `String "max_output_tokens"];
