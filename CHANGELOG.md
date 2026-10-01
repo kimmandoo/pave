@@ -2,6 +2,7 @@
 
 ## 2026-10-01
 
+- chore(release): published v0.1.78 for Linux and macOS on x86_64 and ARM64 after native tests, and verified public archive checksums and packaged TUI behavior.
 - feat(tui): exposed selected model identity on narrow pickers, prioritized useful detail over explanatory prose, and made omitted introductions explicit.
 - fix(tui): named the actual safe action on cramped decision screens, hid unavailable consent shortcuts and included the control gutter in the fit budget.
 - perf(tui): reused unchanged composer wrapping within the renderer and bypassed Unicode segmentation for printable-ASCII transcript lines while preserving grapheme, source-range and measurement behavior.

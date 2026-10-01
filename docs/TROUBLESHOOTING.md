@@ -1,5 +1,12 @@
 # Troubleshooting
 
+### [2026-10-01] An extracted release archive lacked the native-install marker
+
+- **Context / Symptom:** Running `pave update --check` directly from the verified v0.1.78 archive returned `native-install marker missing; rerun install.sh once to enable self-update (opam installs must use opam)`.
+- **Root Cause:** Archive extraction is not installation. The updater deliberately requires the marker and license layout created by `install.sh`; the release archive correctly contains only the executable and two legal files.
+- **Solution:** Ran the actual installer against the latest public release with `PAVE_INSTALL_DIR` under a disposable directory and `PAVE_VERSION` unset, then ran the installed binary's update check. It reported `Pave v0.1.78 is up to date.` No guard was bypassed and the user's installation remained unchanged.
+- **Prevention / Reference:** Verify archive/CLI/TUI behavior on extracted files, but use a real isolated installation to verify self-update discovery.
+
 ### [2026-10-01] Narrow decision hints and selected model details were misleading
 
 - **Context / Symptom:** The actual 24×12 discard dialog said `n/Esc deny`, although its safe choice was Keep conversation on `k`. At 36×18, a truncated model row had no selected-item detail despite spare space; introductory prose ended abruptly.
