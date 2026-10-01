@@ -267,8 +267,6 @@ let handle_completed t json =
   check_id t (optional_id "id" response);
   Openai_responses_wire.reject_unfinished ~invalid response;
   if field "status" response <> `String "completed" then invalid "response incomplete or failed";
-  if field "error" response <> `Null || field "incomplete_details" response <> `Null then
-    invalid "response error or truncation";
   let streamed_outputs () =
     let count = Hashtbl.length t.items in
     if count = 0 then invalid "completion without output items";
@@ -357,7 +355,8 @@ let handle_event t event data =
           | Some detail -> "provider error: " ^ detail
           | None -> "response failed or incomplete")
     | "response.failed" | "response.incomplete" ->
-        Openai_responses_wire.reject_unfinished ~invalid (field "response" json);
+        let status = if kind = "response.failed" then "failed" else "incomplete" in
+        Openai_responses_wire.reject_unfinished ~status ~invalid json;
         invalid "response failed or incomplete"
     | "response.metadata" -> ()
     | "response.output_text.annotation.added" ->

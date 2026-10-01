@@ -19,8 +19,8 @@ let write_tool ~root ~path contents =
   | Error message -> failwith message
   | Ok execute ->
       (match execute () with
-       | [Pave.Protocol.Text result] when not (String.starts_with ~prefix:"Error:" result) -> ()
-       | [Pave.Protocol.Text result] -> failwith result
+       | Ok [Pave.Protocol.Text _] -> ()
+       | Error message -> failwith message
        | _ -> failwith "unexpected write_file result")
 
 let expect_error action =

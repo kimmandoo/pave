@@ -2857,7 +2857,7 @@ let definitions = [
      "limit", integer_field "Maximum matching lines (default 100)" 1 max_matches] ["pattern"];
   schema "web_search" "Search the public web. Uses the configured provider order (Exa, Firecrawl, Brave, Tavily, Kagi, Jina with API keys; credential-free DuckDuckGo otherwise), falling back to the next provider on failure. Requires network approval; returns source URLs, citations, and provider provenance."
     ["query", bounded_string_field "Search query sent to the selected provider" Web_search.max_query_bytes;
-     "page", integer_field "Provider page/offset (default 0)" 0 Web_search.max_page;
+     "page", integer_field "Brave-only page/offset (default 0; nonzero pages exclude other providers)" 0 Web_search.max_page;
      "count", integer_field "Maximum results (default 5)" 1 Web_search.max_results] ["query"];
   schema "web_fetch" "Fetch a public HTTPS page without credentials or redirects and convert bounded HTML to Markdown. Requires separate network approval."
     ["url", bounded_string_field "Credential-free public HTTPS URL on port 443" 4096;
@@ -3157,7 +3157,8 @@ let approval_request ?cancel ?context ~root ~name ~args (decision : Approval.dec
              "Reads a bounded workspace source; it makes no changes.",
              ["Path: " ^ quoted "path" "(missing)" args])
     | "web_search" ->
-        let order, credentialed = match Web_search.plan_summary () with
+        let page = optional_int "page" 0 ~minimum:0 ~maximum:Web_search.max_page args in
+        let order, credentialed = match Web_search.plan_summary ~page () with
           | explicit, engines ->
               (String.concat " → " (List.map fst engines) ^
                  (if explicit then " (from " ^ Web_search.priority_variable ^ ")"
@@ -3642,7 +3643,7 @@ let validate_arguments ~name ~args =
 
 type prepared_execution =
   ?cancel:(unit -> bool) -> ?on_progress:(int -> unit) -> ?approved:bool -> unit ->
-  Protocol.content_block list
+  (Protocol.content_block list, string) result
 
 let session_tool_names = [
   "start_process"; "start_shell"; "process_list"; "process_output";
@@ -3689,7 +3690,10 @@ let prepare ?cancel ?context ~root ~name ~args () =
       if List.mem name path_tool_names then
         resolve_path_arguments ?cancel ?context ~root args
       else root, args in
-    if name = "web_search" then Web_search.check_configuration ();
+    if name = "web_search" then (
+      ignore (Web_search.valid_query (required_string "query" args));
+      let page = optional_int "page" 0 ~minimum:0 ~maximum:Web_search.max_page args in
+      Web_search.check_configuration ~page ());
     if name = "start_process" then (
       Workspace_process.validate_id (required_string "id" args);
       Workspace_process.validate_program
@@ -3767,7 +3771,7 @@ let prepare ?cancel ?context ~root ~name ~args () =
           | "token_count" -> token_count args
           | "mobile_project" -> mobile_project ?cancel root args
           | _ -> assert false in
-        [Protocol.Text result]
+        Ok [Protocol.Text result]
       with
       | Cancelled | Workspace_dap.Cancelled -> raise Cancelled
       | (Workspace_process.Error _ | Workspace_git.Error _ |
@@ -3778,11 +3782,11 @@ let prepare ?cancel ?context ~root ~name ~args () =
          | Workspace_ssh.Error _ | Native_tokenizer.Error _) as exn ->
           (match cancel with
            | Some cancelled when cancelled () -> raise Cancelled
-           | _ -> [Protocol.Text (error_message exn)])
+           | _ -> Error (error_message exn))
       | exn ->
           (match cancel with
            | Some cancelled when cancelled () -> raise Cancelled
-           | _ -> [Protocol.Text (error_message exn)]) in
+           | _ -> Error (error_message exn)) in
     Ok execute
   with
   | Cancelled | Workspace_dap.Cancelled -> raise Cancelled
@@ -3801,19 +3805,17 @@ let prepare ?cancel ?context ~root ~name ~args () =
 
 let execute ?cancel ?on_progress ?preflight ?context ?(approved = false)
     ~root ~name ~args () =
-  let display execute = Protocol.display_content_blocks
-    (execute ?cancel ?on_progress ?approved:(Some approved) ()) in
   match prepare ?cancel ?context ~root ~name ~args () with
-  | Error result -> result
+  | Error result -> Error result
   | Ok execute ->
       try
         match preflight with
         | Some check ->
             (match check () with
-             | Some message -> message
-             | None -> display execute)
-        | None -> display execute
+             | Some message -> Error message
+             | None -> execute ?cancel ?on_progress ~approved ())
+        | None -> execute ?cancel ?on_progress ~approved ()
       with
       | Cancelled -> raise Cancelled
-      | exn -> error_message exn
+      | exn -> Error (error_message exn)
 

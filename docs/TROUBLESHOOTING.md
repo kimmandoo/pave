@@ -1,5 +1,26 @@
 # Troubleshooting
 
+### [2026-10-01] Consent text was clipped while shortcuts still approved
+
+- **Context / Symptom:** A real 36×35 terminal displayed only Deny plus a clipped scope/consequence, but `a` granted all later writes. A 24×12 discard prompt also hid its irreversible-action context.
+- **Root Cause:** The allow gate budgeted the argument body but not the full heading, scope, button labels or consequences.
+- **Solution:** Shared rendering and approval geometry now wraps consent text, stacks full controls when needed and includes all consent rows plus the active timer. Insufficient space locks every non-safe choice.
+- **Prevention / Reference:** Actual CLI/tmux checks covered 36×35, 24×12 and 120×40, resize locking, bracketed paste, process-lifetime write grants, mandatory approval of both later shell calls, default denial and denied/not-written outcomes.
+
+### [2026-10-01] Successful tool content looked like an execution failure
+
+- **Context / Symptom:** Reading a real file beginning `Error:` displayed a failed tool card even though the file read succeeded.
+- **Root Cause:** Prepared execution flattened errors and successful content into the same block list; the agent and TUI inferred status from a text prefix.
+- **Solution:** Prepared/direct tool execution now returns a typed result. Agent settlement and rewind eligibility preserve it, and typed UI events do not reinterpret the content.
+- **Prevention / Reference:** The streamed agent lifecycle regression and actual CLI fixture retain error-like file bytes while showing a successful read. Obsolete literal source-text assertions in unrelated lifecycle scenarios were removed; call pairing, cancellation and availability assertions remain.
+
+### [2026-10-01] Search fallback and provider diagnostics lost failure boundaries
+
+- **Context / Symptom:** Runtime probes observed an unclosed search anchor raising `Invalid_argument`, a 1,025-byte title rejected after normalization, Kagi error-plus-data accepted, raw Firecrawl error text echoed, and nested Responses errors reduced to a generic failure.
+- **Root Cause:** HTML substring bounds, truncation-marker accounting and provider-specific failure-envelope checks were incomplete; Responses diagnostic lookup missed nested and status-less terminal errors.
+- **Solution:** Bounded anchor extraction, UTF-8-safe total title limits and explicit safe search failures retain fallback behavior. Responses/Codex select diagnostic fields before output validation and reject error-bearing completed envelopes. Empty assistant text is omitted from tool-call replay.
+- **Prevention / Reference:** Search runtime probes passed after repair; a real curl/loopback Responses SSE failure reported message and code with exactly one request. Replay serialization retained call/result adjacency without an empty assistant item. Linking standalone OCaml smoke drivers required `digestif.c` rather than the virtual `digestif` package.
+
 ### [2026-09-30] Additional prompts cancelled work and approval arrows rejected actions
 
 - **Context / Symptom:** The user reported `Turn cancelled` after entering a follow-up. In an actual loopback-provider TUI, pressing Down at a `write_file` approval produced `Error: tool approval denied` without an explicit denial.

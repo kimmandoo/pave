@@ -176,8 +176,23 @@ let () =
   expect_error "DuckDuckGo bot challenge is explained" "bot-detection"
     (fun () -> Web_search.search ~http:(fun _ -> Ok (200, "<div class=\"anomaly-modal\">"))
       ~env:(environment []) ~query:"query" ());
+  let malformed_html = "<a class=\"result__a\" href=\"https://example.com/\">Unclosed" in
+  let recovered = Web_search.search
+      ~http:(fun request -> match request.Web_search.search with
+        | Some Web_search.Duckduckgo -> Ok (200, malformed_html)
+        | Some Web_search.Brave -> Ok (200, brave_response)
+        | _ -> fail "unexpected provider after malformed HTML")
+      ~env:(environment ["PAVE_WEB_SEARCH_PROVIDER_PRIORITY", "duckduckgo,brave";
+                        "BRAVE_SEARCH_API_KEY", "brave-secret"])
+      ~query:"query" () in
+  expect "malformed HTML falls back rather than escaping as a parser exception"
+    (recovered.provider = "brave" && List.map fst recovered.failed = ["duckduckgo"]);
+  let recovered_rows = Web_search.parse_duckduckgo 5
+      (malformed_html ^ "<a class=\"result__a\" href=\"https://example.org/\">Valid</a>") in
+  expect "an unclosed result cannot steal the following result's title"
+    (recovered_rows = ["Valid", "https://example.org/", ""]);
 
-  (* Credentialed engines from the reviewed provider set. *)
+  (* Credentialed engines normalize their distinct response envelopes. *)
   let exa_request = ref None in
   let exa = Web_search.search
       ~http:(fun request -> exa_request := Some request; Ok (200,
@@ -221,6 +236,39 @@ let () =
     (first (engine "firecrawl" "FIRECRAWL_API_KEY"
       "{\"success\":true,\"data\":{\"web\":[{\"title\":\"F\",\"url\":\"https://fc.example.org/\",\"description\":\"fs\"}]}}")
      = ("https://fc.example.org/", "fs"));
+  let long_title = String.concat "" (List.init 400 (fun _ -> "界")) in
+  let bounded = Web_search.search
+      ~http:(fun _ -> Ok (200, Yojson.Basic.to_string (`Assoc [
+        "results", `List [`Assoc [
+          "title", `String long_title; "url", `String "https://example.org/";
+          "highlights", `List [`String "snippet"]]]])))
+      ~env:(environment ["PAVE_WEB_SEARCH_PROVIDER_PRIORITY", "exa";
+                        "EXA_API_KEY", "exa-secret"])
+      ~query:"query" () in
+  expect "long UTF-8 titles remain usable and bounded including the ellipsis"
+    (match bounded.results with
+     | [result] -> result.title =
+         String.concat "" (List.init 340 (fun _ -> "界")) ^ "…"
+     | _ -> false);
+  let failed_payloads = [
+    "kagi", "KAGI_API_KEY", "{\"error\":[{\"message\":\"secret-echo\\u001b[31m\"}]," ^
+      "\"data\":{\"search\":[{\"title\":\"Partial\",\"url\":\"https://example.org/\",\"snippet\":\"partial\"}]}}";
+    "firecrawl", "FIRECRAWL_API_KEY",
+      "{\"success\":false,\"error\":\"secret-echo\\u001b[31m\"}"
+  ] in
+  List.iter (fun (name, variable, payload) ->
+    let result = Web_search.search
+        ~http:(fun request -> match request.Web_search.search with
+          | Some Web_search.Brave -> Ok (200, brave_response)
+          | _ -> Ok (200, payload))
+        ~env:(environment ["PAVE_WEB_SEARCH_PROVIDER_PRIORITY", name ^ ",brave";
+          variable, "secret"; "BRAVE_SEARCH_API_KEY", "brave-secret"])
+        ~query:"query" () in
+    expect (name ^ " error envelope does not publish partial data or reflected secrets")
+      (result.provider = "brave" && match result.failed with
+       | [provider, reason] -> provider = name &&
+           not (contains reason "secret-echo") && not (String.contains reason '\027')
+       | _ -> false)) failed_payloads;
 
   expect_error "malformed JSON response" "malformed search response JSON"
     (fun () -> Web_search.search ~http:(fun _ -> Ok (200, "{"))
@@ -273,6 +321,12 @@ let () =
      not (contains fetched.markdown "never show style") &&
      not (contains fetched.markdown "never show comment"));
   expect "fetch is independent of search calls" (!fetch_calls = 1);
+  let fetch_cancelled = ref false in
+  expect_error "transport failure preserves fetch cancellation" "cancelled"
+    (fun () -> Web_search.fetch_url
+      ~cancel:(fun () -> !fetch_cancelled)
+      ~http:(fun _ -> fetch_cancelled := true; Error "request interrupted")
+      "https://93.184.216.34/article" ());
   let links = Web_search.convert_html_to_markdown
       ("<a title=\"quoted > character\" href='https://safe.example/path?a=1&amp;b=2'>" ^
        "Safe &amp; [linked]</a> " ^

@@ -133,15 +133,33 @@ let () =
     primary = 1; wrap_lines = true; notice = ""; preview_cache = None;
     buttons = [| "n", "Deny", ""; "y", "Allow once", "" |]; focus = 0
   } in
-  assert (Tui.approval_fits ~cols:24 ~rows:11 ~activity:0 review);
-  assert (not (Tui.approval_fits ~cols:24 ~rows:10 ~activity:0 review));
-  assert (not (Tui.approval_fits ~cols:24 ~rows:11 ~activity:1 review));
-  assert (Tui.approval_fits ~cols:24 ~rows:12 ~activity:1 review);
+  assert (Tui.approval_fits ~cols:24 ~rows:12 ~activity:0 review);
+  assert (not (Tui.approval_fits ~cols:24 ~rows:11 ~activity:0 review));
+  assert (not (Tui.approval_fits ~cols:24 ~rows:12 ~activity:1 review));
+  assert (Tui.approval_fits ~cols:24 ~rows:13 ~activity:1 review);
   assert (not (Tui.approval_fits ~cols:23 ~rows:30 ~activity:0 review));
   let unwrapped = { review with lines = [String.make 40 'x'];
     wrap_lines = false; preview_cache = None } in
   assert (not (Tui.approval_fits ~cols:24 ~rows:30 ~activity:0 unwrapped));
   assert (Tui.approval_fits ~cols:44 ~rows:10 ~activity:0 unwrapped);
+  let lasting = { review with
+    heading = "Write this file?";
+    context = "write_file · write tier · you may allow it until exit";
+    buttons = [| "n", "Deny", "Nothing runs";
+      "y", "Allow once", "Runs only this call";
+      "a", "Allow all write_file", "Every later write_file call runs until exit" |] } in
+  assert (not (Tui.approval_fits ~cols:24 ~rows:12 ~activity:0 lasting));
+  assert (Tui.approval_fits ~cols:24 ~rows:40 ~activity:0 lasting);
+  let header, controls, _ = Tui.approval_chrome 24 lasting in
+  assert (String.concat "" (Array.to_list header) =
+    lasting.heading ^ lasting.context);
+  assert (Array.length controls > 1);
+  List.iter (fun cols -> List.iter (fun rows ->
+    let screen, _ = Tui.approval_screen ~cols ~rows
+      ~activity_rows:[|Notty.I.void cols 1|] lasting in
+    assert (Array.length screen = rows);
+    assert (Array.for_all (fun row -> Notty.I.width row <= cols) screen))
+    [1; 3; 8; 10; 12; 40]) [1; 12; 24; 36; 80];
   let glyph status = String.sub status 0 (String.index status ' ') in
   let idle_progress = Tui.activity_status ~state:"Thinking" ~elapsed:0. () in
   let frames = List.init 10 (fun frame ->

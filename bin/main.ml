@@ -1050,8 +1050,8 @@ let () =
             Mutex.protect session_grants_lock (fun () ->
               Hashtbl.replace session_grants request.tool_name ());
             true
-        | Pave.Approval.Allow_once | Pave.Approval.Allow_for_session -> true
-        | Pave.Approval.Deny_once -> false in
+        | Pave.Approval.Allow_once -> true
+        | Pave.Approval.Allow_for_session | Pave.Approval.Deny_once -> false in
     let approve_tool_request = with_session_grant (fun request ->
       if not (Unix.isatty Unix.stdin) then Pave.Approval.Deny_once
       else match !ui with

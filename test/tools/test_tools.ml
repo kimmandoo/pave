@@ -5,9 +5,15 @@ let contains text fragment =
   loop 0
 
 let args fields = `Assoc (List.map (fun (k, v) -> k, `String v) fields)
+let execute_text ?cancel ?on_progress ?preflight ?context ?approved
+    ~root ~name ~args () =
+  match Pave.Tools.execute ?cancel ?on_progress ?preflight ?context ?approved
+      ~root ~name ~args () with
+  | Ok blocks -> Pave.Protocol.display_content_blocks blocks
+  | Error message -> message
 let tool_json root name fields =
-  Pave.Tools.execute ~root ~name ~args:(`Assoc fields) ()
-let tool root name fields = Pave.Tools.execute ~root ~name ~args:(args fields) ()
+  execute_text ~root ~name ~args:(`Assoc fields) ()
+let tool root name fields = execute_text ~root ~name ~args:(args fields) ()
 let rejected f =
   try contains (String.lowercase_ascii (f ())) "error"
   with _ -> true
@@ -130,12 +136,12 @@ let () =
       `Assoc ["old_text", `String "alpha"; "new_text", `String "A"];
       `Assoc ["old_text", `String "beta"; "new_text", `String "B"]
     ] in
-    let applied = Pave.Tools.execute ~root ~name:"apply_edits"
+    let applied = execute_text ~root ~name:"apply_edits"
       ~args:(edit_args replacement_hunks) () in
     assert (not (contains (String.lowercase_ascii applied) "error"));
     assert (Pave.Workspace_path.read_bounded
       (Filename.concat root "snapshot.txt") 65_536 = "A B\n");
-    let stale = Pave.Tools.execute ~root ~name:"apply_edits"
+    let stale = execute_text ~root ~name:"apply_edits"
       ~args:(edit_args replacement_hunks) () in
     assert (contains stale "changed since");
     assert (Pave.Workspace_path.read_bounded
@@ -174,14 +180,14 @@ let () =
       "new_name", `String "fresh";
       "dry_run", `Bool dry_run
     ] in
-    let ast_preview = Pave.Tools.execute ~root ~name:"ast_edit"
+    let ast_preview = execute_text ~root ~name:"ast_edit"
       ~args:(ast_args true "ocaml") () in
     assert (contains ast_preview "AST preview");
     assert (Pave.Workspace_path.read_bounded
       (Filename.concat root "ast_sample.ml") 65_536 = ast_snapshot.contents);
-    assert (rejected (fun () -> Pave.Tools.execute ~root ~name:"ast_edit"
+    assert (rejected (fun () -> execute_text ~root ~name:"ast_edit"
       ~args:(ast_args false "swift") ()));
-    let ast_result = Pave.Tools.execute ~root ~name:"ast_edit"
+    let ast_result = execute_text ~root ~name:"ast_edit"
       ~args:(ast_args false "ocaml") () in
     assert (not (contains (String.lowercase_ascii ast_result) "error"));
     assert (Pave.Workspace_path.read_bounded
@@ -360,11 +366,28 @@ let () =
         ~args:(`Assoc ["query", `String "never sent"]) () with
      | Error message -> assert (contains message "KAGI_API_KEY")
      | Ok _ -> failwith "uncredentialed web_search must fail before approval");
+    Unix.putenv "KAGI_API_KEY" "kagi-search-secret";
+    (match Pave.Tools.prepare ~root ~name:"web_search"
+        ~args:(`Assoc ["query", `String "never sent"; "page", `Int 1]) () with
+     | Error message -> assert (contains message "not support paged")
+     | Ok _ -> failwith "unsupported search paging must fail before approval");
+    Unix.putenv "PAVE_WEB_SEARCH_PROVIDER_PRIORITY" "kagi,brave";
+    Unix.putenv "BRAVE_SEARCH_API_KEY" search_secret;
+    let paged_request = approval_case "web_search"
+      ["query", `String "paged query"; "page", `Int 1] Pave.Approval.Exec in
+    let paged_preview = String.concat "\n" paged_request.details in
+    assert (contains paged_preview "brave" &&
+      not (contains paged_preview "kagi") &&
+      not (contains paged_preview search_secret));
     Unix.putenv "KAGI_API_KEY" (Option.value ~default:"" previous_kagi);
     Unix.putenv "PAVE_WEB_SEARCH_PROVIDER_PRIORITY" "brave";
     Unix.putenv "BRAVE_SEARCH_API_KEY" search_secret;
     assert (contains (tool_json root "web_search" ["query", `String "never sent"])
       "requires explicit interactive approval");
+    (match Pave.Tools.prepare ~root ~name:"web_search"
+        ~args:(`Assoc ["query", `String "bad\nquery"]) () with
+     | Error message -> assert (contains message "control character")
+     | Ok _ -> failwith "invalid search query must fail before approval");
     Unix.putenv "PAVE_WEB_SEARCH_PROVIDER_PRIORITY"
       (Option.value ~default:"" previous_priority);
     Unix.putenv "BRAVE_SEARCH_API_KEY"
@@ -467,7 +490,7 @@ let () =
       Pave.Approval.Exec in
     assert (contains (String.concat "\n" eval_request.details) "print(1)");
     let eval_code code =
-      Pave.Tools.execute ~root ~name:"workspace_eval" ~context:tool_context
+      execute_text ~root ~name:"workspace_eval" ~context:tool_context
         ~approved:true ~args:(`Assoc [
           "language", `String "python";
           "code", `String code;
@@ -506,7 +529,7 @@ let () =
     let mutation_error =
       Yojson.Basic.Util.member "error" mutation_denied |> Yojson.Basic.Util.to_string in
     assert (contains mutation_error "tool bridge callback failed");
-    let jobs = Pave.Tools.execute ~root ~name:"process_list" ~context:tool_context
+    let jobs = execute_text ~root ~name:"process_list" ~context:tool_context
       ~args:(`Assoc []) () in
     assert (contains jobs "eval-mutation-job · running");
     ignore (Pave.Tools.execute ~root ~name:"process_kill" ~context:tool_context
@@ -541,7 +564,7 @@ let () =
     assert (not (Pave.Tools.non_reversible_tool ~name:"workspace_eval"
       ~args:(`Assoc ["action", `String "reset"])));
     List.iter (fun (name, fields) ->
-      let result = Pave.Tools.execute ~context:tool_context ~root ~name
+      let result = execute_text ~context:tool_context ~root ~name
         ~args:(`Assoc fields) () in
       assert (contains result "requires explicit interactive approval"))
       ["lsp_start", ["program", `String "/usr/bin/example-lsp"];
@@ -1048,7 +1071,7 @@ other.include(":not-a-gradle-module")
       (["action", `String action;
         "subroot", `String "ios/App.xcodeproj"] @ more) in
     let xcode ?(approved = false) action more =
-      Pave.Tools.execute ~root ~context:tool_context ~approved
+      execute_text ~root ~context:tool_context ~approved
         ~name:"xcode_preflight" ~args:(xcode_args action more) () in
     let scheme = ["scheme", `String "AppShared"] in
     let destination =
@@ -1160,7 +1183,7 @@ esac
     directory "focus/node/src";
     create "focus/node/src/App.tsx" "export const App = () => null\n";
     let mobile stack action subroot extra approved =
-      Pave.Tools.execute ~root ~context:tool_context ~approved
+      execute_text ~root ~context:tool_context ~approved
         ~name:"mobile_check" ~args:(`Assoc
           (["stack", `String stack; "action", `String action;
             "subroot", `String subroot] @ extra)) () in
@@ -1285,7 +1308,7 @@ esac
           "Checked Kotlin/Java errors:\nfocus/gradle/app/src/Main.kt:1:14" &&
         not (contains failed_gradle "Checked Kotlin/Java errors:\nfocus/gradle/other"));
       let inventory action approved =
-        Pave.Tools.execute ~root ~context:tool_context ~approved
+        execute_text ~root ~context:tool_context ~approved
           ~name:"android_devices" ~args:(`Assoc [
             "action", `String action; "subroot", `String "focus/gradle"]) () in
       assert (Pave.Tools.is_shell_tool "android_devices" &&
@@ -1356,7 +1379,7 @@ esac
         let missing_adb = inventory "devices" true in
         assert (contains missing_avd "exit 127 (no device choices" &&
           contains missing_adb "exit 127 (no device choices"));
-      let wrong_root = Pave.Tools.execute ~root ~context:tool_context
+      let wrong_root = execute_text ~root ~context:tool_context
         ~approved:true ~name:"android_devices" ~args:(`Assoc [
           "action", `String "avds"; "subroot", `String "focus/node"]) () in
       assert (contains wrong_root "no Gradle settings manifest");
@@ -1386,7 +1409,7 @@ esac
     let command = tool root "run_command" ["command", "printf 'command-ok\\n'"] in
     assert (contains command "Status: exit 0");
     assert (contains command "command-ok");
-    let timeout = Pave.Tools.execute ~root ~name:"run_command"
+    let timeout = execute_text ~root ~name:"run_command"
       ~args:(`Assoc ["command", `String "sleep 3"; "timeout_seconds", `Int 1]) () in
     assert (contains timeout "Status: timed out");
     let cancellation_requested = ref false in

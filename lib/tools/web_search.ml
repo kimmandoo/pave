@@ -1,7 +1,5 @@
-(* Search engines, in the default automatic order. It follows the reviewed web
-   role chain (exa, firecrawl, ..., duckduckgo) for the engines Pave supports,
-   with the credentialed engines it lists only on explicit selection placed
-   before the credential-free DuckDuckGo fallback. *)
+(* Credentialed search engines in automatic priority order, followed by the
+   credential-free HTML fallback. Explicit configuration preserves its order. *)
 type provider = Exa | Firecrawl | Brave | Tavily | Kagi | Jina | Duckduckgo
 
 let all_providers = [Exa; Firecrawl; Brave; Tavily; Kagi; Jina; Duckduckgo]
@@ -240,9 +238,9 @@ let clean_text ?(limit = 1_000) text =
   let text = Buffer.contents output in
   if String.length text <= limit then text
   else
-    let size = ref limit in
+    let size = ref (max 0 (limit - String.length "…")) in
     while !size > 0 && Char.code text.[!size] land 0xc0 = 0x80 do decr size done;
-    String.sub text 0 !size ^ "…"
+    String.sub text 0 !size ^ (if limit >= String.length "…" then "…" else "")
 
 (* Each JSON engine's result rows, as (title, url, snippet). *)
 let result_rows provider json =
@@ -293,6 +291,9 @@ let result_rows provider json =
         clean_text (first_string ["description"; "content"] row)) rows
   | Kagi ->
       object_required "";
+      (match field "error" json with
+       | None | Some `Null | Some (`List []) -> ()
+       | Some _ -> fail "Kagi reported a search failure");
       (match required "data" json with
        | `Assoc _ as data ->
            (match field "search" data with
@@ -306,7 +307,7 @@ let result_rows provider json =
       object_required "";
       (match field "success" json with
        | Some (`Bool false) ->
-           fail ("Firecrawl reported failure: " ^ first_string ["error"] json)
+           fail "Firecrawl reported a search failure"
        | _ -> ());
       (match required "data" json with
        | `List rows -> rows
@@ -440,10 +441,11 @@ let invoke ?http ?cancel request =
   let send = match http with
     | Some send -> send
     | None -> default_http ?cancel in
-  let status, body = match send request with
+  let response = send request in
+  check_cancel cancel;
+  let status, body = match response with
     | Ok response -> response
     | Error _ -> fail "HTTPS request failed or timed out" in
-  check_cancel cancel;
   if status <> 200 then fail (Printf.sprintf "search/fetch provider returned HTTP %d" status);
   if String.length body > request.response_limit then fail "HTTP response exceeds the size limit";
   body
@@ -454,7 +456,7 @@ type candidate = { engine : provider; key : string option }
    every engine with a credential is tried in default order, ending with the
    credential-free DuckDuckGo fallback. Engines without their credential are
    skipped, never sent a request. *)
-let plan ?(env = Sys.getenv_opt) () =
+let plan ?(env = Sys.getenv_opt) ?(page = 0) () =
   let credential provider = Option.bind (credential_name provider) (fun name ->
     Option.bind (env name) (valid_credential name)) in
   let explicit, order = match env priority_variable with
@@ -469,14 +471,22 @@ let plan ?(env = Sys.getenv_opt) () =
     let variables = List.filter_map credential_name order
       |> List.sort_uniq String.compare |> String.concat ", " in
     fail ("no configured search provider has a credential; set " ^ variables));
+  let candidates = if page = 0 then candidates else
+    match List.filter (fun candidate -> supports_paging candidate.engine) candidates with
+    | [] ->
+        let names = List.map (fun candidate -> provider_label candidate.engine) candidates in
+        fail (String.concat ", " names ^
+          (if List.length names = 1 then " does" else " do") ^
+          " not support paged requests; only Brave Search pages results")
+    | paged -> paged in
   explicit, candidates
 
 (* Lets callers refuse an unconfigured search before asking for approval. *)
-let check_configuration ?(env = Sys.getenv_opt) () = ignore (plan ~env ())
+let check_configuration ?(env = Sys.getenv_opt) ?page () = ignore (plan ~env ?page ())
 
 (* Engine names in try order, each marked with whether a credential is sent. *)
-let plan_summary ?(env = Sys.getenv_opt) () =
-  let explicit, candidates = plan ~env () in
+let plan_summary ?(env = Sys.getenv_opt) ?page () =
+  let explicit, candidates = plan ~env ?page () in
   explicit, List.map (fun candidate ->
     provider_name candidate.engine, candidate.key <> None) candidates
 
@@ -963,11 +973,12 @@ let parse_duckduckgo count html =
            | None -> List.rev rows
            | Some tag_end ->
                let tag = String.sub html tag_start (tag_end - tag_start + 1) in
-               let title_end = Option.value ~default:tag_end
-                 (find_case_insensitive html "</a>" tag_end) in
-               let title = html_text (String.sub html (tag_end + 1) (title_end - tag_end - 1)) in
                let next = Option.value ~default:(String.length html)
                  (find_case_insensitive html marker (tag_end + 1)) in
+               let title_end = match find_case_insensitive html "</a>" (tag_end + 1) with
+                 | Some close when close < next -> close
+                 | _ -> tag_end + 1 in
+               let title = html_text (String.sub html (tag_end + 1) (title_end - tag_end - 1)) in
                let snippet = match find_case_insensitive html "result__snippet" title_end with
                  | Some snippet_at when snippet_at < next ->
                      (* Scan from the tag's '<' so the class attribute's quotes pair up. *)
@@ -1010,15 +1021,7 @@ let search_engine ?http ?cancel ~query ~page ~count candidate =
 let search ?http ?cancel ?(env = Sys.getenv_opt) ?(page = 0) ?(count = 5) ~query () =
   let query = valid_query query in
   validate_limits ~page ~count;
-  let _, candidates = plan ~env () in
-  let candidates = if page = 0 then candidates else
-    match List.filter (fun candidate -> supports_paging candidate.engine) candidates with
-    | [] ->
-        let names = List.map (fun candidate -> provider_label candidate.engine) candidates in
-        fail (String.concat ", " names ^
-          (if List.length names = 1 then " does" else " do") ^
-          " not support paged requests; only Brave Search pages results")
-    | paged -> paged in
+  let _, candidates = plan ~env ~page () in
   let rec attempt failed = function
     | [] ->
         (match List.rev failed with

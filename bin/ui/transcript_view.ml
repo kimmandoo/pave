@@ -489,16 +489,17 @@ let write_preview t id (preview : Pave.Write_preview.snapshot) state =
     card.code <- update card.code preview.lines;
     dirty_write t id) (Hashtbl.find_opt t.writes id)
 
-let finish_write t id ~aborted ~is_error =
+let finish_write t id ~aborted ~is_error ~denied =
   if Hashtbl.mem t.writes id then (
     let card = Hashtbl.find t.writes id in
     write_state t id (if aborted then
       (if card.executing then "cancelled · write unconfirmed" else "cancelled · not written")
+      else if denied then "denied by you · not written"
       else if is_error then "failed · not written" else "completed · written");
     Hashtbl.remove t.writes id)
 
 
-let tool_result ?group:existing ?(aborted = false) ?(is_error = false) t name result =
+let tool_result ?group:existing ?(aborted = false) ?is_error t name result =
   let name = single_line name in
   let id = match existing, t.pending_tool with
     | Some id, _ -> id
@@ -509,9 +510,10 @@ let tool_result ?group:existing ?(aborted = false) ?(is_error = false) t name re
   t.diff_fenced <- false;
   t.diff_raw <- false;
   t.table_active <- false;
-  let failed = is_error || String.starts_with ~prefix:"Error:" result in
+  let failed = Option.value
+    ~default:(String.starts_with ~prefix:"Error:" result) is_error in
   let error = failed || aborted in
-  let denied = List.mem result denied_results in
+  let denied = failed && List.mem result denied_results in
   let outcome = if aborted then "aborted" else if denied then "denied by you · not run"
     else if failed then "failed" else "completed" in
   let length = String.fold_left (fun count char ->

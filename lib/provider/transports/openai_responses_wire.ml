@@ -134,10 +134,10 @@ let request ?(stream = false) ~model messages tools =
         if !pending <> [] || msg.tool_call_id <> None then
           invalid "assistant message during tool results";
         (match msg.content with
-         | Some text -> emit (`Assoc [ "role", `String "assistant";
+         | Some text when text <> "" -> emit (`Assoc [ "role", `String "assistant";
              "content", `String text ])
-         | None when msg.tool_calls = [] -> invalid "empty assistant message"
-         | None -> ());
+         | _ when msg.tool_calls = [] -> invalid "empty assistant message"
+         | _ -> ());
         List.iter (fun (call : tool_call) ->
           if call.id = "" || call.name = "" then invalid "empty tool call id or name";
           if List.mem call.id !pending then invalid "duplicate tool call id";
@@ -164,39 +164,56 @@ let request ?(stream = false) ~model messages tools =
   `Assoc (if stream then fields @ [ "stream", `Bool true ] else fields)
 
 let error_detail json =
-  let message error = match member "message" error, member "code" error with
-    | `String text, _ when text <> "" -> Some text
-    | _, `String code when code <> "" -> Some code
+  let text = function
+    | `String text when String.trim text <> "" -> Some text
     | _ -> None in
-  match message json with
-  | Some _ as detail -> detail
-  | None -> message (member "error" json)
+  let response = member "response" json in
+  let sources = [true, member "error" json; true, member "error" response;
+    false, json; false, response] in
+  let message = List.find_map (fun (_, value) ->
+    match value with
+    | `String _ -> text value
+    | _ -> text (member "message" value)) sources in
+  let code = List.find_map (fun (error, value) ->
+    match text (member "code" value) with
+    | Some _ as code -> code
+    | None when error -> text (member "type" value)
+    | None -> None) sources in
+  match message, code with
+  | Some message, Some code when message <> code ->
+      Some (message ^ " (code=" ^ code ^ ")")
+  | Some message, _ -> Some message
+  | None, code -> code
 
-(* Name why a response did not complete; an output-token stop uses the shared
-   truncation text like every other wire. *)
-let reject_unfinished ~invalid response =
-  match member "status" response with
-  | `String "incomplete" ->
-      (match member "reason" (member "incomplete_details" response) with
-       | `String "max_output_tokens" ->
-           truncated "incomplete_details max_output_tokens"
-       | `String reason when reason <> "" -> invalid ("incomplete response: " ^ reason)
-       | _ -> invalid "incomplete response")
-  | `String "failed" ->
-      (match error_detail response with
-       | Some detail -> invalid ("failed response: " ^ detail)
-       | None -> invalid "failed response")
-  | _ -> ()
+(* Name why a response did not complete; terminal failure event types are
+   authoritative even when their response object omits its status. *)
+let reject_unfinished ?status ~invalid envelope =
+  let response = match status, member "response" envelope with
+    | Some _, (`Assoc _ as response) -> response
+    | _ -> envelope in
+  let incomplete () =
+    match member "reason" (member "incomplete_details" response) with
+    | `String "max_output_tokens" ->
+        truncated "incomplete_details max_output_tokens"
+    | `String reason when reason <> "" -> invalid ("incomplete response: " ^ reason)
+    | _ -> invalid "incomplete response" in
+  let failed prefix =
+    match error_detail envelope with
+    | Some detail -> invalid (prefix ^ ": " ^ detail)
+    | None -> invalid prefix in
+  match (match status with Some status -> `String status
+    | None -> member "status" response) with
+  | `String "incomplete" -> incomplete ()
+  | `String "failed" -> failed "failed response"
+  | _ ->
+      if member "error" response <> `Null then failed "response error";
+      if member "incomplete_details" response <> `Null then incomplete ()
 
 let parse_completion json =
   reject_unfinished ~invalid json;
   (match member "status" json with
    | `String "completed" -> ()
    | _ -> invalid "response not completed");
-  (match member "error" json with `Null -> () | _ -> invalid "response error");
-  (match member "incomplete_details" json with
-   | `Null -> ()
-   | _ -> invalid "incomplete response details");
   let outputs = match member "output" json with
     | `List outputs -> outputs
     | _ -> invalid "missing output items" in

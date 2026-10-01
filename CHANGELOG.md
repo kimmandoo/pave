@@ -2,7 +2,11 @@
 
 ## 2026-10-01
 
-- feat(tools): added Exa, Firecrawl, Kagi, Jina and credential-free DuckDuckGo web search alongside Brave and Tavily, using an ordered provider chain; searches now work without configuration, follow an automatic or `PAVE_WEB_SEARCH_PROVIDER_PRIORITY` order, fall back to the next provider on failure and report the failed providers.
+- fix(tools): kept malformed HTML inside the search fallback chain, bounded UTF-8 titles including truncation markers, rejected partial Kagi error responses, withheld raw Firecrawl error payloads, preserved cancellation and planned only paging-compatible providers before approval.
+- fix(tui): required complete approval headings, scope, controls and consequences to fit before consent; wrapped narrow layouts, kept denied writes visibly unexecuted and trusted typed tool outcomes instead of error-like file contents.
+- fix(provider): retained nested Responses and Codex failure details, rejected error-bearing completed envelopes before executing calls and omitted empty assistant text from tool-call replay.
+- refactor(tools): carried explicit success/error results from prepared execution through agent settlement and rewind eligibility, and moved search priority configuration exclusively to `PAVE_WEB_SEARCH_PROVIDER_PRIORITY`.
+- feat(tools): added Exa, Firecrawl, Kagi, Jina and credential-free DuckDuckGo web search alongside Brave and Tavily; searches now work without configuration, follow an automatic or `PAVE_WEB_SEARCH_PROVIDER_PRIORITY` order, fall back to the next provider on failure and report the failed providers.
 - feat(tui): added an "Allow all TOOL" approval button that allows later calls of reviewable low-impact tools until exit (shell, process, device, remote, external and child-agent actions still ask every call), and moved discard, post-sign-in and `/setup` decisions onto the same button layout.
 - feat(tui): redesigned tool approval as a question with the exact command, query, URL or path first, a plain-words tier/scope subtitle and side-by-side `[ n Deny ]` / `[ y Allow once ]` buttons directly under the preview; clarified tool cards with the acted-on argument in each header, "denied by you · not run" for refusals, single-line outcomes without a misleading collapse hint, and in-card side-effect notes.
 - fix(tools): refused an unconfigured `web_search` before asking for approval, so users are no longer prompted for a call that cannot run.

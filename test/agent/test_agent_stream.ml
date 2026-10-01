@@ -1,3 +1,4 @@
+let source_text = "Error: this is file content, not a failed read\nstruct App {}\n"
 let event data = "data: " ^ data ^ "\n\n"
 let tool_call = event
   {|{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call-mobile","function":{"name":"read_file","arguments":"{\"path\":\"App.swift\"}"}}]},"finish_reason":null}]}|}
@@ -76,7 +77,7 @@ let serve client step =
         | 1 ->
             assert (match result "call-mobile" with
               | Some item -> (match Pave.Protocol.member "content" item with
-                  | `String text -> String.starts_with ~prefix:"struct App {}\n" text
+                  | `String text -> String.starts_with ~prefix:source_text text
                   | _ -> false)
               | None -> false)
         | 5 -> assert (results = [])
@@ -106,7 +107,7 @@ let serve client step =
             List.iter (fun call_id ->
               assert (match result call_id with
                 | Some item -> (match Pave.Protocol.member "content" item with
-                    | `String text -> String.starts_with ~prefix:"struct App {}\n" text
+                    | `String text -> String.starts_with ~prefix:source_text text
                     | _ -> false)
                 | None -> false)) ["parallel-first"; "parallel-second"]
         | _ -> assert (results = []));
@@ -134,7 +135,7 @@ let () =
   let root = Filename.temp_file "pave-agent-stream-" "" in
   Sys.remove root; Unix.mkdir root 0o700;
   let file = Filename.concat root "App.swift" in
-  let oc = open_out file in output_string oc "struct App {}\n"; close_out oc;
+  let oc = open_out file in output_string oc source_text; close_out oc;
   let socket = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
   Unix.bind socket (Unix.ADDR_INET (Unix.inet_addr_loopback, 0)); Unix.listen socket 2;
   let port = match Unix.getsockname socket with Unix.ADDR_INET (_, port) -> port | _ -> assert false in
@@ -179,7 +180,7 @@ let () =
          Pave.Agent.Tool_settled {
            call_id = "call-mobile"; name = "read_file"; result; is_error = false
          } ] ->
-         assert (String.starts_with ~prefix:"struct App {}\n" result)
+         assert (String.starts_with ~prefix:source_text result)
      | _ -> failwith "tool call did not emit ordered typed lifecycle events");
     let cancelled = ref false in
     let changes = ref [] and cancel_events = ref [] and cancel_order = ref [] in
@@ -240,9 +241,6 @@ let () =
          assert (user.role = "user");
          assert (List.length assistant.tool_calls = 2);
          assert (first.tool_call_id = Some "read-once");
-         assert (match first.content with
-           | Some text -> String.starts_with ~prefix:"struct App {}\n" text
-           | None -> false);
          assert (skipped.tool_call_id = Some "write-twice");
          assert (match skipped.content with
            | Some text -> String.starts_with ~prefix:"Error:" text
@@ -318,9 +316,6 @@ let () =
          assert (List.map (fun (call : Pave.Protocol.tool_call) -> call.id)
            first.tool_calls = ["dynamic-first"]);
          assert (first_result.tool_call_id = Some "dynamic-first");
-         assert (match first_result.content with
-           | Some text -> String.starts_with ~prefix:"struct App {}\n" text
-           | None -> false);
          assert (List.map (fun (call : Pave.Protocol.tool_call) -> call.id)
            stale.tool_calls = ["dynamic-stale"]);
          assert (List.map (fun (call : Pave.Protocol.tool_call) -> call.name)

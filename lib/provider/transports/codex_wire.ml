@@ -162,8 +162,6 @@ let parse_completion ~model json =
   (match member "status" json with
   | `String "completed" -> ()
   | _ -> invalid "response not completed");
-  (match member "error" json with `Null -> () | _ -> invalid "response error");
-  (match member "incomplete_details" json with `Null -> () | _ -> invalid "incomplete response details");
   let outputs = match member "output" json with
     | `List outputs -> outputs
     | _ -> invalid "missing output items" in
@@ -295,9 +293,9 @@ let request ?(format = Standard) ?thinking ~model messages tools =
         | Some items -> List.iter emit items
         | None ->
             (match msg.content with
-            | Some text -> emit (`Assoc ["role", `String "assistant"; "content", `String text])
-            | None when calls = [] -> invalid "empty assistant message"
-            | None -> ());
+            | Some text when text <> "" -> emit (`Assoc ["role", `String "assistant"; "content", `String text])
+            | _ when calls = [] -> invalid "empty assistant message"
+            | _ -> ());
             List.iter (fun ((call : tool_call), id) ->
               let fields = ["type", `String "function_call";
                 "call_id", `String id; "name", `String call.name;

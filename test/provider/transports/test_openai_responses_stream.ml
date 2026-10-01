@@ -163,6 +163,29 @@ let () =
   assert (contains "unavailable" (rejection failed));
   assert (contains "rate limit reached" (rejection
     ("event: error\r\ndata: {\"type\":\"error\",\"code\":\"rate_limit_exceeded\",\"message\":\"rate limit reached\"}\r\n\r\n")));
+  assert (contains "quota exhausted" (rejection
+    (added 1 initial_call ^ event "error" ["response", `Assoc [
+      "error", `Assoc ["message", `String "quota exhausted"]]])));
+  assert (contains "quota_exceeded" (rejection
+    (event "response.failed" ["response", `Assoc [
+      "error", `Assoc ["code", `String "quota_exceeded"]]])));
+  assert (String.starts_with ~prefix:Protocol.truncated_prefix (rejection
+    (added 1 initial_call ^ event "response.incomplete" ["response", `Assoc [
+      "incomplete_details", `Assoc ["reason", `String "max_output_tokens"]]])));
+  let rejected = Openai_responses_stream.create ~on_text:ignore () in
+  (match Openai_responses_stream.feed rejected (added 1 initial_call ^
+      event "response.completed" ["response", `Assoc [
+        "status", `String "completed";
+        "output", `List [final_message; final_call];
+        "error", `Assoc ["message", `String "backend unavailable"]]]) with
+   | exception Protocol.Invalid_response detail ->
+       assert (contains "backend unavailable" detail)
+   | _ -> failwith "errored completion released partial calls");
+  assert (not (Openai_responses_stream.is_finished rejected));
+  assert (Openai_responses_stream.usage rejected = None);
+  (match Openai_responses_stream.finish rejected with
+   | exception Protocol.Invalid_response _ -> ()
+   | _ -> failwith "errored completion returned calls on finish");
   let poisoned = Openai_responses_stream.create ~on_text:(fun _ -> ()) () in
   Openai_responses_stream.feed poisoned
     (completion [ final_message ] ^ "data: [DONE]\r\n\r\n");

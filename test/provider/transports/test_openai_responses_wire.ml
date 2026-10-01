@@ -47,6 +47,23 @@ let () =
       "arguments", `String (Yojson.Basic.to_string args) ];
     item "function_call_output" [ "call_id", `String use.id; "output", `String "Contents" ];
     `Assoc [ "role", `String "assistant"; "content", `String "Found it" ] ]);
+  List.iter (fun request ->
+    let input = field "input" (request
+      [assistant (Some "") [use]; Protocol.tool_result use.id "Contents"]) in
+    (match input with
+     | `List [call; result] ->
+         assert (field "type" call = `String "function_call");
+         assert (field "call_id" call = `String use.id);
+         assert (field "arguments" call = `String (Yojson.Basic.to_string args));
+         assert (field "type" result = `String "function_call_output");
+         assert (field "call_id" result = `String use.id);
+         assert (field "output" result = `String "Contents")
+     | _ -> failwith "tool-call replay emitted an empty assistant message");
+    invalid (fun () -> request [assistant (Some "") []]))
+    [
+      (fun messages -> Openai_responses_wire.request ~model:"gpt-test" messages []);
+      (fun messages -> Codex_wire.request ~model:"gpt-test" messages [])
+    ];
   let typed_result = image_result use.id [
     Protocol.Text "before"; Protocol.Image { mime_type = "image/png"; data = "AQID" };
     Protocol.Text "after" ] in
@@ -114,6 +131,36 @@ let () =
     "status", `String "completed";
     "incomplete_details", `Assoc ["reason", `String "max_output_tokens"];
     "output", `List [message [text "partial"]] ]));
+  let contains needle text =
+    let n = String.length needle in
+    let rec scan i = i + n <= String.length text &&
+      (String.sub text i n = needle || scan (i + 1)) in
+    scan 0 in
+  List.iter (fun parse ->
+    List.iter (fun (metadata, expected) ->
+      let response = `Assoc (metadata @ [
+        "output", `List [function_call "call_A" "write_file"
+          {|{"path":"MUST_NOT_EXIST","content":"partial"}|}]]) in
+      match parse response with
+      | exception Protocol.Invalid_response detail ->
+          List.iter (fun reason -> assert (contains reason detail)) expected;
+          assert (not (contains "MUST_NOT_EXIST" detail))
+      | _ -> failwith "failed completion returned an executable tool call")
+      [
+        (["status", `String "failed"; "error", `Assoc [
+          "message", `String "quota exhausted"; "code", `String "quota_exceeded"]],
+         ["quota exhausted"; "quota_exceeded"]);
+        (["status", `String "completed"; "error", `Assoc [
+          "message", `String "backend unavailable"]],
+         ["backend unavailable"]);
+        (["status", `String "failed"; "error", `Assoc [
+          "message", `String " "; "type", `String "server_error"]],
+         ["server_error"]);
+        (["status", `String "completed"; "error", `String "request rejected"],
+         ["request rejected"])
+      ])
+    [Openai_responses_wire.parse_completion;
+     Codex_wire.parse_completion ~model:"gpt-test"];
   assert ((Openai_responses_wire.parse_completion
     (completed [ function_call "call_A" "read_file" "{broken" ])).tool_calls =
     [ call "call_A" "read_file" (`Assoc [Protocol.invalid_arguments_key, `String "{broken"]) ]);

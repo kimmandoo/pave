@@ -392,7 +392,7 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
           done in
         let cancellation_requested = ref false and scheduler_failure = ref None in
         let make_task (call : Protocol.tool_call) :
-            Protocol.content_block list Tool_scheduler.task =
+            (Protocol.content_block list, string) result Tool_scheduler.task =
           let call = match t.secret_mask with
             | Some mask -> { call with arguments =
                 call.arguments
@@ -416,7 +416,7 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
                   }))
             | _ -> None in
           let complete message =
-            Tool_scheduler.Complete [Protocol.Text message] in
+            Tool_scheduler.Complete (Error message) in
           let prepare () =
             let argument key = match Protocol.member key call.arguments with
               | `String value -> Some value
@@ -483,7 +483,7 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
                           let job_id = delegate
                             ~cancel:(Option.value ~default:(fun () -> false) cancel)
                             ~label ~task in
-                          [Protocol.Text ("Started read-only child job " ^
+                          Ok [Protocol.Text ("Started read-only child job " ^
                             job_id ^ ".")]);
                         Tool_scheduler.Run
                     | _ -> complete
@@ -507,9 +507,8 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
                                  match execute ~name:call.name ~args:call.arguments
                                    ~cancel:(Option.value
                                      ~default:(fun () -> false) cancel) with
-                                 | Ok text -> [Protocol.Text text]
-                                 | Error message ->
-                                     [Protocol.Text ("Error: " ^ message)]);
+                                 | Ok text -> Ok [Protocol.Text text]
+                                 | Error message -> Error ("Error: " ^ message));
                                Tool_scheduler.Run)))
               else
                 match Tools.prepare ?cancel ?context:t.workspace_context
@@ -575,7 +574,7 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
               let shell = call.name = "run_command" || call.name = "start_shell" in
               match resolution with
               | Approval.Denied reason ->
-                  [Protocol.Text ("Error: " ^ reason)]
+                  Error ("Error: " ^ reason)
               | (Approval.Allowed | Approval.Requires_prompt _) as resolved ->
                   let reason = match resolved with
                     | Approval.Requires_prompt reason -> reason
@@ -647,9 +646,9 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
                            | _ -> false)
                       | None -> false in
                   if not approved then
-                    [Protocol.Text (if shell then
+                    Error (if shell then
                       "Error: command not approved"
-                      else "Error: tool approval denied")]
+                      else "Error: tool approval denied")
                   else (
                     if external_tool || Tools.non_reversible_tool
                       ~name:call.name ~args:call.arguments then (
@@ -678,10 +677,7 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
                       emit_tool_event t (Tool_executing {
                         call_id = call.id; name = call.name });
                     let content = execute ?cancel ?on_progress ~approved () in
-                    let failed = List.exists (function
-                      | Protocol.Text text ->
-                          String.starts_with ~prefix:"Error:" text
-                      | Protocol.Image _ -> false) content in
+                    let failed = Result.is_error content in
                     (match !tracked_path, before with
                      | Some location, Some (_, before) when not failed ->
                          (try
@@ -716,18 +712,20 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
             with
             | Provider.Cancelled -> raise Provider.Cancelled
             | Tools.Cancelled -> raise Tools.Cancelled
-            | exn -> [Protocol.Text ("Error: " ^ Printexc.to_string exn)] in
+            | exn -> Error ("Error: " ^ Printexc.to_string exn) in
           { Tool_scheduler.mode = Tools.execution_mode call.name;
             prepare; run } in
         let tasks = Array.map make_task calls in
         let on_complete index outcome =
           let (call : Protocol.tool_call) = calls.(index) in
           match outcome with
-          | Tool_scheduler.Completed content ->
+          | Tool_scheduler.Completed outcome ->
+              let content, is_error = match outcome with
+                | Ok content -> content, false
+                | Error message -> [Protocol.Text message], true in
               let result = Protocol.display_content_blocks content in
               emit_tool_event t (Tool_settled {
-                call_id = call.id; name = call.name; result;
-                is_error = String.starts_with ~prefix:"Error:" result
+                call_id = call.id; name = call.name; result; is_error
               });
               append t (Protocol.tool_result_blocks call.id content)
           | Tool_scheduler.Failed Tools.Cancelled ->

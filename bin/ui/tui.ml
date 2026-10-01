@@ -1006,26 +1006,55 @@ let approval_preview cols view =
       view.preview_cache <- Some (columns, lines);
       lines
 
-let approval_fits ~cols ~rows ~activity view =
-  cols >= 24 && rows >= 10 &&
-  let preview = approval_preview cols view in
-  Array.length preview <= max 0 (rows - 7 - activity) &&
+let approval_wrap cols text =
+  if text = "" then [| "" |]
+  else Transcript_view.wrap ~columns:(max 1 (cols - 4))
+    ~measure:measure_text text
+
+let approval_chrome cols view =
+  let header = Array.append (approval_wrap cols view.heading)
+    (approval_wrap cols view.context) in
+  let labels = Array.map (fun (key, label, _) ->
+    "[" ^ key ^ " " ^ label ^ "]") view.buttons in
+  let horizontal = 2 + Array.fold_left (fun size text ->
+    size + measure_text text + 2) 0 labels <= cols in
+  let buttons = if horizontal then [| Array.to_list
+      (Array.mapi (fun index text -> index, text) labels) |]
+    else Array.concat (Array.to_list (Array.mapi (fun index text ->
+      Array.map (fun part -> [index, part]) (approval_wrap cols text)) labels)) in
+  let notice_rows = Array.fold_left (fun rows (_, _, consequence) ->
+    max rows (Array.length (approval_wrap cols consequence))) 1 view.buttons in
+  header, buttons, notice_rows
+
+let approval_budget ~rows ~activity (header, buttons, notice_rows) =
+  rows - activity - Array.length header - Array.length buttons - notice_rows - 3
+
+let approval_content_fits ~cols ~rows ~preview_height preview =
+  cols >= 24 && rows >= 10 && Array.length preview <= preview_height &&
   Array.for_all (fun (_, line) -> measure_text line <= cols - 4) preview
 
-(* The decision sits directly under what is being decided; the activity row
-   stays at the bottom. Row budget: 3 header + preview + 4 decision rows. *)
+let approval_fits ~cols ~rows ~activity view =
+  let preview_height = approval_budget ~rows ~activity (approval_chrome cols view) in
+  approval_content_fits ~cols ~rows ~preview_height (approval_preview cols view)
+
+(* Header, controls and scope explanations share the preview's row budget.
+   Nothing that distinguishes a one-call decision from a lasting grant clips. *)
 let approval_screen ~cols ~rows ~activity_rows view =
   let activity = Array.length activity_rows in
-  let fits = approval_fits ~cols ~rows ~activity view in
   let line attr text = styled_line cols attr (shorten_width cols text) in
-  if rows < 8 then
+  let header, button_rows, notice_height = approval_chrome cols view in
+  let heading_height = Array.length (approval_wrap cols view.heading) in
+  let preview_height = approval_budget ~rows ~activity
+    (header, button_rows, notice_height) in
+  if rows < 8 || preview_height < 0 then
     Array.init rows (fun index ->
       if index = rows - 1 then line warning "n/Esc deny · resize"
       else if index = 0 then line accent "Approval needs room"
       else I.void cols 1), -1
   else
     let preview = approval_preview cols view in
-    let preview_height = rows - 7 - activity in
+    let fits = approval_content_fits ~cols ~rows ~preview_height preview in
+    let preview_height = max 0 preview_height in
     let shown = min preview_height (Array.length preview) in
     let selected = max 0 (min view.focus (Array.length view.buttons - 1)) in
     let consequence index =
@@ -1036,27 +1065,13 @@ let approval_screen ~cols ~rows ~activity_rows view =
           (let _, label, _ = view.buttons.(0) in label)
       else if view.notice <> "" then view.notice
       else consequence selected in
-    let row ~compact =
-      List.concat (List.mapi (fun index (key, label, _) ->
-        let text = if compact then "[" ^ key ^ " " ^ label ^ "]"
-          else "[ " ^ key ^ "  " ^ label ^ " ]" in
-        let attr = if index = selected then selected_attr
-          else if index > 0 && not fits then frame_attr else muted in
-        [I.string text_attr "  "; I.string attr text])
-        (Array.to_list view.buttons)) |> I.hcat in
-    let buttons =
-      let full = row ~compact:false in
-      if I.width full <= cols then full
-      else
-        let compact = row ~compact:true in
-        if I.width compact <= cols then compact
-        else
-          (* Too narrow for every button: show the selected one and its position. *)
-          let key, label, _ = view.buttons.(selected) in
-          I.(string text_attr "  " <|> string selected_attr ("[" ^ key ^ " " ^ label ^ "]")
-             <|> string muted (Printf.sprintf " %d/%d ←→" (selected + 1)
-               (Array.length view.buttons))) in
-    let buttons = I.hsnap ~align:`Left cols buttons in
+    let buttons = Array.map (fun parts ->
+      let cells = List.concat_map (fun (index, text) ->
+        let attr = if index > 0 && not fits then frame_attr
+          else if index = selected then selected_attr else muted in
+        [I.string text_attr "  "; I.string attr text]) parts in
+      I.hsnap ~align:`Left cols (I.hcat cells)) button_rows in
+    let notice = approval_wrap cols notice in
     let keys = String.concat "/" (List.filter (( <> ) "Esc")
       (Array.to_list (Array.map (fun (key, _, _) -> key) view.buttons))) in
     let first_label = let _, label, _ = view.buttons.(0) in
@@ -1065,19 +1080,21 @@ let approval_screen ~cols ~rows ~activity_rows view =
       (if cols < 40 then ["←→ choose"; "↵ ok"; keys]
        else ["←→/Tab choose"; enter_key ^ " confirm"; keys ^ " keys";
              "Esc " ^ first_label]) in
-    let mark = if no_color then "? " else "◆ " in
     Array.concat [
-      [| line accent ("  " ^ mark ^ view.heading);
-         line muted ("    " ^ view.context);
-         I.uchar frame_attr (Uchar.of_int 0x2500) cols 1 |];
+      Array.mapi (fun index text ->
+        line (if index < heading_height then accent else muted) ("  " ^ text)) header;
+      [| I.uchar frame_attr (Uchar.of_int 0x2500) cols 1 |];
       Array.init shown (fun index ->
         let primary, text = preview.(index) in
         if primary then line A.(text_attr ++ st bold) ("  " ^ text)
         else line text_attr ("  " ^ text));
-      [| I.void cols 1;
-         buttons;
-         line (if fits then muted else warning) ("  " ^ notice);
-         line muted ("  " ^ controls) |];
+      [| I.void cols 1 |];
+      buttons;
+      Array.init notice_height (fun index ->
+        if index < Array.length notice then
+          line (if fits then muted else warning) ("  " ^ notice.(index))
+        else I.void cols 1);
+      [| line muted ("  " ^ controls) |];
       Array.make (preview_height - shown) (I.void cols 1);
       activity_rows
     ], (if activity = 0 then -1 else rows - activity)
@@ -2040,13 +2057,13 @@ let finish_tool ?(aborted = false) ?(is_error = false)
   Hashtbl.remove t.tool_groups call_id;
   t.active_tool <- reset_tool_progress t.active_tool call_id;
   change_transcript t (fun () ->
-    let is_error = is_error || String.starts_with ~prefix:"Error:" result in
     let write = Option.fold ~none:false
       ~some:(Hashtbl.mem t.transcript.writes) group in
     Transcript_view.tool_result ?group ~aborted ~is_error
       t.transcript name result;
     if write then Option.iter (fun group ->
-      Transcript_view.finish_write t.transcript group ~aborted ~is_error) group);
+      Transcript_view.finish_write t.transcript group ~aborted ~is_error
+        ~denied:(is_error && List.mem result Transcript_view.denied_results)) group);
   paint t
 
 let tool_settled t call_id name result is_error =

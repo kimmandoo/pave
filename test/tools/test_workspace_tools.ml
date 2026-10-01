@@ -35,7 +35,9 @@ let rec remove_tree path =
   with Unix.Unix_error (Unix.ENOENT, _, _) -> ()
 
 let tool ?context ?(approved = false) ~root name fields =
-  Tools.execute ?context ~approved ~root ~name ~args:(`Assoc fields) ()
+  match Tools.execute ?context ~approved ~root ~name ~args:(`Assoc fields) () with
+  | Ok blocks -> Pave.Protocol.display_content_blocks blocks
+  | Error message -> message
 
 let () =
   let root = Filename.temp_file "pave-workspace-tools-" "" in

@@ -30,8 +30,10 @@ let () =
         ~read_artifact:(fun _ -> None)
         ~record_file_change:(fun ~path:_ ~before:_ ~after:_ -> ()) () in
       let call ?(approved = true) name fields =
-        Pave.Tools.execute ~root ~context ~approved ~name
-          ~args:(`Assoc fields) () in
+        match Pave.Tools.execute ~root ~context ~approved ~name
+          ~args:(`Assoc fields) () with
+        | Ok blocks -> Pave.Protocol.display_content_blocks blocks
+        | Error message -> message in
       let mobile ?(more = []) action =
         call "mobile_check" (["stack", `String stack;
           "subroot", `String "."; "action", `String action;

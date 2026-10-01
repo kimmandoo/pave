@@ -497,17 +497,28 @@ let () =
        String.ends_with ~suffix:"live" row.text) first_card.code);
   write_state writes second "writing";
   tool_result ~group:second writes "write_file" "Wrote two.ml";
-  finish_write writes second ~aborted:false ~is_error:false;
+  finish_write writes second ~aborted:false ~is_error:false ~denied:false;
   expect "out-of-order settlement preserves the other live card"
     (Hashtbl.mem writes.writes first && not (Hashtbl.mem writes.writes second) &&
      second_card.executing && heading_count writes Tool = 2);
-  finish_write writes first ~aborted:true ~is_error:false;
+  finish_write writes first ~aborted:true ~is_error:false ~denied:false;
   expect "queued cancellation clears the live card without executing it"
     (not first_card.executing && not (Hashtbl.mem writes.writes first));
   let denied = start_write writes in
   write_preview writes denied one "queued · not written";
   let denied_card = Hashtbl.find writes.writes denied in
-  finish_write writes denied ~aborted:false ~is_error:true;
-  expect "denial and pre-execution error clear the card without executing it"
-    (not denied_card.executing && not (Hashtbl.mem writes.writes denied));
+  tool_result ~group:denied ~is_error:true writes "write_file"
+    "Error: tool approval denied";
+  finish_write writes denied ~aborted:false ~is_error:true ~denied:true;
+  expect "refused write is denied, not failed or written"
+    (not denied_card.executing && not (Hashtbl.mem writes.writes denied) &&
+     denied_card.state.text = "denied by you · not written");
+  let literal_error = create () in
+  let read = start_tool ~target:"errors.txt" literal_error "read_file" in
+  tool_result ~group:read ~is_error:false literal_error "read_file"
+    "Error: tool approval denied";
+  expect "successful error-looking file content is still a successful read"
+    (Array.exists (fun (entry : entry) -> entry.row.style = Tool_summary &&
+       entry.row.kind = Tool) (snapshot literal_error ~columns:80 ~measure).entries &&
+     heading_count literal_error Error = 0);
   print_endline "semantic transcript, cancellation, expansion and resize: ok"

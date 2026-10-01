@@ -180,6 +180,37 @@ let () =
    | exception Protocol.Invalid_response reason ->
        assert (String.ends_with ~suffix:"provider error: usage limit reached" reason)
    | _ -> failwith "Codex error event must not finish successfully");
+  let contains needle text =
+    let n = String.length needle in
+    let rec scan i = i + n <= String.length text &&
+      (String.sub text i n = needle || scan (i + 1)) in
+    scan 0 in
+  List.iter (fun (failure, expected) ->
+    let rejected = Codex_stream.create ~model ~on_text:ignore () in
+    (match Codex_stream.feed rejected (added initial_call ^ failure) with
+     | exception Protocol.Invalid_response detail ->
+         assert (contains expected detail)
+     | _ -> failwith "Codex failure released partial calls");
+    assert (not (Codex_stream.is_finished rejected));
+    assert (Codex_stream.usage rejected = None);
+    (match Codex_stream.finish rejected with
+     | exception Protocol.Invalid_response _ -> ()
+     | _ -> failwith "Codex failure returned calls on finish"))
+    [
+      (event "error" ["response", `Assoc ["error", `Assoc [
+        "message", `String "quota exhausted"; "code", `String "quota_exceeded"]]],
+       "quota_exceeded");
+      (event "response.failed" ["response", `Assoc [
+        "error", `Assoc ["message", `String "backend unavailable"]]],
+       "backend unavailable");
+      (event "response.incomplete" ["response", `Assoc [
+        "incomplete_details", `Assoc ["reason", `String "max_output_tokens"]]],
+       Protocol.truncated_prefix);
+      (event "response.completed" ["response", `Assoc [
+        "status", `String "completed"; "output", `List [final_call];
+        "error", `Assoc ["message", `String "backend unavailable"]]],
+       "backend unavailable")
+    ];
   let poisoned = Codex_stream.create ~model ~on_text:(fun _ -> ()) () in
   Codex_stream.feed poisoned (completed ~output:[final_message] ());
   (match Codex_stream.feed poisoned (event "response.created" ["id", `String "resp_1"]) with

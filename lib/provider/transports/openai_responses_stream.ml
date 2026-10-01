@@ -226,7 +226,8 @@ let handle_event t event data =
           | Some detail -> "provider error: " ^ detail
           | None -> "response failed or incomplete")
     | "response.failed" | "response.incomplete" ->
-        Openai_responses_wire.reject_unfinished ~invalid (field "response" json);
+        let status = if kind = "response.failed" then "failed" else "incomplete" in
+        Openai_responses_wire.reject_unfinished ~status ~invalid json;
         invalid "response failed or incomplete"
     | _ when String.length kind >= 9 && String.sub kind 0 9 = "response." -> ()
     | _ -> invalid "unknown event")
