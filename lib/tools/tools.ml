@@ -3159,16 +3159,22 @@ let approval_request ?cancel ?context ~root ~name ~args (decision : Approval.dec
              ["Path: " ^ quoted "path" "(missing)" args])
     | "web_search" ->
         let page = optional_int "page" 0 ~minimum:0 ~maximum:Web_search.max_page args in
-        let order, credentialed = match Web_search.plan_summary ~page () with
+        let order, credentialed, rendered = match Web_search.plan_summary ~page () with
           | explicit, engines ->
-              (String.concat " → " (List.map fst engines) ^
+              (String.concat " → " (List.map (fun (name, _, browser) ->
+                   if browser then name ^ " (local browser)" else name) engines) ^
                  (if explicit then " (from " ^ Web_search.priority_variable ^ ")"
                   else " (automatic)")),
-              List.filter_map (fun (name, keyed) -> if keyed then Some name else None) engines
-          | exception Web_search.Error message -> "(unavailable: " ^ message ^ ")", [] in
-        "Sends this query to the first search provider in the order below; the next is tried only if one fails. Each API credential goes only to its own provider; DuckDuckGo receives the query without credentials.",
+              List.filter_map (fun (name, keyed, _) -> if keyed then Some name else None) engines,
+              List.exists (fun (_, _, browser) -> browser) engines
+          | exception Web_search.Error message -> "(unavailable: " ^ message ^ ")", [], false in
+        "Sends this query to the first search provider in the order below; the next is tried only if one fails or finds nothing. Each API credential goes only to its own provider; DuckDuckGo and Ecosia receive the query without credentials.",
         ["Query: " ^ quoted "query" "(missing)" args;
-         "Providers: " ^ order;
+         "Providers: " ^ order] @
+        (if rendered then
+           ["A local headless browser opens the provider's results page with a fresh, temporary profile; that page's scripts run in the browser sandbox."]
+         else []) @
+        [
          "Credentials sent to: " ^
            (if credentialed = [] then "none" else String.concat ", " credentialed);
          "Credentials are never shown in this approval."]

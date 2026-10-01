@@ -1,5 +1,12 @@
 # Troubleshooting
 
+### [2026-10-01] Most credential-free search engines refuse even a headless browser
+
+- **Context / Symptom:** Adding browser-backed engines from the reference provider set: with curl, Ecosia returned HTTP 403 and Startpage 303. With Chrome for Testing `chrome-headless-shell` 154 (`--dump-dom`), Google returned an "unusual traffic" page, Startpage an Anubis proof-of-work page, Mojeek an ALTCHA captcha, Bing no results, and DuckDuckGo HTML an `anomaly` challenge. Only Ecosia rendered real results (10 `organic-result` articles, repeatable).
+- **Root Cause:** These engines fingerprint headless automation or require interactive challenges; the reference implementation relies on stealth patches and puppeteer interaction that Pave does not reproduce.
+- **Solution:** Implemented only Ecosia as a browser-rendered engine (sandbox on, fresh deleted profile, fixed URL, 30 s, 4 MiB DOM cap) and kept DuckDuckGo on its plain HTML POST, which still works without a browser. Challenge pages fail that engine and the chain moves on.
+- **Prevention / Reference:** Re-probe an engine with `chrome-headless-shell --headless --dump-dom URL` before adding it; do not add stealth/evasion flags. A scratch dune executable created right after `dune runtest` sometimes failed with `I/O error: ... .cmi: No such file`; rebuilding the same target once succeeded.
+
 ### [2026-10-01] Devin discarded healthy long responses at a fixed two-minute deadline
 
 - **Context / Symptom:** After successful file tools, the user received `Devin Connect transport failed: request timed out (remote acceptance unknown)`. A local real-curl response emitting binary chunks every five seconds reproduced the transport cutoff at 120.13 seconds with one request.

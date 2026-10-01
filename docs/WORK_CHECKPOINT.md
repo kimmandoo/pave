@@ -1,5 +1,16 @@
 # Work checkpoint
 
+## Current session — headless-browser search, latest-commit review and limits
+
+- **Date:** 2026-10-01
+- **Active task:** Completed the request to add headless-browser search, review the latest commit (`aa4a03a`, web/Devin repair) and reassess the imposed limits. Start: `main` clean at `aa4a03a`, synchronized with origin (history had been rewritten since the earlier sessions).
+- **Browser search:** Probed Google, Startpage, Mojeek, Bing, Ecosia and DuckDuckGo with Chrome for Testing headless shell 154; only Ecosia returned real results (others: challenge/captcha pages). Added `Ecosia` rendered via `Web_search.render_page` (sandbox on, fresh profile deleted afterwards, fixed URL, 30 s, 4 MiB, cancellable) with `detect_browser` (standard paths or absolute `PAVE_BROWSER`, `none` disables). It joins the automatic plan after DuckDuckGo only when a browser exists; approval names it "(local browser)" and explains the run.
+- **Review fixes / limits:** (1) Any duplicate, private or plain-HTTP row, or a provider returning more rows than requested, failed the whole search — rows are now dropped/cut, structure stays strict. (2) A valid empty answer stopped the chain — empty now moves to the next provider; all-empty returns empty. (3) `web_fetch` pages over 1 MiB failed outright (curl `max-filesize` abort) — the transfer is now capped in the reader, status taken from dumped headers, and the leading part returned with `truncated=true`. Kept: 20 results max, Brave-only paging up to 9, 600-byte query, 256 KiB search responses, 20 s per request, 64 KiB fetch preview, per-call approval for shell/process/remote/external/child-agent tools.
+- **Changed files:** `lib/tools/{web_search,tools}.ml`, `test/tools/test_web_search.ml`, `CHANGELOG.md`, `docs/{USAGE,DESIGN_RULES,TROUBLESHOOTING,WORK_CHECKPOINT}.md`.
+- **Verification:** `opam exec -- dune build @install` and `opam exec -- dune runtest` passed (exit 0). Live: a saved Ecosia DOM parsed 5 rows; real `Web_search.search` with `PAVE_BROWSER` set to Chrome for Testing headless shell and priority `ecosia` returned 5 results in 4.4 s with no leftover profile; real `fetch_url` of RFC 9110 (1,187,554 bytes) returned a 65,530-byte preview with `truncated=true`.
+- **Limits / blockers:** No Linux browser is installed on this machine; the live check used a downloaded headless shell in the session scratchpad. Ecosia may challenge automated traffic too. No release or installed-binary replacement.
+- **Exact next action:** None for this request; release only when asked.
+
 ## Current session — Devin deadlines and web request/response reliability
 
 - **Date:** 2026-10-01

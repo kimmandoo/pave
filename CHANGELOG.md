@@ -2,6 +2,8 @@
 
 ## 2026-10-01
 
+- feat(tools): added browser-rendered Ecosia web search through a locally installed or `PAVE_BROWSER` Chrome/Chromium/Edge, run headless with its sandbox and a throwaway profile; it joins the automatic chain after DuckDuckGo only when a browser is available.
+- fix(tools): stopped one bad search result row (duplicate, private, plain HTTP) or an over-long result list from failing the whole search, moved on to the next provider when one returns nothing, and returned a truncated preview instead of an error for pages over 1 MiB.
 - fix(devin): replaced the unconditional two-minute completion cutoff with response-phase deadlines, bounded binary receipt before parsing, and named the failing RPC without replaying accepted requests.
 - fix(web): separated document download and preview limits, preserved JSON source text, marked bounded UTF-8 previews as truncated, and retained safe transport failure causes.
 - fix(search): recognized genuine empty DuckDuckGo pages across HTML quote/class variants, distinguished HTTP 202 challenges, and retained configured fallback without inventing results.

@@ -316,20 +316,76 @@ let () =
        ~env:(environment ["PAVE_WEB_SEARCH_PROVIDER_PRIORITY", "brave";
                          "BRAVE_SEARCH_API_KEY", "brave-secret"])
        ~query:"query" ());
-  expect_error "duplicate result URLs, including fragment variants" "duplicate result URL"
-    (fun () -> Web_search.search ~http:(fun _ -> Ok (200,
-      "{\"web\":{\"results\":[" ^
-      "{\"title\":\"One\",\"url\":\"https://EXAMPLE.org/a\",\"description\":\"one\"}," ^
-      "{\"title\":\"Two\",\"url\":\"https://example.org/a#section\",\"description\":\"two\"}]}}"))
-       ~env:(environment ["PAVE_WEB_SEARCH_PROVIDER_PRIORITY", "brave";
-                         "BRAVE_SEARCH_API_KEY", "brave-secret"])
-       ~query:"query" ~count:2 ());
-  expect_error "private result URL rejected" "private, local"
-    (fun () -> Web_search.search ~http:(fun _ -> Ok (200,
-      "{\"web\":{\"results\":[{\"title\":\"Private\",\"url\":\"https://127.0.0.1/private\",\"description\":\"x\"}]}}"))
-       ~env:(environment ["PAVE_WEB_SEARCH_PROVIDER_PRIORITY", "brave";
-                         "BRAVE_SEARCH_API_KEY", "brave-secret"])
-       ~query:"query" ());
+  let brave_only = environment ["PAVE_WEB_SEARCH_PROVIDER_PRIORITY", "brave";
+                                 "BRAVE_SEARCH_API_KEY", "brave-secret"] in
+  let mixed = Web_search.search ~env:brave_only ~query:"query" ~count:2
+      ~http:(fun _ -> Ok (200,
+        "{\"web\":{\"results\":[" ^
+        "{\"title\":\"One\",\"url\":\"https://EXAMPLE.org/a\",\"description\":\"one\"}," ^
+        "{\"title\":\"Dup\",\"url\":\"https://example.org/a#section\",\"description\":\"dup\"}," ^
+        "{\"title\":\"Private\",\"url\":\"https://127.0.0.1/private\",\"description\":\"x\"}," ^
+        "{\"title\":\"Plain\",\"url\":\"http://insecure.example/\",\"description\":\"x\"}," ^
+        "{\"title\":\"Two\",\"url\":\"https://example.org/b\",\"description\":\"two\"}," ^
+        "{\"title\":\"Three\",\"url\":\"https://example.org/c\",\"description\":\"three\"}]}}")) () in
+  expect "duplicate, private and non-HTTPS rows are dropped and extra rows cut to count"
+    (List.map (fun (result : Web_search.result) -> result.title) mixed.results = ["One"; "Two"]);
+  expect_error "a structurally invalid response still fails" "web must be an object"
+    (fun () -> Web_search.search ~env:brave_only ~query:"query"
+       ~http:(fun _ -> Ok (200, "{\"web\":[]}")) ());
+
+  (* Empty answers move to the next provider; all-empty is an empty answer. *)
+  let tried = ref [] in
+  let empty_then_found = Web_search.search ~query:"query"
+      ~env:(environment ["PAVE_WEB_SEARCH_PROVIDER_PRIORITY", "tavily,brave";
+                        "TAVILY_API_KEY", "tavily-secret"; "BRAVE_SEARCH_API_KEY", "brave-secret"])
+      ~http:(fun request ->
+        tried := request.search :: !tried;
+        if request.search = Some Web_search.Tavily then Ok (200, {|{"results":[]}|})
+        else Ok (200, brave_response)) () in
+  expect "an empty provider falls through to the next"
+    (empty_then_found.provider = "brave" && List.length !tried = 2 &&
+     empty_then_found.failed = []);
+
+  (* Browser-rendered Ecosia, with an injected renderer. *)
+  let ecosia_html =
+    "<article data-test-id=\"organic-result\" aria-label=\"Notty &amp; OCaml\">" ^
+    "<a data-test-id=\"result-link\" href=\"https://www.ecosia.org/settings\">x</a>" ^
+    "<a data-test-id=\"result-link\" href=\"https://github.com/pqwy/notty\">Notty</a>" ^
+    "<p data-test-id=\"web-result-description\">Declarative\n<b>terminal</b> graphics</p></article>" ^
+    "<article data-test-id=\"organic-result\" aria-label=\"Insecure\">" ^
+    "<a data-test-id=\"result-link\" href=\"http://plain.example/\">p</a></article>" in
+  let rendered = ref [] in
+  let ecosia = Web_search.search ~query:"notty"
+      ~env:(environment ["PAVE_WEB_SEARCH_PROVIDER_PRIORITY", "ecosia"])
+      ~find_browser:(fun () -> Some "/fixture/chrome")
+      ~http:(fun _ -> fail "Ecosia must not use curl")
+      ~render:(fun ~program url -> rendered := (program, url) :: !rendered; ecosia_html) () in
+  expect "Ecosia renders its fixed URL in the detected browser"
+    (!rendered = ["/fixture/chrome", "https://www.ecosia.org/search?q=notty"]);
+  expect "Ecosia rows skip Ecosia-internal and plain-HTTP links"
+    (List.map (fun (result : Web_search.result) -> result.url, result.title, result.snippet)
+       ecosia.results =
+     ["https://github.com/pqwy/notty", "Notty & OCaml", "Declarative terminal graphics"]);
+  expect_error "Ecosia without a browser explains how to enable it" "PAVE_BROWSER"
+    (fun () -> Web_search.search ~query:"q"
+       ~env:(environment ["PAVE_WEB_SEARCH_PROVIDER_PRIORITY", "ecosia"])
+       ~find_browser:(fun () -> None) ());
+  let automatic_without_browser = Web_search.plan_summary ~env:(environment [])
+      ~find_browser:(fun () -> None) () in
+  let automatic_with_browser = Web_search.plan_summary ~env:(environment [])
+      ~find_browser:(fun () -> Some "/fixture/chrome") () in
+  expect "automatic plan adds browser-rendered Ecosia only when a browser exists"
+    (automatic_without_browser = (false, ["duckduckgo", false, false]) &&
+     automatic_with_browser = (false, ["duckduckgo", false, false; "ecosia", false, true]));
+  expect_error "Ecosia challenge page is explained" "bot-detection"
+    (fun () -> Web_search.search ~query:"q"
+       ~env:(environment ["PAVE_WEB_SEARCH_PROVIDER_PRIORITY", "ecosia"])
+       ~find_browser:(fun () -> Some "/fixture/chrome")
+       ~render:(fun ~program:_ _ -> "<script>window._cf_chl_opt={}</script>") ());
+  expect_error "relative PAVE_BROWSER is rejected" "absolute path"
+    (fun () -> Web_search.detect_browser ~env:(environment ["PAVE_BROWSER", "chrome"]) ());
+  expect "PAVE_BROWSER=none disables browser engines"
+    (Web_search.detect_browser ~env:(environment ["PAVE_BROWSER", "none"]) () = None);
   expect_error "oversized search results rejected" "response exceeds the size limit"
     (fun () -> Web_search.search ~http:(fun _ -> Ok (200, String.make (Web_search.max_response_bytes + 1) 'x'))
        ~env:(environment ["PAVE_WEB_SEARCH_PROVIDER_PRIORITY", "brave";
@@ -419,12 +475,12 @@ let () =
       "<table><tr><td>abcdefghijklmnop</td></tr></table>" in
   expect "large first table cell retains a bounded visible preview"
     (table_cut && table_preview = "| abcdef");
-  let rejected = ref false in
-  (try ignore (Web_search.fetch_url
-       ~http:(fun _ -> Ok (200, String.make (Web_search.max_fetch_response_bytes + 1) 'x'))
-       "https://93.184.216.34/too-large" ())
-   with Web_search.Error _ -> rejected := true);
-  expect "oversized downloads never become apparently successful previews" !rejected;
+  let oversized = Web_search.fetch_url
+      ~http:(fun _ -> Ok (200, "<p>Lead paragraph</p>" ^
+        String.make (Web_search.max_fetch_response_bytes + 1) 'x'))
+      "https://93.184.216.34/too-large" () in
+  expect "oversized downloads keep a leading preview marked truncated"
+    (oversized.truncated && String.starts_with ~prefix:"Lead paragraph" oversized.markdown);
   expect_error "nonstandard fetch port rejected" "port 443"
     (fun () -> Web_search.fetch_url ~http:(fun _ -> fail "non-443 URL must not be requested")
        "https://pages.example.org:8443/article" ());

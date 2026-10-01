@@ -1,8 +1,10 @@
 (* Credentialed search engines in automatic priority order, followed by the
-   credential-free HTML fallback. Explicit configuration preserves its order. *)
-type provider = Exa | Firecrawl | Brave | Tavily | Kagi | Jina | Duckduckgo
+   credential-free HTML fallback and, when a local Chromium-family browser is
+   available, the browser-rendered Ecosia fallback. Explicit configuration
+   preserves its order. *)
+type provider = Exa | Firecrawl | Brave | Tavily | Kagi | Jina | Duckduckgo | Ecosia
 
-let all_providers = [Exa; Firecrawl; Brave; Tavily; Kagi; Jina; Duckduckgo]
+let all_providers = [Exa; Firecrawl; Brave; Tavily; Kagi; Jina; Duckduckgo; Ecosia]
 
 type request = {
   search : provider option;  (* Some engine: a pinned search call; None: URL fetch *)
@@ -32,6 +34,7 @@ type response = {
 type fetched_page = { source_url : string; markdown : string; truncated : bool }
 
 exception Error of string
+exception Download_limit
 let fail message = raise (Error message)
 let brave_endpoint = "https://api.search.brave.com/res/v1/web/search"
 let tavily_endpoint = "https://api.tavily.com/search"
@@ -40,6 +43,8 @@ let jina_endpoint = "https://s.jina.ai/"
 let kagi_endpoint = "https://kagi.com/api/v1/search"
 let firecrawl_endpoint = "https://api.firecrawl.dev/v2/search"
 let duckduckgo_endpoint = "https://html.duckduckgo.com/html/"
+let ecosia_endpoint = "https://www.ecosia.org/search"
+let browser_variable = "PAVE_BROWSER"
 let priority_variable = "PAVE_WEB_SEARCH_PROVIDER_PRIORITY"
 let max_query_bytes = 600
 let max_results = 20
@@ -86,12 +91,12 @@ let percent_encode text =
 let provider_name = function
   | Exa -> "exa" | Firecrawl -> "firecrawl" | Brave -> "brave"
   | Tavily -> "tavily" | Kagi -> "kagi" | Jina -> "jina"
-  | Duckduckgo -> "duckduckgo"
+  | Duckduckgo -> "duckduckgo" | Ecosia -> "ecosia"
 
 let provider_label = function
   | Exa -> "Exa" | Firecrawl -> "Firecrawl" | Brave -> "Brave Search"
   | Tavily -> "Tavily" | Kagi -> "Kagi" | Jina -> "Jina"
-  | Duckduckgo -> "DuckDuckGo"
+  | Duckduckgo -> "DuckDuckGo" | Ecosia -> "Ecosia"
 
 let provider_of_name name =
   match List.find_opt (fun provider -> provider_name provider = name) all_providers with
@@ -121,27 +126,32 @@ let credential_name = function
   | Jina -> Some "JINA_API_KEY"
   | Kagi -> Some "KAGI_API_KEY"
   | Firecrawl -> Some "FIRECRAWL_API_KEY"
-  | Duckduckgo -> None
+  | Duckduckgo | Ecosia -> None
+
+(* Ecosia answers plain HTTP clients with a challenge; it is fetched by a
+   local headless browser instead of curl. *)
+let requires_browser = function Ecosia -> true | _ -> false
 
 let endpoint = function
   | Brave -> brave_endpoint | Tavily -> tavily_endpoint | Exa -> exa_endpoint
   | Jina -> jina_endpoint | Kagi -> kagi_endpoint | Firecrawl -> firecrawl_endpoint
-  | Duckduckgo -> duckduckgo_endpoint
+  | Duckduckgo -> duckduckgo_endpoint | Ecosia -> ecosia_endpoint
 
 let endpoint_host = function
   | Brave -> "api.search.brave.com" | Tavily -> "api.tavily.com"
   | Exa -> "api.exa.ai" | Jina -> "s.jina.ai" | Kagi -> "kagi.com"
   | Firecrawl -> "api.firecrawl.dev" | Duckduckgo -> "html.duckduckgo.com"
+  | Ecosia -> "www.ecosia.org"
 
 let endpoint_method = function
-  | Brave | Jina -> "GET"
+  | Brave | Jina | Ecosia -> "GET"
   | Tavily | Exa | Kagi | Firecrawl | Duckduckgo -> "POST"
 
 let credential_header = function
   | Brave -> Some "X-Subscription-Token"
   | Exa -> Some "x-api-key"
   | Tavily | Jina | Kagi | Firecrawl -> Some "Authorization"
-  | Duckduckgo -> None
+  | Duckduckgo | Ecosia -> None
 
 (* Only Brave exposes result paging through its API. *)
 let supports_paging = function Brave -> true | _ -> false
@@ -153,6 +163,7 @@ let allowed_headers provider =
   | Jina -> ["Accept"; "X-Respond-With"; "X-Retain-Images"] @ credential
   | Duckduckgo -> ["Accept"; "Accept-Language"; "Content-Type"; "Referer"; "User-Agent"]
   | Tavily | Exa | Kagi | Firecrawl -> ["Accept"; "Content-Type"] @ credential
+  | Ecosia -> []
 
 let valid_credential name value =
   if String.length value = 0 then None
@@ -202,13 +213,6 @@ let normalized_url_key url =
     | Some index -> String.sub suffix 0 index in
   let host_text = if String.contains host ':' then "[" ^ host_lower ^ "]" else host_lower in
   "https://" ^ host_text ^ suffix
-
-let validate_result_urls urls =
-  let seen = Hashtbl.create (List.length urls) in
-  List.iter (fun url ->
-    let key = normalized_url_key url in
-    if Hashtbl.mem seen key then fail "malformed search response: duplicate result URL";
-    Hashtbl.add seen key ()) urls
 
 let array_field label = function
   | `List values -> values
@@ -322,18 +326,22 @@ let result_rows provider json =
          | Some title when String.trim title <> "" -> title
          | _ -> url) |> clean_text ~limit:1_024, url,
         clean_text (first_string ["description"; "snippet"] row))
-  | Duckduckgo -> fail "DuckDuckGo returns HTML, not JSON"
+  | Duckduckgo | Ecosia -> fail (provider_label provider ^ " returns HTML, not JSON")
 
+(* One unusable row (plain HTTP, private host, duplicate, oversized text)
+   is dropped rather than failing the whole search, and engines that ignore
+   the requested count are cut to it. The response's structure stays strict. *)
 let validate_rows count rows =
-  if List.length rows > count then fail "malformed search response: result count exceeds requested limit";
-  List.iter (fun (title, url, snippet) ->
-    if title = "" || String.length title > 1_024 || contains_control title then
-      fail "malformed search response: invalid result title";
-    if String.length url = 0 || String.length url > 4_096 then
-      fail "malformed search response: invalid result URL size";
-    if String.length snippet > 8_192 || contains_control snippet then
-      fail "malformed search response: invalid result snippet") rows;
-  validate_result_urls (List.map (fun (_, url, _) -> url) rows)
+  let seen = Hashtbl.create (List.length rows) in
+  let usable (title, url, snippet) =
+    title <> "" && String.length title <= 1_024 && not (contains_control title) &&
+    String.length url > 0 && String.length url <= 4_096 &&
+    String.length snippet <= 8_192 && not (contains_control snippet) &&
+    match normalized_url_key url with
+    | key when Hashtbl.mem seen key -> false
+    | key -> Hashtbl.add seen key (); true
+    | exception Error _ -> false in
+  List.filter usable rows |> List.filteri (fun index _ -> index < count)
 
 let numbered provider rows =
   List.mapi (fun index (title, url, snippet) -> {
@@ -342,9 +350,7 @@ let numbered provider rows =
   }) rows
 
 let parse_results provider count json =
-  let rows = result_rows provider json in
-  validate_rows count rows;
-  numbered provider rows
+  numbered provider (validate_rows count (result_rows provider json))
 
 let check_cancel cancel = match cancel with
   | Some is_cancelled when is_cancelled () -> fail "search or fetch cancelled"
@@ -395,11 +401,15 @@ let curl_request ?cancel request =
   let host_key = if String.contains host ':' then "[" ^ host ^ "]" else host in
   let pin_address = if String.contains address ':' then "[" ^ address ^ "]" else address in
   let resolve = host_key ^ ":443:" ^ pin_address in
+  let header_path = ref None and capped = ref false in
   let with_body path =
     "silent\nshow-error\n" ^ option "url" request.url ^
     option "request" request.method_ ^ option "write-out" "%{http_code}" ^
     option "connect-timeout" "5" ^ option "max-time" (string_of_int timeout_seconds) ^
-    option "max-filesize" (string_of_int request.response_limit) ^
+    (* A page fetch keeps a bounded prefix past its limit, so curl must not
+       abort the transfer; search responses stay hard-limited. *)
+    (if is_search then option "max-filesize" (string_of_int request.response_limit) else "") ^
+    (match !header_path with None -> "" | Some path -> option "dump-header" path) ^
     option "proto" "=https" ^ option "proto-redir" "=https" ^
     option "max-redirs" "0" ^ option "proxy" "" ^ option "noproxy" "*" ^
     option "resolve" resolve ^
@@ -409,11 +419,17 @@ let curl_request ?cancel request =
   let received = Buffer.create (min request.response_limit 4_096) in
   let collect chunk =
     if Buffer.length received + String.length chunk > request.response_limit + 3 then
-      fail "HTTP response exceeds the size limit";
-    Buffer.add_string received chunk in
+      if is_search then fail "HTTP response exceeds the size limit"
+      else (
+        (* Keep one byte past the limit so the caller can mark truncation. *)
+        let room = request.response_limit + 1 - Buffer.length received in
+        if room > 0 then Buffer.add_substring received chunk 0 (min room (String.length chunk));
+        raise Download_limit)
+    else Buffer.add_string received chunk in
   let run path =
     try ignore (Provider.run_curl ?cancel ~on_chunk:collect (with_body path))
     with
+    | Download_limit -> capped := true
     | Provider.Cancelled -> fail "search or fetch cancelled"
     | Provider.Provider_error reason ->
         let message = match reason with
@@ -427,14 +443,28 @@ let curl_request ?cancel request =
           | _ -> "HTTPS request failed" in
         fail message
   in
-  (match if request.body = "" then None else Some request.body with
-   | None -> run None
-   | Some body ->
-       Provider.with_temp_file (fun path channel ->
-         output_string channel body;
-         flush channel;
-         run (Some path)));
+  let transfer () = match if request.body = "" then None else Some request.body with
+    | None -> run None
+    | Some body ->
+        Provider.with_temp_file (fun path channel ->
+          output_string channel body;
+          flush channel;
+          run (Some path)) in
+  (* A capped fetch stops before curl's trailing status, so read the status
+     from the response headers instead. *)
+  let capped_status =
+    if is_search then (transfer (); None)
+    else Provider.with_temp_file (fun path channel ->
+      close_out channel;
+      header_path := Some path;
+      transfer ();
+      if !capped then Provider.status_from_headers (Provider.read_file path) else None) in
   check_cancel cancel;
+  if !capped then
+    match capped_status with
+    | None -> fail "HTTPS request returned no HTTP status"
+    | Some status -> status, Buffer.contents received
+  else
   let combined = Buffer.contents received in
   let length = String.length combined in
   if length < 3 then fail "HTTPS request returned no HTTP status";
@@ -461,19 +491,88 @@ let invoke ?http ?cancel request =
   let status, body = match response with
     | Ok response -> response
     | Error message -> fail message in
-  if String.length body > request.response_limit then fail "HTTP response exceeds the size limit";
+  if String.length body > request.response_limit && request.search <> None then
+    fail "HTTP response exceeds the size limit";
   if request.search = Some Duckduckgo && status = 202 then
     fail "DuckDuckGo blocked or deferred this search (HTTP 202, usually a bot-detection challenge); use another configured search provider or fetch a known source URL directly";
   if status <> 200 then fail (Printf.sprintf "search/fetch provider returned HTTP %d" status);
   body
 
-type candidate = { engine : provider; key : string option }
+(* A local Chromium-family browser renders pages that refuse plain HTTP
+   clients. PAVE_BROWSER names one explicitly (or "none" disables it);
+   otherwise common install locations are checked. *)
+let browser_paths = [
+  "/usr/bin/google-chrome"; "/usr/bin/google-chrome-stable"; "/usr/bin/chromium";
+  "/usr/bin/chromium-browser"; "/snap/bin/chromium"; "/usr/bin/microsoft-edge";
+  "/usr/bin/microsoft-edge-stable";
+  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+  "/Applications/Chromium.app/Contents/MacOS/Chromium";
+  "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge" ]
+
+let detect_browser ?(env = Sys.getenv_opt) () =
+  match env browser_variable with
+  | None | Some "" -> Native_services.first_executable browser_paths
+  | Some value when String.lowercase_ascii (String.trim value) = "none" -> None
+  | Some path when not (Filename.is_relative path) && Native_services.executable path ->
+      Some path
+  | Some _ ->
+      fail (browser_variable ^
+        " must be an absolute path to a Chromium-family browser executable, or none")
+
+let browser_user_agent =
+  "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+
+let browser_timeout_seconds = 30.
+let max_browser_bytes = 4 * 1024 * 1024
+
+let rec remove_tree path =
+  match (Unix.lstat path).st_kind with
+  | Unix.S_DIR ->
+      Array.iter (fun entry -> remove_tree (Filename.concat path entry)) (Sys.readdir path);
+      Unix.rmdir path
+  | _ -> Unix.unlink path
+  | exception Unix.Unix_error _ -> ()
+
+(* Renders one fixed search URL in a sandboxed headless browser with a fresh
+   throwaway profile (no cookies, history or credentials) and returns the DOM. *)
+let render_page ?cancel ~program url =
+  check_cancel cancel;
+  let profile = Filename.temp_dir "pave-browser-" "" in
+  Fun.protect ~finally:(fun () -> try remove_tree profile with _ -> ()) (fun () ->
+    let result =
+      try Native_services.run_native
+        ~cancel:(fun () -> match cancel with Some cancelled -> cancelled () | None -> false)
+        ~timeout_seconds:browser_timeout_seconds ~output_limit:max_browser_bytes ~program
+        ~arguments:[
+          "--headless"; "--disable-gpu"; "--no-first-run"; "--no-default-browser-check";
+          "--disable-extensions"; "--disable-sync"; "--disable-background-networking";
+          "--disable-component-update"; "--mute-audio"; "--hide-scrollbars"; "--lang=en-US";
+          "--user-data-dir=" ^ profile; "--user-agent=" ^ browser_user_agent;
+          "--virtual-time-budget=8000"; "--dump-dom"; url ]
+        ~stdin:""
+      with Unix.Unix_error _ -> fail "headless browser could not be started" in
+    match result.termination with
+    | Workspace_process.Cancelled -> fail "search or fetch cancelled"
+    | Workspace_process.Timed_out ->
+        fail (Printf.sprintf "headless browser did not finish within %.0f s" browser_timeout_seconds)
+    | _ when result.truncated -> fail "rendered page exceeds the size limit"
+    | Workspace_process.Exited 0 when String.trim result.output <> "" -> result.output
+    | Workspace_process.Exited 0 -> fail "headless browser returned an empty page"
+    | Workspace_process.Exited code ->
+        fail (Printf.sprintf "headless browser exited with status %d" code)
+    | Workspace_process.Signaled _ -> fail "headless browser was terminated")
+
+type candidate = { engine : provider; key : string option; browser : string option }
 
 (* An explicit priority uses exactly the listed engines in order. Otherwise
    every engine with a credential is tried in default order, ending with the
    credential-free DuckDuckGo fallback. Engines without their credential are
    skipped, never sent a request. *)
-let plan ?(env = Sys.getenv_opt) ?(page = 0) () =
+let plan ?(env = Sys.getenv_opt) ?find_browser ?(page = 0) () =
+  let find_browser = match find_browser with
+    | Some find -> find
+    | None -> detect_browser ~env in
+  let browser = lazy (find_browser ()) in
   let credential provider = Option.bind (credential_name provider) (fun name ->
     Option.bind (env name) (valid_credential name)) in
   let explicit, order = match env priority_variable with
@@ -481,13 +580,24 @@ let plan ?(env = Sys.getenv_opt) ?(page = 0) () =
     | _ -> false, all_providers in
   let candidates = List.filter_map (fun engine ->
     match credential_name engine, credential engine with
-    | None, _ -> Some { engine; key = None }
-    | Some _, Some key -> Some { engine; key = Some key }
+    | None, _ when requires_browser engine ->
+        Option.map (fun path -> { engine; key = None; browser = Some path })
+          (Lazy.force browser)
+    | None, _ -> Some { engine; key = None; browser = None }
+    | Some _, Some key -> Some { engine; key = Some key; browser = None }
     | Some _, None -> None) order in
   if candidates = [] then (
     let variables = List.filter_map credential_name order
       |> List.sort_uniq String.compare |> String.concat ", " in
-    fail ("no configured search provider has a credential; set " ^ variables));
+    let needs_browser = List.exists requires_browser order in
+    fail (match variables, needs_browser with
+      | "", true -> "no Chromium-family browser was found for " ^
+          String.concat ", " (List.map provider_label (List.filter requires_browser order)) ^
+          "; install Chrome or Chromium, or set " ^ browser_variable
+      | variables, true -> "no configured search provider is available; set " ^ variables ^
+          " or install a Chromium-family browser (" ^ browser_variable ^ ")"
+      | variables, false ->
+          "no configured search provider has a credential; set " ^ variables));
   let candidates = if page = 0 then candidates else
     match List.filter (fun candidate -> supports_paging candidate.engine) candidates with
     | [] ->
@@ -499,16 +609,16 @@ let plan ?(env = Sys.getenv_opt) ?(page = 0) () =
   explicit, candidates
 
 (* Lets callers refuse an unconfigured search before asking for approval. *)
-let check_configuration ?(env = Sys.getenv_opt) ?page () = ignore (plan ~env ?page ())
+let check_configuration ?(env = Sys.getenv_opt) ?find_browser ?page () =
+  ignore (plan ~env ?find_browser ?page ())
 
 (* Engine names in try order, each marked with whether a credential is sent. *)
-let plan_summary ?(env = Sys.getenv_opt) ?page () =
-  let explicit, candidates = plan ~env ?page () in
+let plan_summary ?(env = Sys.getenv_opt) ?find_browser ?page () =
+  let explicit, candidates = plan ~env ?find_browser ?page () in
   explicit, List.map (fun candidate ->
-    provider_name candidate.engine, candidate.key <> None) candidates
+    provider_name candidate.engine, candidate.key <> None, candidate.browser <> None)
+    candidates
 
-let browser_user_agent =
-  "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
 
 let build_request engine key ~query ~page ~count =
   let key = Option.value ~default:"" key in
@@ -555,6 +665,10 @@ let build_request engine key ~query ~page ~count =
             "Content-Type", "application/x-www-form-urlencoded";
             "Referer", "https://html.duckduckgo.com/"; "User-Agent", browser_user_agent]
         ("q=" ^ percent_encode query ^ "&kl=us-en&b=")
+  | Ecosia -> {
+      search = Some Ecosia; method_ = "GET";
+      url = ecosia_endpoint ^ "?q=" ^ percent_encode query;
+      headers = []; body = ""; response_limit = max_response_bytes }
 
 let utf8_of_codepoint code =
   if code <= 0 || code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff) then "\xef\xbf\xbd"
@@ -933,6 +1047,12 @@ let fetch_url ?http ?cancel ?(max_bytes = max_content_bytes) url () =
       "User-Agent", "pave-web-fetch/1.0"];
     body = ""; response_limit = max_fetch_response_bytes } in
   let body = invoke ?http ?cancel request in
+  (* Past the download limit, keep the leading part as an explicitly
+     truncated preview instead of discarding the whole page. *)
+  let partial = String.length body > max_fetch_response_bytes in
+  let body = if partial then
+      String.sub body 0 (utf8_prefix_length body max_fetch_response_bytes)
+    else body in
   let rec first index =
     if index < String.length body && is_space body.[index] then first (index + 1)
     else index in
@@ -944,7 +1064,7 @@ let fetch_url ?http ?cancel ?(max_bytes = max_content_bytes) url () =
       if String.length body <= max_bytes then body, false
       else String.sub body 0 (utf8_prefix_length body max_bytes), true
     else convert_html_to_markdown ~max_bytes body in
-  { source_url = url; markdown; truncated }
+  { source_url = url; markdown; truncated = truncated || partial }
 
 (* Visible text of an HTML fragment: tags dropped, entities decoded,
    whitespace collapsed. *)
@@ -1005,14 +1125,16 @@ let has_class classes wanted =
       (!ending - index = width && equal index 0) || scan !ending in
   scan 0
 
-let rec find_class_tag html ~tag wanted index =
+(* Next opening tag (optionally of one name) whose attributes satisfy
+   [matches]; comments are skipped. Returns its '<' and '>' offsets. *)
+let rec find_tag_where html ~tag ~matches index =
   match String.index_from_opt html index '<' with
   | None -> None
   | Some start when start + 4 <= String.length html &&
       String.sub html start 4 = "<!--" ->
       (match find_case_insensitive html "-->" (start + 4) with
        | None -> None
-       | Some ending -> find_class_tag html ~tag wanted (ending + 3))
+       | Some ending -> find_tag_where html ~tag ~matches (ending + 3))
   | Some start ->
       match find_tag_end html (start + 1) with
       | None -> None
@@ -1021,10 +1143,19 @@ let rec find_class_tag html ~tag wanted index =
           match parse_tag content with
           | Some (false, name, attributes)
               when (match tag with None -> true | Some expected -> name = expected) &&
-                (match parse_attribute "class" attributes with
-                 | Some classes -> has_class classes wanted | None -> false) ->
+                matches attributes ->
               Some (start, ending, attributes)
-          | _ -> find_class_tag html ~tag wanted (ending + 1)
+          | _ -> find_tag_where html ~tag ~matches (ending + 1)
+
+let find_class_tag html ~tag wanted index =
+  find_tag_where html ~tag index ~matches:(fun attributes ->
+    match parse_attribute "class" attributes with
+    | Some classes -> has_class classes wanted
+    | None -> false)
+
+let find_test_id_tag html ~tag wanted index =
+  find_tag_where html ~tag index ~matches:(fun attributes ->
+    parse_attribute "data-test-id" attributes = Some wanted)
 
 (* DuckDuckGo routes clicks through //duckduckgo.com/l/?uddg=<target>. *)
 let unwrap_duckduckgo_href href =
@@ -1092,35 +1223,100 @@ let parse_duckduckgo count html =
   | [] -> fail "DuckDuckGo returned no usable result markup; it may have blocked the request or changed its HTML; use another configured search provider or fetch a known source URL directly"
   | rows -> rows
 
-let search_engine ?http ?cancel ~query ~page ~count candidate =
-  let request = build_request candidate.engine candidate.key ~query ~page ~count in
-  let body = invoke ?http ?cancel request in
-  let results = match candidate.engine with
-    | Duckduckgo -> numbered Duckduckgo (parse_duckduckgo count body)
-    | engine -> parse_results engine count (parse_json body) in
-  results
+(* Ecosia's rendered results are <article data-test-id="organic-result">
+   blocks titled by aria-label, linked by data-test-id="result-link" and
+   described by data-test-id="web-result-description". *)
+let parse_ecosia count html =
+  let article index = find_test_id_tag html ~tag:(Some "article") "organic-result" index in
+  let rec articles index rows =
+    match article index with
+    | None -> List.rev rows
+    | Some (_, ending, attributes) ->
+        let next = match article (ending + 1) with
+          | Some (start, _, _) -> start
+          | None -> String.length html in
+        let within = function
+          | Some ((start, _, _) as found) when start < next -> Some found
+          | _ -> None in
+        let rec link index =
+          match within (find_test_id_tag html ~tag:(Some "a") "result-link" index) with
+          | None -> None
+          | Some (_, link_end, link_attributes) ->
+              let external_https href =
+                starts_with href "https://" &&
+                (try let _, host, _, _ = Workspace_reader.parse_url href in
+                   host <> "ecosia.org" && not (String.ends_with ~suffix:".ecosia.org" host)
+                 with Workspace_reader.Error _ -> false) in
+              (match parse_attribute "href" link_attributes with
+               | Some href when external_https href -> Some href
+               | _ -> link (link_end + 1)) in
+        let title = match parse_attribute "aria-label" attributes with
+          | Some label -> clean_text ~limit:1_024 label
+          | None -> "" in
+        let snippet =
+          match within (find_test_id_tag html ~tag:None "web-result-description" ending) with
+          | Some (_, open_end, _) ->
+              let close = Option.value ~default:next
+                (find_case_insensitive html "</p>" open_end) in
+              html_text (String.sub html (open_end + 1) (max 0 (min close next - open_end - 1)))
+          | None -> "" in
+        let rows = match link (ending + 1) with
+          | Some url when title <> "" -> (title, url, snippet) :: rows
+          | _ -> rows in
+        articles next rows in
+  match validate_rows count (articles 0 []) with
+  | [] when List.exists (fun marker -> find_case_insensitive html marker 0 <> None)
+      ["_cf_chl_opt"; "/cdn-cgi/challenge-platform/"; "ecosia firewall"; "not a robot"] ->
+      fail "Ecosia answered with a bot-detection challenge; use another configured search provider or fetch a known source URL directly"
+  | [] -> fail "Ecosia returned no usable result markup; it may have blocked the request or changed its HTML"
+  | rows -> rows
 
-(* Engines are tried in plan order; a failure moves to the next engine and is
-   reported with the answer, so substitution is never silent. Cancellation
-   stops immediately. *)
-let search ?http ?cancel ?(env = Sys.getenv_opt) ?(page = 0) ?(count = 5) ~query () =
+let search_engine ?http ?cancel ?render ~query ~page ~count candidate =
+  match candidate.engine, candidate.browser with
+  | Ecosia, Some program ->
+      let request = build_request Ecosia None ~query ~page ~count in
+      let render = match render with
+        | Some render -> render
+        | None -> fun ~program url -> render_page ?cancel ~program url in
+      let html = render ~program request.url in
+      check_cancel cancel;
+      numbered Ecosia (parse_ecosia count html)
+  | Ecosia, None -> fail "Ecosia needs a local Chromium-family browser"
+  | engine, _ ->
+      let request = build_request engine candidate.key ~query ~page ~count in
+      let body = invoke ?http ?cancel request in
+      match engine with
+      | Duckduckgo -> numbered Duckduckgo (parse_duckduckgo count body)
+      | engine -> parse_results engine count (parse_json body)
+
+(* Engines are tried in plan order; a failure or an empty answer moves to
+   the next engine and failures are reported with the answer, so substitution
+   is never silent. If every engine answers empty, the result is empty, not
+   an error. Cancellation stops immediately. *)
+let search ?http ?cancel ?(env = Sys.getenv_opt) ?find_browser ?render
+    ?(page = 0) ?(count = 5) ~query () =
   let query = valid_query query in
   validate_limits ~page ~count;
-  let _, candidates = plan ~env ~page () in
-  let rec attempt failed = function
+  let _, candidates = plan ~env ?find_browser ~page () in
+  let answer candidate results failed =
+    { provider = provider_name candidate.engine; query; page; results;
+      citations = List.map (fun result -> result.citation) results;
+      failed = List.rev failed } in
+  let rec attempt failed empty = function
     | [] ->
-        (match List.rev failed with
-         | [_, message] -> fail message
-         | failures ->
+        (match empty, List.rev failed with
+         | Some candidate, _ -> answer candidate [] failed
+         | None, [_, message] -> fail message
+         | None, failures ->
              fail ("all web search providers failed: " ^ String.concat "; "
                (List.map (fun (name, message) -> name ^ ": " ^ message) failures)))
     | candidate :: rest ->
-        match search_engine ?http ?cancel ~query ~page ~count candidate with
-        | results ->
-            let citations = List.map (fun result -> result.citation) results in
-            { provider = provider_name candidate.engine; query; page; results; citations;
-              failed = List.rev failed }
+        match search_engine ?http ?cancel ?render ~query ~page ~count candidate with
+        | [] ->
+            check_cancel cancel;
+            attempt failed (if empty = None then Some candidate else empty) rest
+        | results -> answer candidate results failed
         | exception (Error message) ->
             check_cancel cancel;
-            attempt ((provider_name candidate.engine, message) :: failed) rest in
-  attempt [] candidates
+            attempt ((provider_name candidate.engine, message) :: failed) empty rest in
+  attempt [] None candidates
