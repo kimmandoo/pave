@@ -1,11 +1,11 @@
 # Troubleshooting
 
-### [2026-10-01] Sandboxed headless Chrome refuses loopback HTTP on WSL
+### [2026-10-01] Headless Chrome on WSL refuses loopback when the server is IPv4-only
 
 - **Context / Symptom:** While verifying the new `browser` tool, `Page.navigate` to `http://127.0.0.1:<port>` and `http://localhost:<port>` failed with `net::ERR_CONNECTION_REFUSED` even though `curl` to the same socket succeeded and a Python `http.server` was listening. `https://example.com` worked from the same browser.
-- **Root Cause:** The sandboxed Chromium network service on this WSL2 host declines loopback connections; it is not a transport or socket bug in the CDP client. `--remote-debugging-pipe` is also unsupported by `chrome-headless-shell` (it exits with `Remote debugging pipe file descriptors are not open` even when fds 3/4 are correctly established).
-- **Solution:** Verified the full CDP path against `https://example.com`; loopback navigation remains a runtime/environment limitation, not a code defect. The debugging WebSocket to the owned browser still works because it is accepted by the browser process itself, not the sandboxed network service.
-- **Prevention / Reference:** For live browser checks prefer a public HTTPS URL or run the page server inside the browser's network namespace; do not add `--no-sandbox` to work around it (the design contract requires the sandbox).
+- **Root Cause:** Not a sandbox block: on this WSL2 host Chrome resolves `localhost` and reaches loopback via IPv6 (`::1`), while `python3 -m http.server` bound only `0.0.0.0` (IPv4). A server bound to `::` with `IPV6_V6ONLY` off answered all of `[::1]`, `localhost`, and `127.0.0.1`. Separately, `--remote-debugging-pipe` is unsupported by `chrome-headless-shell` (it exits with `Remote debugging pipe file descriptors are not open` even when fds 3/4 are correctly established).
+- **Solution:** Verified the full CDP path against a dual-stack loopback server (`http://localhost:8473`) — navigate/observe/evaluate/screenshot and `modelContext` `list_tools`/`call_tool` all worked. No code change was needed.
+- **Prevention / Reference:** For loopback page servers under WSL2, bind `::` with `IPV6_V6ONLY=0` (e.g. `socketserver.TCPServer` with `address_family = AF_INET6`), not `0.0.0.0`.
 
 ### [2026-10-01] Most credential-free search engines refuse even a headless browser
 
