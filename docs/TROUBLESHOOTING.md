@@ -1,5 +1,12 @@
 # Troubleshooting
 
+### [2026-10-01] Full history cleanup required branch and tag replacement
+
+- **Context / Symptom:** Removing identifiers from the current tree and latest message was insufficient: earlier commits, release tags and dependency-update branches still retained historical source references.
+- **Root Cause:** Git objects remain reachable through every branch/tag that still points into the old graph. A prior local filter run also left metadata that prompted whether the new rewrite should continue its old mapping.
+- **Solution:** After explicit user authorization, fetched the full branch/tag scope, retained expected remote object IDs, committed tested repairs and ran a new whole-history filter without pruning topology. Answered No to continuation of the unrelated old filter run. The filter expired old reflogs/objects; its intentional removal of `origin` was followed by restoring the known SSH remote. Atomically force-pushed all branch/tag refs with individual leases and verified a fresh remote mirror, including server-owned PR refs.
+- **Prevention / Reference:** Re-clone other checkouts rather than merging old history back. Existing published binary assets and third-party clones remain separate artifacts; ordinary Git force-push cannot guarantee removal from server caches. Keep required legal notices intact.
+
 ### [2026-10-01] Consent text was clipped while shortcuts still approved
 
 - **Context / Symptom:** A real 36×35 terminal displayed only Deny plus a clipped scope/consequence, but `a` granted all later writes. A 24×12 discard prompt also hid its irreversible-action context.

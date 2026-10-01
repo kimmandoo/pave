@@ -2,6 +2,7 @@
 
 ## 2026-10-01
 
+- chore(history): sanitized historical source references and configuration identifiers across all branches, tags and commit messages, preserved legal notices, and atomically published the rewritten history with explicit remote leases.
 - fix(tools): kept malformed HTML inside the search fallback chain, bounded UTF-8 titles including truncation markers, rejected partial Kagi error responses, withheld raw Firecrawl error payloads, preserved cancellation and planned only paging-compatible providers before approval.
 - fix(tui): required complete approval headings, scope, controls and consequences to fit before consent; wrapped narrow layouts, kept denied writes visibly unexecuted and trusted typed tool outcomes instead of error-like file contents.
 - fix(provider): retained nested Responses and Codex failure details, rejected error-bearing completed envelopes before executing calls and omitted empty assistant text from tool-call replay.
