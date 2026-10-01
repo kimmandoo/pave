@@ -429,6 +429,11 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
               | "run_command" -> argument "command"
               | "web_search" -> argument "query"
               | "web_fetch" -> argument "url"
+              | "browser" ->
+                  (match argument "action" with
+                   | Some ("navigate") -> argument "url"
+                   | Some action -> Some action
+                   | None -> None)
               | _ -> None in
             let write_content = if call.name = "write_file" &&
               t.preview_tools && Option.is_some t.on_tool_event then

@@ -2915,6 +2915,7 @@ let approval_question (request : Pave.Approval.request) =
   | "start_process" -> "Start this process?"
   | "web_search" -> "Search the web for this query?"
   | "web_fetch" -> "Fetch this web page?"
+  | "browser" -> "Control an isolated headless browser?"
   | "write_file" -> "Write this file?"
   | "edit_file" | "apply_edits" | "ast_edit" -> "Edit this file?"
   | "task" -> "Start a read-only child agent?"

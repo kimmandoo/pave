@@ -682,3 +682,14 @@
  (name test_workspace_eval)
  (modules test_workspace_eval)
  (libraries pave unix yojson threads))
+
+(test
+ (name test_workspace_browser)
+ (modules test_workspace_browser)
+ (libraries pave unix yojson threads))
+
+(test
+ (name test_browser_live)
+ (modules test_browser_live)
+ (libraries pave unix yojson threads))
+

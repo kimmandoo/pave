@@ -380,18 +380,6 @@ These are retained product plans, not source-proven defects. No new effect surfa
   **Depends:** RC04a.
   **Gate:** selected editor/client runtime.
 
-- [ ] **BR01a — Own an approved isolated browser session**
-  **Evidence:** [workspace tools](lib/tools/tools.ml) have no browser automation; auth browser launch is unrelated. **Deliver:** approved isolated Chromium/CDP process/tab ownership, bounded lifetime and deterministic cleanup.
-  **Accept:** only new owned tabs attach; denial, cancellation or exit leaves no adopted personal-profile tab or lingering owned process.
-  **Depends:** none.
-  **Gate:** installed supported Chromium; no implicit download or personal-profile reuse.
-
-- [ ] **BR01b — Add scoped browser navigation and inspection**
-  **Evidence:** BR01a establishes process ownership, not page authority. **Deliver:** URL/tab-scoped navigation, bounded script execution and screenshot retrieval with explicit approvals.
-  **Accept:** the selected disposable page yields bounded results; blocked destinations, revoked tabs and oversized results fail without cross-tab access.
-  **Depends:** BR01a.
-  **Gate:** actual isolated browser runtime and per-effect consent.
-
 - [ ] **BR02 — Attach only explicitly selected relay tabs**
   **Evidence:** no existing tool in [tool dispatch](lib/tools/tools.ml) authorizes access to personal browser tabs. **Deliver:** opt-in loopback-authenticated user-installed relay with exact selected-tab identity and detach.
   **Accept:** only a selected tab is inspectable; unrelated logged-in tabs, revoked pairing and disconnected relay cannot be adopted.

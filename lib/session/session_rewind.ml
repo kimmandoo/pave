@@ -54,7 +54,7 @@ let non_reversible_tool_name = function
   | "run_command" | "start_process" | "start_shell"
   | "process_stdin" | "process_close_stdin" | "process_kill"
   | "worktree_create" | "worktree_commit" | "worktree_remove"
-  | "workspace_eval" | "lsp_start" | "dap_start" | "dap"
+  | "workspace_eval" | "lsp_start" | "dap_start" | "dap" | "browser"
   | "ssh_open" | "ssh_read" | "ssh_write" | "ssh_command"
   | "web_search" | "web_fetch" | "clipboard_write"
   | "write_file" | "edit_file" | "apply_edits" | "ast_edit" -> true

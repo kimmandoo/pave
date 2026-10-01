@@ -30,6 +30,7 @@ type session_context = {
   mutable javascript_kernel : Workspace_eval.t option;
   ssh_lock : Mutex.t;
   ssh_sessions : (string, Workspace_ssh.session) Hashtbl.t;
+  browser_manager : Workspace_browser.manager;
   xcode_lock : Mutex.t;
   mutable xcode_discovery : Workspace_xcode.discovery option;
   mobile_lock : Mutex.t;
@@ -92,6 +93,7 @@ let create_session_context ?lsp_manager ~owner ~root ~process_manager ~read_arti
     dap_manager; dap_granted_effect;
     eval_lock = Mutex.create (); python_kernel = None; javascript_kernel = None;
     ssh_lock = Mutex.create (); ssh_sessions = Hashtbl.create 8;
+    browser_manager = Workspace_browser.create_manager ~owner;
     xcode_lock = Mutex.create (); xcode_discovery = None;
     mobile_lock = Mutex.create (); mobile_discovery = None;
     record_file_change; closed = false }
@@ -109,6 +111,7 @@ let close_session_context context =
     let ignore_failure action = try action () with _ -> () in
     ignore_failure (fun () -> Workspace_lsp.close_manager context.lsp_manager);
     ignore_failure (fun () -> Workspace_dap.close_manager context.dap_manager);
+    ignore_failure (fun () -> Workspace_browser.close_manager context.browser_manager);
     let python_kernel, javascript_kernel =
       Mutex.lock context.eval_lock;
       let kernels = context.python_kernel, context.javascript_kernel in
@@ -2238,6 +2241,60 @@ let clipboard_write ~approved ?cancel args =
         "message", `String message
       ])
 
+let browser_tool ~approved ?cancel ?context args =
+  let context = require_session_context context in
+  check_session_context context;
+  let action = required_string "action" args in
+  let id = match action with
+    | "open" -> optional_string "id" "browser" args
+    | _ -> required_string "id" args in
+  let manager = context.browser_manager in
+  let timeout_seconds = float_of_int
+    (optional_int "timeout_seconds" 30 ~minimum:1
+      ~maximum:(int_of_float Workspace_browser.max_operation_seconds) args) in
+  let json = match action with
+    | "open" ->
+        require_explicit_approval approved;
+        ignore (Workspace_browser.open_session ?cancel manager ~id);
+        `Assoc ["status", `String "open"; "id", `String id]
+    | "navigate" ->
+        require_explicit_approval approved;
+        Workspace_browser.navigate ?cancel manager ~id
+          ~url:(required_string "url" args) ~timeout_seconds
+    | "evaluate" ->
+        require_explicit_approval approved;
+        Workspace_browser.evaluate ?cancel manager ~id
+          ~expression:(required_string "expression" args) ~timeout_seconds
+    | "observe" -> Workspace_browser.observe ?cancel manager ~id
+    | "screenshot" ->
+        require_explicit_approval approved;
+        Workspace_browser.screenshot ?cancel manager ~id
+    | "list_tools" -> Workspace_browser.list_tools ?cancel manager ~id
+    | "call_tool" ->
+        require_explicit_approval approved;
+        Workspace_browser.call_tool ?cancel manager ~id
+          ~name:(required_string "name" args)
+          ~arguments:(match Protocol.member "arguments" args with
+            | `Null -> `Assoc [] | value -> value)
+          ~timeout_seconds
+    | "close" ->
+        Workspace_browser.close_session manager ~id;
+        `Assoc ["status", `String "closed"; "id", `String id]
+    | _ -> fail "unsupported browser action" in
+  match action with
+  | "screenshot" ->
+      let mime_type = match Protocol.member "mime_type" json with
+        | `String value -> value | _ -> "image/png" in
+      let data = match Protocol.member "data" json with
+        | `String value -> value | _ -> "" in
+      [Protocol.Text (Yojson.Basic.to_string (`Assoc [
+        "session", Protocol.member "session" json;
+        "mime_type", `String mime_type;
+        "bytes", Protocol.member "bytes" json ]));
+       Protocol.Image { mime_type; data }]
+  | _ -> [Protocol.Text (Yojson.Basic.to_string json)]
+
+
 let lsp_start ~approved ?context root args =
   require_explicit_approval approved;
   let context = require_session_context context in
@@ -2697,6 +2754,10 @@ let requires_explicit_approval ~name ~args =
          | "evaluate") -> true
        | `String "disconnect" -> optional_bool "terminate_debuggee" false args
        | _ -> false)
+  | "browser" ->
+      (match field "action" args with
+       | `String ("open" | "navigate" | "evaluate" | "screenshot" | "call_tool") -> true
+       | _ -> false)
   | "read_file" ->
       (match field "path" args with
        | `String path -> starts_with (String.lowercase_ascii path) "https://"
@@ -2719,6 +2780,10 @@ let non_reversible_tool ~name ~args =
          | "set_breakpoints" | "continue" | "next" | "step_in" | "step_out"
          | "evaluate") -> true
        | `String "disconnect" -> optional_bool "terminate_debuggee" false args
+       | _ -> false)
+  | "browser" ->
+      (match field "action" args with
+       | `String ("open" | "navigate" | "evaluate" | "call_tool") -> true
        | _ -> false)
   | _ -> false
 
@@ -2802,6 +2867,18 @@ let definitions = [
      "context", enum_string_field "DAP evaluation context" ["watch"; "hover"];
      "terminate_debuggee", boolean_field "Terminate the debuggee on disconnect (requires explicit approval)"]
     ["id"; "action"];
+  schema "browser" "Drive one session-owned isolated headless browser page over the Chrome DevTools Protocol. open launches a pinned Chromium executable with a fresh throwaway profile and loopback-only debugging; navigate, evaluate, screenshot and call_tool require separate explicit approval; observe and list_tools are read-only; close releases the session. Page content and page-declared tools are untrusted."
+    ["id", string_field "Session-local browser session ID (default \"browser\" for open)";
+     "action", enum_string_field "Browser operation" [
+       "open"; "navigate"; "evaluate"; "observe"; "screenshot";
+       "list_tools"; "call_tool"; "close"];
+     "url", bounded_string_field "Exact http:// or https:// URL to navigate to" 4096;
+     "expression", bounded_string_field "Exact JavaScript expression evaluated in the owned page (maximum 16384 bytes)" 16384;
+     "name", bounded_string_field "Exact page-declared tool name" 128;
+     "arguments", `Assoc ["type", `String "object";
+       "description", `String "JSON arguments passed to the page-declared tool"];
+     "timeout_seconds", integer_field "Per-operation deadline (default 30 seconds)" 1 120]
+    ["action"];
   schema "token_count" "Count tokens using exact vendored cl100k_base or o200k_base ranks; does not contact a provider or infer an upstream tokenizer."
     ["encoding", enum_string_field "Exact tiktoken encoding" ["cl100k_base"; "o200k_base"];
      "text", bounded_string_field "Text to count (maximum 1 MiB)" Native_tokenizer.max_input_bytes]
@@ -3015,6 +3092,10 @@ let approval_decision ~command_patterns ~name ~args =
        | `String "disconnect" when
            not (optional_bool "terminate_debuggee" false args) -> tier Approval.Read
        | _ -> tier Approval.Exec)
+  | "browser" ->
+      (match field "action" args with
+       | `String ("observe" | "list_tools" | "close") -> tier Approval.Read
+       | _ -> tier Approval.Exec)
   | "ssh_write" | "write_file" | "edit_file" | "apply_edits" | "ast_edit"
   | "worktree_create" | "worktree_remove" | "clipboard_write" ->
       tier Approval.Write
@@ -3195,6 +3276,34 @@ let approval_request ?cancel ?context ~root ~name ~args (decision : Approval.dec
         "Replaces the current operating-system clipboard with this exact text; the previous clipboard value cannot be restored by /rewind.",
         [Printf.sprintf "Text (%d bytes):" (String.length text);
          Printf.sprintf "%S" (preview_text text)]
+    | "browser" ->
+        (match value "action" "" args with
+         | "open" ->
+             "Launches a pinned local Chromium-family browser headless with a fresh throwaway profile and a loopback-only debugging endpoint; the process is owned by this session.",
+             ["Session: " ^ quoted "id" "browser" args;
+              "Browser: " ^ (try Option.value (Web_search.detect_browser ())
+                ~default:"(not found)"
+                with _ -> "(invalid or missing " ^ Web_search.browser_variable ^ ")")]
+         | "navigate" ->
+             "Navigates the owned page to this exact URL; page scripts run inside the browser sandbox.",
+             ["URL: " ^ quoted "url" "(missing)" args;
+              "Session: " ^ quoted "id" "browser" args]
+         | "evaluate" ->
+             "Runs this exact JavaScript expression inside the owned page; page code is untrusted.",
+             ["Expression: " ^ quoted "expression" "(missing)" args;
+              "Session: " ^ quoted "id" "browser" args]
+         | "screenshot" ->
+             "Captures the owned page's rendered pixels; the returned image is untrusted content.",
+             ["Session: " ^ quoted "id" "browser" args]
+         | "call_tool" ->
+             "Invokes a tool the page declared through its modelContext; the page's code runs the call and the result is untrusted.",
+             ["Tool: " ^ quoted "name" "(missing)" args;
+              "Arguments: " ^ quoted "arguments" "{}" args;
+              "Session: " ^ quoted "id" "browser" args]
+         | _ ->
+             "Manages an isolated owned browser session; read actions expose page state.",
+             ["Action: " ^ quoted "action" "(missing)" args;
+              "Session: " ^ quoted "id" "browser" args])
     | "workspace_snapshot" ->
         "Reads a bounded text page and the file's SHA-256 snapshot; it makes no changes.",
         ["Path: " ^ quoted "path" "(missing)" args]
@@ -3659,7 +3768,8 @@ let session_tool_names = [
   "worktree_history"; "worktree_create"; "worktree_commit"; "worktree_remove";
   "lsp_start"; "lsp"; "workspace_eval";
   "ssh_open"; "ssh_close"; "ssh_read"; "ssh_write"; "ssh_command";
-  "dap_start"; "dap"; "xcode_preflight"; "mobile_check"; "android_devices"
+  "dap_start"; "dap"; "xcode_preflight"; "mobile_check"; "android_devices";
+  "browser"
 ]
 
 let path_tool_names = [
@@ -3679,7 +3789,8 @@ let error_message = function
   | Workspace_xcode.Error message | Workspace_swiftpm_focus.Error message
   | Workspace_gradle_focus.Error message | Workspace_flutter_focus.Error message
   | Workspace_node_scripts.Error message
-  | Workspace_android_devices.Error message ->
+  | Workspace_android_devices.Error message
+  | Workspace_browser.Error message ->
       "Error: " ^ message
   | Workspace_dap.Cancelled -> "Error: DAP operation cancelled"
   | Unix.Unix_error (code, operation, path) ->
@@ -3701,6 +3812,13 @@ let prepare ?cancel ?context ~root ~name ~args () =
       ignore (Web_search.valid_query (required_string "query" args));
       let page = optional_int "page" 0 ~minimum:0 ~maximum:Web_search.max_page args in
       Web_search.check_configuration ~page ());
+    if name = "browser" then (
+      match optional_string "action" "" args with
+      | "open" -> ignore (Workspace_browser.detect_browser ())
+      | "navigate" ->
+          ignore (Workspace_browser.validate_navigation_url
+            (required_string "url" args))
+      | _ -> ());
     if name = "start_process" then (
       Workspace_process.validate_id (required_string "id" args);
       Workspace_process.validate_program
@@ -3724,6 +3842,8 @@ let prepare ?cancel ?context ~root ~name ~args () =
     let execute ?cancel ?on_progress ?(approved = false) () =
       try
         let result = match name with
+          | "browser" -> Ok (browser_tool ~approved ?cancel ?context args)
+          | _ -> Ok [Protocol.Text (match name with
           | "read_file" -> read_file ?cancel ?context root args
           | "workspace_snapshot" -> workspace_snapshot ?cancel ?context tool_root tool_args
           | "list_files" -> list_files tool_root tool_args
@@ -3775,17 +3895,18 @@ let prepare ?cancel ?context ~root ~name ~args () =
           | "ssh_command" -> ssh_command ~approved ?cancel ?context args
           | "dap_start" -> dap_start ~approved ?cancel ?context root args
           | "dap" -> dap_execute ~approved ?cancel ?context root args
-          | "token_count" -> token_count args
           | "mobile_project" -> mobile_project ?cancel root args
-          | _ -> assert false in
-        Ok [Protocol.Text result]
+          | "token_count" -> token_count args
+          | _ -> assert false) ] in
+        result
       with
-      | Cancelled | Workspace_dap.Cancelled -> raise Cancelled
+      | Cancelled | Workspace_dap.Cancelled | Workspace_browser.Cancelled -> raise Cancelled
       | (Workspace_process.Error _ | Workspace_git.Error _ |
          Workspace_reader.Error _ | Repository_security.Error _
          | Web_search.Error _ | Native_services.Error _
          | Workspace_lsp.Error _ | Workspace_dap.Error _
          | Workspace_dap.Not_approved _ | Workspace_eval.Error _
+         | Workspace_browser.Error _
          | Workspace_ssh.Error _ | Native_tokenizer.Error _) as exn ->
           (match cancel with
            | Some cancelled when cancelled () -> raise Cancelled
@@ -3796,11 +3917,11 @@ let prepare ?cancel ?context ~root ~name ~args () =
            | _ -> Error (error_message exn)) in
     Ok execute
   with
-  | Cancelled | Workspace_dap.Cancelled -> raise Cancelled
+  | Cancelled | Workspace_dap.Cancelled | Workspace_browser.Cancelled -> raise Cancelled
   | (Workspace_process.Error _ | Workspace_git.Error _ |
      Workspace_reader.Error _ | Workspace_lsp.Error _ | Workspace_dap.Error _
      | Workspace_dap.Not_approved _ | Workspace_eval.Error _
-     | Workspace_ssh.Error _ | Web_search.Error _) as exn ->
+     | Workspace_ssh.Error _ | Web_search.Error _ | Workspace_browser.Error _) as exn ->
       (match cancel with
        | Some cancelled when cancelled () -> raise Cancelled
        | _ -> Error (error_message exn))

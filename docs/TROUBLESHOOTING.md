@@ -1,5 +1,12 @@
 # Troubleshooting
 
+### [2026-10-01] Sandboxed headless Chrome refuses loopback HTTP on WSL
+
+- **Context / Symptom:** While verifying the new `browser` tool, `Page.navigate` to `http://127.0.0.1:<port>` and `http://localhost:<port>` failed with `net::ERR_CONNECTION_REFUSED` even though `curl` to the same socket succeeded and a Python `http.server` was listening. `https://example.com` worked from the same browser.
+- **Root Cause:** The sandboxed Chromium network service on this WSL2 host declines loopback connections; it is not a transport or socket bug in the CDP client. `--remote-debugging-pipe` is also unsupported by `chrome-headless-shell` (it exits with `Remote debugging pipe file descriptors are not open` even when fds 3/4 are correctly established).
+- **Solution:** Verified the full CDP path against `https://example.com`; loopback navigation remains a runtime/environment limitation, not a code defect. The debugging WebSocket to the owned browser still works because it is accepted by the browser process itself, not the sandboxed network service.
+- **Prevention / Reference:** For live browser checks prefer a public HTTPS URL or run the page server inside the browser's network namespace; do not add `--no-sandbox` to work around it (the design contract requires the sandbox).
+
 ### [2026-10-01] Most credential-free search engines refuse even a headless browser
 
 - **Context / Symptom:** Adding browser-backed engines from the reference provider set: with curl, Ecosia returned HTTP 403 and Startpage 303. With Chrome for Testing `chrome-headless-shell` 154 (`--dump-dom`), Google returned an "unusual traffic" page, Startpage an Anubis proof-of-work page, Mojeek an ALTCHA captcha, Bing no results, and DuckDuckGo HTML an `anomaly` challenge. Only Ecosia rendered real results (10 `organic-result` articles, repeatable).
