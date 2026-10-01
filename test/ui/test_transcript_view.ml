@@ -301,8 +301,28 @@ let () =
   event failed_tool "[http_request]";
   event failed_tool "[http_request] Error: HTTP 503";
   expect "tool failure has distinct error outcome and preserved diagnostics"
-    (has_tool_state failed_tool Error "failed" &&
+    (Array.exists (fun (row : row) ->
+       row.kind = Error && row.style = Tool_state && row.text = "failed")
+       (Array.sub failed_tool.rows 0 failed_tool.count) &&
      has "Error: HTTP 503" (lines failed_tool 60));
+  let denied_tool = create () in
+  ignore (start_tool ~target:"rm -rf build" denied_tool "run_command");
+  event denied_tool "[run_command] Error: command not approved";
+  expect "user denial reads as a decision, names the command and adds no error preview"
+    (has "run_command · rm -rf build" (lines denied_tool 60) &&
+     has "denied by you · not run" (lines denied_tool 60) &&
+     not (has "Error: command not approved" (lines denied_tool 60)));
+  let noted_tool = create () in
+  let noted = start_tool ~target:"release notes" noted_tool "web_search" in
+  tool_note noted_tool noted "May have external effects";
+  tool_result ~group:noted noted_tool "web_search" "Error: HTTP 422";
+  expect "notes raised during a call stay inside its card"
+    (has "web_search · \"release notes\"" (lines noted_tool 60) &&
+     Array.for_all (fun (row : row) -> row.group = noted || row.style = Divider)
+       (Array.sub noted_tool.rows 0 noted_tool.count) &&
+     Array.exists (fun (row : row) ->
+       row.style = Quote && row.kind = Error && row.text = "May have external effects")
+       (Array.sub noted_tool.rows 0 noted_tool.count));
   let compact_tool = create () in
   event compact_tool ("[run_command] \n```text\n" ^
     String.make 280 'x' ^ "\n```\nprivate diagnostics");

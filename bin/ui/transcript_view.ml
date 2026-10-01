@@ -373,6 +373,9 @@ let assistant t text = add_block t Assistant "Pave" text
 let notice t text = add_block t Notice "Note" text
 let error t text = add_block t Error "Error" text
 
+let denied_results =
+  ["Error: command not approved"; "Error: tool approval denied"]
+
 let valid_tool_name name =
   name <> "" && String.length name <= 64 &&
   String.for_all (function
@@ -392,19 +395,30 @@ let parse_tool text =
       else None
   | _ -> None
 
+let excerpt_bytes limit text =
+  if String.length text <= limit then text else (
+    let size = ref limit in
+    while !size > 0 && Char.code text.[!size] land 0xc0 = 0x80 do
+      decr size
+    done;
+    String.sub text 0 !size ^ "…")
+
+(* A card names what the call acts on, so a denial or failure is readable
+   without expanding it. *)
 let start_tool ?target t name =
   let name = single_line name in
+  let target = Option.map (fun value -> String.trim (single_line value)) target in
   let label = match name, target with
-    | "read_file", Some path when path <> "" &&
+    | ("read_file" | "write_file" | "edit_file" | "apply_edits" | "list_files"),
+      Some path when path <> "" &&
         Filename.is_relative path && not (String.contains path ':') ->
-        let path = single_line path in
-        let path = if String.length path <= 96 then path else (
-          let size = ref 96 in
-          while !size > 0 && Char.code path.[!size] land 0xc0 = 0x80 do
-            decr size
-          done;
-          String.sub path 0 !size ^ "…") in
-        name ^ " · " ^ path
+        name ^ " · " ^ excerpt_bytes 96 path
+    | ("run_command" | "glob" | "search" | "grep"), Some value when value <> "" ->
+        name ^ " · " ^ excerpt_bytes 72 value
+    | "web_search", Some query when query <> "" ->
+        name ^ " · \"" ^ excerpt_bytes 72 query ^ "\""
+    | "web_fetch", Some url when String.starts_with ~prefix:"https://" url ->
+        name ^ " · " ^ excerpt_bytes 96 url
     | _ -> name in
   let id = group t in
   t.pending_tool <- Some (name, id);
@@ -497,7 +511,9 @@ let tool_result ?group:existing ?(aborted = false) ?(is_error = false) t name re
   t.table_active <- false;
   let failed = is_error || String.starts_with ~prefix:"Error:" result in
   let error = failed || aborted in
-  let outcome = if aborted then "aborted" else if failed then "failed" else "completed" in
+  let denied = List.mem result denied_results in
+  let outcome = if aborted then "aborted" else if denied then "denied by you · not run"
+    else if failed then "failed" else "completed" in
   let length = String.fold_left (fun count char ->
     if char = '\n' then count + 1 else count) 1 result in
   let compact_read = name = "read_file" && not error in
@@ -519,12 +535,19 @@ let tool_result ?group:existing ?(aborted = false) ?(is_error = false) t name re
           label length (if length = 1 then "line" else "lines")))
       else set_text row label)
   done;
+  if error then
+    for i = 0 to t.count - 1 do
+      let row = t.rows.(i) in
+      if row.group = id && row.kind = Tool && row.style = Quote then (
+        mark_dirty t i; row.kind <- Error)
+    done;
   if not compact_read && Option.is_none write then
     add_line t ~kind:(if error then Error else Tool) ~group:id
       ~provisional:false ~style:Tool_state
-      (Printf.sprintf "%s · %d %s · collapsed" outcome length
-        (if length = 1 then "line" else "lines"));
-  let position = ref 0 and previewed = ref false in
+      (if length = 1 then outcome
+       else Printf.sprintf "%s · %d lines · collapsed" outcome length);
+  (* The outcome row already says a denial happened; one line needs no preview. *)
+  let position = ref 0 and previewed = ref denied in
   let status_preview = ref None in
   let starts_at text index prefix =
     let size = String.length prefix in
@@ -581,6 +604,12 @@ let tool_result ?group:existing ?(aborted = false) ?(is_error = false) t name re
   t.fenced <- false;
   t.diff_fenced <- false;
   t.diff_raw <- false
+
+(* Notices raised while a call runs belong to its card, not a separate block. *)
+let tool_note t group text =
+  if text <> "" then
+    add_line t ~kind:Tool ~group ~provisional:false ~style:Quote
+      (single_line text)
 
 let flush_live t =
   if t.live <> "" then (

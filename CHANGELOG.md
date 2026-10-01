@@ -2,6 +2,8 @@
 
 ## 2026-10-01
 
+- feat(tui): redesigned tool approval as a question with the exact command, query, URL or path first, a plain-words tier/scope subtitle and side-by-side `[ n Deny ]` / `[ y Allow once ]` buttons directly under the preview; clarified tool cards with the acted-on argument in each header, "denied by you · not run" for refusals, single-line outcomes without a misleading collapse hint, and in-card side-effect notes.
+- fix(tools): refused an unconfigured `web_search` before asking for approval, so users are no longer prompted for a call that cannot run.
 - fix(provider): reported OpenAI Responses, Azure, Bedrock Mantle and Codex output-token stops with the shared truncation message and surfaced the provider's stated reason for failed, incomplete and streamed error responses instead of a generic failure.
 - fix(agent): stopped retaining empty assistant replies in conversation history, so a reply with no text or tool calls no longer makes every later Anthropic, Responses or Chat Completions request in the session fail.
 

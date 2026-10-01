@@ -3689,6 +3689,7 @@ let prepare ?cancel ?context ~root ~name ~args () =
       if List.mem name path_tool_names then
         resolve_path_arguments ?cancel ?context ~root args
       else root, args in
+    if name = "web_search" then Web_search.check_configuration ();
     if name = "start_process" then (
       Workspace_process.validate_id (required_string "id" args);
       Workspace_process.validate_program
@@ -3788,7 +3789,7 @@ let prepare ?cancel ?context ~root ~name ~args () =
   | (Workspace_process.Error _ | Workspace_git.Error _ |
      Workspace_reader.Error _ | Workspace_lsp.Error _ | Workspace_dap.Error _
      | Workspace_dap.Not_approved _ | Workspace_eval.Error _
-     | Workspace_ssh.Error _) as exn ->
+     | Workspace_ssh.Error _ | Web_search.Error _) as exn ->
       (match cancel with
        | Some cancelled when cancelled () -> raise Cancelled
        | _ -> Error (error_message exn))

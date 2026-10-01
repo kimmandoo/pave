@@ -164,6 +164,9 @@ let emit_tool_event t event =
        | Tool_aborted { name; result; _ } ->
            t.on_event ("[" ^ name ^ "] " ^ result))
 
+let non_reversible_notice =
+  "External, process, network, or clipboard effects may be non-reversible; /rewind does not undo them."
+
 let max_scoped_context_bytes = Project_context.max_total_bytes
 
 let file_mutation (call : Protocol.tool_call) =
@@ -415,11 +418,18 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
           let complete message =
             Tool_scheduler.Complete [Protocol.Text message] in
           let prepare () =
-            let target = if List.mem call.name ["read_file"; "write_file"] then
-              match Protocol.member "path" call.arguments with
-              | `String path -> Some path
-              | _ -> None
-              else None in
+            let argument key = match Protocol.member key call.arguments with
+              | `String value -> Some value
+              | _ -> None in
+            (* The one argument that tells the user what this call acts on. *)
+            let target = match call.name with
+              | "read_file" | "write_file" | "edit_file" | "apply_edits"
+              | "list_files" -> argument "path"
+              | "glob" | "search" | "grep" -> argument "pattern"
+              | "run_command" -> argument "command"
+              | "web_search" -> argument "query"
+              | "web_fetch" -> argument "url"
+              | _ -> None in
             let write_content = if call.name = "write_file" &&
               t.preview_tools && Option.is_some t.on_tool_event then
               try
@@ -657,8 +667,7 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
                         with exn -> t.on_event
                           ("Action started, but rewind tracking failed; treat it as non-reversible: " ^
                            Printexc.to_string exn)) t.on_workspace_effect;
-                      t.on_event
-                        "External, process, network, or clipboard effects may be non-reversible; /rewind does not undo them.");
+                      t.on_event non_reversible_notice);
                     let before = match !tracked_path, t.on_workspace_effect with
                       | Some location, Some _ when location.worktree_id = None ->
                           Some (location, Session_rewind.snapshot_file

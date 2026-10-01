@@ -301,13 +301,20 @@ let invoke ?http ?cancel request =
   if String.length body > request.response_limit then fail "HTTP response exceeds the size limit";
   body
 
+let configured_provider ~env =
+  let priority = match env "PAVE_WEB_SEARCH_PROVIDER_PRIORITY" with
+    | None -> fail "web search is not configured: set PAVE_WEB_SEARCH_PROVIDER_PRIORITY to an explicit provider order (brave,tavily) and that provider's API key"
+    | Some value -> parse_priority value in
+  choose_provider ~env priority
+
+(* Lets callers refuse an unconfigured search before asking for approval. *)
+let check_configuration ?(env = Sys.getenv_opt) () =
+  ignore (configured_provider ~env)
+
 let search ?http ?cancel ?(env = Sys.getenv_opt) ?(page = 0) ?(count = 5) ~query () =
   let query = valid_query query in
   validate_limits ~page ~count;
-  let priority = match env "PAVE_WEB_SEARCH_PROVIDER_PRIORITY" with
-    | None -> fail "set PAVE_WEB_SEARCH_PROVIDER_PRIORITY to an explicit provider order (brave,tavily)"
-    | Some value -> parse_priority value in
-  let provider, key = choose_provider ~env priority in
+  let provider, key = configured_provider ~env in
   if provider = Tavily && page <> 0 then fail "Tavily Search does not support paged requests";
   let request = match provider with
     | Brave -> {

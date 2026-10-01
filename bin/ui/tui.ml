@@ -53,6 +53,7 @@ type approval_request = {
   title : string;
   label : string;
   body : string;
+  primary : int;
   max_bytes : int;
   wrap : bool;
   too_large : string;
@@ -66,10 +67,11 @@ type approval_view = {
   heading : string;
   context : string;
   lines : string list;
+  primary : int;  (* leading lines naming exactly what runs, shown emphasized *)
   wrap_lines : bool;
   mutable allow_selected : bool;
   mutable notice : string;
-  mutable preview_cache : (int * string array) option;
+  mutable preview_cache : (int * (bool * string) array) option;
 }
 
 type terminal_event =
@@ -990,11 +992,14 @@ let approval_preview cols view =
   match view.preview_cache with
   | Some (width, lines) when width = columns -> lines
   | _ ->
+      let lines = List.mapi (fun index line -> index < view.primary, line)
+        view.lines in
       let lines = if view.wrap_lines then
-          Array.concat (List.map (fun line ->
-            if line = "" then [| "" |]
-            else Transcript_view.wrap ~columns ~measure:measure_text line) view.lines)
-        else Array.of_list view.lines in
+          Array.concat (List.map (fun (primary, line) ->
+            if line = "" then [| primary, "" |]
+            else Array.map (fun part -> primary, part)
+              (Transcript_view.wrap ~columns ~measure:measure_text line)) lines)
+        else Array.of_list lines in
       view.preview_cache <- Some (columns, lines);
       lines
 
@@ -1002,8 +1007,10 @@ let approval_fits ~cols ~rows ~activity view =
   cols >= 24 && rows >= 10 &&
   let preview = approval_preview cols view in
   Array.length preview <= max 0 (rows - 7 - activity) &&
-  Array.for_all (fun line -> measure_text line <= cols - 4) preview
+  Array.for_all (fun (_, line) -> measure_text line <= cols - 4) preview
 
+(* The decision sits directly under what is being decided; the activity row
+   stays at the bottom. Row budget: 3 header + preview + 4 decision rows. *)
 let approval_screen ~cols ~rows ~activity_rows view =
   let activity = Array.length activity_rows in
   let fits = approval_fits ~cols ~rows ~activity view in
@@ -1016,32 +1023,43 @@ let approval_screen ~cols ~rows ~activity_rows view =
   else
     let preview = approval_preview cols view in
     let preview_height = rows - 7 - activity in
+    let shown = min preview_height (Array.length preview) in
     let notice = if not fits then
-        Printf.sprintf "Resize to review all %d rows · allow locked" (Array.length preview)
+        Printf.sprintf "Resize to review all %d rows · Allow is locked"
+          (Array.length preview)
       else if view.notice <> "" then view.notice
-      else "One action only · draft preserved" in
-    let choice selected text =
-      choice_line cols selected
-        ((if selected then "❯ " else "  ") ^
-         shorten_width (max 0 (cols - 2)) text) in
+      else "Applies to this one call only · your draft is kept" in
+    let compact = cols < 40 in
+    let button selected key label =
+      let text = if compact then "[" ^ key ^ " " ^ label ^ "]"
+        else "[ " ^ key ^ "  " ^ label ^ " ]" in
+      I.string (if selected then selected_attr else muted) text in
+    let allow_label = if fits then (if compact then "Allow" else "Allow once")
+      else if compact then "Allow·locked" else "Allow once · locked" in
+    let buttons = I.(string text_attr "  " <|>
+      button (not view.allow_selected) "n" "Deny" <|>
+      string text_attr "  " <|>
+      button view.allow_selected "y" allow_label) in
+    let buttons = I.hsnap ~align:`Left cols buttons in
     let controls = fit_labels cols
-      (if cols < 40 then ["y allow"; "n deny"; "Tab/↑↓"; "↵ choose"]
-       else ["y allow"; "n/Esc deny"; "Tab/↑↓ choose"; enter_key ^ " confirm"]) in
+      (if compact then ["←→ choose"; "↵ ok"; "y/n"]
+       else ["←→/Tab choose"; enter_key ^ " confirm"; "y allow"; "n/Esc deny"]) in
+    let mark = if no_color then "? " else "◆ " in
     Array.concat [
-      [| line accent ("  " ^ view.heading);
-         line muted ("  " ^ view.context);
+      [| line accent ("  " ^ mark ^ view.heading);
+         line muted ("    " ^ view.context);
          I.uchar frame_attr (Uchar.of_int 0x2500) cols 1 |];
-      Array.init preview_height (fun index ->
-        if index < Array.length preview then
-          line text_attr ("  " ^ preview.(index))
-        else I.void cols 1);
-      activity_rows;
-      [| line (if fits then muted else warning) notice;
-         choice (not view.allow_selected) "Deny once";
-         choice view.allow_selected
-           (if fits then "Allow once" else "Allow once · resize required");
-         line text_attr controls |]
-    ], (if activity = 0 then -1 else rows - 4 - activity)
+      Array.init shown (fun index ->
+        let primary, text = preview.(index) in
+        if primary then line A.(text_attr ++ st bold) ("  " ^ text)
+        else line text_attr ("  " ^ text));
+      [| I.void cols 1;
+         buttons;
+         line (if fits then muted else warning) ("  " ^ notice);
+         line muted ("  " ^ controls) |];
+      Array.make (preview_height - shown) (I.void cols 1);
+      activity_rows
+    ], (if activity = 0 then -1 else rows - activity)
 
 let paint t =
   let cols, rows = Notty_unix.Term.size t.term in
@@ -1902,7 +1920,18 @@ let sent ?attachments t text =
   t.status <- idle_status;
   paint t
 let event t text =
-  change_transcript t (fun () -> Transcript_view.event t.transcript text);
+  let card = match t.active_tool with
+    | Some progress when Transcript_view.parse_tool text = None &&
+        not (String.starts_with ~prefix:"Error:" text) ->
+        Hashtbl.find_opt t.tool_groups progress.call_id
+    | _ -> None in
+  change_transcript t (fun () -> match card with
+    | Some group ->
+        Transcript_view.tool_note t.transcript group
+          (if text = Pave.Agent.non_reversible_notice
+           then "May have external effects · /rewind cannot undo them"
+           else text)
+    | None -> Transcript_view.event t.transcript text);
   paint t
 
 let tool_preview t key name preview =
@@ -2678,10 +2707,10 @@ let reviewable_text ~max_bytes text =
 
 
 
-let confirm_review_now t ~title ~label ~body ~max_bytes ~wrap
+let confirm_review_now t ~title ~label ~body ~primary ~max_bytes ~wrap
     ~too_large ~unsafe_text ~approved_text ~denied_text =
   let view = { heading = single_line title; context = single_line label;
-    lines = String.split_on_char '\n' body; wrap_lines = wrap;
+    lines = String.split_on_char '\n' body; primary; wrap_lines = wrap;
     allow_selected = false; notice = ""; preview_cache = None } in
   let fits () =
     let cols, rows = Notty_unix.Term.size t.term in
@@ -2732,7 +2761,7 @@ let confirm_review_now t ~title ~label ~body ~max_bytes ~wrap
             | Some Keybindings.Next_status ->
                 view.allow_selected <- not view.allow_selected; paint t; decide ()
             | _ ->
-                view.notice <- "Use y/n or Tab/↑↓ then " ^ enter_key;
+                view.notice <- "Press y to allow or n to deny · typing is ignored here";
                 paint t; decide ())
         | `End -> false
       and allow () =
@@ -2743,10 +2772,10 @@ let confirm_review_now t ~title ~label ~body ~max_bytes ~wrap
       decide ()) in
     alert t (if accepted then approved_text else denied_text);
     accepted)
-let confirm_review t ~title ~label ~body ~max_bytes ~wrap
+let confirm_review t ~title ~label ~body ~primary ~max_bytes ~wrap
     ~too_large ~unsafe_text ~approved_text ~denied_text =
   let request = {
-    title; label; body; max_bytes; wrap; too_large; unsafe_text;
+    title; label; body; primary; max_bytes; wrap; too_large; unsafe_text;
     approved_text; denied_text; result = None
   } in
   enqueue_ui_event t (Approval_event request);
@@ -2761,7 +2790,8 @@ let confirm_review t ~title ~label ~body ~max_bytes ~wrap
 let () =
   approval_handler := (fun t request ->
     let result = confirm_review_now t ~title:request.title
-      ~label:request.label ~body:request.body ~max_bytes:request.max_bytes
+      ~label:request.label ~body:request.body ~primary:request.primary
+      ~max_bytes:request.max_bytes
       ~wrap:request.wrap ~too_large:request.too_large
       ~unsafe_text:request.unsafe_text ~approved_text:request.approved_text
       ~denied_text:request.denied_text in
@@ -2769,24 +2799,51 @@ let () =
 
 
 let confirm t command =
-  let title = "Shell permission" in
-  confirm_review t ~title ~label:"One command · unsandboxed"
-    ~body:command ~max_bytes:4096 ~wrap:false
+  confirm_review t ~title:"Run this shell command?"
+    ~label:"run_command · exec tier · not sandboxed · runs as your user"
+    ~body:command ~primary:max_int ~max_bytes:4096 ~wrap:false
     ~too_large:"Shell command denied: too large to review on screen"
     ~unsafe_text:"Shell command denied: hidden/control text cannot be reviewed"
     ~approved_text:"Shell command approved"
     ~denied_text:"Shell command denied"
 
+(* Ask a question about the action, lead with exactly what will run, then
+   explain its effect; the tier stays visible in plain words. *)
+let approval_question (request : Pave.Approval.request) =
+  match request.tool_name with
+  | "run_command" | "start_shell" -> "Run this shell command?"
+  | "start_process" -> "Start this process?"
+  | "web_search" -> "Search the web for this query?"
+  | "web_fetch" -> "Fetch this web page?"
+  | "write_file" -> "Write this file?"
+  | "edit_file" | "apply_edits" | "ast_edit" -> "Edit this file?"
+  | "task" -> "Start a read-only child agent?"
+  | name -> "Allow " ^ name ^ "?"
+
+let approval_scope (request : Pave.Approval.request) =
+  let consequence = match request.tier with
+    | Pave.Approval.Read -> "reads only"
+    | Pave.Approval.Write -> "changes workspace files"
+    | Pave.Approval.Exec ->
+        if List.mem request.tool_name ["run_command"; "start_shell"]
+        then "not sandboxed" else "process or network effects" in
+  String.concat " · " [
+    request.tool_name;
+    Pave.Approval.tier_name request.tier ^ " tier";
+    consequence;
+    "this call only" ]
+
+let approval_primary_detail detail =
+  List.exists (fun prefix -> String.starts_with ~prefix detail)
+    ["Command: "; "Query: "; "URL: "; "Path: "; "Label: "; "Task: "]
+
 let confirm_tool t (request : Pave.Approval.request) =
   let shell = request.tool_name = "run_command" in
-  let title = if shell then "Shell permission" else "Tool permission" in
-  let body = String.concat "\n" ([
-    "Tool: " ^ request.tool_name;
-    "Tier: " ^ String.uppercase_ascii
-      (Pave.Approval.tier_name request.tier);
-    "Impact: " ^ request.impact
-  ] @ request.details @
-    (match request.reason with Some reason -> ["Policy: " ^ reason] | None -> [])) in
+  let primary, others = List.partition approval_primary_detail request.details in
+  let body = String.concat "\n" (primary @
+    (if primary = [] then [] else [""]) @
+    ["What happens: " ^ request.impact] @ others @
+    (match request.reason with Some reason -> ["Why asked: " ^ reason] | None -> [])) in
   let oversized_shell_command = shell && List.exists (fun detail ->
     let prefix = "Command: " in
     String.starts_with ~prefix detail &&
@@ -2795,11 +2852,10 @@ let confirm_tool t (request : Pave.Approval.request) =
     alert t "Shell command denied: too large to review on screen";
     false)
   else
-    confirm_review t ~title
-      ~label:(if shell then "One command · unsandboxed"
-        else "One action · settings unchanged") ~body
+    confirm_review t ~title:(approval_question request)
+      ~label:(approval_scope request) ~body ~primary:(List.length primary)
       ~max_bytes:8192 ~wrap:true
       ~too_large:"Tool action denied: preview does not fit on screen"
       ~unsafe_text:"Tool action denied: hidden/control text cannot be reviewed"
-      ~approved_text:"Tool action approved"
-      ~denied_text:"Tool action denied"
+      ~approved_text:(request.tool_name ^ " allowed once")
+      ~denied_text:(request.tool_name ^ " denied")

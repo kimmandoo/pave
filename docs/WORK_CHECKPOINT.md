@@ -1,5 +1,16 @@
 # Work checkpoint
 
+## Current session — tool approval and tool card UX redesign
+
+- **Date:** 2026-10-01
+- **Active task:** Completed the user's request to redesign tool y/n approval and tool display UX. The pasted screen came from the installed v0.1.77 binary (old transcript approval); the source already had a modal since `aed9426`, which was redesigned further here.
+- **Observed before changes (PTY, loopback vLLM fixture):** raw `Tool:`/`Tier: EXEC` dump with no question; Deny/Allow stacked at the bottom after a large gap; unconfigured `web_search` still asked for approval and then failed; tool cards split by a separate "● Note" block; single-line results labelled "1 line · collapsed"; user refusals shown as `failed` + `Error: command not approved`; headers lacked the query/command.
+- **Implementation:** `bin/ui/tui.ml` — question headings (`approval_question`), subtitle `tool · tier · effect · this call only` (`approval_scope`), primary argument lines first and bold (`approval_view.primary`), horizontal `[ n  Deny ]  [ y  Allow once ]` buttons directly under the preview with unchanged row budget/fit gate, activity row at the bottom, clearer notices; notices during an active tool go into its card. `bin/ui/transcript_view.ml` — headers name the primary argument, `denied by you · not run`, single-line outcomes without collapse hint, `tool_note` (error-tinted when the call fails). `lib/agent/agent.ml` — `Tool_started.target` for path/pattern/command/query/url tools; shared `non_reversible_notice`. `lib/tools/{web_search,tools}.ml` — `Web_search.check_configuration` in `Tools.prepare`.
+- **Changed files:** above plus `test/tools/test_tools.ml`, `test/ui/{test_chooser_dynamic,test_transcript_view}.ml`, `docs/{USAGE,DESIGN_RULES,WORK_CHECKPOINT}.md`, `CHANGELOG.md`.
+- **Verification:** `opam exec -- dune build @install` and `opam exec -- dune runtest` passed (exit 0). Actual CLI in tmux (110×32, 90×26, 36×16 NO_COLOR) with a loopback vLLM fixture: unconfigured web_search produced no prompt; shell modal showed buttons with reverse-highlight selection moving on Right; stray `x` showed the ignore notice; clipped 36×16 preview locked Allow and unlocked after resize; `y` allowed configured web_search (Brave returned 422 for a fake key) with the side-effect note inside its card; default Enter denied the shell call, shown as `denied by you · not run`. Temporary fixture/workspace removed.
+- **Limits / blockers:** No release or installed-binary replacement — the user will keep seeing the old v0.1.77 screen until a release/update. PTY emulator observation, not a graphical terminal.
+- **Exact next action:** None for this request; release only when asked.
+
 ## Current session — agent request/response logic audit
 
 - **Date:** 2026-10-01

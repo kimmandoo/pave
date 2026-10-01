@@ -350,11 +350,27 @@ let () =
       ["No clipboard content is read before approval."]);
     ignore (approval_case "clipboard_write"
       ["text", `String "reviewed clipboard content"] Pave.Approval.Write);
+    (* An unconfigured search is refused before any approval is requested. *)
+    (match Sys.getenv_opt "PAVE_WEB_SEARCH_PROVIDER_PRIORITY" with
+     | Some _ -> ()
+     | None ->
+         (match Pave.Tools.prepare ~root ~name:"web_search"
+             ~args:(`Assoc ["query", `String "never sent"]) () with
+          | Error message -> assert (contains message "not configured")
+          | Ok _ -> failwith "unconfigured web_search must fail before approval"));
+    let previous_priority = Sys.getenv_opt "PAVE_WEB_SEARCH_PROVIDER_PRIORITY" in
+    Unix.putenv "PAVE_WEB_SEARCH_PROVIDER_PRIORITY" "brave";
+    Unix.putenv "BRAVE_SEARCH_API_KEY" search_secret;
+    assert (contains (tool_json root "web_search" ["query", `String "never sent"])
+      "requires explicit interactive approval");
+    Unix.putenv "PAVE_WEB_SEARCH_PROVIDER_PRIORITY"
+      (Option.value ~default:"" previous_priority);
+    Unix.putenv "BRAVE_SEARCH_API_KEY"
+      (Option.value ~default:"" previous_search_key);
     List.iter (fun (name, fields) ->
       let result = tool_json root name fields in
       assert (contains result "requires explicit interactive approval"))
-      ["web_search", ["query", `String "never sent"];
-       "web_fetch", ["url", `String "https://example.com/"];
+      ["web_fetch", ["url", `String "https://example.com/"];
        "image_ocr", ["path", `String "sample.png";
                      "mime", `String "image/png"];
        "clipboard_read", [];
