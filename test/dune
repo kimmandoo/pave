@@ -562,6 +562,11 @@
  (libraries pave unix yojson))
 
 (test
+ (name test_devin_binary_http)
+ (modules test_devin_binary_http)
+ (libraries pave unix))
+
+(test
  (name test_gitlab_duo_oauth)
  (modules test_gitlab_duo_oauth)
  (libraries pave unix yojson))

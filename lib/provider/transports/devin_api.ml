@@ -182,8 +182,10 @@ let http_connect_code body =
 let default_http ?cancel ~url ~headers ~body ~on_chunk () =
   if not (allowed_url url) then Error (Invalid_response "untrusted Devin API endpoint")
   else try
+    let timeouts = if url = chat_url then Devin_binary_http.completion_timeouts
+      else Devin_binary_http.unary_timeouts in
     let status, response = Devin_binary_http.post ?cancel
-      ~url ~headers ~body ~max_bytes:max_body () in
+      ~timeouts ~url ~headers ~body ~max_bytes:max_body () in
     on_chunk response;
     Ok status
   with Devin_binary_http.Failed reason -> Error (Transport_error reason)
@@ -198,7 +200,13 @@ let rpc ?http ?cancel ~url ~headers ~body () =
     | Some http -> http
     | None -> fun ~url ~headers ~body ~on_chunk ->
         default_http ?cancel ~url ~headers ~body ~on_chunk () in
+  let operation = if url = auth_url then "GetUserJwt"
+    else if url = models_url then "GetCliModelConfigs"
+    else if url = assign_url then "AssignModel"
+    else "GetChatMessage" in
   match call ~url ~headers ~body ~on_chunk with
+  | Error (Transport_error reason) ->
+      Error (Transport_error (operation ^ ": " ^ reason))
   | Error reason -> Error reason
   | Ok status when status < 200 || status >= 300 ->
       Error (Http_error (status, http_connect_code (Buffer.contents received)))

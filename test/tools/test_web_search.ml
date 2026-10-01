@@ -176,6 +176,42 @@ let () =
   expect_error "DuckDuckGo bot challenge is explained" "bot-detection"
     (fun () -> Web_search.search ~http:(fun _ -> Ok (200, "<div class=\"anomaly-modal\">"))
       ~env:(environment []) ~query:"query" ());
+  let challenge_calls = ref [] in
+  let challenge_fallback = Web_search.search
+      ~http:(fun request ->
+        challenge_calls := request.Web_search.search :: !challenge_calls;
+        match request.search with
+        | Some Web_search.Duckduckgo ->
+            Ok (202, "<form class=\"anomaly-modal\">private-challenge-token</form>")
+        | Some Web_search.Brave -> Ok (200, brave_response)
+        | _ -> fail "unexpected challenge fallback")
+      ~env:(environment ["PAVE_WEB_SEARCH_PROVIDER_PRIORITY", "duckduckgo,brave";
+                        "BRAVE_SEARCH_API_KEY", "brave-secret"])
+      ~query:"query" () in
+  expect "HTTP 202 challenge falls back without publishing challenge data"
+    (challenge_fallback.provider = "brave" &&
+     List.rev !challenge_calls = [Some Web_search.Duckduckgo; Some Web_search.Brave] &&
+     match challenge_fallback.failed with
+     | ["duckduckgo", reason] -> not (contains reason "private-challenge-token")
+     | _ -> false);
+  List.iter (fun html ->
+    let empty = Web_search.search ~http:(fun _ -> Ok (200, html))
+        ~env:(environment []) ~query:"unindexed topic" () in
+    expect "live no-result quote and class variants return no invented citations"
+      (empty.results = [] && empty.citations = [] && empty.failed = []))
+    ["<span class='no-results'><h1>No results found</h1></span>";
+     "<div class=\"result results_links results_links_deep web-result result--no-result\">No results found</div>"];
+  let varied_rows = Web_search.parse_duckduckgo 5
+      "<a CLASS='extra result__a selected' href='https://example.org/docs?a=1&amp;b=2'>Actual &amp; Result</a>" in
+  expect "result links accept class membership and single-quoted attributes"
+    (varied_rows = ["Actual & Result", "https://example.org/docs?a=1&b=2", ""]);
+  let empty_json = Web_search.search
+      ~http:(fun _ -> Ok (200, {|{"results":[]}|}))
+      ~env:(environment ["PAVE_WEB_SEARCH_PROVIDER_PRIORITY", "tavily";
+                        "TAVILY_API_KEY", "tavily-secret"])
+      ~query:"unindexed topic" () in
+  expect "valid JSON empty results remain empty"
+    (empty_json.results = [] && empty_json.citations = [] && empty_json.failed = []);
   let malformed_html = "<a class=\"result__a\" href=\"https://example.com/\">Unclosed" in
   let recovered = Web_search.search
       ~http:(fun request -> match request.Web_search.search with
@@ -327,28 +363,24 @@ let () =
       ~cancel:(fun () -> !fetch_cancelled)
       ~http:(fun _ -> fetch_cancelled := true; Error "request interrupted")
       "https://93.184.216.34/article" ());
-  let links = Web_search.convert_html_to_markdown
+  let links, links_truncated = Web_search.convert_html_to_markdown
       ("<a title=\"quoted > character\" href='https://safe.example/path?a=1&amp;b=2'>" ^
        "Safe &amp; [linked]</a> " ^
        "<a href='javascript:alert(1)'>JavaScript label</a> " ^
        "<a href='http://safe.example/'>HTTP label</a> " ^
        "<a href='https://user:password@safe.example/'>Credential label</a>") in
   expect "quoted greater-than attributes and entity-decoded safe HTTPS links"
-    (contains links "[Safe & \\[linked\\]](<https://safe.example/path?a=1&b=2>)");
+    (not links_truncated && contains links "[Safe & \\[linked\\]](<https://safe.example/path?a=1&b=2>)");
   expect "unsafe href destinations are dropped while their text remains"
     (contains links "JavaScript label" && contains links "HTTP label" &&
      contains links "Credential label" && not (contains links "javascript:") &&
      not (contains links "http://safe.example/") &&
      not (contains links "user:password"));
-  let table = Web_search.convert_html_to_markdown
+  let table, table_truncated = Web_search.convert_html_to_markdown
       ("<table><tr><th>Name</th><th>Age</th></tr>" ^
        "<tr><td>Ada</td><td>37</td></tr><tr><td>Lin</td><td>41</td></tr></table>") in
   expect "tables render header separators and every row"
-    (table = "| Name | Age |\n| --- | --- |\n| Ada | 37 |\n| Lin | 41 |");
-  let long_link_html = "<a href='https://e.com'>" ^ String.make 20 ']' ^ "</a>" in
-  expect_error "expanded Markdown is rejected instead of truncated" "converted page exceeds"
-    (fun () -> Web_search.convert_html_to_markdown
-       ~max_bytes:(String.length long_link_html) long_link_html);
+    (not table_truncated && table = "| Name | Age |\n| --- | --- |\n| Ada | 37 |\n| Lin | 41 |");
   expect_error "redirect response rejected" "HTTP 302"
     (fun () -> Web_search.fetch_url ~http:(fun _ -> Ok (302, "redirect body"))
        "https://93.184.216.34/redirect" ());
@@ -361,15 +393,42 @@ let () =
   expect_error "private IPv6 fetch host rejected" "private or local IP"
     (fun () -> Web_search.fetch_url ~http:(fun _ -> fail "private URL must not be requested")
        "https://[::1]/private" ());
-  expect_error "oversized fetched HTML rejected" "exceeds the size limit"
-    (fun () -> Web_search.fetch_url ~max_bytes:8 ~http:(fun _ -> Ok (200, "<p>too much</p>"))
-       "https://93.184.216.34/large" ());
+  let large_html = Web_search.fetch_url
+      ~http:(fun _ -> Ok (200, "<script>" ^ String.make 300_000 'x' ^
+        "</script><p>Visible document</p>"))
+      "https://93.184.216.34/large" () in
+  expect "download budget is independent of output and ignored HTML"
+    (large_html.markdown = "Visible document" && not large_html.truncated);
+  let raw_json = {|{"content":"<p>Preserve &amp; markup</p>","value":42}|} in
+  let json_page = Web_search.fetch_url ~http:(fun _ -> Ok (200, raw_json))
+      "https://93.184.216.34/data.json" () in
+  expect "JSON source survives without HTML stripping or entity decoding"
+    (json_page.markdown = raw_json && not json_page.truncated);
+  let prefix = "{\"value\":\"" in
+  let partial_json = Web_search.fetch_url ~max_bytes:(String.length prefix + 4)
+      ~http:(fun _ -> Ok (200, prefix ^ "한글\"}"))
+      "https://93.184.216.34/data.json" () in
+  expect "JSON preview marks truncation without splitting UTF-8"
+    (partial_json.truncated && partial_json.markdown = prefix ^ "한");
+  let partial_html = Web_search.fetch_url ~max_bytes:4
+      ~http:(fun _ -> Ok (200, "<p>한글</p>"))
+      "https://93.184.216.34/article" () in
+  expect "HTML preview marks truncation without splitting UTF-8"
+    (partial_html.truncated && partial_html.markdown = "한");
+  let table_preview, table_cut = Web_search.convert_html_to_markdown ~max_bytes:8
+      "<table><tr><td>abcdefghijklmnop</td></tr></table>" in
+  expect "large first table cell retains a bounded visible preview"
+    (table_cut && table_preview = "| abcdef");
+  let rejected = ref false in
+  (try ignore (Web_search.fetch_url
+       ~http:(fun _ -> Ok (200, String.make (Web_search.max_fetch_response_bytes + 1) 'x'))
+       "https://93.184.216.34/too-large" ())
+   with Web_search.Error _ -> rejected := true);
+  expect "oversized downloads never become apparently successful previews" !rejected;
   expect_error "nonstandard fetch port rejected" "port 443"
     (fun () -> Web_search.fetch_url ~http:(fun _ -> fail "non-443 URL must not be requested")
        "https://pages.example.org:8443/article" ());
   expect_error "credentialed fetch URL rejected" "credential-free public HTTPS"
     (fun () -> Web_search.fetch_url ~http:(fun _ -> fail "credentialed URL must not be requested")
        "https://user:password@pages.example.org/article" ());
-  expect_error "HTML input limit enforced" "HTML page exceeds"
-    (fun () -> Web_search.convert_html_to_markdown ~max_bytes:4 "<p>hello</p>");
   print_endline "web search pinned providers, provenance, and safe fetch: ok"

@@ -2191,7 +2191,8 @@ let web_fetch ~approved ?cancel args =
   let page = Web_search.fetch_url ?cancel ~max_bytes url () in
   Yojson.Basic.to_string (`Assoc [
     "source_url", `String page.source_url;
-    "markdown", `String page.markdown
+    "markdown", `String page.markdown;
+    "truncated", `Bool page.truncated
   ])
 let image_ocr ~approved ?cancel root args =
   require_explicit_approval approved;
@@ -2859,9 +2860,9 @@ let definitions = [
     ["query", bounded_string_field "Search query sent to the selected provider" Web_search.max_query_bytes;
      "page", integer_field "Brave-only page/offset (default 0; nonzero pages exclude other providers)" 0 Web_search.max_page;
      "count", integer_field "Maximum results (default 5)" 1 Web_search.max_results] ["query"];
-  schema "web_fetch" "Fetch a public HTTPS page without credentials or redirects and convert bounded HTML to Markdown. Requires separate network approval."
+  schema "web_fetch" "Fetch one public HTTPS document without credentials or redirects (up to 1 MiB downloaded). Convert HTML to Markdown and preserve JSON text. Output is a bounded preview; truncated=true means content is incomplete, not a complete document or valid complete JSON. Requires separate network approval."
     ["url", bounded_string_field "Credential-free public HTTPS URL on port 443" 4096;
-     "max_bytes", integer_field "Maximum HTML and converted output bytes (default 65536)"
+     "max_bytes", integer_field "Maximum returned content bytes, not download size (default 65536); inspect truncated"
        1 Web_search.max_content_bytes] ["url"];
   schema "image_ocr" "Run the fixed local Tesseract helper on a workspace image passed through stdin. Requires explicit approval; never invokes a shell or network."
     ["path", string_field "Workspace-relative image path";

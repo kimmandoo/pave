@@ -29,7 +29,7 @@ type response = {
   citations : string list;
   failed : (string * string) list;  (* earlier engines that failed, with why *)
 }
-type fetched_page = { source_url : string; markdown : string }
+type fetched_page = { source_url : string; markdown : string; truncated : bool }
 
 exception Error of string
 let fail message = raise (Error message)
@@ -45,6 +45,7 @@ let max_query_bytes = 600
 let max_results = 20
 let max_page = 9
 let max_response_bytes = 256 * 1_024
+let max_fetch_response_bytes = 1024 * 1024
 let max_content_bytes = Workspace_reader.max_output_bytes
 let timeout_seconds = 20
 
@@ -350,7 +351,9 @@ let check_cancel cancel = match cancel with
   | _ -> ()
 
 let validate_request request =
-  if request.response_limit < 1 || request.response_limit > max_response_bytes then
+  let limit = if request.search = None then max_fetch_response_bytes
+    else max_response_bytes in
+  if request.response_limit < 1 || request.response_limit > limit then
     fail "HTTP response limit is invalid";
   if request.method_ <> "GET" && request.method_ <> "POST" then
     fail "HTTP method is not allowed";
@@ -412,7 +415,17 @@ let curl_request ?cancel request =
     try ignore (Provider.run_curl ?cancel ~on_chunk:collect (with_body path))
     with
     | Provider.Cancelled -> fail "search or fetch cancelled"
-    | Provider.Provider_error _ -> fail "HTTPS request failed or timed out"
+    | Provider.Provider_error reason ->
+        let message = match reason with
+          | "Transport error: curl failed (exit status 6)" -> "HTTPS host could not be resolved"
+          | "Transport error: curl failed (exit status 7)" -> "HTTPS connection failed"
+          | "Transport error: curl failed (exit status 28)" -> "HTTPS request timed out"
+          | "Transport error: curl failed (exit status 35)" -> "HTTPS TLS handshake failed"
+          | "Transport error: curl failed (exit status 60)" -> "HTTPS certificate verification failed"
+          | "Transport error: curl failed (exit status 63)" ->
+              Printf.sprintf "HTTP response exceeds the %d-byte download limit" request.response_limit
+          | _ -> "HTTPS request failed" in
+        fail message
   in
   (match if request.body = "" then None else Some request.body with
    | None -> run None
@@ -439,15 +452,19 @@ let default_http ?cancel request =
 let invoke ?http ?cancel request =
   check_cancel cancel;
   let send = match http with
-    | Some send -> send
+    | Some send -> fun request -> (match send request with
+        | Ok response -> Ok response
+        | Error _ -> Error "HTTPS request failed")
     | None -> default_http ?cancel in
   let response = send request in
   check_cancel cancel;
   let status, body = match response with
     | Ok response -> response
-    | Error _ -> fail "HTTPS request failed or timed out" in
-  if status <> 200 then fail (Printf.sprintf "search/fetch provider returned HTTP %d" status);
+    | Error message -> fail message in
   if String.length body > request.response_limit then fail "HTTP response exceeds the size limit";
+  if request.search = Some Duckduckgo && status = 202 then
+    fail "DuckDuckGo blocked or deferred this search (HTTP 202, usually a bot-detection challenge); use another configured search provider or fetch a known source URL directly";
+  if status <> 200 then fail (Printf.sprintf "search/fetch provider returned HTTP %d" status);
   body
 
 type candidate = { engine : provider; key : string option }
@@ -567,22 +584,38 @@ let decode_entity entity =
        with Failure _ -> None)
   | _ -> None
 
+exception Content_limit
+
+let utf8_prefix_length text limit =
+  let rec boundary index =
+    if index > 0 && index < String.length text &&
+       Char.code text.[index] land 0xc0 = 0x80 then boundary (index - 1)
+    else index in
+  boundary (min (String.length text) (max 0 limit))
+
 let append_checked output max_bytes value =
-  if Buffer.length output + String.length value > max_bytes then
-    fail (Printf.sprintf "converted page exceeds %d-byte content limit" max_bytes);
+  let room = max_bytes - Buffer.length output in
+  if String.length value > room then (
+    Buffer.add_substring output value 0 (utf8_prefix_length value room);
+    raise Content_limit);
   Buffer.add_string output value
 
 let append_decoded ?(escape_markdown = false) output max_bytes html start finish =
   let append value =
-    if escape_markdown then
-      String.iter (function
-        | ('\\' | '[' | ']') as c ->
-            append_checked output max_bytes (String.make 1 '\\');
-            append_checked output max_bytes (String.make 1 c)
-        | '\n' | '\r' when escape_markdown ->
-            append_checked output max_bytes " "
-        | c -> append_checked output max_bytes (String.make 1 c)) value
-    else append_checked output max_bytes value in
+    if not escape_markdown then append_checked output max_bytes value
+    else
+      let rec escaped start index =
+        if index = String.length value then
+          append_checked output max_bytes (String.sub value start (index - start))
+        else match value.[index] with
+          | ('\\' | '[' | ']' | '\n' | '\r') as character ->
+              append_checked output max_bytes (String.sub value start (index - start));
+              append_checked output max_bytes (match character with
+                | '\\' -> "\\\\" | '[' -> "\\[" | ']' -> "\\]"
+                | _ -> " ");
+              escaped (index + 1) (index + 1)
+          | _ -> escaped start (index + 1) in
+      escaped 0 0 in
   let rec loop index =
     if index >= finish then ()
     else if html.[index] = '&' then
@@ -593,7 +626,11 @@ let append_decoded ?(escape_markdown = false) output max_bytes html start finish
             | Some decoded -> append decoded; loop (ending + 1)
             | None -> append "&"; loop (index + 1))
        | _ -> append "&"; loop (index + 1))
-    else (append (String.make 1 html.[index]); loop (index + 1))
+    else (
+      let next = match String.index_from_opt html index '&' with
+        | Some at -> min finish at | None -> finish in
+      append (String.sub html index (next - index));
+      loop next)
   in loop start
 
 let find_case_insensitive text needle start =
@@ -639,7 +676,7 @@ let decode_html_attribute value =
   append_decoded output max_content_bytes value 0 (String.length value);
   Buffer.contents output
 
-let parse_href attributes =
+let parse_attribute wanted attributes =
   let length = String.length attributes in
   let skip_space index =
     let i = ref index in
@@ -666,7 +703,7 @@ let parse_href attributes =
         let ending = find_end start in
         Some (String.sub attributes start (ending - start)), ending)
     else None, index in
-  let href = ref None and seen_href = ref false and duplicate_href = ref false in
+  let found = ref None and seen = ref false and duplicate = ref false in
   let rec scan index =
     let index = skip_space index in
     if index >= length then ()
@@ -681,15 +718,16 @@ let parse_href attributes =
       else
         let name = lowercase (String.sub attributes start (ending - start)) in
         let value, next = read_value ending in
-        if name = "href" then
-          if !seen_href then duplicate_href := true
+        if name = wanted then
+          if !seen then duplicate := true
           else (
-            seen_href := true;
-            href := Option.map decode_html_attribute value);
+            seen := true;
+            found := Option.bind value (fun value ->
+              try Some (decode_html_attribute value) with Content_limit -> None));
         scan (max (index + 1) next)
   in
   scan 0;
-  if !duplicate_href then None else !href
+  if !duplicate then None else !found
 
 let markdown_destination url =
   let output = Buffer.create (String.length url) in
@@ -715,7 +753,7 @@ let safe_anchor_href href =
 
 let convert_html_to_markdown ?(max_bytes = max_content_bytes) html =
   if max_bytes < 1 || max_bytes > max_content_bytes then fail "page content limit must be between 1 and 65536 bytes";
-  if String.length html > max_bytes then fail "HTML page exceeds the content limit";
+  if String.length html > max_fetch_response_bytes then fail "HTML page exceeds the download limit";
   let output = Buffer.create (min (String.length html) max_bytes) in
   let length = String.length html in
   let table_active = ref false in
@@ -840,7 +878,7 @@ let convert_html_to_markdown ?(max_bytes = max_content_bytes) html =
                        | ("td" | "th"), false, true -> open_cell ()
                        | ("td" | "th"), true, true -> finish_cell ()
                        | "a", false, _ ->
-                           let destination = Option.bind (parse_href attributes) safe_anchor_href in
+                           let destination = Option.bind (parse_attribute "href" attributes) safe_anchor_href in
                            anchors := destination :: !anchors;
                            (match destination with Some _ -> append "[" | None -> ())
                        | "a", true, _ -> pop_anchor ()
@@ -861,12 +899,22 @@ let convert_html_to_markdown ?(max_bytes = max_content_bytes) html =
                        | _ -> ());
                       scan (ending + 1) None)))
   in
-  scan 0 None;
-  close_open_anchors ();
-  if !table_active then (
-    finish_row ();
-    render_table ());
-  String.trim (Buffer.contents output)
+  let truncated =
+    try
+      scan 0 None;
+      close_open_anchors ();
+      if !table_active then (finish_row (); render_table ());
+      false
+    with Content_limit ->
+      (* A long table cell may fill before the outer buffer. Preserve its
+         bounded prefix rather than returning an empty table preview. *)
+      (match !current_cell with
+       | Some _ ->
+           finish_row ();
+           (try render_table () with Content_limit -> ())
+       | None -> ());
+      true in
+  String.trim (Buffer.contents output), truncated
 
 let fetch_url ?http ?cancel ?(max_bytes = max_content_bytes) url () =
   if max_bytes < 1 || max_bytes > max_content_bytes then fail "page content limit must be between 1 and 65536 bytes";
@@ -880,11 +928,23 @@ let fetch_url ?http ?cancel ?(max_bytes = max_content_bytes) url () =
   if port <> 443 then fail "fetch URL must use HTTPS port 443";
   check_cancel cancel;
   ignore (safe_addresses ?cancel host);
-  let request = { search = None; method_ = "GET"; url; headers = ["Accept", "text/html,application/xhtml+xml";
-      "User-Agent", "pave-web-fetch/1.0"]; body = ""; response_limit = max_bytes } in
-  let html = invoke ?http ?cancel request in
-  let markdown = convert_html_to_markdown ~max_bytes html in
-  { source_url = url; markdown }
+  let request = { search = None; method_ = "GET"; url;
+    headers = ["Accept", "text/html,application/xhtml+xml,application/json,text/plain;q=0.9";
+      "User-Agent", "pave-web-fetch/1.0"];
+    body = ""; response_limit = max_fetch_response_bytes } in
+  let body = invoke ?http ?cancel request in
+  let rec first index =
+    if index < String.length body && is_space body.[index] then first (index + 1)
+    else index in
+  let start = first 0 in
+  let markdown, truncated =
+    if start < String.length body && (body.[start] = '{' || body.[start] = '[') then
+      (* Structured documents are data: never strip HTML inside JSON strings.
+         A bounded prefix is explicitly marked as incomplete by the tool. *)
+      if String.length body <= max_bytes then body, false
+      else String.sub body 0 (utf8_prefix_length body max_bytes), true
+    else convert_html_to_markdown ~max_bytes body in
+  { source_url = url; markdown; truncated }
 
 (* Visible text of an HTML fragment: tags dropped, entities decoded,
    whitespace collapsed. *)
@@ -929,14 +989,42 @@ let percent_decode text =
   loop 0;
   Buffer.contents output
 
-let attribute tag name =
-  match find_case_insensitive tag (" " ^ name ^ "=\"") 0 with
-  | Some start ->
-      let value = start + String.length name + 3 in
-      (match String.index_from_opt tag value '"' with
-       | Some close -> Some (String.sub tag value (close - value))
-       | None -> None)
+(* HTML class membership is independent of quote style and class order.
+   Reuse the same checked attribute scanner as document links. *)
+let has_class classes wanted =
+  let length = String.length classes and width = String.length wanted in
+  let rec equal start offset =
+    offset = width ||
+    (classes.[start + offset] = wanted.[offset] && equal start (offset + 1)) in
+  let rec scan index =
+    if index >= length then false
+    else if is_space classes.[index] then scan (index + 1)
+    else
+      let ending = ref index in
+      while !ending < length && not (is_space classes.[!ending]) do incr ending done;
+      (!ending - index = width && equal index 0) || scan !ending in
+  scan 0
+
+let rec find_class_tag html ~tag wanted index =
+  match String.index_from_opt html index '<' with
   | None -> None
+  | Some start when start + 4 <= String.length html &&
+      String.sub html start 4 = "<!--" ->
+      (match find_case_insensitive html "-->" (start + 4) with
+       | None -> None
+       | Some ending -> find_class_tag html ~tag wanted (ending + 3))
+  | Some start ->
+      match find_tag_end html (start + 1) with
+      | None -> None
+      | Some ending ->
+          let content = String.sub html (start + 1) (ending - start - 1) in
+          match parse_tag content with
+          | Some (false, name, attributes)
+              when (match tag with None -> true | Some expected -> name = expected) &&
+                (match parse_attribute "class" attributes with
+                 | Some classes -> has_class classes wanted | None -> false) ->
+              Some (start, ending, attributes)
+          | _ -> find_class_tag html ~tag wanted (ending + 1)
 
 (* DuckDuckGo routes clicks through //duckduckgo.com/l/?uddg=<target>. *)
 let unwrap_duckduckgo_href href =
@@ -958,23 +1046,18 @@ let parse_duckduckgo count html =
   if find_case_insensitive html "anomaly-modal" 0 <> None ||
      find_case_insensitive html "anomaly.js" 0 <> None then
     fail "DuckDuckGo blocked the request with a bot-detection challenge; configure a credentialed provider such as Brave, Tavily, Exa or Kagi";
-  let marker = "class=\"result__a\"" in
   let seen = Hashtbl.create 16 in
   let tag_start_before index =
     let rec back i = if i <= 0 then 0 else if html.[i] = '<' then i else back (i - 1) in
     back index in
   let rec collect index rows =
     if List.length rows >= count then List.rev rows
-    else match find_case_insensitive html marker index with
+    else match find_class_tag html ~tag:(Some "a") "result__a" index with
       | None -> List.rev rows
-      | Some at ->
-          let tag_start = tag_start_before at in
-          (match find_tag_end html tag_start with
-           | None -> List.rev rows
-           | Some tag_end ->
-               let tag = String.sub html tag_start (tag_end - tag_start + 1) in
-               let next = Option.value ~default:(String.length html)
-                 (find_case_insensitive html marker (tag_end + 1)) in
+      | Some (_, tag_end, attributes) ->
+               let next = match find_class_tag html ~tag:(Some "a") "result__a" (tag_end + 1) with
+                 | Some (start, _, _) -> start
+                 | None -> String.length html in
                let title_end = match find_case_insensitive html "</a>" (tag_end + 1) with
                  | Some close when close < next -> close
                  | _ -> tag_end + 1 in
@@ -990,7 +1073,7 @@ let parse_duckduckgo count html =
                           html_text (String.sub html (open_end + 1) (max 0 (close - open_end - 1)))
                       | None -> "")
                  | _ -> "" in
-               let row = match Option.bind (attribute tag "href") unwrap_duckduckgo_href with
+               let row = match Option.bind (parse_attribute "href" attributes) unwrap_duckduckgo_href with
                  | Some url when title <> "" && String.length url <= 4_096 ->
                      (match normalized_url_key url with
                       | key when not (Hashtbl.mem seen key) &&
@@ -1001,9 +1084,12 @@ let parse_duckduckgo count html =
                       | exception Error _ -> None
                       | exception Workspace_reader.Error _ -> None)
                  | _ -> None in
-               collect (title_end + 1) (match row with Some row -> row :: rows | None -> rows)) in
+               collect (title_end + 1) (match row with Some row -> row :: rows | None -> rows) in
   match collect 0 [] with
-  | [] -> fail "DuckDuckGo returned no usable results"
+  | [] when find_class_tag html ~tag:None "no-results" 0 <> None ||
+            find_class_tag html ~tag:None "result--no-result" 0 <> None ->
+      []
+  | [] -> fail "DuckDuckGo returned no usable result markup; it may have blocked the request or changed its HTML; use another configured search provider or fetch a known source URL directly"
   | rows -> rows
 
 let search_engine ?http ?cancel ~query ~page ~count candidate =
@@ -1012,7 +1098,6 @@ let search_engine ?http ?cancel ~query ~page ~count candidate =
   let results = match candidate.engine with
     | Duckduckgo -> numbered Duckduckgo (parse_duckduckgo count body)
     | engine -> parse_results engine count (parse_json body) in
-  if results = [] then fail (provider_label candidate.engine ^ " returned no results");
   results
 
 (* Engines are tried in plan order; a failure moves to the next engine and is

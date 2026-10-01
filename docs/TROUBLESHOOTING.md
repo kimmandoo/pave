@@ -1,5 +1,33 @@
 # Troubleshooting
 
+### [2026-10-01] Devin discarded healthy long responses at a fixed two-minute deadline
+
+- **Context / Symptom:** After successful file tools, the user received `Devin Connect transport failed: request timed out (remote acceptance unknown)`. A local real-curl response emitting binary chunks every five seconds reproduced the transport cutoff at 120.13 seconds with one request.
+- **Root Cause:** The independent Devin executor applied `max-time = 120` to completion as well as unary metadata RPCs and waited for a temporary response file to finish. It could not distinguish prefill, active progress and response inactivity. Shared provider streams already had longer phase-specific budgets.
+- **Solution:** Used bounded binary pipe receipt with a three-byte HTTP-status suffix, a 600-second first-data allowance, a resetting 120-second inactivity allowance and a 3,600-second total completion cap. Metadata retains 120 seconds and all connections retain 10 seconds. Safe transport failures now name the RPC. No automatic replay or incomplete Connect response acceptance was introduced.
+- **Prevention / Reference:** The same real-curl workload completed after 130.14 seconds with all 494 bytes and one request. Subprocess regressions cover first-byte/idle/total deadlines, continued progress, delayed readable EOF, cancellation/reaping, size rejection during receipt and fragmented binary/status bytes; existing routed two-turn tool-result replay passed. This reproduces a client-side failure mode, not the exact upstream account/request; no authenticated Devin inference was performed.
+
+### [2026-10-01] Web fetch confused source size with preview size
+
+- **Context / Symptom:** Fetching the reported LINE `page-data.json` produced `HTTPS request failed or timed out`. The public source returned HTTP 200 and 510,997 bytes during diagnosis; the old fetch configuration allowed only 65,536 downloaded bytes.
+- **Root Cause:** `max_bytes` bounded both input transfer and rendered output, and curl size failures were collapsed into a generic timeout message. JSON documents were also passed through HTML conversion, which could strip markup inside JSON string values.
+- **Solution:** Separated the 1 MiB input ceiling from the at-most-65,536-byte preview, returned explicit `truncated` metadata with UTF-8-safe content, preserved structured JSON-looking source text and classified allowlisted transport failures without reflecting remote errors. Oversized input, private hosts, redirects and cancellation still fail.
+- **Prevention / Reference:** Executed the real `Tools.web_fetch` path against `https://designsystem.line.me/page-data/LDSG/components/buttons/action-button-en/page-data.json`: received a 65,536-byte preview with `truncated=true`, the Action Button content and intact HTML strings. Truncated JSON is not a complete parseable document. Regressions cover larger ignored HTML, exact JSON preservation, Unicode truncation, long table cells and over-limit downloads.
+
+### [2026-10-01] DuckDuckGo empty pages and challenges were conflated
+
+- **Context / Symptom:** The reported searches returned either `DuckDuckGo returned no usable results` or HTTP 202. A diagnostic GET returned a 202 `anomaly-modal` challenge. The real native form POST returned HTTP 200 with a genuine empty-result page: a single-quoted `no-results` class inside a multi-class `result--no-result` container.
+- **Root Cause:** HTTP status rejection ran before challenge classification; the scraper treated no usable rows as failure and matched exact double-quoted class strings instead of HTML class membership.
+- **Solution:** Recognized empty pages as successful empty results/citations, reused checked attribute parsing for quote/order-independent class membership and links, and classified 202 as blocked/deferred without publishing its body. Only previously configured/approved fallback providers may be tried; unknown/malformed pages remain failures.
+- **Prevention / Reference:** Deterministic regressions cover captured empty-page class variants, single-quoted multi-class result links, JSON-provider empty lists and 202 fallback without reflecting challenge tokens. DuckDuckGo can still challenge external requests; use a configured supported search API key or a known source URL rather than inventing results.
+
+### [2026-10-01] A cancelled pending read was correctly reported as unexecuted
+
+- **Context / Symptom:** The user also saw `turn cancelled before this tool ran; do not assume it executed` on `read_file` after web failures.
+- **Root Cause:** This is the scheduler's cancellation result, not a file-read failure. A normal web tool error does not itself set the turn-cancellation flag; the supplied log does not identify what requested cancellation.
+- **Solution:** Kept cancellation safety unchanged. An actual Agent/loopback-provider smoke verified both cases: a failed web tool followed by a successful read and second model request; and explicit cancellation after that failure, producing an aborted/unexecuted read with no second model request.
+- **Prevention / Reference:** Do not suppress the abort, execute cancelled work or label it successful to hide this message. Existing tool-call/result pairing and cancellation regressions remain in place.
+
 ### [2026-10-01] An extracted release archive lacked the native-install marker
 
 - **Context / Symptom:** Running `pave update --check` directly from the verified v0.1.78 archive returned `native-install marker missing; rerun install.sh once to enable self-update (opam installs must use opam)`.

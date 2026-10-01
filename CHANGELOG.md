@@ -2,6 +2,9 @@
 
 ## 2026-10-01
 
+- fix(devin): replaced the unconditional two-minute completion cutoff with response-phase deadlines, bounded binary receipt before parsing, and named the failing RPC without replaying accepted requests.
+- fix(web): separated document download and preview limits, preserved JSON source text, marked bounded UTF-8 previews as truncated, and retained safe transport failure causes.
+- fix(search): recognized genuine empty DuckDuckGo pages across HTML quote/class variants, distinguished HTTP 202 challenges, and retained configured fallback without inventing results.
 - chore(release): published v0.1.78 for Linux and macOS on x86_64 and ARM64 after native tests, and verified public archive checksums and packaged TUI behavior.
 - feat(tui): exposed selected model identity on narrow pickers, prioritized useful detail over explanatory prose, and made omitted introductions explicit.
 - fix(tui): named the actual safe action on cramped decision screens, hid unavailable consent shortcuts and included the control gutter in the fit budget.
