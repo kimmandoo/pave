@@ -1037,21 +1037,42 @@ let () =
         | None ->
             Printf.eprintf "\nShell command in %s:\n%s\nApprove? [y/N] %!" root command;
             Pave.Approval.confirmed_answer (try Some (read_line ()) with End_of_file -> None) in
-    let approve_tool_request (request : Pave.Approval.request) =
-      if not (Unix.isatty Unix.stdin) then false
+    (* "Allow all" grants last until this process exits and cover only
+       tools that Approval.session_grantable admits. *)
+    let session_grants = Hashtbl.create 8 and session_grants_lock = Mutex.create () in
+    let with_session_grant ask (request : Pave.Approval.request) =
+      let grantable = Pave.Approval.session_grantable request.tool_name in
+      let granted () = Mutex.protect session_grants_lock (fun () ->
+        Hashtbl.mem session_grants request.tool_name) in
+      if grantable && granted () then true
+      else match ask request with
+        | Pave.Approval.Allow_for_session when grantable ->
+            Mutex.protect session_grants_lock (fun () ->
+              Hashtbl.replace session_grants request.tool_name ());
+            true
+        | Pave.Approval.Allow_once | Pave.Approval.Allow_for_session -> true
+        | Pave.Approval.Deny_once -> false in
+    let approve_tool_request = with_session_grant (fun request ->
+      if not (Unix.isatty Unix.stdin) then Pave.Approval.Deny_once
       else match !ui with
         | Some screen -> Tui.confirm_tool screen request
         | None ->
+            let session = Pave.Approval.session_grantable request.tool_name in
             Printf.eprintf
-              "\nTool action approval in %s:\nTool: %s\nTier: %s\nImpact: %s\n%s%sApprove? [y/N] %!"
+              "\nTool action approval in %s:\nTool: %s\nTier: %s\nImpact: %s\n%s%s%s %!"
               root request.tool_name
               (String.uppercase_ascii
                 (Pave.Approval.tier_name request.tier))
               request.impact (String.concat "\n" request.details)
               (match request.reason with
                | Some reason -> "\nPolicy: " ^ reason ^ "\n"
-               | None -> "\n");
-            Pave.Approval.confirmed_answer (try Some (read_line ()) with End_of_file -> None) in
+               | None -> "\n")
+              (if session then
+                 "[y] allow once · [a] allow all " ^ request.tool_name ^
+                 " until exit · [N] deny:"
+               else "[y] allow once · [N] deny:");
+            Pave.Approval.answer_of_line ~session
+              (try Some (read_line ()) with End_of_file -> None)) in
     let render_tool_event screen = function
       | Pave.Agent.Tool_draft delta -> Tui.tool_draft screen delta
       | Pave.Agent.Tool_draft_ended { key; call_id; valid } ->
@@ -2028,11 +2049,14 @@ let () =
           else "" in
         match !ui with
         | Some screen ->
-            Tui.choose screen
-              ~title:("Discard the unsaved conversation" ^ attachment_note ^
-                "? This cannot be undone")
-              ~choices:["Keep current conversation"; "Discard and switch"] =
-              Some "Discard and switch"
+            Tui.decide screen
+              ~title:("Discard the unsaved conversation" ^ attachment_note ^ "?")
+              ~context:"Cannot be undone · start with --session to keep conversations"
+              ~options:[
+                "k", "Keep conversation", "Stay here · nothing is lost";
+                "d", "Discard and switch",
+                  "The unsaved conversation" ^ attachment_note ^ " is gone for good"] () =
+              "Discard and switch"
         | None ->
             on_event ("Error: current conversation" ^ attachment_note ^
               " is unsaved; start with --session to preserve it");
@@ -2502,13 +2526,14 @@ let () =
           if not connected then
             Tui.alert screen "Sign-in cancelled; active model unchanged."
           else
-            (match Tui.choose screen
-              ~intro:["Account connected; your active model has not changed.";
-                "Choose a model for this workspace and its next launch.";
-                "Use /setup to save a default across workspaces."]
-              ~title:("SETUP · Connected to " ^ descriptor.id)
-              ~choices:["Choose model now"; "Keep current model"] with
-             | Some "Choose model now" ->
+            (match Tui.decide screen
+              ~title:("Connected to " ^ descriptor.id ^ " · choose a model now?")
+              ~context:"Your active model has not changed"
+              ~body:"Choosing applies to this workspace and its next launch.\nUse /setup to save a default across workspaces."
+              ~options:[
+                "k", "Keep current model", "Nothing changes";
+                "c", "Choose model now", "Opens the model picker for " ^ descriptor.id] () with
+             | "Choose model now" ->
                  choose_model ~preferred:descriptor None
              | _ -> on_event ("Signed in to " ^ id ^ "; active model unchanged.")) in
     let run_setup screen ~first_run =
@@ -3545,13 +3570,17 @@ let () =
          | Pave.Interaction.Setup ->
              (match !ui with
               | Some screen ->
-                  (match Tui.choose screen
-                    ~intro:["Connect an account, or set a default for new sessions.";
-                      "Neither action changes your current draft."]
-                    ~title:"SETUP · Account & defaults"
-                    ~choices:["Connect account only"; "Choose user default"] with
-                   | Some "Connect account only" -> choose_login screen
-                   | Some "Choose user default" ->
+                  (match Tui.decide screen
+                    ~title:"Set up accounts and defaults"
+                    ~context:"Neither action changes your current draft"
+                    ~options:[
+                      "Esc", "Cancel", "Nothing changes";
+                      "c", "Connect account only",
+                        "Sign in without changing your model or default";
+                      "d", "Choose user default",
+                        "Pick the default model for new sessions"] () with
+                   | "Connect account only" -> choose_login screen
+                   | "Choose user default" ->
                        run_setup screen ~first_run:false
                    | _ -> ())
               | None -> on_event "Setup needs an interactive terminal; use --login PROVIDER or --provider/--model.")
@@ -4290,7 +4319,7 @@ let () =
                 (with_skills submission.prompt))))
           ~on_event:(Tui.publish_agent_event screen)
           ~on_approve:(Tui.confirm screen)
-          ~on_approve_tool:(Tui.confirm_tool screen)
+          ~on_approve_tool:(with_session_grant (Tui.confirm_tool screen))
           ~on_queued:(Tui.set_queue screen) () in
         runner := Some active;
         interact ()))

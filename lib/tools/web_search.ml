@@ -1,6 +1,13 @@
-type provider = Brave | Tavily
+(* Search engines, in the default automatic order. It follows the reviewed web
+   role chain (exa, firecrawl, ..., duckduckgo) for the engines Pave supports,
+   with the credentialed engines it lists only on explicit selection placed
+   before the credential-free DuckDuckGo fallback. *)
+type provider = Exa | Firecrawl | Brave | Tavily | Kagi | Jina | Duckduckgo
+
+let all_providers = [Exa; Firecrawl; Brave; Tavily; Kagi; Jina; Duckduckgo]
 
 type request = {
+  search : provider option;  (* Some engine: a pinned search call; None: URL fetch *)
   method_ : string;
   url : string;
   headers : (string * string) list;
@@ -22,6 +29,7 @@ type response = {
   page : int;
   results : result list;
   citations : string list;
+  failed : (string * string) list;  (* earlier engines that failed, with why *)
 }
 type fetched_page = { source_url : string; markdown : string }
 
@@ -29,6 +37,12 @@ exception Error of string
 let fail message = raise (Error message)
 let brave_endpoint = "https://api.search.brave.com/res/v1/web/search"
 let tavily_endpoint = "https://api.tavily.com/search"
+let exa_endpoint = "https://api.exa.ai/search"
+let jina_endpoint = "https://s.jina.ai/"
+let kagi_endpoint = "https://kagi.com/api/v1/search"
+let firecrawl_endpoint = "https://api.firecrawl.dev/v2/search"
+let duckduckgo_endpoint = "https://html.duckduckgo.com/html/"
+let priority_variable = "PAVE_WEB_SEARCH_PROVIDER_PRIORITY"
 let max_query_bytes = 600
 let max_results = 20
 let max_page = 9
@@ -70,46 +84,82 @@ let percent_encode text =
     else Buffer.add_string output (Printf.sprintf "%%%02X" code)) text;
   Buffer.contents output
 
-let provider_name = function Brave -> "brave" | Tavily -> "tavily"
-let provider_of_name = function
-  | "brave" -> Brave
-  | "tavily" -> Tavily
-  | name -> fail ("unsupported search provider in PAVE_WEB_SEARCH_PROVIDER_PRIORITY: " ^ name)
+let provider_name = function
+  | Exa -> "exa" | Firecrawl -> "firecrawl" | Brave -> "brave"
+  | Tavily -> "tavily" | Kagi -> "kagi" | Jina -> "jina"
+  | Duckduckgo -> "duckduckgo"
+
+let provider_label = function
+  | Exa -> "Exa" | Firecrawl -> "Firecrawl" | Brave -> "Brave Search"
+  | Tavily -> "Tavily" | Kagi -> "Kagi" | Jina -> "Jina"
+  | Duckduckgo -> "DuckDuckGo"
+
+let provider_of_name name =
+  match List.find_opt (fun provider -> provider_name provider = name) all_providers with
+  | Some provider -> provider
+  | None ->
+      fail ("unsupported search provider in " ^ priority_variable ^ ": " ^ name ^
+        " (supported: " ^ String.concat ", " (List.map provider_name all_providers) ^ ")")
 
 let parse_priority value =
-  let names = String.split_on_char ',' value |> List.map String.trim in
+  let names = String.split_on_char ',' value
+    |> List.map (fun name -> String.lowercase_ascii (String.trim name)) in
   if names = [] || List.exists (( = ) "") names then
-    fail "PAVE_WEB_SEARCH_PROVIDER_PRIORITY must be a comma-separated list of brave and/or tavily";
+    fail (priority_variable ^ " must be a comma-separated list of search providers");
   let providers = List.map provider_of_name names in
-  let seen = Hashtbl.create 2 in
+  let seen = Hashtbl.create 4 in
   List.iter (fun provider ->
     let name = provider_name provider in
-    if Hashtbl.mem seen name then fail "PAVE_WEB_SEARCH_PROVIDER_PRIORITY contains a duplicate provider";
+    if Hashtbl.mem seen name then fail (priority_variable ^ " contains a duplicate provider");
     Hashtbl.add seen name ()) providers;
   providers
 
+(* DuckDuckGo needs no credential; its HTML endpoint receives only the query. *)
 let credential_name = function
-  | Brave -> "BRAVE_SEARCH_API_KEY"
-  | Tavily -> "TAVILY_API_KEY"
+  | Brave -> Some "BRAVE_SEARCH_API_KEY"
+  | Tavily -> Some "TAVILY_API_KEY"
+  | Exa -> Some "EXA_API_KEY"
+  | Jina -> Some "JINA_API_KEY"
+  | Kagi -> Some "KAGI_API_KEY"
+  | Firecrawl -> Some "FIRECRAWL_API_KEY"
+  | Duckduckgo -> None
+
+let endpoint = function
+  | Brave -> brave_endpoint | Tavily -> tavily_endpoint | Exa -> exa_endpoint
+  | Jina -> jina_endpoint | Kagi -> kagi_endpoint | Firecrawl -> firecrawl_endpoint
+  | Duckduckgo -> duckduckgo_endpoint
+
+let endpoint_host = function
+  | Brave -> "api.search.brave.com" | Tavily -> "api.tavily.com"
+  | Exa -> "api.exa.ai" | Jina -> "s.jina.ai" | Kagi -> "kagi.com"
+  | Firecrawl -> "api.firecrawl.dev" | Duckduckgo -> "html.duckduckgo.com"
+
+let endpoint_method = function
+  | Brave | Jina -> "GET"
+  | Tavily | Exa | Kagi | Firecrawl | Duckduckgo -> "POST"
+
+let credential_header = function
+  | Brave -> Some "X-Subscription-Token"
+  | Exa -> Some "x-api-key"
+  | Tavily | Jina | Kagi | Firecrawl -> Some "Authorization"
+  | Duckduckgo -> None
+
+(* Only Brave exposes result paging through its API. *)
+let supports_paging = function Brave -> true | _ -> false
+
+let allowed_headers provider =
+  let credential = Option.to_list (credential_header provider) in
+  match provider with
+  | Brave -> "Accept" :: credential
+  | Jina -> ["Accept"; "X-Respond-With"; "X-Retain-Images"] @ credential
+  | Duckduckgo -> ["Accept"; "Accept-Language"; "Content-Type"; "Referer"; "User-Agent"]
+  | Tavily | Exa | Kagi | Firecrawl -> ["Accept"; "Content-Type"] @ credential
 
 let valid_credential name value =
   if String.length value = 0 then None
   else if String.length value > 8_192 || contains_control value || String.exists (fun c -> c = ' ' || c = '\t') value then
     fail ("invalid credential value in " ^ name)
   else Some value
-
-let choose_provider ~env priority =
-  let rec choose missing = function
-    | [] ->
-        let variables = List.rev missing |> List.sort_uniq String.compare |> String.concat ", " in
-        fail ("no configured search provider has a credential; set " ^ variables)
-    | provider :: rest ->
-        let name = credential_name provider in
-        match Option.bind (env name) (valid_credential name) with
-        | Some key -> provider, key
-        | None -> choose (name :: missing) rest
-  in
-  choose [] priority
 
 let field name = function
   | `Assoc fields -> List.assoc_opt name fields
@@ -161,36 +211,138 @@ let validate_result_urls urls =
     if Hashtbl.mem seen key then fail "malformed search response: duplicate result URL";
     Hashtbl.add seen key ()) urls
 
-let parse_results provider count json =
-  let rows = match provider, json with
-    | Brave, `Assoc _ ->
-        (match required "web" json with
-         | `Assoc _ -> (match required "results" (required "web" json) with
-             | `List values -> values
-             | _ -> fail "malformed search response: web.results must be an array")
-         | _ -> fail "malformed search response: web must be an object")
-    | Tavily, `Assoc _ ->
-        (match required "results" json with
-         | `List values -> values
-         | _ -> fail "malformed search response: results must be an array")
-    | _ -> fail "malformed search response: expected a JSON object" in
+let array_field label = function
+  | `List values -> values
+  | _ -> fail ("malformed search response: " ^ label ^ " must be an array")
+
+let optional_string name row = match field name row with
+  | None | Some `Null -> None
+  | Some (`String value) -> Some value
+  | Some _ -> fail ("malformed search response: " ^ name ^ " must be a string")
+
+let first_string names row =
+  List.fold_left (fun found name -> match found with
+    | Some value when String.trim value <> "" -> found
+    | _ -> optional_string name row) None names
+  |> Option.value ~default:""
+
+(* Collapse whitespace/control runs and keep at most [limit] bytes on a UTF-8
+   boundary; used for engines whose snippets are free text. *)
+let clean_text ?(limit = 1_000) text =
+  let output = Buffer.create (min limit (String.length text)) in
+  let pending_space = ref false in
+  String.iter (fun c ->
+    if Char.code c < 32 || Char.code c = 127 || c = ' ' then pending_space := true
+    else (
+      if !pending_space && Buffer.length output > 0 then Buffer.add_char output ' ';
+      pending_space := false;
+      Buffer.add_char output c)) text;
+  let text = Buffer.contents output in
+  if String.length text <= limit then text
+  else
+    let size = ref limit in
+    while !size > 0 && Char.code text.[!size] land 0xc0 = 0x80 do decr size done;
+    String.sub text 0 !size ^ "…"
+
+(* Each JSON engine's result rows, as (title, url, snippet). *)
+let result_rows provider json =
+  let object_required label = match json with
+    | `Assoc _ -> ()
+    | _ -> fail ("malformed search response: expected a JSON object" ^ label) in
+  match provider with
+  | Brave ->
+      object_required "";
+      (match required "web" json with
+       | `Assoc _ -> array_field "web.results" (required "results" (required "web" json))
+       | _ -> fail "malformed search response: web must be an object")
+      |> List.map (fun row ->
+        string_field "title" row, string_field "url" row, string_field "description" row)
+  | Tavily ->
+      object_required "";
+      array_field "results" (required "results" json)
+      |> List.map (fun row ->
+        string_field "title" row, string_field "url" row, string_field "content" row)
+  | Exa ->
+      object_required "";
+      array_field "results" (required "results" json)
+      |> List.map (fun row ->
+        let url = string_field "url" row in
+        let highlight = match field "highlights" row with
+          | Some (`List (`String text :: _)) -> Some text
+          | _ -> None in
+        let title = match optional_string "title" row with
+          | Some title when String.trim title <> "" -> title
+          | _ -> url in
+        clean_text ~limit:1_024 title, url, clean_text (match highlight with
+          | Some text -> text
+          | None -> first_string ["summary"; "text"] row))
+  | Jina ->
+      let rows = match json with
+        | `List rows -> rows
+        | `Assoc _ ->
+            (match field "code" json with
+             | Some (`Int code) when code <> 200 ->
+                 fail (Printf.sprintf "Jina reported failure code %d" code)
+             | _ -> array_field "data" (required "data" json))
+        | _ -> fail "malformed search response: expected a JSON object or array" in
+      List.map (fun row ->
+        let url = string_field "url" row in
+        (match optional_string "title" row with
+         | Some title when String.trim title <> "" -> title
+         | _ -> url) |> clean_text ~limit:1_024, url,
+        clean_text (first_string ["description"; "content"] row)) rows
+  | Kagi ->
+      object_required "";
+      (match required "data" json with
+       | `Assoc _ as data ->
+           (match field "search" data with
+            | None | Some `Null -> []
+            | Some rows -> array_field "data.search" rows)
+       | _ -> fail "malformed search response: data must be an object")
+      |> List.map (fun row ->
+        clean_text ~limit:1_024 (string_field "title" row), string_field "url" row,
+        clean_text (first_string ["snippet"] row))
+  | Firecrawl ->
+      object_required "";
+      (match field "success" json with
+       | Some (`Bool false) ->
+           fail ("Firecrawl reported failure: " ^ first_string ["error"] json)
+       | _ -> ());
+      (match required "data" json with
+       | `List rows -> rows
+       | `Assoc _ as data -> (match field "web" data with
+           | None | Some `Null -> []
+           | Some rows -> array_field "data.web" rows)
+       | _ -> fail "malformed search response: data must be an object or array")
+      |> List.map (fun row ->
+        let url = string_field "url" row in
+        (match optional_string "title" row with
+         | Some title when String.trim title <> "" -> title
+         | _ -> url) |> clean_text ~limit:1_024, url,
+        clean_text (first_string ["description"; "snippet"] row))
+  | Duckduckgo -> fail "DuckDuckGo returns HTML, not JSON"
+
+let validate_rows count rows =
   if List.length rows > count then fail "malformed search response: result count exceeds requested limit";
-  let values = List.map (fun row ->
-    let title = string_field "title" row in
-    let url = string_field "url" row in
-    let snippet = string_field (if provider = Brave then "description" else "content") row in
+  List.iter (fun (title, url, snippet) ->
     if title = "" || String.length title > 1_024 || contains_control title then
       fail "malformed search response: invalid result title";
     if String.length url = 0 || String.length url > 4_096 then
       fail "malformed search response: invalid result URL size";
     if String.length snippet > 8_192 || contains_control snippet then
-      fail "malformed search response: invalid result snippet";
-    title, url, snippet) rows in
-  validate_result_urls (List.map (fun (_, url, _) -> url) values);
+      fail "malformed search response: invalid result snippet") rows;
+  validate_result_urls (List.map (fun (_, url, _) -> url) rows)
+
+let numbered provider rows =
   List.mapi (fun index (title, url, snippet) -> {
     title; url; snippet; provider = provider_name provider;
     citation = Printf.sprintf "[%d] %s" (index + 1) url;
-  }) values
+  }) rows
+
+let parse_results provider count json =
+  let rows = result_rows provider json in
+  validate_rows count rows;
+  numbered provider rows
 
 let check_cancel cancel = match cancel with
   | Some is_cancelled when is_cancelled () -> fail "search or fetch cancelled"
@@ -203,16 +355,6 @@ let validate_request request =
     fail "HTTP method is not allowed";
   if String.length request.body > 16_384 then fail "HTTP request body exceeds the size limit"
 
-let is_brave_request request =
-  request.method_ = "GET" && starts_with request.url (brave_endpoint ^ "?") &&
-  List.exists (fun (name, _) -> name = "X-Subscription-Token") request.headers
-let is_tavily_request request =
-  request.method_ = "POST" && request.url = tavily_endpoint &&
-  List.exists (fun (name, _) -> name = "Authorization") request.headers
-let header_allowed_for_search request name =
-  (is_brave_request request && (name = "Accept" || name = "X-Subscription-Token")) ||
-  (is_tavily_request request && (name = "Accept" || name = "Content-Type" || name = "Authorization"))
-
 let safe_addresses ?cancel host =
   let addresses = try Workspace_reader.resolve_host ?cancel host 443 with
     | Workspace_reader.Error "workspace read cancelled" -> fail "search or fetch cancelled"
@@ -224,21 +366,26 @@ let safe_addresses ?cancel host =
 
 let curl_request ?cancel request =
   validate_request request;
-  let is_search = is_brave_request request || is_tavily_request request in
+  let is_search = request.search <> None in
   if not is_search && (request.method_ <> "GET" || request.body <> "" ||
       List.exists (fun (name, _) ->
         (name <> "Accept" && name <> "User-Agent") ||
         name = "Authorization" || name = "X-Subscription-Token") request.headers) then
     fail "URL fetch requests must be unauthenticated GET requests with safe headers";
-  if is_search && List.exists (fun (name, _) -> not (header_allowed_for_search request name)) request.headers then
-    fail "search request contains an unexpected header";
+  Option.iter (fun provider ->
+    if request.method_ <> endpoint_method provider ||
+       not (starts_with request.url (endpoint provider)) then
+      fail "search request does not match its fixed provider endpoint";
+    if List.exists (fun (name, _) -> not (List.mem name (allowed_headers provider)))
+        request.headers then
+      fail "search request contains an unexpected header") request.search;
   let host, host_lower, port, _ =
     try Workspace_reader.parse_url request.url
     with Workspace_reader.Error _ -> fail "HTTPS request URL is invalid" in
   if port <> 443 then fail "HTTPS requests must use port 443";
-  if is_search then (
-    let expected = if is_brave_request request then "api.search.brave.com" else "api.tavily.com" in
-    if host_lower <> expected then fail "search credential is not bound to its fixed provider host");
+  Option.iter (fun provider ->
+    if host_lower <> endpoint_host provider then
+      fail "search credential is not bound to its fixed provider host") request.search;
   let addresses = safe_addresses ?cancel host in
   let address = List.hd addresses in
   let host_key = if String.contains host ':' then "[" ^ host ^ "]" else host in
@@ -301,43 +448,86 @@ let invoke ?http ?cancel request =
   if String.length body > request.response_limit then fail "HTTP response exceeds the size limit";
   body
 
-let configured_provider ~env =
-  let priority = match env "PAVE_WEB_SEARCH_PROVIDER_PRIORITY" with
-    | None -> fail "web search is not configured: set PAVE_WEB_SEARCH_PROVIDER_PRIORITY to an explicit provider order (brave,tavily) and that provider's API key"
-    | Some value -> parse_priority value in
-  choose_provider ~env priority
+type candidate = { engine : provider; key : string option }
+
+(* An explicit priority uses exactly the listed engines in order. Otherwise
+   every engine with a credential is tried in default order, ending with the
+   credential-free DuckDuckGo fallback. Engines without their credential are
+   skipped, never sent a request. *)
+let plan ?(env = Sys.getenv_opt) () =
+  let credential provider = Option.bind (credential_name provider) (fun name ->
+    Option.bind (env name) (valid_credential name)) in
+  let explicit, order = match env priority_variable with
+    | Some value when String.trim value <> "" -> true, parse_priority value
+    | _ -> false, all_providers in
+  let candidates = List.filter_map (fun engine ->
+    match credential_name engine, credential engine with
+    | None, _ -> Some { engine; key = None }
+    | Some _, Some key -> Some { engine; key = Some key }
+    | Some _, None -> None) order in
+  if candidates = [] then (
+    let variables = List.filter_map credential_name order
+      |> List.sort_uniq String.compare |> String.concat ", " in
+    fail ("no configured search provider has a credential; set " ^ variables));
+  explicit, candidates
 
 (* Lets callers refuse an unconfigured search before asking for approval. *)
-let check_configuration ?(env = Sys.getenv_opt) () =
-  ignore (configured_provider ~env)
+let check_configuration ?(env = Sys.getenv_opt) () = ignore (plan ~env ())
 
-let search ?http ?cancel ?(env = Sys.getenv_opt) ?(page = 0) ?(count = 5) ~query () =
-  let query = valid_query query in
-  validate_limits ~page ~count;
-  let provider, key = configured_provider ~env in
-  if provider = Tavily && page <> 0 then fail "Tavily Search does not support paged requests";
-  let request = match provider with
-    | Brave -> {
-        method_ = "GET";
-        url = brave_endpoint ^ "?q=" ^ percent_encode query ^ "&count=" ^ string_of_int count ^
-              "&offset=" ^ string_of_int page ^ "&result_filter=web";
-        headers = ["Accept", "application/json"; "X-Subscription-Token", key];
-        body = ""; response_limit = max_response_bytes;
-      }
-    | Tavily -> {
-        method_ = "POST"; url = tavily_endpoint;
-        headers = ["Accept", "application/json"; "Content-Type", "application/json";
-                   "Authorization", "Bearer " ^ key];
-        body = Yojson.Basic.to_string (`Assoc [
-          "query", `String query; "search_depth", `String "basic";
+(* Engine names in try order, each marked with whether a credential is sent. *)
+let plan_summary ?(env = Sys.getenv_opt) () =
+  let explicit, candidates = plan ~env () in
+  explicit, List.map (fun candidate ->
+    provider_name candidate.engine, candidate.key <> None) candidates
+
+let browser_user_agent =
+  "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+
+let build_request engine key ~query ~page ~count =
+  let key = Option.value ~default:"" key in
+  let json fields = Yojson.Basic.to_string (`Assoc fields) in
+  let post headers body = {
+    search = Some engine; method_ = "POST"; url = endpoint engine;
+    headers; body; response_limit = max_response_bytes } in
+  match engine with
+  | Brave -> {
+      search = Some Brave; method_ = "GET";
+      url = brave_endpoint ^ "?q=" ^ percent_encode query ^ "&count=" ^ string_of_int count ^
+            "&offset=" ^ string_of_int page ^ "&result_filter=web";
+      headers = ["Accept", "application/json"; "X-Subscription-Token", key];
+      body = ""; response_limit = max_response_bytes }
+  | Tavily ->
+      post ["Accept", "application/json"; "Content-Type", "application/json";
+            "Authorization", "Bearer " ^ key]
+        (json ["query", `String query; "search_depth", `String "basic";
           "max_results", `Int count; "include_answer", `Bool false;
-          "include_raw_content", `Bool false]);
-        response_limit = max_response_bytes;
-      } in
-  let body = invoke ?http ?cancel request in
-  let results = parse_results provider count (parse_json body) in
-  let citations = List.map (fun result -> result.citation) results in
-  { provider = provider_name provider; query; page; results; citations }
+          "include_raw_content", `Bool false])
+  | Exa ->
+      post ["Accept", "application/json"; "Content-Type", "application/json";
+            "x-api-key", key]
+        (json ["query", `String query; "numResults", `Int count; "type", `String "auto";
+          "contents", `Assoc ["highlights", `Assoc [
+            "numSentences", `Int 2; "highlightsPerUrl", `Int 1]]])
+  | Jina -> {
+      search = Some Jina; method_ = "GET";
+      url = jina_endpoint ^ "?q=" ^ percent_encode query ^ "&count=" ^ string_of_int count;
+      headers = ["Accept", "application/json"; "Authorization", "Bearer " ^ key;
+                 "X-Respond-With", "no-content"; "X-Retain-Images", "none"];
+      body = ""; response_limit = max_response_bytes }
+  | Kagi ->
+      post ["Accept", "application/json"; "Content-Type", "application/json";
+            "Authorization", "Bearer " ^ key]
+        (json ["query", `String query; "workflow", `String "search"; "limit", `Int count])
+  | Firecrawl ->
+      post ["Accept", "application/json"; "Content-Type", "application/json";
+            "Authorization", "Bearer " ^ key]
+        (json ["query", `String query; "limit", `Int count;
+          "sources", `List [`Assoc ["type", `String "web"]]])
+  | Duckduckgo ->
+      post ["Accept", "text/html"; "Accept-Language", "en-US,en;q=0.9";
+            "Content-Type", "application/x-www-form-urlencoded";
+            "Referer", "https://html.duckduckgo.com/"; "User-Agent", browser_user_agent]
+        ("q=" ^ percent_encode query ^ "&kl=us-en&b=")
 
 let utf8_of_codepoint code =
   if code <= 0 || code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff) then "\xef\xbf\xbd"
@@ -680,8 +870,169 @@ let fetch_url ?http ?cancel ?(max_bytes = max_content_bytes) url () =
   if port <> 443 then fail "fetch URL must use HTTPS port 443";
   check_cancel cancel;
   ignore (safe_addresses ?cancel host);
-  let request = { method_ = "GET"; url; headers = ["Accept", "text/html,application/xhtml+xml";
+  let request = { search = None; method_ = "GET"; url; headers = ["Accept", "text/html,application/xhtml+xml";
       "User-Agent", "pave-web-fetch/1.0"]; body = ""; response_limit = max_bytes } in
   let html = invoke ?http ?cancel request in
   let markdown = convert_html_to_markdown ~max_bytes html in
   { source_url = url; markdown }
+
+(* Visible text of an HTML fragment: tags dropped, entities decoded,
+   whitespace collapsed. *)
+let html_text fragment =
+  let output = Buffer.create (String.length fragment) in
+  let length = String.length fragment in
+  let rec loop index =
+    if index < length then
+      if fragment.[index] = '<' then
+        (match String.index_from_opt fragment index '>' with
+         | Some close -> Buffer.add_char output ' '; loop (close + 1)
+         | None -> ())
+      else if fragment.[index] = '&' then
+        (match String.index_from_opt fragment (index + 1) ';' with
+         | Some ending when ending - index <= 16 ->
+             (match decode_entity (String.sub fragment (index + 1) (ending - index - 1)) with
+              | Some decoded -> Buffer.add_string output decoded; loop (ending + 1)
+              | None -> Buffer.add_char output '&'; loop (index + 1))
+         | _ -> Buffer.add_char output '&'; loop (index + 1))
+      else (Buffer.add_char output fragment.[index]; loop (index + 1)) in
+  loop 0;
+  clean_text ~limit:1_024 (Buffer.contents output)
+
+let percent_decode text =
+  let hex c = match c with
+    | '0'..'9' -> Some (Char.code c - 48)
+    | 'a'..'f' -> Some (Char.code c - 87)
+    | 'A'..'F' -> Some (Char.code c - 55)
+    | _ -> None in
+  let output = Buffer.create (String.length text) in
+  let length = String.length text in
+  let rec loop index =
+    if index < length then
+      match text.[index] with
+      | '%' when index + 2 < length ->
+          (match hex text.[index + 1], hex text.[index + 2] with
+           | Some high, Some low ->
+               Buffer.add_char output (Char.chr (high * 16 + low)); loop (index + 3)
+           | _ -> Buffer.add_char output '%'; loop (index + 1))
+      | '+' -> Buffer.add_char output ' '; loop (index + 1)
+      | c -> Buffer.add_char output c; loop (index + 1) in
+  loop 0;
+  Buffer.contents output
+
+let attribute tag name =
+  match find_case_insensitive tag (" " ^ name ^ "=\"") 0 with
+  | Some start ->
+      let value = start + String.length name + 3 in
+      (match String.index_from_opt tag value '"' with
+       | Some close -> Some (String.sub tag value (close - value))
+       | None -> None)
+  | None -> None
+
+(* DuckDuckGo routes clicks through //duckduckgo.com/l/?uddg=<target>. *)
+let unwrap_duckduckgo_href href =
+  let href = String.concat "&" (String.split_on_char '&' href
+    |> List.map (fun part -> if starts_with part "amp;" then
+      String.sub part 4 (String.length part - 4) else part)) in
+  match find_case_insensitive href "uddg=" 0 with
+  | Some start ->
+      let value = start + 5 in
+      let stop = Option.value ~default:(String.length href)
+        (String.index_from_opt href value '&') in
+      Some (percent_decode (String.sub href value (stop - value)))
+  | None when starts_with href "https://" -> Some href
+  | None -> None
+
+(* Scraped results are filtered, not trusted: non-HTTPS, private, ad and
+   duplicate links are dropped rather than failing the whole page. *)
+let parse_duckduckgo count html =
+  if find_case_insensitive html "anomaly-modal" 0 <> None ||
+     find_case_insensitive html "anomaly.js" 0 <> None then
+    fail "DuckDuckGo blocked the request with a bot-detection challenge; configure a credentialed provider such as Brave, Tavily, Exa or Kagi";
+  let marker = "class=\"result__a\"" in
+  let seen = Hashtbl.create 16 in
+  let tag_start_before index =
+    let rec back i = if i <= 0 then 0 else if html.[i] = '<' then i else back (i - 1) in
+    back index in
+  let rec collect index rows =
+    if List.length rows >= count then List.rev rows
+    else match find_case_insensitive html marker index with
+      | None -> List.rev rows
+      | Some at ->
+          let tag_start = tag_start_before at in
+          (match find_tag_end html tag_start with
+           | None -> List.rev rows
+           | Some tag_end ->
+               let tag = String.sub html tag_start (tag_end - tag_start + 1) in
+               let title_end = Option.value ~default:tag_end
+                 (find_case_insensitive html "</a>" tag_end) in
+               let title = html_text (String.sub html (tag_end + 1) (title_end - tag_end - 1)) in
+               let next = Option.value ~default:(String.length html)
+                 (find_case_insensitive html marker (tag_end + 1)) in
+               let snippet = match find_case_insensitive html "result__snippet" title_end with
+                 | Some snippet_at when snippet_at < next ->
+                     (* Scan from the tag's '<' so the class attribute's quotes pair up. *)
+                     (match find_tag_end html (tag_start_before snippet_at) with
+                      | Some open_end ->
+                          let close = List.filter_map (fun closing ->
+                            find_case_insensitive html closing open_end) ["</a>"; "</div>"; "</span>"]
+                            |> List.fold_left min next in
+                          html_text (String.sub html (open_end + 1) (max 0 (close - open_end - 1)))
+                      | None -> "")
+                 | _ -> "" in
+               let row = match Option.bind (attribute tag "href") unwrap_duckduckgo_href with
+                 | Some url when title <> "" && String.length url <= 4_096 ->
+                     (match normalized_url_key url with
+                      | key when not (Hashtbl.mem seen key) &&
+                          not (String.ends_with ~suffix:"duckduckgo.com"
+                            (let _, host, _, _ = Workspace_reader.parse_url url in host)) ->
+                          Hashtbl.add seen key (); Some (title, url, snippet)
+                      | _ -> None
+                      | exception Error _ -> None
+                      | exception Workspace_reader.Error _ -> None)
+                 | _ -> None in
+               collect (title_end + 1) (match row with Some row -> row :: rows | None -> rows)) in
+  match collect 0 [] with
+  | [] -> fail "DuckDuckGo returned no usable results"
+  | rows -> rows
+
+let search_engine ?http ?cancel ~query ~page ~count candidate =
+  let request = build_request candidate.engine candidate.key ~query ~page ~count in
+  let body = invoke ?http ?cancel request in
+  let results = match candidate.engine with
+    | Duckduckgo -> numbered Duckduckgo (parse_duckduckgo count body)
+    | engine -> parse_results engine count (parse_json body) in
+  if results = [] then fail (provider_label candidate.engine ^ " returned no results");
+  results
+
+(* Engines are tried in plan order; a failure moves to the next engine and is
+   reported with the answer, so substitution is never silent. Cancellation
+   stops immediately. *)
+let search ?http ?cancel ?(env = Sys.getenv_opt) ?(page = 0) ?(count = 5) ~query () =
+  let query = valid_query query in
+  validate_limits ~page ~count;
+  let _, candidates = plan ~env () in
+  let candidates = if page = 0 then candidates else
+    match List.filter (fun candidate -> supports_paging candidate.engine) candidates with
+    | [] ->
+        let names = List.map (fun candidate -> provider_label candidate.engine) candidates in
+        fail (String.concat ", " names ^
+          (if List.length names = 1 then " does" else " do") ^
+          " not support paged requests; only Brave Search pages results")
+    | paged -> paged in
+  let rec attempt failed = function
+    | [] ->
+        (match List.rev failed with
+         | [_, message] -> fail message
+         | failures ->
+             fail ("all web search providers failed: " ^ String.concat "; "
+               (List.map (fun (name, message) -> name ^ ": " ^ message) failures)))
+    | candidate :: rest ->
+        match search_engine ?http ?cancel ~query ~page ~count candidate with
+        | results ->
+            let citations = List.map (fun result -> result.citation) results in
+            { provider = provider_name candidate.engine; query; page; results; citations;
+              failed = List.rev failed }
+        | exception (Error message) ->
+            check_cancel cancel;
+            attempt ((provider_name candidate.engine, message) :: failed) rest in
+  attempt [] candidates

@@ -199,3 +199,23 @@ let confirmed_answer = function
       match String.lowercase_ascii (String.trim line) with
       | "y" | "yes" | "\xe3\x85\x9b" -> true
       | _ -> false
+
+type answer = Deny_once | Allow_once | Allow_for_session
+
+(* Only reviewable, low-blast-radius tools may be allowed for the rest of the
+   run; shell, process, device, remote, external and child-agent actions keep
+   their mandatory per-call approval. *)
+let session_grantable tool_name =
+  List.mem tool_name [
+    "web_search"; "web_fetch"; "write_file"; "edit_file"; "apply_edits";
+    "ast_edit"; "image_ocr" ]
+
+(* Line prompts add `a`/`all` (or ㅁ, the a key under a Korean two-set input
+   method) for a session grant where one is offered. *)
+let answer_of_line ~session = function
+  | None -> Deny_once
+  | Some line ->
+      match String.lowercase_ascii (String.trim line) with
+      | "y" | "yes" | "\xe3\x85\x9b" -> Allow_once
+      | ("a" | "all" | "\xe3\x85\x81") when session -> Allow_for_session
+      | _ -> Deny_once

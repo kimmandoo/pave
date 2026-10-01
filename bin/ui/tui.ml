@@ -54,13 +54,13 @@ type approval_request = {
   label : string;
   body : string;
   primary : int;
+  request_buttons : (string * string * string) list;
   max_bytes : int;
   wrap : bool;
   too_large : string;
   unsafe_text : string;
-  approved_text : string;
-  denied_text : string;
-  mutable result : bool option;
+  status : int -> string;
+  mutable result : int option;
 }
 
 type approval_view = {
@@ -69,7 +69,10 @@ type approval_view = {
   lines : string list;
   primary : int;  (* leading lines naming exactly what runs, shown emphasized *)
   wrap_lines : bool;
-  mutable allow_selected : bool;
+  (* Key, label and one-line consequence per button; index 0 is the safe
+     default (deny/keep) and is never locked by a clipped preview. *)
+  buttons : (string * string * string) array;
+  mutable focus : int;
   mutable notice : string;
   mutable preview_cache : (int * (bool * string) array) option;
 }
@@ -282,7 +285,7 @@ let listing_handler : (t -> listing_update -> unit) ref =
   ref (fun _ _ -> ())
 
 let approval_handler : (t -> approval_request -> unit) ref =
-  ref (fun _ request -> request.result <- Some false)
+  ref (fun _ request -> request.result <- Some 0)
 
 
 let no_color = match Sys.getenv_opt "NO_COLOR" with Some s -> s <> "" | None -> false
@@ -1024,26 +1027,44 @@ let approval_screen ~cols ~rows ~activity_rows view =
     let preview = approval_preview cols view in
     let preview_height = rows - 7 - activity in
     let shown = min preview_height (Array.length preview) in
+    let selected = max 0 (min view.focus (Array.length view.buttons - 1)) in
+    let consequence index =
+      let _, _, text = view.buttons.(index) in text in
     let notice = if not fits then
-        Printf.sprintf "Resize to review all %d rows · Allow is locked"
+        Printf.sprintf "Resize to review all %d rows · only %s is available"
           (Array.length preview)
+          (let _, label, _ = view.buttons.(0) in label)
       else if view.notice <> "" then view.notice
-      else "Applies to this one call only · your draft is kept" in
-    let compact = cols < 40 in
-    let button selected key label =
-      let text = if compact then "[" ^ key ^ " " ^ label ^ "]"
-        else "[ " ^ key ^ "  " ^ label ^ " ]" in
-      I.string (if selected then selected_attr else muted) text in
-    let allow_label = if fits then (if compact then "Allow" else "Allow once")
-      else if compact then "Allow·locked" else "Allow once · locked" in
-    let buttons = I.(string text_attr "  " <|>
-      button (not view.allow_selected) "n" "Deny" <|>
-      string text_attr "  " <|>
-      button view.allow_selected "y" allow_label) in
+      else consequence selected in
+    let row ~compact =
+      List.concat (List.mapi (fun index (key, label, _) ->
+        let text = if compact then "[" ^ key ^ " " ^ label ^ "]"
+          else "[ " ^ key ^ "  " ^ label ^ " ]" in
+        let attr = if index = selected then selected_attr
+          else if index > 0 && not fits then frame_attr else muted in
+        [I.string text_attr "  "; I.string attr text])
+        (Array.to_list view.buttons)) |> I.hcat in
+    let buttons =
+      let full = row ~compact:false in
+      if I.width full <= cols then full
+      else
+        let compact = row ~compact:true in
+        if I.width compact <= cols then compact
+        else
+          (* Too narrow for every button: show the selected one and its position. *)
+          let key, label, _ = view.buttons.(selected) in
+          I.(string text_attr "  " <|> string selected_attr ("[" ^ key ^ " " ^ label ^ "]")
+             <|> string muted (Printf.sprintf " %d/%d ←→" (selected + 1)
+               (Array.length view.buttons))) in
     let buttons = I.hsnap ~align:`Left cols buttons in
+    let keys = String.concat "/" (List.filter (( <> ) "Esc")
+      (Array.to_list (Array.map (fun (key, _, _) -> key) view.buttons))) in
+    let first_label = let _, label, _ = view.buttons.(0) in
+      String.lowercase_ascii label in
     let controls = fit_labels cols
-      (if compact then ["←→ choose"; "↵ ok"; "y/n"]
-       else ["←→/Tab choose"; enter_key ^ " confirm"; "y allow"; "n/Esc deny"]) in
+      (if cols < 40 then ["←→ choose"; "↵ ok"; keys]
+       else ["←→/Tab choose"; enter_key ^ " confirm"; keys ^ " keys";
+             "Esc " ^ first_label]) in
     let mark = if no_color then "? " else "◆ " in
     Array.concat [
       [| line accent ("  " ^ mark ^ view.heading);
@@ -2707,27 +2728,45 @@ let reviewable_text ~max_bytes text =
 
 
 
-let confirm_review_now t ~title ~label ~body ~primary ~max_bytes ~wrap
-    ~too_large ~unsafe_text ~approved_text ~denied_text =
+(* Shows one decision and returns the chosen option index; 0 (the safe
+   default) also covers Escape, Ctrl+C, end of input and unreviewable text. *)
+let confirm_review_now t ~title ~label ~body ~primary ~options ~max_bytes ~wrap
+    ~too_large ~unsafe_text ~status =
+  let options = Array.of_list options in
   let view = { heading = single_line title; context = single_line label;
     lines = String.split_on_char '\n' body; primary; wrap_lines = wrap;
-    allow_selected = false; notice = ""; preview_cache = None } in
+    buttons = options; focus = 0; notice = ""; preview_cache = None } in
   let fits () =
     let cols, rows = Notty_unix.Term.size t.term in
     approval_fits ~cols ~rows
       ~activity:(if Option.is_some t.activity then 1 else 0) view in
+  let index_of_key key =
+    let found = ref None in
+    Array.iteri (fun index (option_key, _, _) ->
+      if !found = None && option_key = key then found := Some index) options;
+    !found in
+  (* Korean two-set layout: ㅛ=y, ㅁ=a, ㅜ=n, ㄴ=s, ㅏ=k, ㅇ=d, ㅊ=c. *)
+  let key_of_event = function
+    | `Key (`ASCII c, []) -> Some (String.make 1 (Char.lowercase_ascii c))
+    | `Key (`Uchar u, []) ->
+        (match Uchar.to_int u with
+         | 0x315B -> Some "y" | 0x3141 -> Some "a" | 0x315C -> Some "n"
+         | 0x3134 -> Some "s" | 0x314F -> Some "k" | 0x3147 -> Some "d"
+         | 0x314A -> Some "c" | _ -> None)
+    | _ -> None in
   if String.length body > max_bytes then (
     alert t too_large;
-    false)
+    0)
   else if not (reviewable_text ~max_bytes body) then (
     alert t unsafe_text;
-    false)
+    0)
   else (
     let previous_overlays = t.overlays and previous_view = t.approval_view in
     let previous_scroll = t.scroll in
     t.overlays <- Approval_overlay :: previous_overlays;
     t.approval_view <- Some view;
-    let accepted = Fun.protect ~finally:(fun () ->
+    let last = Array.length options - 1 in
+    let chosen = Fun.protect ~finally:(fun () ->
       t.overlays <- previous_overlays;
       t.approval_view <- previous_view;
       t.scroll <- previous_scroll;
@@ -2735,6 +2774,7 @@ let confirm_review_now t ~title ~label ~body ~primary ~max_bytes ~wrap
       t.previous <- None;
       paint t) (fun () ->
       paint t;
+      let select index = view.focus <- index; paint t in
       let rec decide () = match next_input t with
         | `Resize _ ->
             view.notice <- "";
@@ -2745,45 +2785,55 @@ let confirm_review_now t ~title ~label ~body ~primary ~max_bytes ~wrap
         | `Paste `Start -> t.paste <- true; decide ()
         | `Paste `End ->
             t.paste <- false;
-            view.notice <- "Pasted text ignored · choose an action";
+            view.notice <- "Pasted text ignored · choose a button";
             paint t; decide ()
         | `Key _ when t.paste -> decide ()
         | `Key _ as event ->
-            (match Keybindings.resolve t.bindings Keybindings.Approval event with
-            | Some Keybindings.Approve -> allow ()
-            | Some Keybindings.Accept ->
-                if view.allow_selected then allow () else false
-            | Some Keybindings.Reject -> false
-            | Some Keybindings.Move_up ->
-                view.allow_selected <- false; paint t; decide ()
-            | Some Keybindings.Move_down ->
-                view.allow_selected <- true; paint t; decide ()
-            | Some Keybindings.Next_status ->
-                view.allow_selected <- not view.allow_selected; paint t; decide ()
-            | _ ->
-                view.notice <- "Press y to allow or n to deny · typing is ignored here";
-                paint t; decide ())
-        | `End -> false
-      and allow () =
-        if fits () then true
+            (match Option.bind (key_of_event event) index_of_key with
+             | Some index -> choose index
+             | None ->
+                 match Keybindings.resolve t.bindings Keybindings.Approval event with
+                 | Some Keybindings.Approve ->
+                     (match index_of_key "y" with
+                      | Some index -> choose index
+                      | None -> ignored ())
+                 | Some Keybindings.Accept -> choose view.focus
+                 | Some Keybindings.Reject -> 0
+                 | Some Keybindings.Move_up ->
+                     select (max 0 (view.focus - 1)); decide ()
+                 | Some Keybindings.Move_down ->
+                     select (min last (view.focus + 1)); decide ()
+                 | Some Keybindings.Next_status ->
+                     select (if view.focus >= last then 0 else view.focus + 1);
+                     decide ()
+                 | _ -> ignored ())
+        | `End -> 0
+      and ignored () =
+        let keys = String.concat "/" (Array.to_list (Array.map (fun (key, _, _) -> key)
+          options)) in
+        view.notice <- "Press " ^ keys ^ " or choose a button · typing is ignored here";
+        paint t; decide ()
+      and choose index =
+        if index = 0 || fits () then index
         else (
-          view.notice <- "Resize first · complete preview required";
+          view.notice <- "Resize first · the complete preview must be visible";
           paint t; decide ()) in
       decide ()) in
-    alert t (if accepted then approved_text else denied_text);
-    accepted)
-let confirm_review t ~title ~label ~body ~primary ~max_bytes ~wrap
-    ~too_large ~unsafe_text ~approved_text ~denied_text =
+    (match status chosen with "" -> paint t | message -> alert t message);
+    chosen)
+
+let confirm_review t ~title ~label ~body ~primary ~options ~max_bytes ~wrap
+    ~too_large ~unsafe_text ~status =
   let request = {
-    title; label; body; primary; max_bytes; wrap; too_large; unsafe_text;
-    approved_text; denied_text; result = None
+    title; label; body; primary; request_buttons = options; max_bytes; wrap; too_large;
+    unsafe_text; status; result = None
   } in
   enqueue_ui_event t (Approval_event request);
   let rec await () = match request.result with
     | Some result -> result
     | None ->
         (match next_input t with
-        | `End -> false
+        | `End -> 0
         | _ -> await ()) in
   await ()
 
@@ -2791,21 +2841,36 @@ let () =
   approval_handler := (fun t request ->
     let result = confirm_review_now t ~title:request.title
       ~label:request.label ~body:request.body ~primary:request.primary
-      ~max_bytes:request.max_bytes
+      ~options:request.request_buttons ~max_bytes:request.max_bytes
       ~wrap:request.wrap ~too_large:request.too_large
-      ~unsafe_text:request.unsafe_text ~approved_text:request.approved_text
-      ~denied_text:request.denied_text in
+      ~unsafe_text:request.unsafe_text ~status:request.status in
     request.result <- Some result)
 
+(* A two-or-more-way decision shown as buttons; the first option is the safe
+   default. Returns the chosen option's label. *)
+let decide t ~title ?(context = "") ?(body = "") ~options () =
+  let indexed = List.mapi (fun index (key, label, consequence) ->
+    index, (key, label, consequence)) options in
+  let chosen = confirm_review t ~title ~label:context ~body ~primary:0
+    ~options:(List.map snd indexed) ~max_bytes:8192 ~wrap:true
+    ~too_large:"Choice cancelled: text does not fit on screen"
+    ~unsafe_text:"Choice cancelled: hidden/control text cannot be shown"
+    ~status:(fun _ -> "") in
+  let _, label, _ = List.assoc chosen indexed in
+  label
+
+let deny_option = "n", "Deny", "Nothing runs · the model is told you declined"
+let allow_once_option = "y", "Allow once", "Runs this call only · later calls ask again"
 
 let confirm t command =
   confirm_review t ~title:"Run this shell command?"
     ~label:"run_command · exec tier · not sandboxed · runs as your user"
     ~body:command ~primary:max_int ~max_bytes:4096 ~wrap:false
+    ~options:[deny_option; allow_once_option]
     ~too_large:"Shell command denied: too large to review on screen"
     ~unsafe_text:"Shell command denied: hidden/control text cannot be reviewed"
-    ~approved_text:"Shell command approved"
-    ~denied_text:"Shell command denied"
+    ~status:(function 0 -> "Shell command denied" | _ -> "Shell command approved")
+  <> 0
 
 (* Ask a question about the action, lead with exactly what will run, then
    explain its effect; the tier stays visible in plain words. *)
@@ -2831,7 +2896,8 @@ let approval_scope (request : Pave.Approval.request) =
     request.tool_name;
     Pave.Approval.tier_name request.tier ^ " tier";
     consequence;
-    "this call only" ]
+    (if Pave.Approval.session_grantable request.tool_name
+     then "you may allow it until exit" else "asks every call") ]
 
 let approval_primary_detail detail =
   List.exists (fun prefix -> String.starts_with ~prefix detail)
@@ -2848,14 +2914,27 @@ let confirm_tool t (request : Pave.Approval.request) =
     let prefix = "Command: " in
     String.starts_with ~prefix detail &&
     String.length detail - String.length prefix > 4096) request.details in
+  let session = Pave.Approval.session_grantable request.tool_name in
+  let options = [deny_option; allow_once_option] @
+    (if session then
+       ["a", "Allow all " ^ request.tool_name,
+        "Runs this and every later " ^ request.tool_name ^
+        " call without asking until Pave exits"]
+     else []) in
   if oversized_shell_command then (
     alert t "Shell command denied: too large to review on screen";
-    false)
+    Pave.Approval.Deny_once)
   else
-    confirm_review t ~title:(approval_question request)
+    match confirm_review t ~title:(approval_question request)
       ~label:(approval_scope request) ~body ~primary:(List.length primary)
-      ~max_bytes:8192 ~wrap:true
+      ~options ~max_bytes:8192 ~wrap:true
       ~too_large:"Tool action denied: preview does not fit on screen"
       ~unsafe_text:"Tool action denied: hidden/control text cannot be reviewed"
-      ~approved_text:(request.tool_name ^ " allowed once")
-      ~denied_text:(request.tool_name ^ " denied")
+      ~status:(function
+        | 0 -> request.tool_name ^ " denied"
+        | 1 -> request.tool_name ^ " allowed once"
+        | _ -> request.tool_name ^ " allowed until exit")
+    with
+    | 0 -> Pave.Approval.Deny_once
+    | 1 -> Pave.Approval.Allow_once
+    | _ -> Pave.Approval.Allow_for_session

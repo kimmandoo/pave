@@ -91,9 +91,12 @@ let () =
                          "BRAVE_SEARCH_API_KEY", "brave-secret"])
        ~query:"query" ());
   expect "cancelled search does not issue HTTP" (not !cancelled_request);
-  expect_error "priority is mandatory" "PAVE_WEB_SEARCH_PROVIDER_PRIORITY"
-    (fun () -> Web_search.search ~http:(fun _ -> fail "request must not be sent")
-       ~env:(environment ["BRAVE_SEARCH_API_KEY", "brave-secret"]) ~query:"query" ());
+  let automatic = ref [] in
+  let auto_brave = Web_search.search
+      ~http:(fun request -> automatic := request :: !automatic; Ok (200, brave_response))
+      ~env:(environment ["BRAVE_SEARCH_API_KEY", "brave-secret"]) ~query:"query" () in
+  expect "automatic order uses the first engine with a credential"
+    (auto_brave.provider = "brave" && List.length !automatic = 1);
   expect_error "unsupported provider is rejected" "unsupported search provider"
     (fun () -> Web_search.search ~http:(fun _ -> fail "request must not be sent")
        ~env:(environment ["PAVE_WEB_SEARCH_PROVIDER_PRIORITY", "google";
@@ -114,13 +117,110 @@ let () =
     attempts := request.url :: !attempts;
     if contains request.url "search.brave.com" then Ok (503, "provider unavailable")
     else Ok (200, tavily_response) in
-  expect_error "provider failure is not silently substituted" "HTTP 503"
-    (fun () -> Web_search.search ~http:no_substitution ~env:(environment [
+  let substituted = Web_search.search ~http:no_substitution ~env:(environment [
       "PAVE_WEB_SEARCH_PROVIDER_PRIORITY", "brave,tavily";
       "BRAVE_SEARCH_API_KEY", "brave-secret";
       "TAVILY_API_KEY", "tavily-secret"])
-      ~query:"query" ());
-  expect "provider errors do not trigger a secondary request" (List.length !attempts = 1);
+      ~query:"query" () in
+  expect "a failed provider falls back to the next and is reported"
+    (substituted.provider = "tavily" && List.length !attempts = 2 &&
+     (match substituted.failed with
+      | ["brave", reason] -> contains reason "HTTP 503"
+      | _ -> false));
+  expect_error "every failure is listed when all providers fail" "all web search providers failed"
+    (fun () -> Web_search.search ~http:(fun _ -> Ok (503, "down")) ~env:(environment [
+      "PAVE_WEB_SEARCH_PROVIDER_PRIORITY", "brave,tavily";
+      "BRAVE_SEARCH_API_KEY", "brave-secret";
+      "TAVILY_API_KEY", "tavily-secret"]) ~query:"query" ());
+  let after_cancel = ref 0 in
+  let cancelled = ref false in
+  expect_error "cancellation stops the fallback chain" "cancelled"
+    (fun () -> Web_search.search ~cancel:(fun () -> !cancelled)
+      ~http:(fun _ -> incr after_cancel; cancelled := true; Ok (503, "down"))
+      ~env:(environment [
+        "PAVE_WEB_SEARCH_PROVIDER_PRIORITY", "brave,tavily";
+        "BRAVE_SEARCH_API_KEY", "brave-secret";
+        "TAVILY_API_KEY", "tavily-secret"]) ~query:"query" ());
+  expect "no request after cancellation" (!after_cancel = 1);
+
+  (* Credential-free DuckDuckGo is the automatic fallback. *)
+  let ddg_html =
+    "<div class=\"result results_links\"><a rel=\"nofollow\" class=\"result__a\" " ^
+    "href=\"//duckduckgo.com/l/?uddg=https%3A%2F%2Fgithub.com%2Focaml%2Fyojson&amp;rut=x\">" ^
+    "<b>Yojson</b> &amp; friends</a>" ^
+    "<a class=\"result__snippet\" href=\"#\">Fast JSON\nfor <b>OCaml</b></a></div>" ^
+    "<div class=\"result\"><a class=\"result__a\" href=\"https://duckduckgo.com/y.js?ad=1\">Ad</a></div>" ^
+    "<div class=\"result\"><a class=\"result__a\" href=\"http://insecure.example/\">Plain HTTP</a></div>" ^
+    "<div class=\"result\"><a class=\"result__a\" href=\"https://github.com/ocaml/yojson#readme\">Duplicate</a></div>" ^
+    "<div class=\"result\"><a class=\"result__a\" href=\"https://10.0.0.1/x\">Private</a></div>" ^
+    "<div class=\"result\"><a class=\"result__a\" href=\"https://ocaml.org/p/yojson\">ocaml.org</a>" ^
+    "<div class=\"result__snippet\">Package page</div></div>" in
+  let ddg_request = ref None in
+  let ddg = Web_search.search
+      ~http:(fun request -> ddg_request := Some request; Ok (200, ddg_html))
+      ~env:(environment []) ~query:"yojson & json" ~count:5 () in
+  expect "no credentials selects DuckDuckGo" (ddg.provider = "duckduckgo");
+  (match !ddg_request with
+   | Some request ->
+       expect "DuckDuckGo HTML form POST without credentials"
+         (request.method_ = "POST" && request.url = "https://html.duckduckgo.com/html/" &&
+          request.search = Some Web_search.Duckduckgo &&
+          contains request.body "q=yojson%20%26%20json" &&
+          List.assoc_opt "Authorization" request.headers = None)
+   | None -> fail "DuckDuckGo request was sent");
+  expect "DuckDuckGo results unwrap redirects and drop ads, HTTP, private and duplicate links"
+    (List.map (fun (result : Web_search.result) -> result.url, result.title, result.snippet)
+       ddg.results =
+     ["https://github.com/ocaml/yojson", "Yojson & friends", "Fast JSON for OCaml";
+      "https://ocaml.org/p/yojson", "ocaml.org", "Package page"]);
+  expect_error "DuckDuckGo bot challenge is explained" "bot-detection"
+    (fun () -> Web_search.search ~http:(fun _ -> Ok (200, "<div class=\"anomaly-modal\">"))
+      ~env:(environment []) ~query:"query" ());
+
+  (* Credentialed engines from the reviewed provider set. *)
+  let exa_request = ref None in
+  let exa = Web_search.search
+      ~http:(fun request -> exa_request := Some request; Ok (200,
+        "{\"results\":[{\"title\":null,\"url\":\"https://exa.example.org/a\"," ^
+        "\"highlights\":[\"First line\\nsecond line\"]}]}"))
+      ~env:(environment ["EXA_API_KEY", "exa-secret"; "BRAVE_SEARCH_API_KEY", "brave-secret"])
+      ~query:"query" ~count:3 () in
+  expect "Exa leads the automatic order" (exa.provider = "exa");
+  expect "Exa result uses URL for a missing title and a single-line highlight"
+    (match exa.results with
+     | [result] -> result.title = "https://exa.example.org/a" &&
+         result.snippet = "First line second line"
+     | _ -> false);
+  (match !exa_request with
+   | Some request ->
+       expect "Exa key only in x-api-key on its pinned endpoint"
+         (request.url = "https://api.exa.ai/search" &&
+          List.assoc_opt "x-api-key" request.headers = Some "exa-secret" &&
+          List.assoc_opt "Authorization" request.headers = None &&
+          contains request.body "\"numResults\":3")
+   | None -> fail "Exa request was sent");
+  let engine name variable body =
+    Web_search.search ~http:(fun request ->
+        expect (name ^ " bearer credential")
+          (List.assoc_opt "Authorization" request.headers = Some ("Bearer " ^ name ^ "-secret"));
+        Ok (200, body))
+      ~env:(environment ["PAVE_WEB_SEARCH_PROVIDER_PRIORITY", name; variable, name ^ "-secret"])
+      ~query:"query" () in
+  let first (response : Web_search.response) = match response.results with
+    | result :: _ -> result.url, result.snippet
+    | [] -> "", "" in
+  expect "Kagi data.search results"
+    (first (engine "kagi" "KAGI_API_KEY"
+      "{\"data\":{\"search\":[{\"title\":\"K\",\"url\":\"https://kagi.example.org/\",\"snippet\":\"ks\"}]}}")
+     = ("https://kagi.example.org/", "ks"));
+  expect "Jina data array results"
+    (first (engine "jina" "JINA_API_KEY"
+      "{\"code\":200,\"data\":[{\"title\":\"J\",\"url\":\"https://jina.example.org/\",\"description\":\"js\"}]}")
+     = ("https://jina.example.org/", "js"));
+  expect "Firecrawl data.web results"
+    (first (engine "firecrawl" "FIRECRAWL_API_KEY"
+      "{\"success\":true,\"data\":{\"web\":[{\"title\":\"F\",\"url\":\"https://fc.example.org/\",\"description\":\"fs\"}]}}")
+     = ("https://fc.example.org/", "fs"));
 
   expect_error "malformed JSON response" "malformed search response JSON"
     (fun () -> Web_search.search ~http:(fun _ -> Ok (200, "{"))

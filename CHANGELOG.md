@@ -2,6 +2,8 @@
 
 ## 2026-10-01
 
+- feat(tools): added Exa, Firecrawl, Kagi, Jina and credential-free DuckDuckGo web search alongside Brave and Tavily, using an ordered provider chain; searches now work without configuration, follow an automatic or `PAVE_WEB_SEARCH_PROVIDER_PRIORITY` order, fall back to the next provider on failure and report the failed providers.
+- feat(tui): added an "Allow all TOOL" approval button that allows later calls of reviewable low-impact tools until exit (shell, process, device, remote, external and child-agent actions still ask every call), and moved discard, post-sign-in and `/setup` decisions onto the same button layout.
 - feat(tui): redesigned tool approval as a question with the exact command, query, URL or path first, a plain-words tier/scope subtitle and side-by-side `[ n Deny ]` / `[ y Allow once ]` buttons directly under the preview; clarified tool cards with the acted-on argument in each header, "denied by you · not run" for refusals, single-line outcomes without a misleading collapse hint, and in-card side-effect notes.
 - fix(tools): refused an unconfigured `web_search` before asking for approval, so users are no longer prompted for a call that cannot run.
 - fix(provider): reported OpenAI Responses, Azure, Bedrock Mantle and Codex output-token stops with the shared truncation message and surfaced the provider's stated reason for failed, incomplete and streamed error responses instead of a generic failure.

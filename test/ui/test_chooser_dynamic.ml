@@ -130,7 +130,8 @@ let () =
   let review : Tui.approval_view = {
     heading = "Tool permission"; context = "One action";
     lines = ["Tool: write_file"; "Tier: WRITE"; "Path: reviewed.txt"; "Content: exact"];
-    primary = 1; wrap_lines = true; allow_selected = false; notice = ""; preview_cache = None
+    primary = 1; wrap_lines = true; notice = ""; preview_cache = None;
+    buttons = [| "n", "Deny", ""; "y", "Allow once", "" |]; focus = 0
   } in
   assert (Tui.approval_fits ~cols:24 ~rows:11 ~activity:0 review);
   assert (not (Tui.approval_fits ~cols:24 ~rows:10 ~activity:0 review));

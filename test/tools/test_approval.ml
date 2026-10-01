@@ -56,4 +56,15 @@ let () =
      A.confirmed_answer (Some "\xe3\x85\x9b") &&
      not (A.confirmed_answer (Some "")) && not (A.confirmed_answer (Some "n")) &&
      not (A.confirmed_answer (Some "yes please")) && not (A.confirmed_answer None));
+  expect "allow-all is offered only for reviewable low-impact tools"
+    (A.session_grantable "web_search" && A.session_grantable "write_file" &&
+     not (A.session_grantable "run_command") && not (A.session_grantable "start_shell") &&
+     not (A.session_grantable "task") && not (A.session_grantable "mcp:server") &&
+     not (A.session_grantable "workspace_rewind"));
+  expect "line answers map a/all/ㅁ to a session grant only where offered"
+    (A.answer_of_line ~session:true (Some " A ") = A.Allow_for_session &&
+     A.answer_of_line ~session:true (Some "\xe3\x85\x81") = A.Allow_for_session &&
+     A.answer_of_line ~session:false (Some "a") = A.Deny_once &&
+     A.answer_of_line ~session:true (Some "y") = A.Allow_once &&
+     A.answer_of_line ~session:true None = A.Deny_once);
   print_endline "approval tiers, precedence and compound command policy: ok"

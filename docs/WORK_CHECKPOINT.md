@@ -1,5 +1,16 @@
 # Work checkpoint
 
+## Current session — decision buttons everywhere, allow-all, the reference search providers
+
+- **Date:** 2026-10-01
+- **Active task:** Completed the follow-up request: apply the button design to other choice prompts, add an "allow all" approval, and implement web search providers using the behavioral reference as reference.
+- **Reference findings (the reference):** `packages/coding-agent/src/web/search/{index,provider}.ts` walk a `web` role chain (`priority.json`: parallel, hosted, exa, firecrawl, searxng, startpage, duckduckgo, ecosia, google, mojeek, public), skip unavailable providers and fall back on failure. Google/Ecosia/Mojeek/Startpage rely on a headless browser; Parallel/Exa-MCP use MCP; Perplexity uses chat/cookie flows — not ported. DuckDuckGo works with a plain HTML POST (verified live with curl).
+- **Implementation:** `lib/tools/web_search.ml` — providers Exa, Firecrawl, Brave, Tavily, Kagi, Jina, DuckDuckGo; `plan` (explicit priority or automatic keyed engines then DuckDuckGo), `plan_summary`, `build_request`, per-provider fixed host/method/header allowlist enforced in `curl_request` via `request.search`, strict JSON row parsing with whitespace-cleaned snippets, lenient DuckDuckGo HTML parser, fallback `search` returning `failed`. `lib/tools/tools.ml` — approval discloses provider order and credentialed providers; output adds `fallback_from`. `lib/tools/approval.ml` — `answer`, `session_grantable`, `answer_of_line`. `bin/ui/tui.ml` — N-button decision modal (`buttons`/`focus`, per-button consequence line, compact/narrow fallbacks, Korean-layout keys), `decide`, `confirm_tool` returns `Approval.answer` with "Allow all TOOL" for grantable tools. `bin/main.ml` — mutex-guarded in-memory grants (`with_session_grant`) for TUI and line prompts; discard-conversation, post-sign-in and `/setup` use `Tui.decide`.
+- **Changed files:** above plus `test/tools/{test_web_search,test_tools,test_approval}.ml`, `test/ui/test_chooser_dynamic.ml`, `docs/{USAGE,DESIGN_RULES,WORK_CHECKPOINT}.md`, `CHANGELOG.md`.
+- **Verification:** `opam exec -- dune build @install` and `opam exec -- dune runtest` passed (exit 0). Actual CLI in tmux with a loopback vLLM fixture and no search keys: approval showed `Providers: duckduckgo (automatic)` and three buttons; `a` allowed the first search, the second `web_search` ran without a prompt; live DuckDuckGo returned titles/URLs/snippets for both queries. `/new` showed the Keep/Discard modal (Esc kept); `/setup` showed Cancel/Connect/Default and collapsed to one selected button with position at 34 columns. Temporary fixture/workspace removed.
+- **Limits / blockers:** Exa/Firecrawl/Kagi/Jina/Tavily/Brave were verified against fixture responses only (no live keys). DuckDuckGo may bot-challenge automated traffic. Searxng, browser-backed scrapers, Parallel, Perplexity and hosted model grounding were not ported. No release or installed-binary replacement.
+- **Exact next action:** None for this request; release only when asked.
+
 ## Current session — tool approval and tool card UX redesign
 
 - **Date:** 2026-10-01

@@ -350,15 +350,17 @@ let () =
       ["No clipboard content is read before approval."]);
     ignore (approval_case "clipboard_write"
       ["text", `String "reviewed clipboard content"] Pave.Approval.Write);
-    (* An unconfigured search is refused before any approval is requested. *)
-    (match Sys.getenv_opt "PAVE_WEB_SEARCH_PROVIDER_PRIORITY" with
-     | Some _ -> ()
-     | None ->
-         (match Pave.Tools.prepare ~root ~name:"web_search"
-             ~args:(`Assoc ["query", `String "never sent"]) () with
-          | Error message -> assert (contains message "not configured")
-          | Ok _ -> failwith "unconfigured web_search must fail before approval"));
+    (* An explicit provider without its credential is refused before any
+       approval is requested. *)
     let previous_priority = Sys.getenv_opt "PAVE_WEB_SEARCH_PROVIDER_PRIORITY" in
+    let previous_kagi = Sys.getenv_opt "KAGI_API_KEY" in
+    Unix.putenv "PAVE_WEB_SEARCH_PROVIDER_PRIORITY" "kagi";
+    Unix.putenv "KAGI_API_KEY" "";
+    (match Pave.Tools.prepare ~root ~name:"web_search"
+        ~args:(`Assoc ["query", `String "never sent"]) () with
+     | Error message -> assert (contains message "KAGI_API_KEY")
+     | Ok _ -> failwith "uncredentialed web_search must fail before approval");
+    Unix.putenv "KAGI_API_KEY" (Option.value ~default:"" previous_kagi);
     Unix.putenv "PAVE_WEB_SEARCH_PROVIDER_PRIORITY" "brave";
     Unix.putenv "BRAVE_SEARCH_API_KEY" search_secret;
     assert (contains (tool_json root "web_search" ["query", `String "never sent"])

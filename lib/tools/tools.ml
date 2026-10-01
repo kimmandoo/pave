@@ -2173,13 +2173,15 @@ let web_search ~approved ?cancel args =
       "provider", `String result.provider;
       "citation", `String result.citation
     ] in
-  Yojson.Basic.to_string (`Assoc [
+  Yojson.Basic.to_string (`Assoc ([
     "provider", `String response.provider;
     "query", `String response.query;
     "page", `Int response.page;
     "citations", `List (List.map (fun citation -> `String citation) response.citations);
     "results", `List (List.map result response.results)
-  ])
+  ] @ (if response.failed = [] then [] else [
+    "fallback_from", `List (List.map (fun (provider, error) ->
+      `Assoc ["provider", `String provider; "error", `String error]) response.failed)])))
 
 let web_fetch ~approved ?cancel args =
   require_explicit_approval approved;
@@ -2853,7 +2855,7 @@ let definitions = [
      "hidden", boolean_field "Include dotfiles and hidden directories (default false)";
      "case_sensitive", boolean_field "Use ASCII-only case matching (default true)";
      "limit", integer_field "Maximum matching lines (default 100)" 1 max_matches] ["pattern"];
-  schema "web_search" "Search with the explicitly configured pinned Brave or Tavily provider. Requires network approval; returns source URLs, citations, and provider provenance."
+  schema "web_search" "Search the public web. Uses the configured provider order (Exa, Firecrawl, Brave, Tavily, Kagi, Jina with API keys; credential-free DuckDuckGo otherwise), falling back to the next provider on failure. Requires network approval; returns source URLs, citations, and provider provenance."
     ["query", bounded_string_field "Search query sent to the selected provider" Web_search.max_query_bytes;
      "page", integer_field "Provider page/offset (default 0)" 0 Web_search.max_page;
      "count", integer_field "Maximum results (default 5)" 1 Web_search.max_results] ["query"];
@@ -3155,20 +3157,18 @@ let approval_request ?cancel ?context ~root ~name ~args (decision : Approval.dec
              "Reads a bounded workspace source; it makes no changes.",
              ["Path: " ^ quoted "path" "(missing)" args])
     | "web_search" ->
-        let priority = Option.value ~default:"(unset)"
-          (Sys.getenv_opt "PAVE_WEB_SEARCH_PROVIDER_PRIORITY") in
-        let configured = [
-          "brave", "BRAVE_SEARCH_API_KEY";
-          "tavily", "TAVILY_API_KEY"
-        ] |> List.filter_map (fun (provider, variable) ->
-          match Sys.getenv_opt variable with
-          | Some value when value <> "" -> Some provider
-          | _ -> None) in
-        "Sends this query to the first configured public search provider in the explicit priority order; its API credential is sent only to that provider.",
+        let order, credentialed = match Web_search.plan_summary () with
+          | explicit, engines ->
+              (String.concat " → " (List.map fst engines) ^
+                 (if explicit then " (from " ^ Web_search.priority_variable ^ ")"
+                  else " (automatic)")),
+              List.filter_map (fun (name, keyed) -> if keyed then Some name else None) engines
+          | exception Web_search.Error message -> "(unavailable: " ^ message ^ ")", [] in
+        "Sends this query to the first search provider in the order below; the next is tried only if one fails. Each API credential goes only to its own provider; DuckDuckGo receives the query without credentials.",
         ["Query: " ^ quoted "query" "(missing)" args;
-         "Provider priority: " ^ priority;
-         "Credentials present for: " ^
-           (if configured = [] then "none" else String.concat ", " configured);
+         "Providers: " ^ order;
+         "Credentials sent to: " ^
+           (if credentialed = [] then "none" else String.concat ", " credentialed);
          "Credentials are never shown in this approval."]
     | "web_fetch" ->
         "Fetches one public HTTPS page without authentication or redirects; the returned page is untrusted.",
