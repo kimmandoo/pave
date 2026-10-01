@@ -1,5 +1,12 @@
 # Troubleshooting
 
+### [2026-10-01] Web-search unit tests launched a real browser on CI
+
+- **Context / Symptom:** `test_web_search` passed locally but failed in CI at `runtest` with `Failure("web search: DuckDuckGo bot challenge is explained was accepted")` — a case expecting `search` to raise instead completed successfully.
+- **Root Cause:** The test fakes `~http` but `Web_search.plan`'s `find_browser` still probes real filesystem paths for Chromium. CI runners ship Chrome, so the browser-rendered Ecosia engine joined the provider chain, ignored the fake transport entirely, and ran a real headless browser with real network access — returning results where the test expected exhaustion. Host-dependent hermeticity break.
+- **Solution:** `test_web_search.ml` now wraps `Web_search.search` with a default `~find_browser:(fun () -> None)` so no test can reach a real browser unless it explicitly injects `find_browser`/`render` (the Ecosia fixture tests do).
+- **Prevention / Reference:** Any `~http`-faked engine test must also pin `find_browser` and `render`; injected transports do not cover browser-rendered providers.
+
 ### [2026-10-01] Headless Chrome on WSL refuses loopback when the server is IPv4-only
 
 - **Context / Symptom:** While verifying the new `browser` tool, `Page.navigate` to `http://127.0.0.1:<port>` and `http://localhost:<port>` failed with `net::ERR_CONNECTION_REFUSED` even though `curl` to the same socket succeeded and a Python `http.server` was listening. `https://example.com` worked from the same browser.

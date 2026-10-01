@@ -17,6 +17,16 @@ let expect_error label fragment fn =
   | exception exn -> fail (label ^ " raised the wrong exception: " ^ Printexc.to_string exn)
 
 let environment values name = List.assoc_opt name values
+
+(* Unit tests fake HTTP but still ran the real browser-rendered fallback on
+   hosts with Chrome installed (CI runners), launching a real browser and
+   network call whenever the chain reached Ecosia. Tests now pin the browser
+   probe off by default; tests exercising the rendered path pass their own
+   find_browser/render injections. *)
+let search ?http ?cancel ?env ?(find_browser = fun () -> None) ?render
+    ?page ?count ~query () =
+  Web_search.search ?http ?cancel ?env ~find_browser ?render ?page ?count
+    ~query ()
 let brave_response =
   "{\"web\":{\"results\":[{\"title\":\"Example\",\"url\":\"https://docs.example.org/article\",\"description\":\"A result snippet\"}]}}"
 let tavily_response =
@@ -27,7 +37,7 @@ let () =
   let http request =
     captured := request :: !captured;
     Ok (200, tavily_response) in
-  let response = Web_search.search ~http ~env:(environment [
+  let response = search ~http ~env:(environment [
       "PAVE_WEB_SEARCH_PROVIDER_PRIORITY", "tavily,brave";
       "BRAVE_SEARCH_API_KEY", "brave-secret";
       "TAVILY_API_KEY", "tavily-secret"])
@@ -52,7 +62,7 @@ let () =
   let brave_http request =
     brave_request := Some request;
     Ok (200, brave_response) in
-  let brave = Web_search.search ~http:brave_http ~env:(environment [
+  let brave = search ~http:brave_http ~env:(environment [
       "PAVE_WEB_SEARCH_PROVIDER_PRIORITY", "brave,tavily";
       "BRAVE_SEARCH_API_KEY", "brave-secret";
       "TAVILY_API_KEY", "tavily-secret"])
@@ -72,12 +82,12 @@ let () =
 
   let called = ref false in
   expect_error "all configured credentials missing" "BRAVE_SEARCH_API_KEY"
-    (fun () -> Web_search.search ~http:(fun _ -> called := true; Ok (200, brave_response))
+    (fun () -> search ~http:(fun _ -> called := true; Ok (200, brave_response))
        ~env:(environment ["PAVE_WEB_SEARCH_PROVIDER_PRIORITY", "brave"])
        ~query:"query" ());
   expect "missing credential sends no request" (not !called);
 
-  let only_tavily = Web_search.search ~http:(fun _ -> Ok (200, tavily_response))
+  let only_tavily = search ~http:(fun _ -> Ok (200, tavily_response))
       ~env:(environment ["PAVE_WEB_SEARCH_PROVIDER_PRIORITY", "brave,tavily";
                         "TAVILY_API_KEY", "tavily-secret"])
       ~query:"query" () in
@@ -85,29 +95,29 @@ let () =
     (only_tavily.provider = "tavily");
   let cancelled_request = ref false in
   expect_error "pre-request cancellation is honored" "cancelled"
-    (fun () -> Web_search.search ~cancel:(fun () -> true)
+    (fun () -> search ~cancel:(fun () -> true)
        ~http:(fun _ -> cancelled_request := true; Ok (200, brave_response))
        ~env:(environment ["PAVE_WEB_SEARCH_PROVIDER_PRIORITY", "brave";
                          "BRAVE_SEARCH_API_KEY", "brave-secret"])
        ~query:"query" ());
   expect "cancelled search does not issue HTTP" (not !cancelled_request);
   let automatic = ref [] in
-  let auto_brave = Web_search.search
+  let auto_brave = search
       ~http:(fun request -> automatic := request :: !automatic; Ok (200, brave_response))
       ~env:(environment ["BRAVE_SEARCH_API_KEY", "brave-secret"]) ~query:"query" () in
   expect "automatic order uses the first engine with a credential"
     (auto_brave.provider = "brave" && List.length !automatic = 1);
   expect_error "unsupported provider is rejected" "unsupported search provider"
-    (fun () -> Web_search.search ~http:(fun _ -> fail "request must not be sent")
+    (fun () -> search ~http:(fun _ -> fail "request must not be sent")
        ~env:(environment ["PAVE_WEB_SEARCH_PROVIDER_PRIORITY", "google";
                          "BRAVE_SEARCH_API_KEY", "brave-secret"]) ~query:"query" ());
   expect_error "page bounds" "page must be between"
-    (fun () -> Web_search.search ~http:(fun _ -> fail "request must not be sent")
+    (fun () -> search ~http:(fun _ -> fail "request must not be sent")
        ~env:(environment ["PAVE_WEB_SEARCH_PROVIDER_PRIORITY", "brave";
                          "BRAVE_SEARCH_API_KEY", "brave-secret"])
        ~query:"query" ~page:10 ());
   expect_error "Tavily page is rejected rather than ignored" "does not support paged"
-    (fun () -> Web_search.search ~http:(fun _ -> fail "request must not be sent")
+    (fun () -> search ~http:(fun _ -> fail "request must not be sent")
        ~env:(environment ["PAVE_WEB_SEARCH_PROVIDER_PRIORITY", "tavily";
                          "TAVILY_API_KEY", "tavily-secret"])
        ~query:"query" ~page:1 ());
@@ -117,7 +127,7 @@ let () =
     attempts := request.url :: !attempts;
     if contains request.url "search.brave.com" then Ok (503, "provider unavailable")
     else Ok (200, tavily_response) in
-  let substituted = Web_search.search ~http:no_substitution ~env:(environment [
+  let substituted = search ~http:no_substitution ~env:(environment [
       "PAVE_WEB_SEARCH_PROVIDER_PRIORITY", "brave,tavily";
       "BRAVE_SEARCH_API_KEY", "brave-secret";
       "TAVILY_API_KEY", "tavily-secret"])
@@ -128,14 +138,14 @@ let () =
       | ["brave", reason] -> contains reason "HTTP 503"
       | _ -> false));
   expect_error "every failure is listed when all providers fail" "all web search providers failed"
-    (fun () -> Web_search.search ~http:(fun _ -> Ok (503, "down")) ~env:(environment [
+    (fun () -> search ~http:(fun _ -> Ok (503, "down")) ~env:(environment [
       "PAVE_WEB_SEARCH_PROVIDER_PRIORITY", "brave,tavily";
       "BRAVE_SEARCH_API_KEY", "brave-secret";
       "TAVILY_API_KEY", "tavily-secret"]) ~query:"query" ());
   let after_cancel = ref 0 in
   let cancelled = ref false in
   expect_error "cancellation stops the fallback chain" "cancelled"
-    (fun () -> Web_search.search ~cancel:(fun () -> !cancelled)
+    (fun () -> search ~cancel:(fun () -> !cancelled)
       ~http:(fun _ -> incr after_cancel; cancelled := true; Ok (503, "down"))
       ~env:(environment [
         "PAVE_WEB_SEARCH_PROVIDER_PRIORITY", "brave,tavily";
@@ -156,7 +166,7 @@ let () =
     "<div class=\"result\"><a class=\"result__a\" href=\"https://ocaml.org/p/yojson\">ocaml.org</a>" ^
     "<div class=\"result__snippet\">Package page</div></div>" in
   let ddg_request = ref None in
-  let ddg = Web_search.search
+  let ddg = search
       ~http:(fun request -> ddg_request := Some request; Ok (200, ddg_html))
       ~env:(environment []) ~query:"yojson & json" ~count:5 () in
   expect "no credentials selects DuckDuckGo" (ddg.provider = "duckduckgo");
@@ -174,12 +184,12 @@ let () =
      ["https://github.com/ocaml/yojson", "Yojson & friends", "Fast JSON for OCaml";
       "https://ocaml.org/p/yojson", "ocaml.org", "Package page"]);
   expect_error "DuckDuckGo bot challenge is explained" "bot-detection"
-    (fun () -> Web_search.search ~http:(fun _ -> Ok (200, "<div class=\"anomaly-modal\">"))
+    (fun () -> search ~http:(fun _ -> Ok (200, "<div class=\"anomaly-modal\">"))
       ~env:(environment []) ~query:"query" ());
   let challenge_calls = ref [] in
-  let challenge_fallback = Web_search.search
+  let challenge_fallback = search
       ~http:(fun request ->
-        challenge_calls := request.Web_search.search :: !challenge_calls;
+        challenge_calls := request.search :: !challenge_calls;
         match request.search with
         | Some Web_search.Duckduckgo ->
             Ok (202, "<form class=\"anomaly-modal\">private-challenge-token</form>")
@@ -195,7 +205,7 @@ let () =
      | ["duckduckgo", reason] -> not (contains reason "private-challenge-token")
      | _ -> false);
   List.iter (fun html ->
-    let empty = Web_search.search ~http:(fun _ -> Ok (200, html))
+    let empty = search ~http:(fun _ -> Ok (200, html))
         ~env:(environment []) ~query:"unindexed topic" () in
     expect "live no-result quote and class variants return no invented citations"
       (empty.results = [] && empty.citations = [] && empty.failed = []))
@@ -205,7 +215,7 @@ let () =
       "<a CLASS='extra result__a selected' href='https://example.org/docs?a=1&amp;b=2'>Actual &amp; Result</a>" in
   expect "result links accept class membership and single-quoted attributes"
     (varied_rows = ["Actual & Result", "https://example.org/docs?a=1&b=2", ""]);
-  let empty_json = Web_search.search
+  let empty_json = search
       ~http:(fun _ -> Ok (200, {|{"results":[]}|}))
       ~env:(environment ["PAVE_WEB_SEARCH_PROVIDER_PRIORITY", "tavily";
                         "TAVILY_API_KEY", "tavily-secret"])
@@ -213,8 +223,8 @@ let () =
   expect "valid JSON empty results remain empty"
     (empty_json.results = [] && empty_json.citations = [] && empty_json.failed = []);
   let malformed_html = "<a class=\"result__a\" href=\"https://example.com/\">Unclosed" in
-  let recovered = Web_search.search
-      ~http:(fun request -> match request.Web_search.search with
+  let recovered = search
+      ~http:(fun request -> match request.search with
         | Some Web_search.Duckduckgo -> Ok (200, malformed_html)
         | Some Web_search.Brave -> Ok (200, brave_response)
         | _ -> fail "unexpected provider after malformed HTML")
@@ -230,7 +240,7 @@ let () =
 
   (* Credentialed engines normalize their distinct response envelopes. *)
   let exa_request = ref None in
-  let exa = Web_search.search
+  let exa = search
       ~http:(fun request -> exa_request := Some request; Ok (200,
         "{\"results\":[{\"title\":null,\"url\":\"https://exa.example.org/a\"," ^
         "\"highlights\":[\"First line\\nsecond line\"]}]}"))
@@ -251,7 +261,7 @@ let () =
           contains request.body "\"numResults\":3")
    | None -> fail "Exa request was sent");
   let engine name variable body =
-    Web_search.search ~http:(fun request ->
+    search ~http:(fun request ->
         expect (name ^ " bearer credential")
           (List.assoc_opt "Authorization" request.headers = Some ("Bearer " ^ name ^ "-secret"));
         Ok (200, body))
@@ -273,7 +283,7 @@ let () =
       "{\"success\":true,\"data\":{\"web\":[{\"title\":\"F\",\"url\":\"https://fc.example.org/\",\"description\":\"fs\"}]}}")
      = ("https://fc.example.org/", "fs"));
   let long_title = String.concat "" (List.init 400 (fun _ -> "界")) in
-  let bounded = Web_search.search
+  let bounded = search
       ~http:(fun _ -> Ok (200, Yojson.Basic.to_string (`Assoc [
         "results", `List [`Assoc [
           "title", `String long_title; "url", `String "https://example.org/";
@@ -293,8 +303,8 @@ let () =
       "{\"success\":false,\"error\":\"secret-echo\\u001b[31m\"}"
   ] in
   List.iter (fun (name, variable, payload) ->
-    let result = Web_search.search
-        ~http:(fun request -> match request.Web_search.search with
+    let result = search
+        ~http:(fun request -> match request.search with
           | Some Web_search.Brave -> Ok (200, brave_response)
           | _ -> Ok (200, payload))
         ~env:(environment ["PAVE_WEB_SEARCH_PROVIDER_PRIORITY", name ^ ",brave";
@@ -307,18 +317,18 @@ let () =
        | _ -> false)) failed_payloads;
 
   expect_error "malformed JSON response" "malformed search response JSON"
-    (fun () -> Web_search.search ~http:(fun _ -> Ok (200, "{"))
+    (fun () -> search ~http:(fun _ -> Ok (200, "{"))
        ~env:(environment ["PAVE_WEB_SEARCH_PROVIDER_PRIORITY", "brave";
                          "BRAVE_SEARCH_API_KEY", "brave-secret"])
        ~query:"query" ());
   expect_error "wrong provider response structure" "web must be an object"
-    (fun () -> Web_search.search ~http:(fun _ -> Ok (200, "{\"web\":[]}"))
+    (fun () -> search ~http:(fun _ -> Ok (200, "{\"web\":[]}"))
        ~env:(environment ["PAVE_WEB_SEARCH_PROVIDER_PRIORITY", "brave";
                          "BRAVE_SEARCH_API_KEY", "brave-secret"])
        ~query:"query" ());
   let brave_only = environment ["PAVE_WEB_SEARCH_PROVIDER_PRIORITY", "brave";
                                  "BRAVE_SEARCH_API_KEY", "brave-secret"] in
-  let mixed = Web_search.search ~env:brave_only ~query:"query" ~count:2
+  let mixed = search ~env:brave_only ~query:"query" ~count:2
       ~http:(fun _ -> Ok (200,
         "{\"web\":{\"results\":[" ^
         "{\"title\":\"One\",\"url\":\"https://EXAMPLE.org/a\",\"description\":\"one\"}," ^
@@ -330,12 +340,12 @@ let () =
   expect "duplicate, private and non-HTTPS rows are dropped and extra rows cut to count"
     (List.map (fun (result : Web_search.result) -> result.title) mixed.results = ["One"; "Two"]);
   expect_error "a structurally invalid response still fails" "web must be an object"
-    (fun () -> Web_search.search ~env:brave_only ~query:"query"
+    (fun () -> search ~env:brave_only ~query:"query"
        ~http:(fun _ -> Ok (200, "{\"web\":[]}")) ());
 
   (* Empty answers move to the next provider; all-empty is an empty answer. *)
   let tried = ref [] in
-  let empty_then_found = Web_search.search ~query:"query"
+  let empty_then_found = search ~query:"query"
       ~env:(environment ["PAVE_WEB_SEARCH_PROVIDER_PRIORITY", "tavily,brave";
                         "TAVILY_API_KEY", "tavily-secret"; "BRAVE_SEARCH_API_KEY", "brave-secret"])
       ~http:(fun request ->
@@ -355,7 +365,7 @@ let () =
     "<article data-test-id=\"organic-result\" aria-label=\"Insecure\">" ^
     "<a data-test-id=\"result-link\" href=\"http://plain.example/\">p</a></article>" in
   let rendered = ref [] in
-  let ecosia = Web_search.search ~query:"notty"
+  let ecosia = search ~query:"notty"
       ~env:(environment ["PAVE_WEB_SEARCH_PROVIDER_PRIORITY", "ecosia"])
       ~find_browser:(fun () -> Some "/fixture/chrome")
       ~http:(fun _ -> fail "Ecosia must not use curl")
@@ -367,7 +377,7 @@ let () =
        ecosia.results =
      ["https://github.com/pqwy/notty", "Notty & OCaml", "Declarative terminal graphics"]);
   expect_error "Ecosia without a browser explains how to enable it" "PAVE_BROWSER"
-    (fun () -> Web_search.search ~query:"q"
+    (fun () -> search ~query:"q"
        ~env:(environment ["PAVE_WEB_SEARCH_PROVIDER_PRIORITY", "ecosia"])
        ~find_browser:(fun () -> None) ());
   let automatic_without_browser = Web_search.plan_summary ~env:(environment [])
@@ -378,7 +388,7 @@ let () =
     (automatic_without_browser = (false, ["duckduckgo", false, false]) &&
      automatic_with_browser = (false, ["duckduckgo", false, false; "ecosia", false, true]));
   expect_error "Ecosia challenge page is explained" "bot-detection"
-    (fun () -> Web_search.search ~query:"q"
+    (fun () -> search ~query:"q"
        ~env:(environment ["PAVE_WEB_SEARCH_PROVIDER_PRIORITY", "ecosia"])
        ~find_browser:(fun () -> Some "/fixture/chrome")
        ~render:(fun ~program:_ _ -> "<script>window._cf_chl_opt={}</script>") ());
@@ -387,7 +397,7 @@ let () =
   expect "PAVE_BROWSER=none disables browser engines"
     (Web_search.detect_browser ~env:(environment ["PAVE_BROWSER", "none"]) () = None);
   expect_error "oversized search results rejected" "response exceeds the size limit"
-    (fun () -> Web_search.search ~http:(fun _ -> Ok (200, String.make (Web_search.max_response_bytes + 1) 'x'))
+    (fun () -> search ~http:(fun _ -> Ok (200, String.make (Web_search.max_response_bytes + 1) 'x'))
        ~env:(environment ["PAVE_WEB_SEARCH_PROVIDER_PRIORITY", "brave";
                          "BRAVE_SEARCH_API_KEY", "brave-secret"])
        ~query:"query" ());
