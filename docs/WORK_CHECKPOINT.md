@@ -1,5 +1,14 @@
 # Work checkpoint
 
+## Current session — verification of unpushed browser/search commits
+
+- **Date:** 2026-10-01
+- **Active task:** Completed the review of the four unpushed commits (`ee94058`..`e048ab4`: Ecosia search, headless browser, page tools) and fixed only the defects found. Start: `main` four commits ahead of origin, clean tree.
+- **Fixes:** (1) `Workspace_browser.read_exact` timed out after 5 s of silence even between CDP messages, breaking page evaluations that settle later. (2) `executionContextDestroyed` never removed contexts because the reverse index used a different key. (3) A failed browser exec leaked its `pave-browser-*` profile.
+- **Changed files:** `lib/tools/workspace_browser.ml`, `test/test_workspace_browser.ml`, `CHANGELOG.md`, `docs/{TROUBLESHOOTING,WORK_CHECKPOINT}.md`.
+- **Verification:** `opam exec -- dune build @install` and `opam exec -- dune runtest` passed. Both new regression tests failed before the fixes. The live Chromium smoke (`test_browser_live`) was skipped: no browser is installed on this machine.
+- **Exact next action:** None; release only when asked.
+
 ## Current session — session-owned headless browser tool (BR01a/BR01b)
 
 - **Date:** 2026-10-01

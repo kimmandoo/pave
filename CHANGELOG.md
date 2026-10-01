@@ -2,6 +2,7 @@
 
 ## 2026-10-01
 
+- fix(tools): stopped the headless browser from dropping the connection when a page answer took over five seconds (silence is now only fatal inside a frame), forgot destroyed frame execution contexts that were keyed inconsistently, and removed the throwaway profile when the browser failed to start.
 - feat(tools): added a session-owned isolated headless browser tool driven over the Chrome DevTools Protocol — approved `open`/`navigate`/`evaluate`/`screenshot`/`call_tool` actions with a fresh throwaway profile, loopback-only debugging endpoint and deterministic teardown, plus read-only `observe`/`list_tools` and untrusted page-declared `modelContext` tool invocation.
 - feat(tools): extended the browser tool's page-declared `modelContext` support to every frame: catalog reads and invocations run in each frame's own context via tracked execution contexts, `list_tools` accepts `name`/`frame` filters and returns full schemas only for exact-name reads, `tool_events` reports registered/updated/unregistered transitions since a cursor (clearing requires approval), `call_tool` returns structured `{ok,result}`/`{ok:false,error}` envelopes, and oversized page results return delimited previews instead of failing.
 - feat(tools): added browser-rendered Ecosia web search through a locally installed or `PAVE_BROWSER` Chrome/Chromium/Edge, run headless with its sandbox and a throwaway profile; it joins the automatic chain after DuckDuckGo only when a browser is available.

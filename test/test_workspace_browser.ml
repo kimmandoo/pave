@@ -416,6 +416,38 @@ let test_manager_close () =
     (fun () -> Browser.open_session ~spawn ~connect manager ~id:"two");
   Thread.join server
 
+let test_long_silent_response () =
+  (* A CDP answer to an awaited page promise can arrive long after the last
+     byte; only silence inside a frame is a dead connection. *)
+  let client, server = Unix.socketpair Unix.PF_UNIX Unix.SOCK_STREAM 0 in
+  let sender = Thread.create (fun () ->
+    Thread.delay 6.5;
+    let payload = "{\"id\":1}" in
+    let frame = "\x81" ^ String.make 1 (Char.chr (String.length payload)) ^ payload in
+    ignore (Unix.write_substring server frame 0 (String.length frame))) () in
+  let transport =
+    { Browser.fd = client; write_lock = Mutex.create (); closed = false } in
+  (match Browser.read_ws_message ~limit:1024 transport with
+   | `Text message -> expect "late frame delivered" (message = "{\"id\":1}")
+   | `Closed -> expect "late frame delivered" false);
+  Thread.join sender;
+  Unix.close client; Unix.close server
+
+let test_context_destroyed () =
+  let connection = fake_connection (new_fake_endpoint ()) in
+  let event method_ params = `Assoc [
+    "method", `String method_; "sessionId", `String "s1"; "params", params ] in
+  Browser.note_context_event connection (event "Runtime.executionContextCreated"
+    (`Assoc [ "context", `Assoc [
+      "id", `Int 7; "auxData", `Assoc [
+        "isDefault", `Bool true; "frameId", `String "f1" ] ] ]));
+  expect "context recorded"
+    (Hashtbl.find_opt connection.contexts (Browser.context_key "s1" "f1") = Some 7);
+  Browser.note_context_event connection (event "Runtime.executionContextDestroyed"
+    (`Assoc [ "executionContextId", `Int 7 ]));
+  expect "destroyed context forgotten" (Hashtbl.length connection.contexts = 0);
+  expect "reverse index forgotten" (Hashtbl.length connection.context_frames = 0)
+
 let () =
   test_url_validation ();
   test_frame_encoding ();
@@ -425,4 +457,6 @@ let () =
   test_catalog_frames_and_events ();
   test_failed_open_cleans_slot ();
   test_manager_close ();
+  test_context_destroyed ();
+  test_long_silent_response ();
   print_endline "test_workspace_browser: ok"

@@ -945,3 +945,11 @@
 - **Root Cause:** `read_text_page` rejected any call where `line` was set and `offset` was present at all, even `offset: 0`. Models (especially local OpenAI-compatible ones) commonly fill every optional schema field with its default, so a plain read arrived as `offset: 0, line: 1` and could never succeed.
 - **Solution:** Treat `offset: 0` and `line: 1` as the defaults they are; reject only a nonzero offset combined with a line above 1, with a message telling the model to retry with one of them. Schema descriptions now state the defaults. Regression cases were added to `test/tools/test_tools.ml`.
 - **Prevention / Reference:** Mutually exclusive optional tool arguments must tolerate echoed default values. `dune test test/tools` does not run `test_tools` (it is declared in `test/dune`); run `dune test` to exercise it.
+
+### [2026-10-01] Headless browser calls died after five seconds of silence
+
+- **Context / Symptom:** `browser` `evaluate`/`call_tool` on a page promise that settled after more than five seconds failed with `browser connection timed out waiting for data`, although the operation allowed up to 120 s. Destroyed iframes also kept stale execution-context ids.
+- **Root Cause:** `Workspace_browser.read_exact` applied its five-second idle limit to the first two bytes of every WebSocket frame, but CDP sends nothing while an awaited promise is pending. The reverse context index stored `session\000session\000frame` while the forward table used `session\000frame`, so `executionContextDestroyed` never removed anything. A browser that failed to exec also left its `pave-browser-*` profile directory behind.
+- **Solution:** The idle limit applies only inside a frame; waiting for the next message uses the 120 s operation bound plus slack, with cancellation still polled every 250 ms. The reverse index stores the forward key, and the profile is removed when spawn fails. Regression tests `test_long_silent_response` and `test_context_destroyed` failed before the fix.
+- **Prevention / Reference:** Keep liveness timeouts separate from per-operation deadlines when a protocol answers asynchronously. `dune exec test/test_workspace_browser.exe` covers both.
+

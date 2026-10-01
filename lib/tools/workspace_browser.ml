@@ -132,10 +132,10 @@ type ws_transport = {
 
 let close_socket fd = try Unix.close fd with Unix.Unix_error _ -> ()
 
-let read_exact cancel fd buffer offset remaining =
-  (* Five seconds of silence is still a dead connection; the shorter select
-     slice just keeps cancel and drain quiet-deadlines responsive. *)
-  let idle_deadline = Unix.gettimeofday () +. 5. in
+let read_exact ?(idle = 5.) cancel fd buffer offset remaining =
+  (* Five seconds of silence inside a frame is a dead connection; the shorter
+     select slice just keeps cancel and drain quiet-deadlines responsive. *)
+  let idle_deadline = Unix.gettimeofday () +. idle in
   let rec loop offset remaining =
     if remaining <> 0 then begin
       check_cancel cancel;
@@ -246,7 +246,9 @@ let read_ws_message ?(cancel = fun () -> false) ~limit transport =
   let payload = Buffer.create 4096 in
   let next_frame () =
     let header = Bytes.create 2 in
-    read_exact cancel transport.fd header 0 2;
+    (* Between messages the browser is legitimately silent while a page
+       promise or navigation settles; the caller's operation bound applies. *)
+    read_exact ~idle:(max_operation_seconds +. 10.) cancel transport.fd header 0 2;
     let first = Char.code (Bytes.get header 0) in
     let second = Char.code (Bytes.get header 1) in
     let fin = first land 0x80 <> 0 in
@@ -362,8 +364,7 @@ let note_context_event connection json =
               | `String frame_id, `Int context_id ->
                   let key = context_key session_id frame_id in
                   Hashtbl.replace connection.contexts key context_id;
-                  Hashtbl.replace connection.context_frames
-                    context_id (session_id ^ "\000" ^ key)
+                  Hashtbl.replace connection.context_frames context_id key
               | _ -> ())
        | _ -> ())
   | `String "Runtime.executionContextDestroyed" ->
@@ -382,7 +383,8 @@ let note_context_event connection json =
              if starts_with key (session_id ^ "\000") then None else Some value)
              connection.contexts;
            let stale = Hashtbl.fold (fun context_id packed acc ->
-             if starts_with packed session_id then context_id :: acc else acc)
+             if starts_with packed (session_id ^ "\000") then context_id :: acc
+             else acc)
              connection.context_frames [] in
            List.iter (Hashtbl.remove connection.context_frames) stale
        | _ -> Hashtbl.reset connection.contexts;
@@ -892,8 +894,11 @@ let open_session ?(env = Sys.getenv_opt) ?(cancel = fun () -> false)
         let program = detect_browser ~env () in
         fun ~cancel:_ ->
           let profile = Filename.temp_dir "pave-browser-" "" in
-          { pid = spawn_browser ~program
-              ~arguments:(browser_arguments ~profile); profile } in
+          match spawn_browser ~program ~arguments:(browser_arguments ~profile) with
+          | pid -> { pid; profile }
+          | exception exn ->
+              (try remove_tree profile with _ -> ());
+              raise exn in
   let connect = match connect with
     | Some connect -> connect
     | None ->
