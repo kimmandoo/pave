@@ -9,6 +9,9 @@
 - fix(provider): continued streamed tool calls whose deltas omit `index`, accepted arguments delivered as a complete object, and read Mistral-style content part lists.
 - fix(provider): mapped Ollama `minimal`/`xhigh` effort to the `low`/`high` wire values instead of a bare `true`.
 - fix(provider): sent `safetySettings: OFF` on Google Vertex requests so agentic tool transcripts are not blocked by content gating.
+- fix(provider): sanitized replayed transcripts before every request — malformed tool calls (blank id/name) are dropped with their results, duplicate call ids are rewritten to `id_dupN` with results re-pointed, missing results gain a conservative "No result provided" block, and orphan results are removed — ending provider 400 loops after aborted or interrupted turns.
+- fix(provider): retried transient request failures (HTTP 429/5xx, connection-level curl exits, first-byte timeouts) up to three attempts with backoff; streamed responses retry only before any response byte is consumed, and no sleep is spent under injected test fixtures.
+- feat(tools): added `publish_web`, a session-owned Portal relay tunnel — `publish` exposes a loopback port and returns the public HTTPS URL once ready, `stop` ends a named tunnel, and `list` reports running tunnels; requires the `portal` CLI (or `PAVE_PORTAL`) and explicit approval.
 
 ## 2026-10-01
 

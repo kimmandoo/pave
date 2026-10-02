@@ -1731,6 +1731,7 @@ let () =
                         let compacted = if native_anthropic then
                           Pave.Provider.compact_anthropic_messages
                             ~authentication ?resolve_credential ?cancel
+                            ?max_output_tokens:!context_window_max_output_tokens
                             ~on_usage provider ~instructions:native_instruction
                             ~messages:native_messages ~tools:native_tools
                         else
@@ -2296,6 +2297,7 @@ let () =
                 let compacted = if native_anthropic then
                   Pave.Provider.compact_anthropic_messages
                     ~authentication ?resolve_credential
+                    ?max_output_tokens:!context_window_max_output_tokens
                     ~on_usage:collect_usage provider
                     ~instructions:Pave.Context_compaction.native_summary_instruction
                     ~messages:native_messages ~tools:native_tools

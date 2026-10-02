@@ -264,6 +264,9 @@ let response_deadline_cases () =
     | exception Pave.Provider.Cancelled -> ())
 
 let () =
+  (* Each scripted step asserts one request; keep transport retries off so an
+     error status does not consume extra steps. *)
+  Pave.Provider.Test.disable_retries ();
   response_deadline_cases ();
   let pinned = "https://api.example.test/v1/chat/completions" in
   Pave.Provider.validate_endpoint_override

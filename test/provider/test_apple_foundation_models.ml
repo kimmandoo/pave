@@ -125,6 +125,11 @@ let tests () =
       { Protocol.name = "photo.png"; mime_type = "image/png"; data = "aGVsbG8=" }]
       "look"] (configuration ()) "does not support user media attachments";
     expect_error ~messages:[Protocol.user "continue";
+      { Protocol.role = "assistant"; content = None;
+        tool_calls = [ { Protocol.id = "call-1"; name = "lookup";
+          arguments = `Assoc [] } ];
+        tool_call_id = None; tool_result_content = None;
+        provider_state = None; attachments = [] };
       Protocol.tool_result_blocks "call-1" [Protocol.Image {
         mime_type = "image/png"; data = "aGVsbG8=" }]]
       (configuration ()) "does not support image tool results";

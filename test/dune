@@ -692,4 +692,7 @@
  (name test_browser_live)
  (modules test_browser_live)
  (libraries pave unix yojson threads))
-
+(test
+ (name test_sanitize)
+ (modules test_sanitize)
+ (libraries pave unix yojson))

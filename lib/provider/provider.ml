@@ -224,6 +224,11 @@ module Test = struct
 
   let use_curl_helper executable =
     curl_helper := Some (Unix.realpath executable)
+
+  (* Step-ordered fixtures assert exactly one request per call; disable
+     retries so an error response does not shift the scripted sequence. *)
+  let retry_disabled = ref false
+  let disable_retries () = retry_disabled := true
 end
 
 
@@ -557,6 +562,28 @@ let curl_options ~local ~max_seconds ~endpoint ~headers ~body_path =
   ^ (if local then option "proxy" "" ^ option "noproxy" "*" ^
       option "max-redirs" "0" else "")
 
+(* Transient transport states where a retry cannot double-apply the request:
+   an explicit rejection (429/5xx) or a connection-level curl failure before
+   any response arrived. Timeouts after response bytes started are never
+   retried — remote acceptance is unknown. *)
+let transient_curl_status = function
+  | "5" | "6" | "7" | "35" | "52" | "55" | "56" | "92" -> true
+  | _ -> false
+
+let retryable_status = function
+  | 429 -> true
+  | code -> code >= 500 && code <= 599
+
+let retry_attempts = 3
+
+let attempts_allowed n =
+  n < retry_attempts && not !Test.retry_disabled
+
+let retry_delay_seconds attempt =
+  (* Under the injected curl fixture, retries must not wall-clock sleep. *)
+  if !Test.curl_helper <> None then 0.0
+  else min 4.0 (0.5 *. float_of_int attempt)
+
 let post_json ?max_request_bytes ?(local = false) ?cancel
     ~endpoint ~headers ~secret body_json =
   let body = request_body ?max_request_bytes ~local ~endpoint ~headers body_json in
@@ -566,24 +593,59 @@ let post_json ?max_request_bytes ?(local = false) ?cancel
     close_out body_output;
     let option name value = name ^ " = " ^ quote_config value ^ "\n" in
     let max_response_bytes = 16_777_216 in
-    let received = Buffer.create 8192 in
-    let consume chunk =
-      (* curl appends a three-byte HTTP status after the body. *)
-      if String.length chunk > max_response_bytes + 3 - Buffer.length received then
-        raise (Provider_error "completion response exceeds 16 MiB");
-      Buffer.add_string received chunk in
     let configuration =
       curl_options ~local ~max_seconds:buffered_max_seconds
         ~endpoint ~headers ~body_path
       ^ option "output" "/dev/stdout"
       ^ option "max-filesize" (string_of_int max_response_bytes)
       ^ option "write-out" "%{http_code}" in
-    (try ignore (run_curl ?cancel ~on_chunk:consume configuration) with
-      | Provider_error "Transport error: curl failed (exit status 28)" ->
-          raise (Provider_error (curl_timeout_message ~streaming:false
-            ~response_body_seen:false))
-      | Provider_error "Transport error: curl failed (exit status 63)" ->
-          raise (Provider_error "completion response exceeds 16 MiB"));
+    let rec attempt n =
+      let received = Buffer.create 8192 in
+      let consume chunk =
+        (* curl appends a three-byte HTTP status after the body. *)
+        if String.length chunk > max_response_bytes + 3 - Buffer.length received then
+          raise (Provider_error "completion response exceeds 16 MiB");
+        Buffer.add_string received chunk in
+      let status =
+        try
+          ignore (run_curl ?cancel ~on_chunk:consume configuration);
+          let length = Buffer.length received in
+          if length >= 3 then
+            (try int_of_string (Buffer.sub received (length - 3) 3)
+             with Failure _ -> 0)
+          else 0
+        with
+        | Provider_error "Transport error: curl failed (exit status 28)" ->
+            if Buffer.length received = 0 && attempts_allowed n then -1
+            else
+              raise (Provider_error (curl_timeout_message ~streaming:false
+                ~response_body_seen:(Buffer.length received > 0)))
+        | Provider_error "Transport error: curl failed (exit status 63)" ->
+            raise (Provider_error "completion response exceeds 16 MiB")
+        | Provider_error message when
+            String.starts_with
+              ~prefix:"Transport error: curl failed (exit status " message
+            && attempts_allowed n ->
+            (* Connection-level curl failures are safe to retry. *)
+            let code =
+              let prefix = "Transport error: curl failed (exit status " in
+              let suffix = ")" in
+              if String.ends_with ~suffix message then
+                String.sub message (String.length prefix)
+                  (String.length message - String.length prefix - 1)
+              else "" in
+            if transient_curl_status code then -1
+            else raise (Provider_error message)
+      in
+      if status = -1 || retryable_status status then
+        if attempts_allowed n then (
+          Unix.sleepf (retry_delay_seconds n);
+          check_cancel cancel;
+          attempt (n + 1))
+        else received
+      else received
+    in
+    let received = attempt 1 in
     check_cancel cancel;
     let length = Buffer.length received in
     if length < 3 then raise (Provider_error "curl returned an invalid HTTP status");
@@ -639,50 +701,81 @@ let post_stream ?max_request_bytes ?(local = false) ?cancel ~endpoint ~headers
           ~endpoint ~headers ~body_path
         ^ "no-buffer\n"
         ^ option "dump-header" header_path in
-      let status = ref None in
-      let response_body_seen = ref false in
-      let pending = Buffer.create 256 in
-      let consume chunk =
-        if chunk <> "" then response_body_seen := true;
-        if !status = None then status := status_from_headers (read_file header_path);
-        match !status with
-        | Some code when code >= 200 && code < 300 ->
-            if Buffer.length pending <> 0 then (
-              on_chunk (Buffer.contents pending);
-              Buffer.clear pending);
-            on_chunk chunk
-        | _ ->
-            if Buffer.length pending + String.length chunk > 16_384 then
-              raise (Provider_error "HTTP error or missing response headers exceeded 16 KiB");
-            Buffer.add_string pending chunk in
-      (try ignore (run_curl ~on_chunk:consume ~is_done ~is_finished ?cancel
-         ?progress
-         ~stream_timeouts:{
-           first_byte_seconds = float_of_int buffered_max_seconds;
-           idle_seconds = float_of_int stream_idle_seconds;
-         } configuration)
-       with
-       | Stream_complete -> ()
-       | Stream_timeout `First_byte ->
-           raise (Provider_error (Printf.sprintf
-             "Transport error: provider stream timed out before the first response data byte (upload and response wait exceeded %d s)"
-             buffered_max_seconds))
-       | Stream_timeout `Idle ->
-           raise (Provider_error (Printf.sprintf
-             "Transport error: provider stream stalled after response data (no data for %d s)"
-             stream_idle_seconds))
-       | Provider_error "Transport error: curl failed (exit status 28)" ->
-           raise (Provider_error (curl_timeout_message ~streaming:true
-             ~response_body_seen:!response_body_seen)));
-      check_cancel cancel;
-      let code = match status_from_headers (read_file header_path) with
-        | Some code -> code
-        | None -> raise (Provider_error "missing HTTP response status") in
-      if code < 200 || code >= 300 then (
-        let error = try Yojson.Basic.from_string (Buffer.contents pending)
-          with Yojson.Json_error _ -> `Null in
-        raise (Provider_error (http_error_reason secret code error)));
-      if Buffer.length pending <> 0 then on_chunk (Buffer.contents pending)))
+      let rec attempt n =
+        let status = ref None in
+        let response_body_seen = ref false in
+        let forwarded = ref false in
+        let pending = Buffer.create 256 in
+        let consume chunk =
+          if chunk <> "" then response_body_seen := true;
+          if !status = None then
+            status := status_from_headers (read_file header_path);
+          match !status with
+          | Some code when code >= 200 && code < 300 ->
+              forwarded := true;
+              if Buffer.length pending <> 0 then (
+                on_chunk (Buffer.contents pending);
+                Buffer.clear pending);
+              on_chunk chunk
+          | _ ->
+              if Buffer.length pending + String.length chunk > 16_384 then
+                raise (Provider_error
+                  "HTTP error or missing response headers exceeded 16 KiB");
+              Buffer.add_string pending chunk in
+        (* A retry is safe only before any response byte reached the consumer:
+           an explicit error status, a first-byte timeout, or a curl failure
+           while the request was still one-shot from our side. *)
+        let retry =
+          try
+            ignore (run_curl ~on_chunk:consume ~is_done ~is_finished ?cancel
+              ?progress
+              ~stream_timeouts:{
+                first_byte_seconds = float_of_int buffered_max_seconds;
+                idle_seconds = float_of_int stream_idle_seconds;
+              } configuration);
+            (match status_from_headers (read_file header_path) with
+             | Some code -> retryable_status code && not !forwarded
+             | None -> not !forwarded)
+          with
+          | Stream_complete -> false
+          | Stream_timeout `First_byte -> not !forwarded
+          | Stream_timeout `Idle ->
+              raise (Provider_error (Printf.sprintf
+                "Transport error: provider stream stalled after response data (no data for %d s)"
+                stream_idle_seconds))
+          | Provider_error "Transport error: curl failed (exit status 28)" ->
+              if not !forwarded && attempts_allowed n then true
+              else
+                raise (Provider_error (curl_timeout_message ~streaming:true
+                  ~response_body_seen:!response_body_seen))
+          | Provider_error message when
+              String.starts_with
+                ~prefix:"Transport error: curl failed (exit status " message ->
+              let code =
+                let prefix =
+                  "Transport error: curl failed (exit status " in
+                if String.ends_with ~suffix:")" message then
+                  String.sub message (String.length prefix)
+                    (String.length message - String.length prefix - 1)
+                else "" in
+              transient_curl_status code && not !forwarded
+          in
+        if retry && attempts_allowed n then (
+          Unix.sleepf (retry_delay_seconds n);
+          check_cancel cancel;
+          attempt (n + 1))
+        else (
+          check_cancel cancel;
+          let code = match status_from_headers (read_file header_path) with
+            | Some code -> code
+            | None -> raise (Provider_error "missing HTTP response status") in
+          if code < 200 || code >= 300 then (
+            let error = try Yojson.Basic.from_string (Buffer.contents pending)
+              with Yojson.Json_error _ -> `Null in
+            raise (Provider_error (http_error_reason secret code error)));
+          if Buffer.length pending <> 0 then
+            on_chunk (Buffer.contents pending)) in
+      attempt 1))
 
 let supports_user_media = function
   | Openai_completions | Local_chat | Anthropic_messages | Openai_responses
@@ -732,6 +825,7 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage
      config.api <> Gemini_direct && config.api <> Vertex_generate then
     raise (Provider_error
       "audio/video attachments require a Gemini generateContent route");
+  let messages = Protocol.sanitize_messages messages in
   let config = if config.api = Local_chat then
     { config with endpoint = local_endpoint config.endpoint } else config in
   if config.api = Apple_foundation_models && authentication <> Api_key then
@@ -1777,6 +1871,7 @@ let compact_anthropic_messages ?(authentication = Api_key) ?resolve_credential
   let api_key = credential.access in
   reject_controls "API key" api_key;
   if api_key = "" then raise (Provider_error "missing Anthropic API key");
+  let messages = Protocol.sanitize_messages messages in
   check_cancel cancel;
   let body = Anthropic_wire.compaction_request ~allow_prompt_caching:true
     ~model:config.model
@@ -1805,6 +1900,7 @@ let compact_openai_responses ?(authentication = Api_key) ?resolve_credential
     raise (Provider_error "native compaction requires the OpenAI Responses API-key route");
   if config.model = "" then raise (Provider_error "empty Responses model");
   reject_controls "model" config.model;
+  let messages = Protocol.sanitize_messages messages in
   let endpoint =
     if String.ends_with ~suffix:"/responses" config.endpoint &&
        not (String.contains config.endpoint '?' ||

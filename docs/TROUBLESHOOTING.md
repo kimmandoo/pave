@@ -1,5 +1,12 @@
 # Troubleshooting
 
+### [2026-10-02] Provider retry backoff stalled the test suite
+
+- **Context / Symptom:** `dune runtest` ran to the 300 s timeout after transient-retry logic was added to `Provider.post_json`/`post_stream`. Fixtures never hit real network errors, but a fixture returning HTTP 429/5xx triggered `Unix.sleepf` backoffs inside the loop.
+- **Root Cause:** Retry delays ran unconditionally; injected `Test.curl_helper` fixtures still paid real wall-clock sleeps.
+- **Solution:** `retry_delay_seconds` returns `0.0` when `Test.curl_helper` is set, preserving retry counts while removing sleeps under fixtures.
+- **Prevention / Reference:** Any time-based backoff added to shared transport paths must bypass real sleeps when `Provider.Test.curl_helper` is injected.
+
 ### [2026-10-01] Web-search unit tests launched a real browser on CI
 
 - **Context / Symptom:** `test_web_search` passed locally but failed in CI at `runtest` with `Failure("web search: DuckDuckGo bot challenge is explained was accepted")` — a case expecting `search` to raise instead completed successfully.

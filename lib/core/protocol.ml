@@ -509,3 +509,151 @@ let completion_usage json =
       input_modality_tokens = None; cached_input_modality_tokens = None;
       output_modality_tokens = None }
   | _ -> None
+
+(* Replay hardening: model turns can leave malformed tool calls (empty id or
+   name), duplicate call ids, or results that never paired. Providers reject
+   such transcripts and wedge the session in an error loop, so every request
+   is sanitized first:
+     - drop tool calls with blank id/name, and the results they would have owned;
+     - rewrite a repeated call id to `id ^ "_dup" ^ n`, pairing its result;
+     - a call never followed by a result gains a synthetic "No result provided";
+     - a result whose call id is missing or already paired is dropped. *)
+let sanitize_messages (messages : message list) : message list =
+  let malformed (call : tool_call) =
+    String.trim call.id = "" || String.trim call.name = "" in
+  let drop_queue : (string, bool Queue.t) Hashtbl.t = Hashtbl.create 8 in
+  let stage1 = List.filter_map (fun (msg : message) ->
+    match msg.role with
+    | "assistant" ->
+        Hashtbl.reset drop_queue;
+        let calls = List.map (fun (call : tool_call) ->
+          let bad = malformed call in
+          let queue = match Hashtbl.find_opt drop_queue call.id with
+            | Some queue -> queue
+            | None -> let queue = Queue.create () in
+              Hashtbl.add drop_queue call.id queue; queue in
+          Queue.add bad queue; bad, call) msg.tool_calls in
+        let kept = List.filter_map (fun (bad, call) ->
+          if bad then None else Some call) calls in
+        if kept = [] && (msg.content = None || msg.content = Some "") &&
+           msg.provider_state = None then None
+        else Some (if List.length kept = List.length calls then msg
+          else { msg with tool_calls = kept })
+    | "tool" ->
+        (match msg.tool_call_id with
+         | Some id ->
+             (match Hashtbl.find_opt drop_queue id with
+              | Some queue when not (Queue.is_empty queue) ->
+                  if Queue.pop queue then None else Some msg
+              | _ -> Some msg)
+         | None -> Some msg)
+    | _ -> Hashtbl.reset drop_queue; Some msg) messages in
+  (* Rename duplicate call ids; enqueue the mapping for the next result that
+     carries the original id. *)
+  let seen : (string, int) Hashtbl.t = Hashtbl.create 8 in
+  let rename_map : (string, string option Queue.t) Hashtbl.t = Hashtbl.create 8 in
+  let suffix id n =
+    let mark = "_dup" ^ string_of_int n in
+    let base = if String.length id + String.length mark <= 64 then id
+      else String.sub id 0 (64 - String.length mark) in
+    base ^ mark in
+  let rec fresh id n =
+    if not (Hashtbl.mem seen id) then id
+    else if not (Hashtbl.mem seen (suffix id n)) then suffix id n
+    else fresh id (n + 1) in
+  let enqueue id replacement =
+    let queue = match Hashtbl.find_opt rename_map id with
+      | Some queue -> queue
+      | None -> let queue = Queue.create () in
+        Hashtbl.add rename_map id queue; queue in
+    Queue.add replacement queue in
+  let stage2 = List.map (fun (msg : message) ->
+    match msg.role with
+    | "assistant" ->
+        let calls = List.map (fun (call : tool_call) ->
+          (* A redeclared call id clears the leftover rewrite queue: an older
+             duplicate's expected result never arrived, so a later real result
+             belongs to this occurrence. *)
+          (match Hashtbl.find_opt rename_map call.id with
+           | Some queue when not (Queue.is_empty queue) ->
+               Queue.clear queue
+           | _ -> ());
+          match Hashtbl.find_opt seen call.id with
+          | None -> Hashtbl.add seen call.id 1; enqueue call.id None; call
+          | Some count ->
+              let id = fresh call.id count in
+              Hashtbl.replace seen call.id (count + 1);
+              Hashtbl.add seen id 1;
+              enqueue call.id (Some id);
+              { call with id }) msg.tool_calls in
+        if calls = msg.tool_calls then msg else { msg with tool_calls = calls }
+    | "tool" ->
+        (match msg.tool_call_id with
+         | Some id ->
+             (match Hashtbl.find_opt rename_map id with
+              | Some queue when not (Queue.is_empty queue) ->
+                  (match Queue.pop queue with
+                   | Some replacement -> { msg with tool_call_id = Some replacement }
+                   | None -> msg)
+              | _ -> msg)
+         | None -> msg)
+    | _ -> msg) stage1 in
+  (* Ensure each surviving call is followed by exactly one result: pull the
+     earliest unconsumed real result located after the call's turn forward,
+     synthesize when none exists, and drop results that never pair. *)
+  let real : (string, (int * message) list ref) Hashtbl.t = Hashtbl.create 8 in
+  List.iteri (fun index (msg : message) ->
+    match msg.role, msg.tool_call_id with
+    | "tool", Some id ->
+        (match Hashtbl.find_opt real id with
+         | Some entries -> entries := !entries @ [index, msg]
+         | None -> Hashtbl.add real id (ref [index, msg]))
+    | _ -> ()) stage2;
+  let consumed : (string * int, unit) Hashtbl.t = Hashtbl.create 8 in
+  let pick ~after id =
+    match Hashtbl.find_opt real id with
+    | None -> None
+    | Some entries ->
+        let rec scan = function
+          | [] -> None
+          | (index, msg) :: rest ->
+              if index <= after || Hashtbl.mem consumed (id, index)
+              then scan rest
+              else (Hashtbl.add consumed (id, index) (); Some msg) in
+        scan !entries in
+  let resolved : (string, unit) Hashtbl.t = Hashtbl.create 8 in
+  let out : message Queue.t = Queue.create () in
+  let pending : tool_call list ref = ref [] and pending_at = ref (-1) in
+  let flush () =
+    List.iter (fun (call : tool_call) ->
+      if not (Hashtbl.mem resolved call.id) then (
+        Hashtbl.add resolved call.id ();
+        match pick ~after:!pending_at call.id with
+        | Some msg -> Queue.add msg out
+        | None ->
+            Queue.add (tool_result_blocks call.id
+              [Text "No result provided"]) out)) !pending;
+    pending := [] in
+  let at_head id = match !pending with
+    | (call : tool_call) :: _ when call.id = id -> true
+    | _ -> false in
+  List.iteri (fun index (msg : message) ->
+    match msg.role, msg.tool_call_id with
+    | "assistant", _ ->
+        flush ();
+        if msg.tool_calls <> [] then (pending := msg.tool_calls; pending_at := index);
+        Queue.add msg out
+    | "tool", Some id ->
+        if at_head id && not (Hashtbl.mem consumed (id, index)) then (
+          Hashtbl.add consumed (id, index) ();
+          Hashtbl.add resolved id ();
+          Queue.add msg out;
+          pending := List.tl !pending;
+          flush ())
+        else if not (Hashtbl.mem consumed (id, index)) then
+          ()  (* orphan: call missing, already paired, or out of order *)
+    | _ ->
+        flush ();
+        Queue.add msg out) stage2;
+  flush ();
+  Queue.fold (fun acc msg -> acc @ [msg]) [] out
