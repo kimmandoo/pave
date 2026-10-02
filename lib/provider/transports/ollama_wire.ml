@@ -91,8 +91,9 @@ let request ~model ?thinking messages tools =
   let think = match thinking with
     | None -> None
     | Some "none" -> Some (`Bool false)
-    | Some ("low" | "medium" | "high" | "max" as level) -> Some (`String level)
-    | Some ("minimal" | "xhigh") -> Some (`Bool true)
+    | Some ("minimal" | "low") -> Some (`String "low")
+    | Some ("xhigh") -> Some (`String "high")
+    | Some ("medium" | "high" | "max" as level) -> Some (`String level)
     | Some _ -> invalid_arg "unsupported Ollama thinking level" in
   `Assoc ([ "model", `String model; "messages", `List converted;
     "stream", `Bool false ] @

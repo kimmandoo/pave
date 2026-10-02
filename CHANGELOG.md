@@ -7,6 +7,7 @@
 - fix(provider): replayed assistant text on OpenAI Responses as a typed `output_text` message, read `output_text` items back in streamed completions, accepted bare `data:` SSE events and a leading UTF-8 BOM, tolerated server-side item kinds and `finish_reason` aliases, and reported DeepSeek/Gemini cache-hit token spellings.
 - fix(provider): sent the GitHub Copilot vision header, carried Bedrock image tool results as `ImageData` protos, emitted a single `content: null` on Z.AI assistant turns, fell back to `us-east-1` for unsigned AWS regions, and defaulted Azure endpoints to `api-version=v1`.
 - fix(provider): continued streamed tool calls whose deltas omit `index`, accepted arguments delivered as a complete object, and read Mistral-style content part lists.
+- fix(provider): mapped Ollama `minimal`/`xhigh` effort to the `low`/`high` wire values instead of a bare `true`.
 
 ## 2026-10-01
 
