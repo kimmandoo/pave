@@ -8,6 +8,10 @@ let session_id = "sess-test"
 let title = "hub test session"
 
 let () = Printexc.record_backtrace true
+(* The server legitimately answers and closes while a large request is still
+   in flight; on macOS the follow-up write can raise SIGPIPE. Convert the
+   signal to EPIPE so tests observe a closed connection, not a signal exit. *)
+let () = Sys.set_signal Sys.sigpipe Sys.Signal_ignore
 
 let fail message = failwith ("test_session_hub: " ^ message)
 
@@ -19,7 +23,11 @@ let write_all fd bytes =
     if offset < total then
       let n =
         try Unix.write fd bytes offset (total - offset)
-        with Unix.Unix_error (Unix.EINTR, _, _) -> 0 in
+        with Unix.Unix_error (Unix.EINTR, _, _) -> 0
+        (* The server may answer and close before consuming a large request;
+           a broken pipe ends the write; the response is still readable. *)
+        | Unix.Unix_error ((Unix.EPIPE | Unix.ECONNRESET), _, _) ->
+            total - offset in
       loop (offset + n) in
   loop 0
 
