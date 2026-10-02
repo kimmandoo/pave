@@ -96,11 +96,14 @@ let submessages number fs = List.filter_map (function
 let submessage number fs = match submessages number fs with
   | first :: _ -> first | [] -> []
 
-let metadata ?(jwt="") ?(discovery=false) api_key = buf (fun b ->
+(* `raw` sends the credential as given; the default wraps it in the
+   devin-session-token scheme the released CLI uses. A 401 on the wrapped form
+   retries with the raw key. *)
+let metadata ?(jwt="") ?(discovery=false) ?(raw=false) api_key = buf (fun b ->
   let client = if discovery then "chisel" else "devin-cli" in
-  let version = if discovery then "0.0.0-dev" else "3000.6.2" in
+  let version = if discovery then "0.0.0-dev" else "3000.11.3" in
   string b 1 client; string b 2 version;
-  string b 3 (session_key api_key); string b 4 "en";
+  string b 3 (if raw then api_key else session_key api_key); string b 4 "en";
   string b 5 (if Sys.os_type = "Win32" then "windows" else
     if Sys.os_type = "Unix" && Sys.file_exists "/System/Library" then "darwin" else "linux");
   string b 7 version; string b 12 "chisel";
@@ -220,16 +223,24 @@ let protect f = try f () with
 
 let authenticate ?http ?cancel ~api_key () = protect (fun () ->
   if not (valid_text api_key) then Error Invalid_credential else
-  match rpc ?http ?cancel ~url:auth_url ~headers:unary_headers
-    ~body:(unary_request (metadata api_key)) () with
-  | Error _ as error -> error
-  | Ok payload ->
-      let response = fields (decode_unary payload) in
-      let jwt = text 1 response and custom = text 2 response in
-      if jwt = "" then Error (Invalid_response "empty Devin user JWT")
-      else if custom <> "" && custom <> base_url && custom <> base_url ^ "/" then
-        Error (Invalid_response "Devin auth redirected to untrusted API host")
-      else Ok jwt)
+      let attempt = rpc ?http ?cancel ~url:auth_url ~headers:unary_headers
+        ~body:(unary_request (metadata api_key)) () in
+      (* Non-session bearer keys arrive without the scheme prefix; retry once
+         with the raw credential when the wrapped form is rejected. *)
+      let attempt, raw = match attempt with
+        | Error (Http_error (401, _)) ->
+            rpc ?http ?cancel ~url:auth_url ~headers:unary_headers
+              ~body:(unary_request (metadata ~raw:true api_key)) (), true
+        | _ -> attempt, false in
+      match attempt with
+      | Error _ as error -> error
+      | Ok payload ->
+          let response = fields (decode_unary payload) in
+          let jwt = text 1 response and custom = text 2 response in
+          if jwt = "" then Error (Invalid_response "empty Devin user JWT")
+          else if custom <> "" && custom <> base_url && custom <> base_url ^ "/" then
+            Error (Invalid_response "Devin auth redirected to untrusted API host")
+          else Ok (jwt, raw))
 
 let model_of_config fs =
   let id = text 22 fs and info = submessage 23 fs in
@@ -286,21 +297,32 @@ let discover ?http ?cancel ~api_key () = protect (fun () ->
   | Error error, _ -> Error error
   | _, Ok [] -> Error (Invalid_response "empty Devin account model catalog"))
 
-(* The Devin Prompt wire message carries text (field 3), call references and
-   metadata, but has no image/content-block field. Reject typed images before
-   any RPC rather than silently dropping them or stringifying base64 as text. *)
-let reject_image_tool_results messages =
-  if List.exists (fun (message : Protocol.message) ->
-    match message.tool_result_content with
-    | Some blocks -> List.exists (function Protocol.Image _ -> true | _ -> false) blocks
-    | None -> false) messages then
-    bad "Devin protobuf transport does not support image tool results"
+(* ChatMessagePrompt carries images (field 10) as base64 ImageData protos
+   alongside the text prompt. *)
+let image_data (mime_type, data) = buf (fun b ->
+  string b 1 data; string b 2 mime_type)
+
+let image_mime mime_type =
+  match Protocol.attachment_kind mime_type with
+  | Some Protocol.Image_attachment -> true | _ -> false
 
 let prompt ?(message_id="") ?(source=1) ?(call_id="") ?(is_error=false)
-    ?(thinking="") ?(signature="") ?(calls=[]) value =
+    ?(thinking="") ?(signature="") ?(calls=[]) ?(images=[]) value =
   buf (fun b -> string b 1 message_id; number b 2 source; string b 3 value;
     List.iter (bytes b 6) calls; string b 7 call_id;
-    boolean b 9 is_error; string b 11 thinking; string b 12 signature)
+    boolean b 9 is_error; List.iter (bytes b 10) images;
+    string b 11 thinking; string b 12 signature)
+
+let attachment_image (attachment : Protocol.attachment) =
+  if image_mime attachment.mime_type then
+    image_data (attachment.mime_type, attachment.data)
+  else bad "Devin transcript only supports image attachments"
+
+let content_image = function
+  | Protocol.Image { mime_type; data } ->
+      if image_mime mime_type then image_data (mime_type, data)
+      else bad "Devin transcript only supports image content"
+  | Protocol.Text _ -> assert false
 let tool_call (call : Protocol.tool_call) = buf (fun b ->
   string b 1 call.id; string b 2 call.name;
   string b 3 (Yojson.Basic.to_string call.arguments))
@@ -365,7 +387,9 @@ let prompts ~cascade_id ~selected_model messages =
       "\000" ^ message.role) in
     match message.role with
     | "user" | "developer" ->
-        prompt ~message_id:id (Option.value ~default:"" message.content)
+        prompt ~message_id:id
+          ~images:(List.map attachment_image message.attachments)
+          (Option.value ~default:"" message.content)
     | "assistant" ->
         let state_id,thinking,signature = match message.provider_state with
           | Some state when Protocol.member "provider" state = `String "devin"
@@ -385,8 +409,16 @@ let prompts ~cascade_id ~selected_model messages =
     | "tool" ->
         let call_id = match message.tool_call_id with
           | Some id when valid_id id -> id | _ -> bad "missing tool call ID" in
-        prompt ~message_id:id ~source:4 ~call_id
-          (Option.value ~default:"" message.content)
+        (* Tool message ids carry the call id so one call's result replaces
+           another's placeholder without collision. *)
+        let id = uuid (cascade_id ^ "\000" ^ string_of_int index ^
+          "\000tool\000" ^ call_id) in
+        let blocks = Protocol.content_blocks_of_tool_result message in
+        let images = List.filter_map (function
+          | Protocol.Text _ -> None
+          | (Protocol.Image _ as block) -> Some (content_image block)) blocks in
+        prompt ~message_id:id ~source:4 ~call_id ~images
+          (Protocol.text_of_content_blocks blocks)
     | _ -> bad "unsupported Devin transcript role") messages
 (* Devin forwards tool schemas to the assigned backend. Its Gemini backend
    rejects JSON Schema type arrays (including nullable parameters) with an
@@ -443,9 +475,9 @@ let router_prompt messages =
           Some (prompt (Option.value ~default:"" message.content))
         else last tail in
   last (List.rev messages)
-let assign ?http ?cancel ~api_key ~model ~cascade_id messages =
+let assign ?http ?cancel ?(raw_key=false) ~api_key ~model ~cascade_id messages =
   let body = buf (fun b ->
-    bytes b 1 (metadata api_key); string b 2 model; string b 3 cascade_id;
+    bytes b 1 (metadata ~raw:raw_key api_key); string b 2 model; string b 3 cascade_id;
     Option.iter (bytes b 5) (router_prompt messages)) in
   match rpc ?http ?cancel ~url:assign_url ~headers:unary_headers ~body () with
   | Error error -> Error error
@@ -455,14 +487,14 @@ let assign ?http ?cancel ~api_key ~model ~cascade_id messages =
         Error (Invalid_response "Devin router returned no assignment JWT/model UID")
       else Ok (actual,jwt)
 let request ?(max_tokens=64000) ?(supports_parallel_tool_calls=false)
-    ~api_key ~jwt ~model ~selected_model ~cascade_id ?assignment messages tools =
-  reject_image_tool_results messages;
+    ?(raw_key=false) ~api_key ~jwt ~model ~selected_model ~cascade_id
+    ?assignment messages tools =
   if not (valid_id model && valid_uuid cascade_id) then bad "invalid Devin model or cascade ID";
   if max_tokens < 1 || max_tokens > 1_000_000 then bad "invalid Devin max tokens";
   let google = tools <> [] &&
     (gemini_model model || gemini_model selected_model) in
   buf (fun b ->
-    bytes b 1 (metadata ~jwt api_key);
+    bytes b 1 (metadata ~jwt ~raw:raw_key api_key);
     let system = List.filter_map (fun (m : Protocol.message) ->
       if m.role = "system" then m.content else None) messages in
     string b 2 (String.concat "\n\n" system);
@@ -575,7 +607,8 @@ let parse_stream ?(assigned_model="") ?(selected_model="") ?(cascade_id="") body
     if not (valid_id name) then bad "invalid streamed tool name";
     let arguments = Protocol.decode_tool_arguments args in
     ({ id; name; arguments } : Protocol.tool_call)) (List.rev !order) in
-  if !stop = 3 && tool_calls = [] then bad "Devin response stopped at token limit";
+  if !stop = 3 && tool_calls = [] then
+    Protocol.truncated "stop reason MAX_TOKENS";
   let content = Buffer.contents output_text in
   let provider_state = Some (`Assoc ["provider", `String "devin";
     "model", `String selected_model;
@@ -592,21 +625,22 @@ let complete ?http ?cancel ?(max_tokens=64000)
     ?(supports_parallel_tool_calls=false) ~api_key ~model ~cascade_id ~router
     messages tools =
   protect (fun () ->
-    reject_image_tool_results messages;
+
     if not (valid_text api_key) then Error Invalid_credential
     else if not (valid_id model && valid_uuid cascade_id) then
       Error (Invalid_response "invalid Devin model or cascade ID")
     else match authenticate ?http ?cancel ~api_key () with
     | Error _ as error -> error
-    | Ok jwt ->
+    | Ok (jwt, raw_key) ->
         let assigned = if router then
-          assign ?http ?cancel ~api_key ~model ~cascade_id messages
+          assign ?http ?cancel ~raw_key ~api_key ~model ~cascade_id messages
           else Ok (model, "") in
         (match assigned with
         | Error _ as error -> error
         | Ok (actual, assignment) ->
             let body = request ~max_tokens ~supports_parallel_tool_calls
-              ~api_key ~jwt ~model:actual ~selected_model:model ~cascade_id
+              ~raw_key ~api_key ~jwt ~model:actual ~selected_model:model
+              ~cascade_id
               ?assignment:(if assignment = "" then None else Some assignment)
               messages tools in
             let body = frame 1 (gzip body) in

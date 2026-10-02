@@ -118,7 +118,7 @@ let check_cancel = function
   | Some cancel when cancel () -> raise Cancelled
   | _ -> ()
 
-let read_all ?on_chunk ?is_done ?is_finished ?cancel ?stream_timeouts fd =
+let read_all ?on_chunk ?is_done ?is_finished ?cancel ?stream_timeouts ?progress fd =
   let buffer = Buffer.create 128 in
   let chunk = Bytes.create 8192 in
   let finished_at = ref None in
@@ -182,7 +182,14 @@ let read_all ?on_chunk ?is_done ?is_finished ?cancel ?stream_timeouts fd =
                 let tail = Buffer.sub buffer (Buffer.length buffer - 128) 128 in
                 Buffer.clear buffer;
                 Buffer.add_string buffer tail));
-        loop ()))
+          (* A keep-alive comment still yields bytes but no parsed event; only
+             a delivered event counts as real stream progress for the idle
+             watchdog. *)
+          (match progress with
+           | Some advanced when advanced () ->
+               last_received_at := Some (Unix.gettimeofday ())
+           | _ -> ());
+          loop ()))
     else (
       (match deadline with
        | Some (deadline, phase) when Unix.gettimeofday () >= deadline ->
@@ -220,7 +227,7 @@ module Test = struct
 end
 
 
-let run_curl ?on_chunk ?is_done ?is_finished ?cancel ?stream_timeouts configuration =
+let run_curl ?on_chunk ?is_done ?is_finished ?cancel ?stream_timeouts ?progress configuration =
   check_cancel cancel;
   let executable = match !Test.curl_helper with
     | Some executable -> executable
@@ -245,7 +252,12 @@ let run_curl ?on_chunk ?is_done ?is_finished ?cancel ?stream_timeouts configurat
       raise exn
   in
   let errors =
-    try Unix.openfile "/dev/null" [ Unix.O_WRONLY ] 0
+    (* Fixture helpers exit non-zero on a violated assertion; their stderr is
+       normally discarded, but PAVE_CURL_ERRORS names a capture file. *)
+    let target = match Sys.getenv_opt "PAVE_CURL_ERRORS" with
+      | Some path when path <> "" -> path
+      | _ -> "/dev/null" in
+    try Unix.openfile target [ Unix.O_WRONLY; Unix.O_CREAT; Unix.O_APPEND ] 0o600
     with exn ->
       List.iter close_fd [ input_read; input_write; output_read; output_write ];
       raise exn
@@ -282,7 +294,7 @@ let run_curl ?on_chunk ?is_done ?is_finished ?cancel ?stream_timeouts configurat
       in
       close_fd input_write;
       let status_code = read_all ?on_chunk ?is_done ?is_finished ?cancel
-        ?stream_timeouts output_read in
+        ?stream_timeouts ?progress output_read in
       close_fd output_read;
       let status = wait_for ?cancel pid in
       waited := true;
@@ -603,7 +615,18 @@ let status_from_headers headers =
     else current) None (String.split_on_char '\n' headers)
 
 let post_stream ?max_request_bytes ?(local = false) ?cancel ~endpoint ~headers
-    ~secret body_json ~on_chunk ~is_done ~is_finished =
+    ~secret ?progress body_json ~on_chunk ~is_done ~is_finished =
+  (* SSE endpoints content-negotiate on Accept; add it unless the caller (or a
+     signed request) already supplied one. *)
+  let headers =
+    if List.exists (fun header ->
+        String.lowercase_ascii
+          (match String.index_opt header ':' with
+           | Some index -> String.sub header 0 index
+           | None -> header)
+          |> String.trim = "accept") headers
+    then headers
+    else headers @ [ "Accept: text/event-stream" ] in
   let body = request_body ?max_request_bytes ~local ~endpoint ~headers body_json in
   with_temp_file (fun body_path body_output ->
     output_string body_output body;
@@ -633,6 +656,7 @@ let post_stream ?max_request_bytes ?(local = false) ?cancel ~endpoint ~headers
               raise (Provider_error "HTTP error or missing response headers exceeded 16 KiB");
             Buffer.add_string pending chunk in
       (try ignore (run_curl ~on_chunk:consume ~is_done ~is_finished ?cancel
+         ?progress
          ~stream_timeouts:{
            first_byte_seconds = float_of_int buffered_max_seconds;
            idle_seconds = float_of_int stream_idle_seconds;
@@ -682,7 +706,8 @@ let supports_user_media = function
   | Vertex_anthropic | Devin_connect | Apple_foundation_models -> false
 
 let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage
-    ?on_tool_arguments ?thinking ?cancel ?apple_helper_path config messages tools =
+    ?on_tool_arguments ?thinking ?max_output_tokens ?cancel ?apple_helper_path
+    config messages tools =
   check_cancel cancel;
   let on_text = match on_text, on_tool_arguments with
     | None, Some _ -> Some (fun _ -> ())
@@ -774,6 +799,9 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage
             "Azure routes do not accept subscription OAuth credentials") in
     let endpoint, headers = resolve authentication in
     endpoint, headers, secret in
+  (* Per-request output cap: prefer the model's provider-reported ceiling;
+     otherwise keep the conservative default. *)
+  let output_tokens = Option.value ~default:4096 max_output_tokens in
   let result = match config.api with
   | Apple_foundation_models ->
       if authentication <> Api_key then
@@ -821,17 +849,29 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage
       | Some emit ->
           let stream = Openai_stream.create ?on_tool_arguments ~on_text:emit () in
           let fields = fields @ [ "stream", `Bool true ] in
-          let fields = if config.api = Openai_completions &&
-            config.endpoint = "https://api.openai.com/v1/chat/completions" then
+          (* Usage arrives on a trailing usage-only chunk only when asked.
+             Official and local endpoints accept stream_options; strict compat
+             hosts may 400 on the unknown field, so they keep the omission. *)
+          let fields = if config.api = Local_chat ||
+            (config.api = Openai_completions &&
+             config.endpoint = "https://api.openai.com/v1/chat/completions") then
               fields @ [ "stream_options", `Assoc [ "include_usage", `Bool true ] ]
             else fields in
+          let fields = match thinking, config.api with
+            | Some effort, (Openai_completions | Local_chat) ->
+                fields @ [ "reasoning_effort", `String effort ]
+            | _ -> fields in
           let body = `Assoc fields in
           parse_with_secret secret (fun () ->
+            let sse_events = ref (Openai_stream.events stream) in
             post_stream ~local:(config.api = Local_chat) ?cancel
               ~endpoint ~headers ~secret body
               ~on_chunk:(Openai_stream.feed stream)
               ~is_done:(fun () -> Openai_stream.is_done stream)
-              ~is_finished:(fun () -> Openai_stream.is_finished stream);
+              ~is_finished:(fun () -> Openai_stream.is_finished stream)
+              ~progress:(fun () ->
+                let count = Openai_stream.events stream in
+                count > !sse_events && (sse_events := count; true));
             let reply = Openai_stream.finish stream in
             (match on_usage with
              | None -> ()
@@ -1103,7 +1143,7 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage
         Commandcode_api.messages_headers ~endpoint:config.endpoint ~api_key
       with Invalid_argument reason -> raise (Provider_error reason) in
       let body = parse (fun () ->
-        Commandcode_api.messages_request ~model:config.model ~max_tokens:4096
+        Commandcode_api.messages_request ~model:config.model ~max_tokens:output_tokens
           messages tools) in
       let json = post_json ?cancel ~endpoint:config.endpoint
         ~headers ~secret:api_key body in
@@ -1198,7 +1238,7 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage
       let headers = try Duo.gateway_headers ~endpoint:config.endpoint access
         with Invalid_argument reason -> raise (Provider_error reason) in
       let body = parse (fun () -> Duo.request ~route ~model:config.model
-        ~max_tokens:4096 messages tools) in
+        ~max_tokens:output_tokens messages tools) in
       let json = post_json ?cancel ~endpoint:config.endpoint
         ~headers ~secret:access.token body in
       let reply = parse (fun () ->
@@ -1247,7 +1287,7 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage
       let body = parse (fun () ->
         Anthropic_wire.request ~allow_compaction:false
           ~allow_prompt_caching:false
-          ~replay_assistant_content ~model:config.model ~max_tokens:4096
+          ~replay_assistant_content ~model:config.model ~max_tokens:output_tokens
           messages tools) in
       let body = if config.api = Umans_messages then
         (try Umans_api.add_messages_reasoning_effort ~thinking body
@@ -1274,9 +1314,13 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage
       let allow_prompt_caching = allow_direct_api_key_features in
       let compaction_beta = allow_compaction &&
         Anthropic_wire.requires_compaction_beta ~model:config.model messages in
+      let replay_assistant_content =
+        Anthropic_wire.replay_native_content ~provider:"anthropic"
+          ~model:config.model in
       let body = parse (fun () ->
         Anthropic_wire.request ~allow_compaction ~allow_prompt_caching
-          ~model:config.model ~max_tokens:4096 messages tools) in
+          ~replay_assistant_content ?thinking
+          ~model:config.model ~max_tokens:output_tokens messages tools) in
       let headers = [ "anthropic-version: 2023-06-01" ] @
         (if compaction_beta then
           ["anthropic-beta: " ^ Anthropic_wire.compaction_beta] else []) @
@@ -1287,14 +1331,16 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage
              [ "Authorization: Bearer " ^ api_key;
                "anthropic-beta: oauth-2025-04-20,claude-code-20250219";
                "anthropic-dangerous-direct-browser-access: true";
-               "User-Agent: pave/0.1.1"; "x-app: cli" ]
+               "User-Agent: claude-cli/2.0.0 (external, cli)"; "x-app: cli" ]
          | Cloud_identity ->
              raise (Provider_error
                "Anthropic Messages does not accept cloud identity credentials")) in
       (match on_text with
       | None ->
           let json = post_json ?cancel ~endpoint:config.endpoint ~headers ~secret:api_key body in
-          let reply = parse (fun () -> Anthropic_wire.parse_response json) in
+          let reply = parse (fun () ->
+            Anthropic_wire.parse_native_completion ~provider:"anthropic"
+              ~model:config.model json) in
           (match on_usage with
            | None -> ()
            | Some report ->
@@ -1302,15 +1348,20 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage
                Option.iter report (Anthropic_wire.usage json));
           reply
       | Some emit ->
-          let stream = Anthropic_stream.create ?on_tool_arguments ~on_text:emit () in
+          let stream = Anthropic_stream.create ?on_tool_arguments
+            ~provider:"anthropic" ~model:config.model ~on_text:emit () in
           let body = match body with
             | `Assoc fields -> `Assoc (fields @ [ "stream", `Bool true ])
             | _ -> assert false in
           parse (fun () ->
+            let sse_events = ref (Anthropic_stream.events stream) in
             post_stream ?cancel ~endpoint:config.endpoint ~headers ~secret:api_key
               body ~on_chunk:(Anthropic_stream.feed stream)
               ~is_done:(fun () -> Anthropic_stream.is_done stream)
-              ~is_finished:(fun () -> Anthropic_stream.is_finished stream);
+              ~is_finished:(fun () -> Anthropic_stream.is_finished stream)
+              ~progress:(fun () ->
+                let count = Anthropic_stream.events stream in
+                count > !sse_events && (sse_events := count; true));
             let reply = Anthropic_stream.finish stream in
             (match on_usage with
              | None -> ()
@@ -1335,7 +1386,8 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage
           (if api_key = "" then [] else [ "Authorization: Bearer " ^ api_key ]),
           api_key in
       let body = parse (fun () ->
-        Openai_responses_wire.request ~model:config.model messages tools) in
+        Openai_responses_wire.request ~model:config.model ?thinking
+          ~max_output_tokens:output_tokens messages tools) in
       (match on_text with
       | None ->
           let json = post_json ?cancel ~endpoint ~headers ~secret body in
@@ -1350,13 +1402,18 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage
       | Some emit ->
           let stream = Openai_responses_stream.create ?on_tool_arguments ~on_text:emit () in
           let body = parse (fun () ->
-            Openai_responses_wire.request ~stream:true
+            Openai_responses_wire.request ~stream:true ?thinking
+              ~max_output_tokens:output_tokens
               ~model:config.model messages tools) in
           parse_with_secret secret (fun () ->
+            let sse_events = ref (Openai_responses_stream.events stream) in
             post_stream ?cancel ~endpoint ~headers ~secret
               body ~on_chunk:(Openai_responses_stream.feed stream)
               ~is_done:(fun () -> Openai_responses_stream.is_done stream)
-              ~is_finished:(fun () -> Openai_responses_stream.is_finished stream);
+              ~is_finished:(fun () -> Openai_responses_stream.is_finished stream)
+              ~progress:(fun () ->
+                let count = Openai_responses_stream.events stream in
+                count > !sse_events && (sse_events := count; true));
             let reply = Openai_responses_stream.finish stream in
             (match on_usage with
              | None -> ()
@@ -1454,7 +1511,7 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage
         raise (Provider_error "invalid Ollama Cloud API key");
       let headers = if cloud then [ "Authorization: Bearer " ^ api_key ] else [] in
       let body = parse (fun () ->
-        Ollama_wire.request ~model:config.model messages tools) in
+        Ollama_wire.request ~model:config.model ?thinking messages tools) in
       (match on_text with
       | None ->
           let json = post_json ?cancel ~endpoint:config.endpoint ~headers
@@ -1486,7 +1543,7 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage
             reply))
   | Gemini_direct ->
       let body = parse (fun () ->
-        Gemini_wire.request ~model:config.model messages tools) in
+        Gemini_wire.request ~model:config.model ?thinking messages tools) in
       let headers = [ "x-goog-api-key: " ^ api_key ] in
       let base = if String.ends_with ~suffix:"/" config.endpoint then
         String.sub config.endpoint 0 (String.length config.endpoint - 1)
@@ -1509,11 +1566,15 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage
           let stream = Gemini_stream.create ?on_tool_arguments ~model:config.model ~on_text:emit () in
           let endpoint = base ^ "/" ^ model_path ^ ":streamGenerateContent?alt=sse" in
           parse (fun () ->
+            let sse_events = ref (Gemini_stream.events stream) in
             post_stream ~max_request_bytes:gemini_max_request_bytes ?cancel
               ~endpoint ~headers ~secret:api_key body
               ~on_chunk:(Gemini_stream.feed stream)
               ~is_done:(fun () -> Gemini_stream.is_done stream)
-              ~is_finished:(fun () -> Gemini_stream.is_finished stream);
+              ~is_finished:(fun () -> Gemini_stream.is_finished stream)
+              ~progress:(fun () ->
+                let count = Gemini_stream.events stream in
+                count > !sse_events && (sse_events := count; true));
 
             let reply = Gemini_stream.finish stream in
             (match on_usage with
@@ -1536,15 +1597,20 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage
       let endpoint =
         try Vertex_wire.endpoint ~project ~location ~model:config.model
         with Invalid_argument reason -> raise (Provider_error reason) in
-      let body = parse (fun () -> Vertex_wire.request ~model:config.model messages tools) in
+      let body = parse (fun () -> Vertex_wire.request ~model:config.model
+        ?thinking messages tools) in
       let emit = Option.value ~default:(fun _ -> ()) on_text in
       let stream = Gemini_stream.create ?on_tool_arguments ~model:config.model ~on_text:emit () in
       parse (fun () ->
+        let sse_events = ref (Gemini_stream.events stream) in
         post_stream ~max_request_bytes:gemini_max_request_bytes ?cancel
           ~endpoint ~headers:["Authorization: Bearer " ^ access] ~secret:access
           body ~on_chunk:(Gemini_stream.feed stream)
           ~is_done:(fun () -> Gemini_stream.is_done stream)
-          ~is_finished:(fun () -> Gemini_stream.is_finished stream);
+          ~is_finished:(fun () -> Gemini_stream.is_finished stream)
+          ~progress:(fun () ->
+            let count = Gemini_stream.events stream in
+            count > !sse_events && (sse_events := count; true));
         let reply = Vertex_wire.finish_stream ~model:config.model stream in
         (match on_usage with
         | None -> ()
@@ -1569,18 +1635,23 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage
         ~project ~location ~model:config.model ~streaming
         with Invalid_argument reason -> raise (Provider_error reason) in
       let body = parse (fun () ->
-        Vertex_anthropic_wire.request ~model:config.model ~max_tokens:4096
-          ~streaming messages tools) in
+        Vertex_anthropic_wire.request ~model:config.model ~max_tokens:output_tokens
+          ~streaming ?thinking messages tools) in
       let headers = ["Authorization: Bearer " ^ access] in
       if streaming then (
         let emit = Option.value ~default:(fun _ -> ()) on_text in
-        let stream = Vertex_anthropic_wire.create_stream ?on_tool_arguments ~on_text:emit () in
+        let stream = Vertex_anthropic_wire.create_stream ?on_tool_arguments
+          ~model:config.model ~on_text:emit () in
         parse (fun () ->
+          let sse_events = ref (Anthropic_stream.events stream) in
           post_stream ?cancel ~endpoint ~headers ~secret:access body
             ~on_chunk:(Vertex_anthropic_wire.feed_stream stream)
             ~is_done:(fun () -> Anthropic_stream.is_done stream)
             ~is_finished:(fun () ->
-              Vertex_anthropic_wire.stream_is_finished stream);
+              Vertex_anthropic_wire.stream_is_finished stream)
+            ~progress:(fun () ->
+              let count = Anthropic_stream.events stream in
+              count > !sse_events && (sse_events := count; true));
           let reply = Vertex_anthropic_wire.finish_stream
             ~model:config.model stream in
           (match on_usage with
@@ -1666,10 +1737,14 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage
       let emit = match on_text with Some emit -> emit | None -> fun _ -> () in
       let stream = Codex_stream.create ?on_tool_arguments ~model:config.model ~on_text:emit () in
       (try parse (fun () ->
+        let sse_events = ref (Codex_stream.events stream) in
         post_stream ?cancel ~endpoint:config.endpoint ~headers ~secret:api_key
           body ~on_chunk:(Codex_stream.feed stream)
           ~is_done:(fun () -> Codex_stream.is_done stream)
-          ~is_finished:(fun () -> Codex_stream.is_finished stream);
+          ~is_finished:(fun () -> Codex_stream.is_finished stream)
+          ~progress:(fun () ->
+            let count = Codex_stream.events stream in
+            count > !sse_events && (sse_events := count; true));
         let reply = Codex_stream.finish stream in
         (match on_usage with
          | None -> ()
@@ -1688,7 +1763,7 @@ type native_compaction = {
   provider_state : Yojson.Basic.t;
 }
 let compact_anthropic_messages ?(authentication = Api_key) ?resolve_credential
-    ?cancel ?on_usage config ~instructions ~messages ~tools =
+    ?max_output_tokens ?cancel ?on_usage config ~instructions ~messages ~tools =
   if config.api <> Anthropic_messages || authentication <> Api_key then
     raise (Provider_error "native compaction requires the Anthropic Messages API-key route");
   if config.endpoint <> "https://api.anthropic.com/v1/messages" then
@@ -1704,7 +1779,9 @@ let compact_anthropic_messages ?(authentication = Api_key) ?resolve_credential
   if api_key = "" then raise (Provider_error "missing Anthropic API key");
   check_cancel cancel;
   let body = Anthropic_wire.compaction_request ~allow_prompt_caching:true
-    ~model:config.model ~max_tokens:4096 ~instructions messages tools in
+    ~model:config.model
+    ~max_tokens:(Option.value ~default:4096 max_output_tokens)
+    ~instructions messages tools in
   let headers = [
     "anthropic-version: 2023-06-01";
     "anthropic-beta: " ^ Anthropic_wire.compaction_beta;

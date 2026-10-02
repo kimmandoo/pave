@@ -5,20 +5,29 @@ type t = {
   mutable data_present : bool;
   mutable event_name : string option;
   mutable after_cr : bool;
+  mutable bom_checked : bool;
+  (* Count of events delivered to on_event; keep-alives do not increment it. *)
+  mutable dispatched : int;
 }
 
 let max_event_bytes = 1_048_576
 let invalid text = raise (Protocol.Invalid_response text)
-
 let create ~on_event =
   { on_event; line = Buffer.create 128; data = Buffer.create 512;
-    data_present = false; event_name = None; after_cr = false }
+    data_present = false; event_name = None; after_cr = false;
+    bom_checked = false; dispatched = 0 }
 
 let dispatch t =
-  if t.data_present then t.on_event t.event_name (Buffer.contents t.data);
+  (* An event with a `data:` field — even an empty value — is dispatchable;
+     comment keep-alives set no fields and never reach the listener. *)
+  if t.data_present then (
+    t.on_event t.event_name (Buffer.contents t.data);
+    t.dispatched <- t.dispatched + 1);
   Buffer.clear t.data;
   t.data_present <- false;
   t.event_name <- None
+
+let events t = t.dispatched
 
 (* A complete line in a chunk needs no intermediate line/name/value strings.
    Only a line split across chunks is accumulated in [t.line]. *)
@@ -78,8 +87,19 @@ let rec feed_from t bytes offset length =
         t.after_cr <- bytes.[stop] = '\r';
         feed_from t bytes (stop + 1) length))
 
-let feed t bytes = feed_from t bytes 0 (String.length bytes)
+let feed t bytes =
+  (* Strip a UTF-8 byte-order mark once; a BOM would otherwise poison the
+     first field name and swallow the opening event. *)
+  if not t.bom_checked then (
+    t.bom_checked <- true;
+    let offset =
+      if String.length bytes >= 3 && bytes.[0] = '\xEF' &&
+         bytes.[1] = '\xBB' && bytes.[2] = '\xBF' then 3 else 0 in
+    feed_from t bytes offset (String.length bytes))
+  else feed_from t bytes 0 (String.length bytes)
 
 let finish t =
-  if Buffer.length t.line <> 0 || t.data_present || t.event_name <> None then
-    invalid "incomplete SSE event at EOF"
+  (* Flush an unterminated tail line and a pending event: some services close
+     without a trailing blank line after their last data frame. *)
+  if Buffer.length t.line <> 0 then process_line t;
+  dispatch t

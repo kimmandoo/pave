@@ -21,6 +21,9 @@ type t = {
   mutable failed : bool;
   content : Buffer.t;
   calls : (int, call) Hashtbl.t;
+  (* Some compatible hosts omit `index`; deltas then continue the call that
+     was most recently opened. *)
+  mutable last_call : int option;
   mutable response_bytes : int;
   mutable parser : Sse.t option;
 }
@@ -69,11 +72,13 @@ let get_call t index =
 let parse_tool_delta t json =
   let index = match field "index" json with
     | `Int index -> index
-    | _ -> invalid "missing tool call index" in
+    | `Null ->
+        (match t.last_call with
+         | Some index -> index
+         | None -> 0)
+    | _ -> invalid "invalid tool call index" in
   let call = get_call t index in
-  (match field "type" json with
-   | `Null | `String "function" -> ()
-   | _ -> invalid "unsupported tool call type");
+  t.last_call <- Some index;
   (match optional_string "tool call id" (field "id" json) with
    | Some part -> append t call.id part | None -> ());
   (match field "function" json with
@@ -81,8 +86,13 @@ let parse_tool_delta t json =
    | `Assoc _ as fn ->
        (match optional_string "function name" (field "name" fn) with
         | Some part -> append t call.name part | None -> ());
-       (match optional_string "function arguments" (field "arguments" fn) with
-        | Some part -> append t call.arguments part | None -> ())
+       (match field "arguments" fn with
+        | `Null -> ()
+        | `String part -> append t call.arguments part
+        | (`Assoc _ | `List _ | `Int _ | `Float _ | `Bool _) as value ->
+            (* A few compatible hosts send the arguments object itself once,
+               complete, instead of a streamed string. *)
+            append t call.arguments (Yojson.Basic.to_string value))
    | _ -> invalid "invalid tool call function");
   (match t.on_tool_arguments with
    | None -> ()
@@ -93,12 +103,24 @@ let parse_tool_delta t json =
        emit { Protocol.key = Printf.sprintf "chat:%d" index;
          call_id = (if id = "" then None else Some id);
          name = Buffer.contents call.name; fragment })
+let content_text json =
+  match json with
+  | `Null -> None
+  | `String text -> Some text
+  | `List parts ->
+      (* Some compatible hosts (Mistral-style) stream content as typed parts. *)
+      let text = Buffer.create 64 in
+      List.iter (fun part ->
+        match field "text" part with
+        | `String piece -> Buffer.add_string text piece
+        | _ -> ()) parts;
+      Some (Buffer.contents text)
+  | _ -> invalid "invalid content delta"
 
 let parse_choice t json =
   (match field "index" json with
    | `Null | `Int 0 -> ()
    | _ -> invalid "unexpected completion choice index");
-  if t.finish_reason <> None then invalid "completion chunk after finish_reason";
   (match field "delta" json with
    | `Null -> ()
    | `Assoc _ as delta ->
@@ -109,7 +131,7 @@ let parse_choice t json =
         | `Null | `String "" -> ()
         | `String _ -> invalid "refusal"
         | _ -> invalid "invalid refusal");
-       (match optional_string "content" (field "content" delta) with
+       (match content_text (field "content" delta) with
         | None -> ()
         | Some text ->
             t.content_seen <- true;
@@ -122,9 +144,21 @@ let parse_choice t json =
    | _ -> invalid "invalid completion delta");
   (match field "finish_reason" json with
    | `Null -> ()
-   | `String ("stop" | "tool_calls" as reason) -> t.finish_reason <- Some reason
-   | `String "length" -> Protocol.truncated "finish_reason length"
-   | `String reason -> invalid ("unexpected finish_reason: " ^ reason)
+   | `String reason ->
+       (* Compatible hosts report the same outcome under several spellings;
+          normalize like the non-streamed parser. *)
+       let reason = String.lowercase_ascii reason in
+       (match reason with
+        | "stop" | "end" | "tool_calls" | "function_call" ->
+            if t.finish_reason = None then t.finish_reason <- Some reason
+        | "length" | "max_tokens" ->
+            Protocol.truncated ("finish_reason " ^ reason)
+        | "content_filter" | "network_error" ->
+            invalid ("provider finish_reason: " ^ reason)
+        | "error" | "insufficient_system_resource" ->
+            invalid ("provider returned error finish_reason" ^
+              (if reason = "error" then "" else ": " ^ reason))
+        | _ -> invalid ("provider finish_reason: " ^ reason))
    | _ -> invalid "invalid finish_reason")
 
 let parse_chunk t json =
@@ -132,9 +166,9 @@ let parse_chunk t json =
    | `Null -> ()
    | _ -> invalid (error_text json));
   (match field "choices" json with
-   | `List [] -> () (* Optional usage-only chunk after the final choice. *)
+   | `Null | `List [] -> () (* Usage-only and keep-alive chunks carry none. *)
    | `List [ choice ] -> parse_choice t choice
-   | _ -> invalid "missing or ambiguous completion choices");
+   | _ -> invalid "ambiguous completion choices");
   if t.finish_reason <> None then
     match Protocol.completion_usage json with
     | None -> ()
@@ -160,7 +194,8 @@ let create ?on_tool_arguments ~on_text () =
   let t = { on_text; on_tool_arguments; done_seen = false; finish_reason = None;
     content_seen = false; usage = None; failed = false;
     content = Buffer.create 256;
-    calls = Hashtbl.create 4; response_bytes = 0; parser = None } in
+    calls = Hashtbl.create 4; last_call = None; response_bytes = 0;
+    parser = None } in
   t.parser <- Some (Sse.create ~on_event:(handle_event t));
   t
 
@@ -172,9 +207,11 @@ let feed t bytes =
   with Protocol.Invalid_response _ as error ->
     t.failed <- true;
     raise error
+let events t = match t.parser with Some parser -> Sse.events parser | None -> 0
 let is_done t = t.done_seen && not t.failed
 let is_finished t = t.finish_reason <> None && not t.failed
-let usage t = if t.done_seen && not t.failed && t.finish_reason <> None then t.usage else None
+let usage t = if t.done_seen && not t.failed && t.finish_reason <> None
+  then t.usage else None
 
 
 let finish t =
@@ -200,10 +237,8 @@ let finish t =
       (* Compatible servers omit the arguments of parameterless tools. *)
       let arguments = Protocol.decode_tool_arguments raw in
       { Protocol.id = id; name; arguments }) calls in
-    (match t.finish_reason, calls with
-     | Some "tool_calls", [] -> invalid "finish_reason tool_calls without tool calls"
-     | Some "stop", _ :: _ -> invalid "finish_reason stop with tool calls"
-     | _ -> ());
+    (* A tool-call turn reported as "stop" (or a bare "tool_calls" finish with
+       no parsed calls) is still a valid completion — hosts differ here. *)
     { Protocol.role = "assistant"; content = (if t.content_seen then Some (Buffer.contents t.content) else None);
     tool_calls = calls; tool_call_id = None; tool_result_content = None; provider_state = None; attachments = [] }
   with Protocol.Invalid_response _ as error ->

@@ -30,7 +30,7 @@ let tool_schema json =
           [ "parameters", parameters ]) ]
   | _ -> invalid "invalid tool definition"
 
-let request ~model messages tools =
+let request ~model ?thinking messages tools =
   if model = "" then invalid_arg "empty Ollama model";
   let pending = ref [] in
   let convert (msg : message) =
@@ -88,7 +88,15 @@ let request ~model messages tools =
     | _ -> invalid "unsupported transcript role" in
   let converted = List.map convert messages in
   if !pending <> [] then invalid "missing tool results";
-  `Assoc ([ "model", `String model; "messages", `List converted; "stream", `Bool false ] @
+  let think = match thinking with
+    | None -> None
+    | Some "none" -> Some (`Bool false)
+    | Some ("low" | "medium" | "high" | "max" as level) -> Some (`String level)
+    | Some ("minimal" | "xhigh") -> Some (`Bool true)
+    | Some _ -> invalid_arg "unsupported Ollama thinking level" in
+  `Assoc ([ "model", `String model; "messages", `List converted;
+    "stream", `Bool false ] @
+    (match think with None -> [] | Some value -> ["think", value]) @
     if tools = [] then [] else [ "tools", `List (List.map tool_schema tools) ])
 
 let parse_call index json =

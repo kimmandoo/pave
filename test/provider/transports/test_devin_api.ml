@@ -296,19 +296,36 @@ let () =
   let routed_hint = P.member "hint" (P.member "properties" routed_schema) in
   assert (P.member "type" routed_hint = `String "string");
   assert (P.member "nullable" routed_hint = `Bool true);
+  (* Image tool results travel as ImageData (field 10) on the TOOL prompt. *)
   let image_attempts = ref 0 in
-  let image_http ~url:_ ~headers:_ ~body:_ ~on_chunk:_ =
-    incr image_attempts; Ok 200 in
+  let image_http ~url ~headers:_ ~body ~on_chunk =
+    incr image_attempts;
+    if url = D.auth_url then (
+      on_chunk (response (fun b -> D.string b 1 "jwt-from-account")); Ok 200)
+    else (
+      assert (url = D.chat_url);
+      let fs = D.fields (D.gzip ~decode:true
+        (String.sub body 5 (String.length body - 5))) in
+      let prompts = D.submessages 3 fs in
+      (match List.rev prompts with
+       | result_prompt :: _ ->
+           assert (D.integer 2 result_prompt = 4);
+           assert (lookup 7 result_prompt = call_id);
+           assert (lookup 3 result_prompt = "chart attached");
+           let image = object_field 10 result_prompt in
+           assert (lookup 1 image = "c2VjcmV0LWJhc2U2NA==");
+           assert (lookup 2 image = "image/png")
+       | [] -> fail "image tool result missing from prompt");
+      on_chunk (make_reply 42); Ok 200) in
   let image_result = P.tool_result_blocks call_id [
     P.Text "chart attached";
     P.Image { mime_type = "image/png"; data = "c2VjcmV0LWJhc2U2NA==" }] in
-  expect_error (function
-    | D.Invalid_response message ->
-        message = "Devin protobuf transport does not support image tool results"
-    | _ -> false)
-    (D.complete ~http:image_http ~api_key:key ~model:router_uid
-      ~cascade_id:cascade ~router:false [P.user "Inspect this"; image_result] [tool]);
-  assert (!image_attempts = 0);
+  (match D.complete ~http:image_http ~api_key:key ~model:router_uid
+    ~cascade_id:cascade ~router:false
+    [P.user "Inspect this"; image_result] [tool] with
+   | Ok _ -> ()
+   | Error _ -> fail "image tool result rejected");
+  assert (!image_attempts = 2);
   let attempts = ref 0 in
   let hostile_http ~url ~headers:_ ~body:_ ~on_chunk =
     incr attempts;

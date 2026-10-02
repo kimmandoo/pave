@@ -1793,6 +1793,7 @@ let () =
               "\n\n" ^ String.concat "\n" session_guidance) in
           let child = Pave.Agent.create ~provider ~authentication
             ?resolve_credential ?secret_mask ~root ~system:child_system
+            ?max_output_tokens:!context_window_max_output_tokens
             ~history ~allow_shell:false
             ~tool_available:(fun name ->
               List.mem name read_tools && tool_allowed name)
@@ -1983,6 +1984,7 @@ let () =
         ?workspace_context
         ?secret_mask
         ~thinking:(fun () -> !thinking_level)
+        ?max_output_tokens:!context_window_max_output_tokens
         ~root ~system:agent_system
         ~allow_shell:!allow_shell
         ~tool_available

@@ -86,10 +86,27 @@ let tool_schema json =
       let input_schema = member "parameters" fn in
       if name = "" || member "type" input_schema <> `String "object" then
         invalid "tool definition must have a name and object parameters";
+      (* Anthropic rejects combinator keys at the input_schema root; spill
+         them into the description so the constraint text survives. *)
+      let input_schema, spilled = match input_schema with
+        | `Assoc fields ->
+            let spilled, kept = List.partition (fun (key, _) ->
+              List.mem key ["oneOf"; "anyOf"; "allOf"]) fields in
+            if spilled = [] then input_schema, ""
+            else `Assoc kept,
+              String.concat "" (List.map (fun (key, value) ->
+                Printf.sprintf "%s: %s" key (Yojson.Basic.to_string value))
+                spilled)
+        | schema -> schema, "" in
       let fields = [ "name", `String name; "input_schema", input_schema ] in
       let fields = match member "description" fn with
-        | `String description -> fields @ [ "description", `String description ]
-        | `Null -> fields
+        | `String description ->
+            let description = if spilled = "" then description
+              else description ^ "\n\n" ^ spilled in
+            fields @ [ "description", `String description ]
+        | `Null ->
+            if spilled = "" then fields
+            else fields @ [ "description", `String spilled ]
         | _ -> invalid "invalid tool description" in
       `Assoc fields
   | _ -> invalid "invalid tool definition"
@@ -137,8 +154,30 @@ let compaction_block content signature =
     "signature", `String signature ]
 
 let request ?(allow_compaction = false) ?(allow_prompt_caching = false)
-    ?replay_assistant_content ~model ~max_tokens messages tools =
+    ?replay_assistant_content ?thinking ~model ~max_tokens messages tools =
   if model = "" || max_tokens <= 0 then invalid_arg "invalid Anthropic model or max_tokens";
+  (* Thinking budget must fit inside max_tokens with headroom for the reply. *)
+  let thinking_budget thinking =
+    let floor = function
+      | "none" -> None
+      | "minimal" -> Some 1024
+      | "low" -> Some 2048
+      | "medium" -> Some 8192
+      | "high" -> Some 16384
+      | "xhigh" -> Some 32768
+      | "max" -> Some 65536
+      | _ -> invalid_arg "unsupported thinking level" in
+    match floor thinking with
+    | None -> Some (`Assoc ["type", `String "disabled"])
+    | Some budget ->
+        let budget = min budget (max_tokens - 4000) in
+        if budget <= 0 then invalid_arg
+          "max_tokens too small for the requested thinking level"
+        else Some (`Assoc ["type", `String "enabled";
+          "budget_tokens", `Int budget]) in
+  let thinking_field = match thinking with
+    | None -> None
+    | Some level -> thinking_budget level in
   let systems = ref [] in
   let wire = ref [] in
   let pending = ref [] in
@@ -212,7 +251,8 @@ let request ?(allow_compaction = false) ?(allow_prompt_caching = false)
               | ({ role = "tool"; tool_call_id = Some id; tool_calls = []; _ } as result) :: remaining ->
                   if not (List.mem id !pending) then invalid "unexpected or duplicate tool result";
                   pending := List.filter (( <> ) id) !pending;
-                  collect (tool_result_block id (tool_result_content result) :: acc) remaining
+                  collect (tool_result_block id
+                    (tool_result_content result) :: acc) remaining
                | ({ role = "tool"; _ } : message) :: _ -> invalid "malformed tool result"
                | remaining ->
                    if !pending <> [] then invalid "missing tool results";
@@ -225,15 +265,78 @@ let request ?(allow_compaction = false) ?(allow_prompt_caching = false)
   replay messages;
   let fields = [ "model", `String model; "max_tokens", `Int max_tokens;
                  "messages", `List (List.rev !wire) ] in
+  (* Prompt caching anchors on the stable head: the last tool definition and
+     the last system block. A top-level cache_control field is invalid, and
+     cache_control on a block requires the array form of `system`. *)
+  let cache = `Assoc [ "type", `String "ephemeral" ] in
+  let apply_cache block = match block with
+    | `Assoc fields when List.assoc_opt "cache_control" fields = None ->
+        `Assoc (fields @ [ "cache_control", cache ])
+    | other -> other in
   let fields = match List.rev !systems with
     | [] -> fields
-    | texts -> fields @ [ "system", `String (String.concat "\n\n" texts) ] in
+    | texts ->
+        if allow_prompt_caching then
+          match List.rev texts with
+          | last :: rest ->
+              fields @ [ "system", `List (List.rev (
+                apply_cache (text_block last) ::
+                List.map text_block rest)) ]
+          | [] -> fields
+        else fields @ [ "system", `String (String.concat "\n\n" texts) ] in
   let fields = match tools with
     | [] -> fields
-    | definitions -> fields @ [ "tools", `List (List.map tool_schema definitions) ] in
-  let fields = if allow_prompt_caching then
-    fields @ [ "cache_control", `Assoc [ "type", `String "ephemeral" ] ]
-    else fields in
+    | definitions ->
+        let converted = List.map tool_schema definitions in
+        let converted = if allow_prompt_caching then
+          match List.rev converted with
+          | last :: rest -> List.rev (apply_cache last :: rest)
+          | [] -> converted
+          else converted in
+        fields @ [ "tools", `List converted ] in
+  (* Rolling anchor on the newest message's last text-capable block: a
+     breakpoint there caches the entire preceding conversation, which is where
+     the reuse actually is. Generated reasoning and boundary blocks reject
+     cache_control, so the scan walks backward past them. *)
+  let fields = if not allow_prompt_caching then fields else
+    let markable = function
+      | `Assoc block ->
+          (match List.assoc_opt "type" block with
+           | Some (`String ("thinking" | "redacted_thinking" | "fallback"
+               | "tool_addition" | "tool_removal")) -> false
+           | _ -> List.assoc_opt "cache_control" block = None)
+      | _ -> false in
+    List.map (fun (key, value) ->
+      if key <> "messages" then key, value else
+      match value with
+      | `List messages ->
+          let mark content = match content with
+            | `String text -> `List [ apply_cache (text_block text) ]
+            | `List blocks ->
+                let rec last_markable = function
+                  | [] -> None
+                  | (`Assoc _ as block) :: earlier when markable block ->
+                      Some (List.rev (apply_cache block :: earlier))
+                  | _ :: earlier -> last_markable earlier in
+                (match last_markable (List.rev blocks) with
+                 | Some blocks -> `List blocks
+                 | None -> content)
+            | _ -> content in
+          let marked_last (msg : Yojson.Basic.t) = match msg with
+            | `Assoc fields ->
+                (match List.assoc_opt "content" fields with
+                 | Some _ ->
+                     `Assoc (List.map (fun (k, v) ->
+                       if k = "content" then k, mark v else k, v) fields)
+                 | None -> msg)
+            | _ -> msg in
+          key, `List (match List.rev messages with
+            | last :: rest -> List.rev (marked_last last :: rest)
+            | [] -> messages)
+      | _ -> key, value) fields in
+  let fields = match thinking_field with
+    | None -> fields
+    | Some value -> fields @ [ "thinking", value ] in
   `Assoc fields
 
 let compaction_request ?(allow_prompt_caching = false)
@@ -297,9 +400,12 @@ let parse_response json =
   (match member "stop_reason" json with
    | `String "end_turn" when tool_calls = [] -> ()
    | `String "tool_use" when tool_calls <> [] -> ()
-   | `String "max_tokens" -> Protocol.truncated "stop_reason max_tokens"
-   | `String "refusal" -> invalid "refusal"
-   | `String reason -> invalid ("unexpected stop_reason: " ^ reason)
+   | `String ("end_turn" | "tool_use") -> invalid "stop_reason/content mismatch"
+   | `String ("pause_turn" | "stop_sequence") -> ()
+   | `String ("max_tokens" | "model_context_window_exceeded" as reason) ->
+       Protocol.truncated ("stop_reason " ^ reason)
+   | `String ("refusal" | "sensitive" as reason) -> invalid reason
+   | `String _ -> () (* New stop reasons ship server-side first; degrade to stop. *)
    | _ -> invalid "missing stop_reason");
   let content = match List.rev !texts with
     | [] -> None

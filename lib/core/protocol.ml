@@ -426,12 +426,20 @@ let parse_completion json =
        | _ -> raise (Invalid_response "invalid refusal"));
       let msg = parse_message response in
       let finish = member "finish_reason" choice in
-      (match finish with
-      | `String "stop" when msg.tool_calls = [] -> msg
-      | `String "tool_calls" when msg.tool_calls <> [] -> msg
-      | `String "length" -> truncated "finish_reason length"
-      | `String reason -> raise (Invalid_response ("unexpected finish_reason: " ^ reason))
-      | _ -> raise (Invalid_response "missing finish_reason"))
+      (* Some OpenAI-compatible hosts report tool-call turns as "stop", emit the
+         aliases "end"/"function_call"/"max_tokens", or send native uppercase
+         finish reasons (e.g. Gemini-fronting gateways). Normalize them all. *)
+      let normalized = match finish with
+        | `String reason -> String.lowercase_ascii reason
+        | _ -> "" in
+      (match normalized with
+      | "stop" | "end" | "tool_calls" | "function_call" -> msg
+      | "length" | "max_tokens" -> truncated ("finish_reason " ^ normalized)
+      | "error" | "insufficient_system_resource" ->
+          raise (Invalid_response ("provider returned error finish_reason" ^
+            (if normalized = "error" then "" else ": " ^ normalized)))
+      | "" -> raise (Invalid_response "missing finish_reason")
+      | reason -> raise (Invalid_response ("provider finish_reason: " ^ reason)))
   | `List [] -> raise (Invalid_response "missing choices")
   | `List _ -> raise (Invalid_response "multiple choices")
   | _ -> raise (Invalid_response "missing choices")
@@ -478,12 +486,26 @@ let completion_usage json =
   match member "prompt_tokens" reported, member "completion_tokens" reported with
   | `Int input_tokens, `Int output_tokens
     when input_tokens >= 0 && output_tokens >= 0 ->
-      let cached_input_tokens = optional_token_detail
-        (member "prompt_tokens_details" reported) "cached_tokens" input_tokens in
-      let reasoning_output_tokens = optional_token_detail
+    (* Compatible hosts spell cache reads differently: DeepSeek reports
+       prompt_cache_hit_tokens; others a top-level cached_tokens or the
+       Gemini-style cachedContentTokenCount. *)
+    let cached_input_tokens =
+      match optional_token_detail
+          (member "prompt_tokens_details" reported) "cached_tokens" input_tokens with
+      | Some _ as hit -> hit
+      | None ->
+          let nonneg = function `Int value when value >= 0 -> Some value
+            | _ -> None in
+          List.find_map (fun value -> match value with
+            | Some value when value <= input_tokens -> Some value
+            | _ -> None)
+            [ nonneg (member "prompt_cache_hit_tokens" reported);
+              nonneg (member "cached_tokens" reported);
+              nonneg (member "cachedContentTokenCount" reported) ] in
+    let reasoning_output_tokens = optional_token_detail
         (member "completion_tokens_details" reported) "reasoning_tokens" output_tokens in
-      Some { input_tokens; output_tokens; cached_input_tokens;
-        cache_creation_input_tokens = None; reasoning_output_tokens;
-        input_modality_tokens = None; cached_input_modality_tokens = None;
-        output_modality_tokens = None }
+    Some { input_tokens; output_tokens; cached_input_tokens;
+      cache_creation_input_tokens = None; reasoning_output_tokens;
+      input_modality_tokens = None; cached_input_modality_tokens = None;
+      output_modality_tokens = None }
   | _ -> None

@@ -1,10 +1,15 @@
 type block =
   | Text of Buffer.t
   | Tool of string * string * Yojson.Basic.t * Buffer.t
+  (* Thinking/redacted_thinking replay: accumulate the reconstructed block so
+     finish can attach it to provider_state. *)
+  | Thinking of { kind : string; text : Buffer.t; signature : Buffer.t }
   | Ignored
 
 type t = {
   on_text : string -> unit;
+  provider : string;
+  model : string;
   on_tool_arguments : (Protocol.tool_argument_delta -> unit) option;
   blocks : (int, block * bool) Hashtbl.t;
   mutable started : bool;
@@ -61,8 +66,22 @@ let handle_block_start t json =
          | Some emit -> emit { Protocol.key = Printf.sprintf "anthropic:%d" n;
              call_id = Some id; name; fragment = "" });
         Tool (id, name, input, Buffer.create 128)
-    | `String ("thinking" | "redacted_thinking") -> Ignored
-    | _ -> invalid "unsupported content block" in
+    | `String "thinking" ->
+        let text = match field "thinking" content with
+          | `String value -> value | _ -> "" in
+        let text_buffer = Buffer.create (String.length text + 64) in
+        Buffer.add_string text_buffer text;
+        reserve t text;
+        Thinking { kind = "thinking"; text = text_buffer;
+          signature = Buffer.create 64 }
+    | `String "redacted_thinking" ->
+        let data = match field "data" content with
+          | `String value -> value | _ -> "" in
+        let signature = Buffer.create (String.length data + 8) in
+        Buffer.add_string signature data;
+        Thinking { kind = "redacted_thinking"; text = Buffer.create 0;
+          signature }
+    | _ -> Ignored (* future content block kinds *) in
   Hashtbl.add t.blocks n (block, false)
 
 let handle_block_delta t json =
@@ -85,13 +104,28 @@ let handle_block_delta t json =
         | None -> ()
         | Some emit -> emit { Protocol.key = Printf.sprintf "anthropic:%d" n;
             call_id = Some id; name; fragment = value })
-   | `String ("thinking_delta" | "signature_delta"), Ignored -> ()
+   | `String "thinking_delta", Thinking { text; _ } ->
+       let value = required_string "thinking" delta in
+       reserve t value;
+       Buffer.add_string text value
+   | `String "signature_delta", Thinking { signature; _ } ->
+       let value = required_string "signature" delta in
+       reserve t value;
+       Buffer.add_string signature value
+   | `String _, Ignored -> ()
    | _ -> invalid "delta type does not match content block")
 
 let handle_message_delta t json =
   (match field "usage" json with
    | `Null -> ()
-   | reported -> t.output_tokens <- Anthropic_wire.output_usage reported);
+   | reported ->
+       t.output_tokens <- Anthropic_wire.output_usage reported;
+       (match Anthropic_wire.input_usage reported with
+        | Some (input_tokens, cache_creation, cache_read) ->
+            t.input_tokens <- Some input_tokens;
+            t.cache_creation_input_tokens <- cache_creation;
+            t.cached_input_tokens <- cache_read
+        | None -> ()));
   match field "stop_reason" (field "delta" json) with
   | `Null -> ()
   | `String reason ->
@@ -141,12 +175,13 @@ let handle_event t event data =
       if not t.started then invalid "message_delta before start";
       handle_message_delta t json
   | "message_stop" ->
-      if not t.started || t.reason = None then invalid "message_stop before terminal reason";
+      if not t.started then invalid "message_stop before message_start";
       t.stopped <- true
-  | _ -> invalid ("unknown event: " ^ kind)
+  | _ -> () (* unknown events ignored for forward compatibility *)
 
-let create ?on_tool_arguments ~on_text () =
-  let t = { on_text; on_tool_arguments; blocks = Hashtbl.create 4; started = false; stopped = false;
+let create ?on_tool_arguments ?(provider = "anthropic") ?(model = "") ~on_text () =
+  let t = { on_text; provider; model; on_tool_arguments;
+    blocks = Hashtbl.create 4; started = false; stopped = false;
     reason = None; input_tokens = None; output_tokens = None;
     cached_input_tokens = None; cache_creation_input_tokens = None;
     failed = false; response_bytes = 0; parser = None } in
@@ -162,6 +197,7 @@ let feed t bytes =
     t.failed <- true;
     raise error
 
+let events t = match t.parser with Some parser -> Sse.events parser | None -> 0
 let is_done t = t.stopped && not t.failed
 let is_finished t = t.stopped && not t.failed
 
@@ -177,31 +213,64 @@ let finish t =
   if t.failed then invalid "stream is invalid";
   try
     (match t.parser with Some parser -> Sse.finish parser | None -> invalid "missing parser");
-    if not t.started || not t.stopped || t.reason = None then invalid "incomplete message";
+    if not t.started || not t.stopped || t.reason = None then
+      invalid "incomplete message";
     let blocks = Hashtbl.fold (fun n (block, closed) items ->
-      if not closed then invalid "unclosed content block";
-      (n, block) :: items) t.blocks [] |> List.sort (fun (a, _) (b, _) -> Int.compare a b) in
+      (n, block, closed) :: items) t.blocks []
+      |> List.sort (fun (a, _, _) (b, _, _) -> Int.compare a b) in
     let text = Buffer.create 128 in
     let calls = ref [] in
-    List.iter (fun (_, block) -> match block with
-      | Text part -> Buffer.add_buffer text part
+    let state_blocks = ref [] in
+    List.iter (fun (_, block, closed) -> match block with
+      | Text part ->
+          if not closed then invalid "unclosed content block";
+          Buffer.add_buffer text part;
+          state_blocks := `Assoc ["type", `String "text";
+            "text", `String (Buffer.contents part)] :: !state_blocks
       | Tool (id, name, input, partial) ->
+          if not closed then invalid "unclosed content block";
           let arguments = if Buffer.length partial = 0 then input else
             Protocol.decode_tool_arguments (Buffer.contents partial) in
           (match arguments with `Assoc _ -> () | _ -> invalid "tool input must be an object");
           if List.exists (fun (call : Protocol.tool_call) -> call.id = id) !calls then
             invalid "duplicate tool id";
-          calls := { Protocol.id; name; arguments } :: !calls
-      | Ignored -> ()) blocks;
+          calls := { Protocol.id; name; arguments } :: !calls;
+          state_blocks := `Assoc ["type", `String "tool_use"; "id", `String id;
+            "name", `String name; "input", arguments] :: !state_blocks
+      | Thinking { kind; text = thinking_text; signature } ->
+          if not closed then invalid "unclosed content block";
+          let fields = if kind = "thinking"
+            then ["type", `String "thinking";
+                  "thinking", `String (Buffer.contents thinking_text)]
+            else ["type", `String "redacted_thinking";
+                  "data", `String (Buffer.contents signature)] in
+          let fields = if kind = "thinking" && Buffer.length signature > 0
+            then fields @ ["signature", `String (Buffer.contents signature)]
+            else fields in
+          state_blocks := `Assoc fields :: !state_blocks
+      | Ignored ->
+          if not closed then invalid "unclosed content block") blocks;
     let calls = List.rev !calls in
     (match t.reason with
      | Some "end_turn" when calls = [] -> ()
      | Some "tool_use" when calls <> [] -> ()
-     | Some "max_tokens" -> Protocol.truncated "stop_reason max_tokens"
-     | Some reason -> invalid ("unexpected stop_reason: " ^ reason)
+     | Some ("end_turn" | "tool_use") ->
+         invalid "stop_reason/content mismatch"
+     | Some ("pause_turn" | "stop_sequence" | "compaction") -> ()
+     | Some ("max_tokens" | "model_context_window_exceeded" as reason) ->
+         Protocol.truncated ("stop_reason " ^ reason)
+     | Some ("refusal" | "sensitive" as reason) -> invalid reason
+     | Some _ -> () (* Unknown stop reasons degrade to a normal stop. *)
      | None -> assert false);
+    let provider_state =
+      let blocks = List.rev !state_blocks in
+      if t.model <> "" &&
+         List.exists Anthropic_wire.native_thinking_block blocks
+      then Some (`Assoc (Anthropic_wire.native_state_tag t.provider t.model @
+        ["content", `List blocks]))
+      else None in
     { Protocol.role = "assistant"; content = (if Buffer.length text = 0 then None else Some (Buffer.contents text));
-    tool_calls = calls; tool_call_id = None; tool_result_content = None; provider_state = None; attachments = [] }
+    tool_calls = calls; tool_call_id = None; tool_result_content = None; provider_state; attachments = [] }
   with Protocol.Invalid_response _ as error ->
     t.failed <- true;
     raise error

@@ -192,7 +192,7 @@ let replay_parts ~model (msg : message) state =
     (List.combine parsed_calls native_calls) msg.tool_calls;
   parts
 
-let request ~model messages tools =
+let request ~model ?thinking messages tools =
   if model = "" then invalid_arg "empty Gemini model";
   let systems = ref [] and contents = ref [] and pending = ref [] in
   let add message = contents := message :: !contents in
@@ -295,12 +295,32 @@ let request ~model messages tools =
     | [] -> fields
     | definitions -> fields @ [ "tools", `List [ `Assoc [
         "functionDeclarations", `List (List.map tool_schema definitions) ] ] ] in
+  let fields = match thinking with
+    | None -> fields
+    | Some level ->
+        let thinking_config = match level with
+          | "none" -> `Assoc ["thinkingBudget", `Int 0]
+          | "minimal" -> `Assoc ["thinkingLevel", `String "MINIMAL";
+              "includeThoughts", `Bool true]
+          | "low" -> `Assoc ["thinkingLevel", `String "LOW";
+              "includeThoughts", `Bool true]
+          | "medium" -> `Assoc ["thinkingLevel", `String "MEDIUM";
+              "includeThoughts", `Bool true]
+          | "high" -> `Assoc ["thinkingLevel", `String "HIGH";
+              "includeThoughts", `Bool true]
+          | "xhigh" | "max" -> `Assoc ["thinkingLevel", `String "HIGH";
+              "includeThoughts", `Bool true]
+          | _ -> invalid_arg "unsupported thinking level" in
+        fields @ ["generationConfig", `Assoc
+          ["thinkingConfig", thinking_config]] in
   `Assoc fields
 
 let parse_candidate ~model candidate =
   let finish = required_string "finishReason" candidate in
-  if finish = "MAX_TOKENS" then Protocol.truncated "finishReason MAX_TOKENS";
-  if finish <> "STOP" then invalid ("generation finished with " ^ finish);
+  (match finish with
+   | "STOP" -> ()
+   | "MAX_TOKENS" -> Protocol.truncated "finishReason MAX_TOKENS"
+   | reason -> invalid ("generation finished with " ^ reason));
   (match field "index" candidate with
    | `Null | `Int 0 -> ()
    | _ -> invalid "unexpected candidate index");
@@ -330,5 +350,5 @@ let parse_completion ~model json =
    | `Assoc _ as feedback when field "blockReason" feedback <> `Null -> invalid "prompt blocked"
    | _ -> ());
   match field "candidates" json with
-  | `List [ candidate ] -> parse_candidate ~model candidate
-  | _ -> invalid "missing or ambiguous candidates"
+  | `List (candidate :: _) -> parse_candidate ~model candidate
+  | _ -> invalid "missing candidates"

@@ -135,9 +135,10 @@ let untag_state ~model (msg : message) =
           fields)) }
   | _ -> invalid "malformed native state"
 
-let request ~model messages tools =
+let request ~model ?thinking messages tools =
   ignore (model_id model);
-  map_contents (Gemini_wire.request ~model (List.map (untag_state ~model) messages) tools)
+  map_contents (Gemini_wire.request ~model ?thinking
+    (List.map (untag_state ~model) messages) tools)
 
 let parse_completion ~model json =
   ignore (model_id model);

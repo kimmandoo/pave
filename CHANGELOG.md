@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-10-02
+
+- fix(provider): respected the model's advertised output ceiling instead of always sending `max_tokens: 4096`, threaded `thinking` effort into Anthropic Messages, OpenAI Responses/Chat, Codex, Gemini, Vertex and Ollama requests, and kept streaming responses alive while keep-alive bytes flow even without parsed events.
+- fix(provider): made Anthropic prompt caching a valid request — breakpoints anchor on the last system block, the last tool definition and the newest message's markable block; root `oneOf`/`anyOf`/`allOf` spill into the tool description; signed thinking/redacted blocks are preserved for replay; and `pause_turn`/`stop_sequence`/`model_context_window_exceeded` stop reasons are honored.
+- fix(provider): replayed assistant text on OpenAI Responses as a typed `output_text` message, read `output_text` items back in streamed completions, accepted bare `data:` SSE events and a leading UTF-8 BOM, tolerated server-side item kinds and `finish_reason` aliases, and reported DeepSeek/Gemini cache-hit token spellings.
+- fix(provider): sent the GitHub Copilot vision header, carried Bedrock image tool results as `ImageData` protos, emitted a single `content: null` on Z.AI assistant turns, fell back to `us-east-1` for unsigned AWS regions, and defaulted Azure endpoints to `api-version=v1`.
+- fix(provider): continued streamed tool calls whose deltas omit `index`, accepted arguments delivered as a complete object, and read Mistral-style content part lists.
+
 ## 2026-10-01
 
 - fix(tools): stopped the headless browser from dropping the connection when a page answer took over five seconds (silence is now only fatal inside a frame), forgot destroyed frame execution contexts that were keyed inconsistently, and removed the throwaway profile when the browser failed to start.

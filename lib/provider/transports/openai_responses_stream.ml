@@ -77,7 +77,7 @@ let handle_added t json =
          | _ -> invalid "invalid function arguments");
         Call { id; call_id; name; args; args_done = None; done_item = false }
     | `String "reasoning" -> Ignored id
-    | _ -> invalid "unsupported output item" in
+    | _ -> Ignored id in (* server tool calls and future item kinds *)
   Hashtbl.add t.items n item;
   (match t.on_tool_arguments, item with
    | Some emit, Call call ->
@@ -90,9 +90,10 @@ let message_text output =
   match field "content" output with
   | `List content -> String.concat "" (List.map (fun part ->
       match field "type" part, field "text" part with
-      | `String "output_text", `String text -> text
       | `String "refusal", _ -> invalid "refusal"
-      | _ -> invalid "unsupported message content") content)
+      | `String "output_text", `String text -> text
+      | `String _, _ -> "" (* annotations and future content parts *)
+      | _ -> invalid "malformed message content") content)
   | _ -> invalid "missing message content"
 
 let handle_item_done t json =
@@ -246,6 +247,7 @@ let feed t bytes =
   with Protocol.Invalid_response _ as error ->
     t.failed <- true;
     raise error
+let events t = match t.parser with Some parser -> Sse.events parser | None -> 0
 let is_done t = t.done_seen && not t.failed
 let is_finished t = t.completed <> None && not t.failed
 

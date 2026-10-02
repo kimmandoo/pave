@@ -40,13 +40,17 @@ let () =
   assert (field "tools" wire = `List [ item "function" [
     "name", `String "read_file"; "parameters", schema; "strict", `Bool false;
     "description", `String "Read file" ] ]);
+  let assistant_item text = item "message" [
+    "role", `String "assistant"; "status", `String "completed";
+    "content", `List [ item "output_text" [
+      "text", `String text; "annotations", `List [] ] ] ] in
   assert (field "input" wire = `List [
     `Assoc [ "role", `String "user"; "content", `List [ item "input_text" [ "text", `String "Read the file" ] ] ];
-    `Assoc [ "role", `String "assistant"; "content", `String "Reading" ];
+    assistant_item "Reading";
     item "function_call" [ "call_id", `String use.id; "name", `String use.name;
       "arguments", `String (Yojson.Basic.to_string args) ];
     item "function_call_output" [ "call_id", `String use.id; "output", `String "Contents" ];
-    `Assoc [ "role", `String "assistant"; "content", `String "Found it" ] ]);
+    assistant_item "Found it" ]);
   List.iter (fun request ->
     let input = field "input" (request
       [assistant (Some "") [use]; Protocol.tool_result use.id "Contents"]) in

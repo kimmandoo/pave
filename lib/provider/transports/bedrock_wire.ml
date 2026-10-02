@@ -92,7 +92,7 @@ let tool_spec json =
       `Assoc ["toolSpec", `Assoc fields]
   | _ -> invalid "invalid tool definition"
 
-let request messages tools =
+let request messages tools : Yojson.Basic.t =
   let systems = ref [] and turns = ref [] and pending = ref [] and used_tools = ref [] in
   let append message = turns := message :: !turns in
   let rec replay = function
@@ -168,15 +168,15 @@ let request messages tools =
     fields @ ["toolConfig", `Assoc ["tools", `List definitions]] in
   `Assoc fields
 
-let parse_response json =
+let parse_response (json : Yojson.Basic.t) =
   let output = member "output" json in
   let message = member "message" output in
   if member "role" message <> `String "assistant" then invalid "missing assistant role";
   let blocks = match member "content" message with
-    | `List blocks -> blocks
+    | `List (blocks : Yojson.Basic.t list) -> blocks
     | _ -> invalid "missing content blocks" in
   let texts = ref [] and calls = ref [] in
-  List.iter (fun block -> match block with
+  List.iter (fun (block : Yojson.Basic.t) -> match block with
     | `Assoc ["text", `String value] -> texts := value :: !texts
     | `Assoc ["toolUse", tool] ->
         let id = required_string "toolUseId" tool in
@@ -185,9 +185,19 @@ let parse_response json =
         if id = "" || name = "" then invalid "empty tool use ID or name";
         (match arguments with `Assoc _ -> () | _ -> invalid "tool input must be an object");
         calls := { id; name; arguments } :: !calls
-    | `Assoc ["reasoningContent", _] ->
-        invalid "reasoning content cannot be preserved across Converse turns"
-    | _ -> invalid "unsupported content block") blocks;
+    | `Assoc _ as other ->
+        (* reasoningContent cannot round-trip through this transport: its
+           signature is required for replay but the wire drops it, so a signed
+           block surviving only as text would 400 the next request. *)
+        if member "reasoningContent" other <> `Null then
+          invalid "reasoning content cannot be preserved across Converse turns"
+        else if member "guardrailContent" other = `Null &&
+           member "image" other = `Null && member "document" other = `Null &&
+           member "video" other = `Null &&
+           member "citationsContent" other = `Null &&
+           member "searchResultContent" other = `Null then
+          invalid "unsupported content block"
+    | _ -> invalid "malformed content block") blocks;
   let calls = List.rev !calls in
   let ids = List.map (fun (call : tool_call) -> call.id) calls in
   if List.length ids <> List.length (List.sort_uniq String.compare ids) then
@@ -195,7 +205,9 @@ let parse_response json =
   (match member "stopReason" json with
    | `String ("end_turn" | "stop_sequence") when calls = [] -> ()
    | `String "tool_use" when calls <> [] -> ()
-   | `String reason -> invalid ("unsupported stop reason: " ^ reason)
+   | `String ("max_tokens" | "model_context_window_exceeded" as reason) ->
+       truncated ("stop reason " ^ reason)
+   | `String reason -> invalid ("provider stop reason: " ^ reason)
    | _ -> invalid "missing stop reason");
   let content = match List.rev !texts with
     | [] -> None
@@ -206,10 +218,17 @@ let parse_response json =
 
 let usage json =
   let reported = member "usage" json in
-  match member "inputTokens" reported, member "outputTokens" reported with
-  | `Int input_tokens, `Int output_tokens when input_tokens >= 0 && output_tokens >= 0 ->
-      Some { input_tokens; output_tokens; cached_input_tokens = None;
-        cache_creation_input_tokens = None; reasoning_output_tokens = None;
+  match reported with
+  | `Assoc _ ->
+      let count key = match member key reported with
+        | `Int value when value >= 0 -> Some value
+        | _ -> None in
+      let input_tokens = Option.value ~default:0 (count "inputTokens") in
+      let output_tokens = Option.value ~default:0 (count "outputTokens") in
+      Some { input_tokens; output_tokens;
+        cached_input_tokens = count "cacheReadInputTokens";
+        cache_creation_input_tokens = count "cacheWriteInputTokens";
+        reasoning_output_tokens = None;
         input_modality_tokens = None; cached_input_modality_tokens = None;
         output_modality_tokens = None }
   | _ -> None
@@ -223,6 +242,9 @@ type converse_stream_event =
 type stream_block =
   | Text_block of int
   | Tool_block of int * string * string * Buffer.t
+  (* Members we don't consume (reasoningContent, images, toolResult echoes)
+     still occupy an index; stop events must match without misrouting. *)
+  | Ignored_block of int
 
 type converse_stream = {
   frames : Aws_event_stream.decoder;
@@ -267,11 +289,11 @@ let stream_int name json =
   match member name json with
   | `Int value when value >= 0 -> value
   | _ -> invalid ("missing or invalid " ^ name)
-
 let event_payload expected json =
   match json with
   | `Assoc [name, value] when name = expected -> value
   | _ -> invalid ("invalid ConverseStream " ^ expected ^ " event")
+
 
 let unique_block stream index =
   if List.mem index stream.block_indices then invalid "duplicate ConverseStream content block index";
@@ -340,7 +362,12 @@ let decode_converse_event stream frame =
             | Some emit -> emit { Protocol.key = Printf.sprintf "bedrock:%d" index;
                 call_id = Some id; name; fragment = "" });
            []
-       | _ -> invalid "unsupported ConverseStream content block start")
+       | `Assoc ["text", _] | `Assoc [] | `Null ->
+           stream.active_block <- Some (Text_block index);
+           []
+       | _ ->
+           stream.active_block <- Some (Ignored_block index);
+           [])
   | "contentBlockDelta" ->
       if not stream.message_started || stream.message_stopped <> None then
         invalid "unexpected ConverseStream content delta";
@@ -366,7 +393,7 @@ let decode_converse_event stream frame =
                      call_id = Some id; name; fragment });
                 []
             | _ -> invalid "mismatched ConverseStream tool input block")
-       | _ -> invalid "unsupported ConverseStream content delta")
+       | _ -> []) (* reasoningContent and other delta members we don't consume *)
   | "contentBlockStop" ->
       if not stream.message_started || stream.message_stopped <> None then
         invalid "unexpected ConverseStream content block stop";
@@ -383,6 +410,9 @@ let decode_converse_event stream frame =
            if List.mem id stream.tool_ids then invalid "duplicate ConverseStream tool use ID";
            stream.tool_ids <- id :: stream.tool_ids;
            [Tool_call { id; name; arguments }]
+       | Some (Ignored_block active) when active = index ->
+           stream.active_block <- None;
+           []
        | _ -> invalid "mismatched ConverseStream content block stop")
   | "messageStop" ->
       if not stream.message_started || stream.message_stopped <> None ||
@@ -390,9 +420,10 @@ let decode_converse_event stream frame =
       let reason = required_string "stopReason" value in
       if String.length reason > 64 then invalid "invalid ConverseStream stop reason";
       (match reason with
-       | "end_turn" | "stop_sequence" when stream.tool_ids = [] -> ()
-       | "tool_use" when stream.tool_ids <> [] -> ()
-       | _ -> invalid ("unsupported stop reason: " ^ reason));
+       | "end_turn" | "stop_sequence" | "tool_use" -> ()
+       | "max_tokens" | "model_context_window_exceeded" ->
+           truncated ("stop reason " ^ reason)
+       | _ -> invalid ("provider stop reason: " ^ reason));
       stream.message_stopped <- Some reason;
       [Message_stop reason]
   | "metadata" ->
@@ -405,7 +436,7 @@ let decode_converse_event stream frame =
            (match usage (`Assoc ["usage", report]) with
             | Some value -> [Usage value]
             | None -> invalid "invalid ConverseStream usage"))
-  | _ -> invalid ("unsupported ConverseStream event: " ^ name)
+  | _ -> [] (* forward compatibility: unknown event types carry no content *)
 
 let feed_converse_stream stream data =
   try

@@ -33,3 +33,9 @@ let headers ~endpoint:target ~model ~token ~messages =
     "X-GitHub-Api-Version: 2026-08-01";
     "X-Initiator: " ^ initiator;
     "X-Interaction-Type: conversation-" ^ initiator ]
+  @ if List.exists (fun (message : Protocol.message) ->
+      List.exists (fun (attachment : Protocol.attachment) ->
+        Protocol.attachment_kind attachment.mime_type = Some Image_attachment)
+        message.attachments) messages
+    then [ "Copilot-Vision-Request: true" ]
+    else []

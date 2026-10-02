@@ -99,9 +99,19 @@ let native_compaction_items ~model (message : Protocol.message) =
       Some items
 
 
+let assistant_message_item text =
+  `Assoc ["type", `String "message"; "role", `String "assistant";
+    "status", `String "completed";
+    "content", `List [`Assoc ["type", `String "output_text";
+      "text", `String text; "annotations", `List []]]]
 
-let request ?(stream = false) ~model messages tools =
+let request ?(stream = false) ?thinking ?max_output_tokens ~model messages tools =
   if model = "" then invalid_arg "empty Responses model";
+  (match thinking with
+   | Some level when not (List.mem level
+       ["none"; "minimal"; "low"; "medium"; "high"; "xhigh"; "max"]) ->
+       invalid "unsupported reasoning effort"
+   | _ -> ());
   let instructions = ref [] and input = ref [] and pending = ref [] in
   let emit json = input := json :: !input in
   List.iter (fun (msg : message) ->
@@ -133,9 +143,10 @@ let request ?(stream = false) ~model messages tools =
     | "assistant" ->
         if !pending <> [] || msg.tool_call_id <> None then
           invalid "assistant message during tool results";
+        (* The text item precedes its own calls: strict gateways reject a
+           message wedged between a call and its output. *)
         (match msg.content with
-         | Some text when text <> "" -> emit (`Assoc [ "role", `String "assistant";
-             "content", `String text ])
+         | Some text when text <> "" -> emit (assistant_message_item text)
          | _ when msg.tool_calls = [] -> invalid "empty assistant message"
          | _ -> ());
         List.iter (fun (call : tool_call) ->
@@ -145,7 +156,8 @@ let request ?(stream = false) ~model messages tools =
           pending := call.id :: !pending;
           emit (`Assoc [ "type", `String "function_call";
             "call_id", `String call.id; "name", `String call.name;
-            "arguments", `String (Yojson.Basic.to_string call.arguments) ])) msg.tool_calls
+            "arguments", `String (Yojson.Basic.to_string call.arguments) ]))
+          msg.tool_calls
     | "tool" ->
         (match msg.content, msg.tool_call_id, msg.tool_calls with
          | Some _, Some id, [] when List.mem id !pending ->
@@ -155,10 +167,19 @@ let request ?(stream = false) ~model messages tools =
          | _ -> invalid "unexpected or malformed tool result")
     | _ -> invalid "unsupported transcript role") messages;
   if !pending <> [] then invalid "missing tool results";
-  let fields = [ "model", `String model; "input", `List (List.rev !input) ] in
+  let fields = [ "model", `String model; "input", `List (List.rev !input);
+                 "store", `Bool false ] in
   let fields = match List.rev !instructions with
     | [] -> fields
     | texts -> fields @ [ "instructions", `String (String.concat "\n\n" texts) ] in
+  let fields = match thinking with
+    | None -> fields
+    | Some level -> fields @ ["reasoning", `Assoc ["effort", `String level]] in
+  let fields = match max_output_tokens with
+    | None -> fields
+    | Some tokens when tokens > 0 ->
+        fields @ ["max_output_tokens", `Int tokens]
+    | Some _ -> invalid "invalid max_output_tokens" in
   let fields = if tools = [] then fields else
     fields @ [ "tools", `List (List.map tool_schema tools) ] in
   `Assoc (if stream then fields @ [ "stream", `Bool true ] else fields)
@@ -234,7 +255,8 @@ let parse_completion json =
                | `String text -> texts := text :: !texts
                | _ -> invalid "invalid output text")
           | `String "refusal" -> invalid "refusal"
-          | _ -> invalid "unsupported message content") content
+          | `String _ -> () (* annotations and future content parts *)
+          | _ -> invalid "malformed message content") content
     | `String "function_call" ->
         let id = required_string "call_id" item in
         let name = required_string "name" item in
@@ -244,7 +266,8 @@ let parse_completion json =
         let arguments = decode_tool_arguments args in
         calls := { id; name; arguments } :: !calls
     | `String "reasoning" -> ()
-    | _ -> invalid "unsupported output item") outputs;
+    | `String _ -> () (* server tool calls and future item kinds *)
+    | _ -> invalid "malformed output item") outputs;
   { role = "assistant"; content = (match List.rev !texts with
       | [] -> None | texts -> Some (String.concat "" texts));
     tool_calls = List.rev !calls; tool_call_id = None; tool_result_content = None; provider_state = None; attachments = [] }

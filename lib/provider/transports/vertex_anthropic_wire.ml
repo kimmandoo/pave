@@ -17,12 +17,12 @@ let endpoint ~project ~location ~model ~streaming =
     "https://%s/v1/projects/%s/locations/%s/publishers/anthropic/models/%s:%s"
     host project location model
     (if streaming then "streamRawPredict" else "rawPredict")
-let request ~model ~max_tokens ~streaming messages tools =
+let request ~model ~max_tokens ~streaming ?thinking messages tools =
   let model = Vertex_wire.model_id model in
   if not (String.starts_with ~prefix:"claude-" model) then
     invalid_arg "Vertex Claude requires a Claude model ID";
   if max_tokens <= 0 then invalid_arg "invalid Claude max_tokens";
-  let body = Anthropic_wire.request ~model ~max_tokens messages tools in
+  let body = Anthropic_wire.request ~model ~max_tokens ?thinking messages tools in
   match body with
   | `Assoc fields -> `Assoc (List.filter (fun (key, _) -> key <> "model") fields @ [
       "anthropic_version", `String "vertex-2023-10-16";
@@ -45,8 +45,9 @@ let parse_completion ~model json =
   validate_completion
     (Anthropic_wire.parse_native_completion ~provider:"google-vertex" ~model json)
 
-let create_stream ?on_tool_arguments ~on_text () =
-  Anthropic_stream.create ?on_tool_arguments ~on_text ()
+let create_stream ?on_tool_arguments ?(model = "") ~on_text () =
+  Anthropic_stream.create ?on_tool_arguments ~provider:"google-vertex"
+    ~model ~on_text ()
 let feed_stream = Anthropic_stream.feed
 let stream_is_finished = Anthropic_stream.is_finished
 let stream_usage = Anthropic_stream.usage

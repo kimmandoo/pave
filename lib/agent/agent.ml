@@ -32,6 +32,7 @@ type t = {
   authentication : Provider.authentication;
   resolve_credential : (unit -> Provider.credentials) option;
   thinking : unit -> string option;
+  max_output_tokens : int option;
   root : string;
   workspace_context : Tools.session_context option;
   allow_shell : bool;
@@ -68,7 +69,7 @@ type t = {
 let create ~provider ~root ~system ?workspace_context
     ?(authentication = Provider.Api_key)
     ?resolve_credential ?secret_mask ?before_request ?(history = [])
-    ?(thinking = fun () -> None) ?(allow_shell = false)
+    ?(thinking = fun () -> None) ?max_output_tokens ?(allow_shell = false)
     ?(tool_available = fun _ -> true) ?delegate_task ?(stream = false)
     ?(preview_tools = false)
     ?(external_tools = []) ?execute_external ?validate_external_tool
@@ -81,7 +82,8 @@ let create ~provider ~root ~system ?workspace_context
   let redact = match secret_mask with
     | Some mask -> Secret_mask.redact mask
     | None -> Fun.id in
-  { provider; authentication; resolve_credential; thinking; root; workspace_context;
+  { provider; authentication; resolve_credential; thinking; max_output_tokens;
+    root; workspace_context;
     system; secret_mask;
     allow_shell; tool_available; external_tools; execute_external;
     validate_external_tool; external_approval_details;
@@ -343,10 +345,12 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
         let reply =
           if t.stream then Provider.complete ~authentication:t.authentication
             ?resolve_credential:t.resolve_credential ?thinking:(t.thinking ())
+            ?max_output_tokens:t.max_output_tokens
             ~on_text ?on_tool_arguments ?on_usage:t.on_usage ?cancel
             t.provider transcript definitions
           else Provider.complete ~authentication:t.authentication
             ?resolve_credential:t.resolve_credential ?thinking:(t.thinking ())
+            ?max_output_tokens:t.max_output_tokens
             ?on_usage:t.on_usage ?cancel t.provider transcript definitions in
         Provider.check_cancel cancel;
         end_drafts reply.tool_calls;

@@ -36,7 +36,8 @@ let request ~model messages tools =
     let json = Protocol.message_to_json msg in
     match json with
     | `Assoc fields when msg.role = "assistant" ->
-        let fields = if msg.content = None then fields @ ["content", `Null]
+        let fields = if msg.content = None then
+            (List.remove_assoc "content" fields) @ ["content", `Null]
           else fields in
         let fields = match msg.provider_state with
           | None -> fields

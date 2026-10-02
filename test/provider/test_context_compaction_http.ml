@@ -127,15 +127,26 @@ printf '200'
         output_modality_tokens = None });
       let request, config = captured_request () in
       verify_headers config ~compaction_beta:true;
-      assert (member "system" request = `String "stable system prompt");
-      assert (member "cache_control" request =
-        `Assoc ["type", `String "ephemeral"]);
+      (* Prompt caching anchors on the last system block, last tool
+         definition, and the newest message's markable block. *)
+      let ephemeral = `Assoc ["type", `String "ephemeral"] in
+      let cache_control json = member "cache_control" json in
+      assert (member "system" request = `List [
+        `Assoc ["type", `String "text"; "text", `String "stable system prompt";
+          "cache_control", ephemeral]]);
+      assert (member "cache_control" request = `Null);
       assert (member "compaction" request = `Assoc [
         "type", `String "summarize";
         "instructions", `String "preserve decisions"]);
-      assert (member "tools" request <> `Null);
+      (match member "tools" request with
+       | `List tools ->
+           assert (List.exists (fun tool ->
+             cache_control tool = ephemeral) tools)
+       | _ -> assert false);
       assert (member "messages" request = `List [
-        `Assoc ["role", `String "user"; "content", `String "older turn"]]);
+        `Assoc ["role", `String "user"; "content", `List [
+          `Assoc ["type", `String "text"; "text", `String "older turn";
+            "cache_control", ephemeral]]]]);
       let signed_marker = { (Pave.Protocol.user compacted.summary) with
         provider_state = Some compacted.provider_state } in
       let normal_response = `Assoc [
@@ -150,20 +161,25 @@ printf '200'
       let ordinary, config = captured_request () in
       verify_headers config ~compaction_beta:false;
       assert (member "compaction" ordinary = `Null);
-      assert (member "cache_control" ordinary =
-        `Assoc ["type", `String "ephemeral"]);
+      (* A single user turn still gets its rolling breakpoint. *)
+      assert (member "cache_control" ordinary = `Null);
+      assert (member "messages" ordinary = `List [
+        `Assoc ["role", `String "user"; "content", `List [
+          `Assoc ["type", `String "text"; "text", `String "ordinary turn";
+            "cache_control", ephemeral]]]]);
       ignore (Pave.Provider.complete provider
         [signed_marker; Pave.Protocol.user "after summary"] []);
       let replay, config = captured_request () in
       verify_headers config ~compaction_beta:true;
-      assert (member "cache_control" replay =
-        `Assoc ["type", `String "ephemeral"]);
+      assert (member "cache_control" replay = `Null);
       assert (member "messages" replay = `List [
         `Assoc ["role", `String "assistant"; "content", `List [
           `Assoc ["type", `String "compaction";
             "content", `String "signed summary";
             "signature", `String "signed-by-anthropic"]]];
-        `Assoc ["role", `String "user"; "content", `String "after summary"]]);
+        `Assoc ["role", `String "user"; "content", `List [
+          `Assoc ["type", `String "text"; "text", `String "after summary";
+            "cache_control", ephemeral]]]]);
       let gateway = { provider with
         endpoint = "https://gateway.example/v1/messages" } in
       ignore (Pave.Provider.complete gateway

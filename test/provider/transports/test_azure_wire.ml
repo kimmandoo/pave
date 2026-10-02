@@ -138,7 +138,7 @@ let () =
   if child = 0 then (
     Unix.putenv "AZURE_OPENAI_ENDPOINT" (foundry_base ^ "/");
     assert (Azure_wire.endpoint ~route:Azure_wire.Chat_completions () =
-      foundry_base ^ "/openai/v1/chat/completions");
+      foundry_base ^ "/openai/v1/chat/completions?api-version=v1");
     Unix.putenv "AZURE_OPENAI_ENDPOINT" (base ^ "/");
     Unix.putenv "AZURE_OPENAI_API_VERSION" "preview";
     assert (Azure_wire.endpoint () =
@@ -146,7 +146,7 @@ let () =
     assert (Azure_wire.endpoint ~route:Azure_wire.Chat_completions () =
       base ^ "/openai/v1/chat/completions?api-version=preview");
     Unix.putenv "AZURE_OPENAI_API_VERSION" "";
-    assert (Azure_wire.endpoint () = base ^ "/openai/v1/responses");
+    assert (Azure_wire.endpoint () = base ^ "/openai/v1/responses?api-version=v1");
     Unix.putenv "AZURE_OPENAI_API_VERSION" "2025-04-01-preview";
     invalid Azure_wire.endpoint;
     Unix.putenv "AZURE_OPENAI_ENDPOINT" "https://project-7.openai.azure.com.evil.example";

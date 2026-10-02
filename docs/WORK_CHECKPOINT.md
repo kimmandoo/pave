@@ -1,5 +1,14 @@
 # Work checkpoint
 
+## Current session — provider request/response audit against the porting reference
+
+- **Date:** 2026-10-02
+- **Active task:** Completed the audit of provider model request/response handling and fixed the confirmed defects. Start: `main` ahead of origin, clean tree.
+- **Fixes:** (1) `max_tokens` now uses the model's provider-reported ceiling instead of a hardcoded 4096 across Anthropic/Responses/Codex/compaction paths; `thinking` effort reaches Anthropic, OpenAI chat/responses, Codex, Gemini, Vertex and Ollama requests. (2) Anthropic prompt caching is now a valid request (per-block anchors; root JSON-Schema combinators spill into the tool description; thinking/redacted blocks replay as native state). (3) OpenAI Responses replays assistant text as `output_text` items and parses them back; SSE tolerates bare `data:` events and a UTF-8 BOM; streamed tool-call deltas without `index` continue the open call. (4) Copilot vision header, Bedrock image tool results (field 10 `ImageData`), Z.AI deduplicated `content`, AWS `us-east-1` region fallback, Azure `api-version=v1` default, cache-token spellings for DeepSeek/Gemini.
+- **Changed files:** `bin/main.ml`, `lib/agent/agent.ml`, `lib/core/{protocol,sse}.ml`, `lib/provider/provider.ml`, `lib/provider/transports/{anthropic_stream,anthropic_wire,aws_auth,azure_wire,bedrock_wire,codex_stream,codex_wire,devin_api,gemini_stream,gemini_wire,github_copilot_wire,ollama_wire,openai_responses_stream,openai_responses_wire,openai_stream,vertex_anthropic_wire,vertex_wire,zai_api}.ml`, `test/provider/{test_context_compaction_http,transports/test_anthropic_wire,transports/test_azure_wire,transports/test_devin_api,transports/test_openai_responses_wire}.ml`, `CHANGELOG.md`, `docs/WORK_CHECKPOINT.md`.
+- **Verification:** `opam exec -- dune build @install` and `opam exec -- dune runtest` pass. Fixture stderr can be captured with `PAVE_CURL_ERRORS=/path` (new env override in `Provider.run_curl`).
+- **Exact next action:** None; commit and release only when asked.
+
 ## Current session — verification of unpushed browser/search commits
 
 - **Date:** 2026-10-01

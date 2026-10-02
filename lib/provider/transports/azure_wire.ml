@@ -88,7 +88,9 @@ let endpoint ?(route=Responses) () =
     else base in
   let _, normalized_base, path = parse_endpoint base in
   if path <> "" then fail "AZURE_OPENAI_ENDPOINT must be a resource base URL";
-  let version = Option.value ~default:"" (Sys.getenv_opt "AZURE_OPENAI_API_VERSION") in
+  let version = match Sys.getenv_opt "AZURE_OPENAI_API_VERSION" with
+    | Some "" | None -> "v1"
+    | Some value -> value in
   normalized_base ^ route_path route ^ version_suffix version
 
 let valid_deployment deployment =
