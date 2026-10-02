@@ -2308,6 +2308,31 @@ let browser_tool ~approved ?cancel ?context args =
         "bytes", Protocol.member "bytes" json ]));
        Protocol.Image { mime_type; data }]
   | _ -> [Protocol.Text (Yojson.Basic.to_string json)]
+let publish_web_tool ~approved ?cancel ?context args =
+  let context = require_session_context context in
+  check_session_context context;
+  let action = required_string "action" args in
+  let manager = context.process_manager in
+  let tunnel_id name = "portal:" ^ name in
+  let json = match action with
+    | "publish" ->
+        require_explicit_approval approved;
+        let port = optional_int "port" 0 ~minimum:1 ~maximum:65535 args in
+        if port = 0 then fail "publish requires a loopback port";
+        let name = match optional_string "name" "" args with
+          | "" -> "pave-" ^ string_of_int port
+          | value -> Workspace_portal.publish_name value in
+        Workspace_portal.publish ?cancel manager ~id:(tunnel_id name)
+          ~port ~name
+    | "stop" ->
+        let name = match optional_string "name" "" args with
+          | "" -> fail "stop requires a tunnel name"
+          | value -> value in
+        Workspace_portal.stop manager ~id:(tunnel_id name)
+    | "list" -> Workspace_portal.list manager
+    | _ -> fail "unsupported publish_web action" in
+  [Protocol.Text (Yojson.Basic.to_string json)]
+
 
 
 let lsp_start ~approved ?context root args =
@@ -2774,6 +2799,10 @@ let requires_explicit_approval ~name ~args =
        | `String ("open" | "navigate" | "evaluate" | "screenshot" | "call_tool") -> true
        | `String "tool_events" -> optional_bool "clear" false args
        | _ -> false)
+  | "publish_web" ->
+      (match field "action" args with
+       | `String "publish" -> true
+       | _ -> false)
   | "read_file" ->
       (match field "path" args with
        | `String path -> starts_with (String.lowercase_ascii path) "https://"
@@ -2800,6 +2829,10 @@ let non_reversible_tool ~name ~args =
   | "browser" ->
       (match field "action" args with
        | `String ("open" | "navigate" | "evaluate" | "call_tool") -> true
+       | _ -> false)
+  | "publish_web" ->
+      (match field "action" args with
+       | `String "publish" -> true
        | _ -> false)
   | _ -> false
 
@@ -3062,6 +3095,11 @@ let definitions = [
     ["format", enum_string_field "Result format (default summary)" ["summary"; "sarif"];
      "file_limit", integer_field "Maximum files scanned (default 2000)" 0 Repository_security.max_files;
      "finding_limit", integer_field "Maximum findings returned (default 100)" 0 100] [];
+  schema "publish_web" "Publish a localhost port to a public HTTPS URL through a Portal relay tunnel. publish starts a session-owned `portal expose` process and returns the public URL once ready; stop terminates a named tunnel; list shows running tunnels. Publishing exposes the local service publicly until stopped or the session ends."
+    ["action", enum_string_field "Tunnel operation" ["publish"; "stop"; "list"];
+     "port", integer_field "Loopback port to publish (required for publish)" 1 65535;
+     "name", string_field "Public hostname prefix and tunnel ID; auto-derived when omitted (required for stop)"]
+    ["action"];
 ]
 
 let function_name json =
@@ -3116,6 +3154,10 @@ let approval_decision ~command_patterns ~name ~args =
        | `String ("observe" | "list_tools" | "close") -> tier Approval.Read
        | `String "tool_events" when
            not (optional_bool "clear" false args) -> tier Approval.Read
+       | _ -> tier Approval.Exec)
+  | "publish_web" ->
+      (match field "action" args with
+       | `String "list" -> tier Approval.Read
        | _ -> tier Approval.Exec)
   | "ssh_write" | "write_file" | "edit_file" | "apply_edits" | "ast_edit"
   | "worktree_create" | "worktree_remove" | "clipboard_write" ->
@@ -3325,6 +3367,19 @@ let approval_request ?cancel ?context ~root ~name ~args (decision : Approval.dec
              "Manages an isolated owned browser session; read actions expose page state.",
              ["Action: " ^ quoted "action" "(missing)" args;
               "Session: " ^ quoted "id" "browser" args])
+    | "publish_web" ->
+        (match value "action" "" args with
+         | "publish" ->
+             "Publishes this localhost port on a public Portal relay; anyone with the URL can reach it until the tunnel is stopped or the session ends.",
+             ["Local port: " ^ value "port" "(missing)" args;
+              "Public name prefix: " ^
+                (match value "name" "" args with
+                 | "" -> "pave-" ^ value "port" "?" args
+                 | name -> name);
+              "Process: portal expose (PAVE_PORTAL or PATH)"]
+         | _ ->
+             "Manages a session-owned Portal tunnel; publish exposes a local port publicly.",
+             ["Action: " ^ value "action" "(missing)" args])
     | "workspace_snapshot" ->
         "Reads a bounded text page and the file's SHA-256 snapshot; it makes no changes.",
         ["Path: " ^ quoted "path" "(missing)" args]
@@ -3790,7 +3845,7 @@ let session_tool_names = [
   "lsp_start"; "lsp"; "workspace_eval";
   "ssh_open"; "ssh_close"; "ssh_read"; "ssh_write"; "ssh_command";
   "dap_start"; "dap"; "xcode_preflight"; "mobile_check"; "android_devices";
-  "browser"
+  "browser"; "publish_web"
 ]
 
 let path_tool_names = [
@@ -3811,7 +3866,7 @@ let error_message = function
   | Workspace_gradle_focus.Error message | Workspace_flutter_focus.Error message
   | Workspace_node_scripts.Error message
   | Workspace_android_devices.Error message
-  | Workspace_browser.Error message ->
+  | Workspace_browser.Error message | Workspace_portal.Error message ->
       "Error: " ^ message
   | Workspace_dap.Cancelled -> "Error: DAP operation cancelled"
   | Unix.Unix_error (code, operation, path) ->
@@ -3840,6 +3895,17 @@ let prepare ?cancel ?context ~root ~name ~args () =
           ignore (Workspace_browser.validate_navigation_url
             (required_string "url" args))
       | _ -> ());
+    if name = "publish_web" then (
+      match optional_string "action" "" args with
+      | "publish" ->
+          ignore (Workspace_portal.detect_portal ());
+          ignore (optional_int "port" 0 ~minimum:1 ~maximum:65535 args);
+          (match optional_string "name" "" args with
+           | "" -> ()
+           | value -> ignore (Workspace_portal.publish_name value))
+      | "stop" -> ignore (required_string "name" args)
+      | "list" -> ()
+      | _ -> ());
     if name = "start_process" then (
       Workspace_process.validate_id (required_string "id" args);
       Workspace_process.validate_program
@@ -3864,6 +3930,7 @@ let prepare ?cancel ?context ~root ~name ~args () =
       try
         let result = match name with
           | "browser" -> Ok (browser_tool ~approved ?cancel ?context args)
+          | "publish_web" -> Ok (publish_web_tool ~approved ?cancel ?context args)
           | _ -> Ok [Protocol.Text (match name with
           | "read_file" -> read_file ?cancel ?context root args
           | "workspace_snapshot" -> workspace_snapshot ?cancel ?context tool_root tool_args
@@ -3927,7 +3994,7 @@ let prepare ?cancel ?context ~root ~name ~args () =
          | Web_search.Error _ | Native_services.Error _
          | Workspace_lsp.Error _ | Workspace_dap.Error _
          | Workspace_dap.Not_approved _ | Workspace_eval.Error _
-         | Workspace_browser.Error _
+         | Workspace_browser.Error _ | Workspace_portal.Error _
          | Workspace_ssh.Error _ | Native_tokenizer.Error _) as exn ->
           (match cancel with
            | Some cancelled when cancelled () -> raise Cancelled
@@ -3942,7 +4009,8 @@ let prepare ?cancel ?context ~root ~name ~args () =
   | (Workspace_process.Error _ | Workspace_git.Error _ |
      Workspace_reader.Error _ | Workspace_lsp.Error _ | Workspace_dap.Error _
      | Workspace_dap.Not_approved _ | Workspace_eval.Error _
-     | Workspace_ssh.Error _ | Web_search.Error _ | Workspace_browser.Error _) as exn ->
+     | Workspace_ssh.Error _ | Web_search.Error _ | Workspace_browser.Error _
+     | Workspace_portal.Error _) as exn ->
       (match cancel with
        | Some cancelled when cancelled () -> raise Cancelled
        | _ -> Error (error_message exn))
