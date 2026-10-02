@@ -8,6 +8,8 @@
 - fix(agent): tool `elapsed_ms` is measured between run start and the moment the tool body returns, not at result-delivery time, so scheduler queueing no longer inflates the timeline; stage details are truncated and secret-masked before journaling.
 - fix(tools): the `memory` tool no longer sits in the unrestricted default bucket — `list`/`get` are read-tier, `put`/`forget` are write-tier and the tool is session-grantable; `publish_web` preflight validates `attach` and reports the `stop` name correctly.
 - fix(extensions): a manifest missing a required field fails with `missing manifest field` instead of a raw `Not_found`; the `did you mean` suggestion list only proposes commands that are actually available in the current session.
+- chore(release): published v0.1.80 for Linux and macOS on x86_64 and ARM64 after a full green CI matrix and verified the release archive checksums, the embedded `v0.1.80` version, the installer's latest-release discovery and `update --check` reporting `Pave v0.1.80 is up to date.`
+- fix(session): a connection the hub accepted but had not yet registered when `close()` ran is now torn down silently instead of answered with a 503, so a half-open client can no longer observe bytes after close; `test_session_hub` also tolerates `SIGPIPE`/`EPIPE` on its client writes.
 
 ## 2026-10-02
 
