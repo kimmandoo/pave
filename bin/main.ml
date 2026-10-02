@@ -77,7 +77,10 @@ let () =
   let recording : Pave.Session_recording.recorder option ref = ref None in
   let record_frame direction kind data =
     match !recording with
-    | Some recorder -> Pave.Session_recording.record recorder ~direction ~kind data
+    | Some recorder ->
+        (try Pave.Session_recording.record recorder ~direction ~kind data
+         with Invalid_argument message ->
+           Printf.eprintf "Recording: skipped frame: %s\n%!" message)
     | None -> () in
   let approval_mode_override = ref None in
   let explicit_selection = ref false and explicit_provider = ref false
@@ -456,8 +459,13 @@ let () =
       if path <> "" then
         let resolved = if Filename.is_relative path
           then Filename.concat root path else path in
+        (* Recordings carry full prompts and tool output, so they follow the
+           journal rules: a fresh user-private file, never a truncate of an
+           existing path or a symlink target. *)
+        let fd = Unix.openfile resolved
+            [Unix.O_WRONLY; Unix.O_CREAT; Unix.O_EXCL] 0o600 in
         recording := Some (Pave.Session_recording.create_recorder
-          (open_out resolved))) !record_path;
+          (Unix.out_channel_of_descr fd))) !record_path;
     if !cli_timeout_ms < 0 then
       failwith "--timeout must be a nonnegative millisecond count";
 
@@ -798,6 +806,9 @@ let () =
       effective_approval_mode := Option.value ~default:configured_approval_mode
         (Option.bind !journal Pave.Session.mode);
 
+    at_exit (fun () -> match !recording with
+      | Some recorder -> Pave.Session_recording.close_recorder recorder
+      | None -> ());
     at_exit (fun () -> match !journal with
       | None -> ()
       | Some current ->
@@ -1070,13 +1081,19 @@ let () =
         match !session_hub with
         | Some hub -> session_hub := None; Pave.Session_hub.close hub
         | None -> ()) in
+    let generated_hub_token = ref None in
     let hub_token () =
       match Sys.getenv_opt "PAVE_CSRF_TOKEN" with
       | Some value when value <> "" -> value
       | _ ->
-          let bytes = Pave.Oauth_flow.random_bytes 16 in
-          String.concat "" (List.init 16 (fun i ->
-            Printf.sprintf "%02x" (Char.code bytes.[i]))) in
+          match !generated_hub_token with
+          | Some token -> token
+          | None ->
+              let bytes = Pave.Oauth_flow.random_bytes 16 in
+              let token = String.concat "" (List.init 16 (fun i ->
+                Printf.sprintf "%02x" (Char.code bytes.[i]))) in
+              generated_hub_token := Some token;
+              token in
     let hub_submit = function
       | Pave.Session_hub.Submit text ->
           (match !runner with
@@ -1190,7 +1207,7 @@ let () =
     let persist_allow_rule command =
       let rule : Pave.Approval.command_rule =
         { match_text = Pave.Approval.normalize command;
-          policy = Pave.Approval.Allow } in
+          policy = Pave.Approval.Allow; exact = true } in
       live_command_rules := !live_command_rules @ [rule];
       (match !live_agent with
        | Some current -> current.Pave.Agent.command_patterns <-
@@ -1253,6 +1270,7 @@ let () =
         | Some screen -> Tui.confirm_tool screen request
         | None ->
             let session = Pave.Approval.session_grantable request.tool_name in
+            let always = Pave.Approval.always_grantable request.tool_name in
             Printf.eprintf
               "\nTool action approval in %s:\nTool: %s\nTier: %s\nImpact: %s\n%s%s%s %!"
               root request.tool_name
@@ -1262,11 +1280,13 @@ let () =
               (match request.reason with
                | Some reason -> "\nPolicy: " ^ reason ^ "\n"
                | None -> "\n")
-              (if session then
-                 "[y] allow once · [a] allow all " ^ request.tool_name ^
-                 " until exit · [N] deny:"
-               else "[y] allow once · [N] deny:");
-            Pave.Approval.answer_of_line ~session
+              (String.concat " " (List.filter (fun part -> part <> "") [
+                 "[y] allow once";
+                 (if always then "· [w] always" else "");
+                 (if session then "· [a] allow all " ^ request.tool_name ^
+                  " until exit" else "");
+                 "· [N] deny:"]));
+            Pave.Approval.answer_of_line ~session ~always
               (try Some (read_line ()) with End_of_file -> None)) in
     let render_tool_event screen = function
       | Pave.Agent.Tool_draft delta -> Tui.tool_draft screen delta
@@ -4077,7 +4097,7 @@ let () =
                           ~id:("portal:" ^ name) ~port ~name in
                         notify ("Session hub published: " ^
                           Yojson.Basic.to_string json ^
-                          " (token in x-pave-csrf-token header required)")
+                          " (x-pave-csrf-token: " ^ hub_token () ^ ")")
                     | "stop" :: [name] ->
                         notify (Yojson.Basic.to_string
                           (Pave.Workspace_portal.stop manager
@@ -4755,7 +4775,9 @@ let () =
           ~on_event:(Tui.publish_agent_event screen)
           ~on_approve:(Tui.confirm screen)
           ~on_approve_tool:(with_session_grant (Tui.confirm_tool screen))
-          ~on_queued:(Tui.set_queue screen) () in
+          ~on_queued:(Tui.set_queue screen)
+          ~on_record:(fun (submission : Pave.Turn_runner.submission) ->
+            record_frame `Input "prompt" (`String submission.prompt)) () in
         runner := Some active;
         interact ()))
     else (

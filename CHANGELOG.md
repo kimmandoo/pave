@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-10-03
+
+- fix(session): made `/hub start` actually usable — the CSRF token is now minted once per session instead of on every lookup, the `/hub` notice and `/publish attach` output print the same token the server enforces, and `Turn_runner` submissions from hub threads are marshalled through the runner's notice pipe so the TUI thread performs all queue/turn mutations.
+- fix(session): hardened the hub HTTP surface — a constant-time CSRF comparison, a 30 s per-connection deadline so a slow-drip client cannot pin a handler slot, and shutdown-before-close ordering that can no longer signal a reused descriptor.
+- fix(session): `--record PATH` creates a fresh user-private file (`O_EXCL 0o600`) instead of truncating whatever exists, oversized frames are skipped with a warning rather than aborting the turn, and TUI/hub prompts are recorded via `Turn_runner.on_record` so every submission path lands in the replay.
+- fix(agent): tool `elapsed_ms` is measured between run start and the moment the tool body returns, not at result-delivery time, so scheduler queueing no longer inflates the timeline; stage details are truncated and secret-masked before journaling.
+- fix(tools): the `memory` tool no longer sits in the unrestricted default bucket — `list`/`get` are read-tier, `put`/`forget` are write-tier and the tool is session-grantable; `publish_web` preflight validates `attach` and reports the `stop` name correctly.
+- fix(extensions): a manifest missing a required field fails with `missing manifest field` instead of a raw `Not_found`; the `did you mean` suggestion list only proposes commands that are actually available in the current session.
+
 ## 2026-10-02
 
 - feat(session): recorded per-stage turn timing (model, tools, turn) as journaled `stage` entries with elapsed milliseconds, surfaced in `/entries` and `--output jsonl` step events, and carried `call_id`/`elapsed_ms` on tool lifecycle records — the step-level timeline needed for slowdown analysis.

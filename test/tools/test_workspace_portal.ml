@@ -224,9 +224,10 @@ let test_publish_cloudflared () =
       let text = Yojson.Basic.to_string json in
       assert (contains text "https://quick-99.trycloudflare.com");
       assert (contains text "\"backend\":\"cloudflared\"");
-      (* Random subdomain: the advertised name is the tunnel id, not the
-         requested name. *)
-      assert (contains text "\"name\":\"quick-99\"");
+      (* `name` is the requested tunnel name used by `stop`; `advertised`
+         carries the random subdomain the backend actually assigned. *)
+      assert (contains text "\"name\":\"ignored-name\"");
+      assert (contains text "\"advertised\":\"quick-99\"");
       let ic = open_in capture in
       let argv = really_input_string ic (in_channel_length ic) in
       close_in ic;
@@ -255,8 +256,8 @@ let test_publish_localhost_run () =
       let text = Yojson.Basic.to_string json in
       assert (contains text "https://abc123def.lhr.life");
       assert (contains text "\"backend\":\"localhost.run\"");
-      assert (contains text "\"name\":\"abc123def\"");
-      assert (contains text "requested");
+      assert (contains text "\"name\":\"wanted\"");
+      assert (contains text "\"advertised\":\"abc123def\"");
       let ic = open_in capture in
       let argv = really_input_string ic (in_channel_length ic) in
       close_in ic;

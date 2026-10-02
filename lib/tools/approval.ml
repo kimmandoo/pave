@@ -15,7 +15,8 @@ type decision = {
   reason : string option;
 }
 
-type command_rule = { match_text : string; policy : policy }
+type command_rule = { match_text : string; policy : policy;
+                      exact : bool }
 
 type resolution = Allowed | Denied of string | Requires_prompt of string option
 
@@ -137,6 +138,10 @@ let command_rule_matches command segments rule =
   match rule.policy with
   | Allow ->
       (match segments with
+       | [segment] when rule.exact ->
+           (* Persisted grants are exact-command rules: match the normalized
+              segment literally so `*` never widens a grant. *)
+           pattern = normalize segment
        | [segment] -> glob_matches pattern segment
        | _ -> false)
   | Prompt ->
@@ -213,7 +218,7 @@ type answer = Deny_once | Allow_once | Allow_for_session | Allow_always
 let session_grantable tool_name =
   List.mem tool_name [
     "web_search"; "web_fetch"; "write_file"; "edit_file"; "apply_edits";
-    "ast_edit"; "image_ocr" ]
+    "ast_edit"; "image_ocr"; "memory" ]
 
 (* Only an exact, fully reviewed shell command may be remembered across runs;
    the persisted rule matches the literal normalized command text. *)

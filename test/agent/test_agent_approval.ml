@@ -399,7 +399,7 @@ let () =
         "echo harmless && touch compound-denied.txt"])
       ~allow_shell:true ~approval_mode:A.Auto_all ~tool_approval:[]
       ~command_patterns:[{ A.match_text = "touch compound-denied.txt";
-        policy = A.Deny }]
+        policy = A.Deny; exact = false }]
       ~approve_tool:(fun _ -> incr compound_calls; true) ());
     expect "compound deny blocks before prompting" (!compound_calls = 0);
     expect "compound deny blocks every side effect"

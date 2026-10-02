@@ -15,6 +15,7 @@ let () =
   let open Pave.Interaction in
   let has_help help name =
     List.exists (fun line ->
+      let line = String.trim line in
       line = name || String.starts_with ~prefix:(name ^ " ") line)
       help in
   let check_capabilities ~session ~interactive =

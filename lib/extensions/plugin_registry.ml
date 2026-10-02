@@ -61,6 +61,10 @@ let parse_manifest path data =
     if not (List.mem name ["schemaVersion"; "name"; "version"; "skills";
         "commands"; "tools"; "installedFrom"; "category"]) then
       fail ("unexpected or missing manifest fields")) fields;
+  List.iter (fun required ->
+    if not (List.mem_assoc required fields) then
+      fail ("missing manifest field: " ^ required))
+    ["schemaVersion"; "name"; "version"; "skills"; "commands"; "tools"];
   if field fields "schemaVersion" <> `Int 1 then fail "unsupported manifest schemaVersion";
   let name = text "plugin name" (field fields "name") in
   let version_text = text "plugin version" (field fields "version") in

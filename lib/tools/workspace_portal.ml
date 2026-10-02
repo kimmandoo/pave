@@ -320,11 +320,12 @@ let publish ?cancel ?(env = Sys.getenv_opt)
                  "id", `String id;
                  "backend", `String (backend_name backend);
                  "url", `String url;
-                 "name", `String advertised;
+                 "name", `String name;
+                 "advertised", `String advertised;
                  "port", `Int port;
                  "note", `String
-                   ("Public until stopped with publish_web stop or \
-                     session exit." ^ caveat) ]
+                   ("Public until stopped with publish_web stop name=" ^ name ^
+                    " or session exit." ^ caveat) ]
 
 let stop manager ~id =
   Workspace_process.kill_job manager ~id;

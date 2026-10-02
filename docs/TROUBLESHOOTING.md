@@ -1,5 +1,12 @@
 # Troubleshooting
 
+### [2026-10-03] `dup3`/`pipe2` weak symbols crash OCaml processes built against the macOS 27 SDK
+
+- **Context / Symptom:** After rebuilding the local `_opam` switch on macOS 25.x with Xcode's MacOSX 27 SDK, every test that spawned a managed process failed with `Pave.Workspace_process.Error("process launcher exited before establishing a session")`. A minimal `Unix.fork ()` + `Unix.dup2` child died with `SIGBUS` (wait status `sig 10`); `Unix.pipe ~cloexec:true` showed the same.
+- **Root Cause:** `configure`'s `AC_CHECK_FUNC` probes `dup3`/`pipe2`/`accept4`, all newly declared in the macOS 27 SDK under `__API_AVAILABLE(macos(27.0) …)`. Autoconf link tests succeed because the symbols are weak imports, so OCaml 5.5.1 compiles the `HAS_DUP3`/`HAS_PIPE2`/`HAS_ACCEPT4` code paths; at runtime on macOS < 27 the weak address is nil and the first call crashes.
+- **Solution:** Rebuild the switch with the probes forced off: `ac_cv_func_dup3=no ac_cv_func_pipe2=no opam reinstall ocaml-compiler ocaml-base-compiler`. Verify `_opam/lib/ocaml/caml/s.h` shows `/* #undef HAS_DUP3 */` and `/* #undef HAS_PIPE2 */`.
+- **Prevention / Reference:** Any OCaml switch built with a newer SDK on an older macOS must pin `ac_cv_func_*=no` for every `__API_AVAILABLE(macos(27.0))` libc addition. This is a toolchain/environment problem, not a repo bug — do not "fix" `workspace_process.ml` for it.
+
 ### [2026-10-02] `pave hub` subcommand rejected its own name as an argument
 
 - **Context / Symptom:** `pave hub --session FILE --port N` exited with `unexpected argument: hub` and printed the hub usage line.

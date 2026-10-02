@@ -70,6 +70,9 @@ type t = {
   by_id : (string, entry) Hashtbl.t;
   mutable leaf : string option;
   mutable disk_size : int;
+  (* Guards the mutable chain state so a reader on another thread (the
+     session hub) cannot observe a torn mid-append view. *)
+  guard : Mutex.t;
 }
 
 let invalid text = raise (Protocol.Invalid_response ("invalid session journal: " ^ text))
@@ -664,8 +667,8 @@ let branch_entries_at t leaf =
         walk entry.parent_id (entry :: items) in
   walk leaf []
 
-let branch_entries t = branch_entries_at t t.leaf
-let entries t = List.rev t.records_rev
+let branch_entries t = Mutex.protect t.guard (fun () -> branch_entries_at t t.leaf)
+let entries t = Mutex.protect t.guard (fun () -> List.rev t.records_rev)
 let leaf_id t = t.leaf
 let parent_session t = match Protocol.member "parentSession" t.header with
   | `String id -> Some id | _ -> None
@@ -927,14 +930,15 @@ let unresolved_tool_calls entries =
 let missing_results entries = unresolved_tool_calls entries
 
 let append_entry t kind =
-  let entry = { id = fresh_id (); parent_id = t.leaf; timestamp = timestamp ();
-                step = t.next_step; kind } in
-  append_line t (entry_json entry);
-  t.next_step <- t.next_step + 1;
-  t.records_rev <- entry :: t.records_rev;
-  Hashtbl.add t.by_id entry.id entry;
-  t.leaf <- Some entry.id;
-  entry
+  Mutex.protect t.guard (fun () ->
+    let entry = { id = fresh_id (); parent_id = t.leaf; timestamp = timestamp ();
+                  step = t.next_step; kind } in
+    append_line t (entry_json entry);
+    t.next_step <- t.next_step + 1;
+    t.records_rev <- entry :: t.records_rev;
+    Hashtbl.add t.by_id entry.id entry;
+    t.leaf <- Some entry.id;
+    entry)
 
 
 let recovery_result (call : pending_tool_call) =
@@ -1401,7 +1405,7 @@ let load_journal path =
       next_step = 1 + List.fold_left (fun high (entry : entry) ->
         max high entry.step) 0 !records;
       records_rev = !records; by_id; leaf = !leaf;
-      disk_size = size })
+      disk_size = size; guard = Mutex.create () })
 
 let migrate_legacy ~cwd path =
   let fd = Unix.openfile path [ Unix.O_RDWR ] 0 in

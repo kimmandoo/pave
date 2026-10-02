@@ -85,7 +85,7 @@ let parse_approval_settings = function
               | `Assoc rule ->
                   check_unique_fields "command pattern field" rule;
                   List.iter (fun (name, _) ->
-                    if not (List.mem name ["match"; "approval"]) then
+                    if not (List.mem name ["match"; "approval"; "exact"]) then
                       invalid_arg ("unknown command pattern field " ^ name)) rule;
                   let match_text = match member "match" rule with
                     | Some (`String text) when String.trim text <> "" &&
@@ -98,7 +98,11 @@ let parse_approval_settings = function
                   let policy = match member "approval" rule with
                     | None -> invalid_arg "command pattern approval is required"
                     | Some value -> parse_policy value in
-                  { Approval.match_text = match_text; policy }
+                  let exact = match member "exact" rule with
+                    | None -> false
+                    | Some (`Bool value) -> value
+                    | Some _ -> invalid_arg "command pattern exact must be a boolean" in
+                  { Approval.match_text = match_text; policy; exact }
               | _ -> invalid_arg "command pattern must be an object") patterns
         | Some (`List _) -> invalid_arg "tools.commandPatterns allows at most 64 rules"
         | Some _ -> invalid_arg "tools.commandPatterns must be an array" in
@@ -295,8 +299,9 @@ let update_file ?(require_owner = false) ?(allow_custom = false) ~directory chan
             updated.tool_approval)]) @
         (if updated.command_patterns = [] then [] else
           ["commandPatterns", `List (List.map (fun (rule : Approval.command_rule) ->
-            `Assoc ["match", `String rule.match_text;
-              "approval", `String (Approval.string_of_policy rule.policy)])
+            `Assoc (["match", `String rule.match_text;
+              "approval", `String (Approval.string_of_policy rule.policy)] @
+              (if rule.exact then ["exact", `Bool true] else [])))
             updated.command_patterns)]) in
       let fields =
         option "default_provider" updated.default_provider

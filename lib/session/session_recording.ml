@@ -74,7 +74,7 @@ let close_recorder recorder =
   Fun.protect ~finally:(fun () -> Mutex.unlock recorder.mutex) (fun () ->
     if not recorder.closed then (
       recorder.closed <- true;
-      flush recorder.out))
+      close_out_noerr recorder.out))
 
 type player = {
   read_line : unit -> string;

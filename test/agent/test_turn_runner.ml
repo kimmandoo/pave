@@ -175,9 +175,80 @@ let queue_management_cases () =
     assert (List.rev !started = [first.submission]);
     assert (!cancellations = 1))
 
+let remote_submission_case () =
+  let module Runner = Pave.Turn_runner in
+  let events = ref [] and cancelled = ref 0 in
+  let recorded = ref [] and finished = ref 0 in
+  let release_first = Atomic.make false in
+  let owner = Thread.self () in
+  let run ~cancel (submission : Runner.submission) =
+    if submission.prompt = "first" then
+      while not (Atomic.get release_first) && not (cancel ()) do
+        Thread.delay 0.001
+      done in
+  let runner = Runner.create ~run
+    ~on_event:(function
+      | Runner.Turn_started { submission; _ } ->
+          assert (Thread.self () = owner);
+          events := ("started:" ^ submission.prompt) :: !events
+      | Runner.Turn_cancelled _ -> incr cancelled; incr finished
+      | Runner.Turn_completed _ ->
+          events := "completed" :: !events;
+          incr finished
+      | Runner.Turn_failed { error; _ } -> raise error
+      | _ -> failwith "unexpected remote event")
+    ~on_approve:(fun _ -> false)
+    ~on_queued:(fun _ -> ())
+    ~on_record:(fun (submission : Runner.submission) ->
+      recorded := submission.prompt :: !recorded) () in
+  Fun.protect ~finally:(fun () -> Runner.close runner) (fun () ->
+    let pump () =
+      let readable, _, _ = Unix.select [Runner.fd runner] [] [] 3. in
+      assert (readable <> []);
+      Runner.drain runner in
+    let wait_finished n =
+      let deadline = Unix.gettimeofday () +. 3. in
+      while !finished < n do
+        assert (Unix.gettimeofday () < deadline);
+        pump ()
+      done in
+    let drain_notice () =
+      let readable, _, _ = Unix.select [Runner.fd runner] [] [] 0.2 in
+      if readable <> [] then Runner.drain runner in
+    (* A foreign thread's submit must reach the owner via the pipe; the turn
+       events fire on the owner thread, not the submitter's. *)
+    let submitter = Thread.create (fun () ->
+      Runner.submit runner "remote-first") () in
+    Thread.join submitter;
+    wait_finished 1;
+    assert (List.rev !events = ["started:remote-first"; "completed"]);
+    assert (List.rev !recorded = ["remote-first"]);
+    events := []; recorded := [];
+    (* Remote submit while busy queues; remote cancel cancels the active turn. *)
+    Runner.submit runner "first";
+    drain_notice ();
+    assert (Runner.busy runner);
+    let submitter = Thread.create (fun () ->
+      Runner.submit runner "remote-second") () in
+    Thread.join submitter;
+    let deadline = Unix.gettimeofday () +. 3. in
+    while Runner.queued_count runner = 0 do
+      assert (Unix.gettimeofday () < deadline);
+      drain_notice ()
+    done;
+    assert (Runner.queued_count runner = 1);
+    let canceller = Thread.create (fun () -> Runner.cancel runner) () in
+    Thread.join canceller;
+    (* Cancel cancels the running turn; the queued submission then starts and
+       finishes, so two more turns complete. *)
+    wait_finished 3;
+    assert (List.mem "started:remote-second" !events);
+    assert (List.rev !recorded = ["first"; "remote-second"]))
+
 let () =
   shutdown_cases ();
   queue_management_cases ();
+  remote_submission_case ();
   let events = ref [] in
   let event value = events := value :: !events in
   let release_late_events = Atomic.make false in

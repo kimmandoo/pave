@@ -35,6 +35,9 @@ let head_cap = 16 * 1024
 let body_cap = 64 * 1024
 let max_connections = 32
 let io_timeout = 5.0
+(* Total wall-clock budget per connection; per-read timeouts alone cannot
+   stop a slow drip from holding a handler slot forever. *)
+let request_deadline = 30.0
 
 exception Http_error of int * string
 
@@ -239,9 +242,21 @@ let route t client request =
       write_response client 200 (`Assoc [ "ok", `Bool true ])
     else write_response client 405 (json_error "method_not_allowed")
   else begin
-    (* CSRF-token convention: header only, never a query parameter. *)
+    (* CSRF-token convention: header only, never a query parameter. The
+       comparison walks the full presented length so the byte position of a
+       mismatch does not leak through early exit. *)
+    let token_matches presented =
+      let n = String.length presented in
+      if n <> String.length t.token then false
+      else
+        let mismatch = ref 0 in
+        for i = 0 to n - 1 do
+          mismatch := !mismatch lor
+            (Char.code presented.[i] lxor Char.code t.token.[i])
+        done;
+        !mismatch = 0 in
     (match header_value request "x-pave-csrf-token" with
-     | Some presented when presented = t.token -> ()
+     | Some presented when token_matches presented -> ()
      | _ -> write_response client 403 (json_error "csrf");
        raise Exit);
     match request.meth, path with
@@ -286,19 +301,29 @@ let release t client =
       t.clients <- List.filter (fun fd -> fd <> client) t.clients)
 
 let serve_client t client =
+  (* The descriptor is deregistered and shut down before close so a stale
+     snapshot in [close] can never shutdown a reused fd number, and no path
+     closes an fd that is still listed as a client. *)
   Fun.protect ~finally:(fun () ->
       release t client;
+      (try Unix.shutdown client Unix.SHUTDOWN_ALL
+       with Unix.Unix_error _ -> ());
       (try Unix.close client with Unix.Unix_error _ -> ())) (fun () ->
       (try Unix.set_close_on_exec client with Unix.Unix_error _ -> ());
       (try
          Unix.setsockopt_float client Unix.SO_RCVTIMEO io_timeout;
          Unix.setsockopt_float client Unix.SO_SNDTIMEO io_timeout
        with Unix.Unix_error _ -> ());
+      (* Absolute per-connection deadline: the per-read timeout alone would
+         let a client drip bytes forever and pin a handler slot. *)
+      let deadline = Unix.gettimeofday () +. request_deadline in
       let safe_write status json =
         try write_response client status json with _ -> () in
       try
         let request = read_request client in
-        route t client request
+        if Unix.gettimeofday () > deadline then
+          raise (Http_error (408, "timeout"))
+        else route t client request
       with
       | Exit -> ()  (* a response was already written (e.g. csrf) *)
       | Http_error (status, message) -> safe_write status (json_error message)
@@ -351,21 +376,22 @@ let create ~port ~token ~session_id ~title ~read_entries ~read_pending ~submit (
 let port t = t.bound_port
 
 let close t =
-  let clients =
+  let closing =
     Mutex.protect t.lock (fun () ->
-        if not t.alive then None
+        if not t.alive then false
         else begin
           t.alive <- false;
-          Some t.clients
+          (* Shutdown under the lock: handlers cannot release (and then close)
+             an fd while we hold it, so each descriptor here is still open and
+             still refers to its client socket. *)
+          List.iter (fun client ->
+              try Unix.shutdown client Unix.SHUTDOWN_ALL
+              with Unix.Unix_error _ -> ()) t.clients;
+          true
         end) in
-  match clients with
-  | None -> ()  (* second close: listen fd may be reused; touch nothing *)
-  | Some clients ->
-    (* Shutdown wakes blocked readers; handlers remain the sole closers so no
-       descriptor is closed twice while still registered. *)
+  if closing then (
+    (* Handlers remain the sole closers, so no descriptor is closed twice
+       while still registered. *)
     (try Unix.shutdown t.listen Unix.SHUTDOWN_ALL
      with Unix.Unix_error _ -> ());
-    (try Unix.close t.listen with Unix.Unix_error _ -> ());
-    List.iter (fun client ->
-        try Unix.shutdown client Unix.SHUTDOWN_ALL
-        with Unix.Unix_error _ -> ()) clients
+    (try Unix.close t.listen with Unix.Unix_error _ -> ()))

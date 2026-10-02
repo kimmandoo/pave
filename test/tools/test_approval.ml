@@ -30,14 +30,15 @@ let () =
     (A.resolve ~mode:A.Ask_writes ~decision:(decision A.Write)
       ~user_policy:(Some A.Allow) = A.Allowed);
   let deny_rules = [
-    { A.match_text = "rm -rf *"; policy = A.Deny };
-    { A.match_text = "echo *"; policy = A.Allow }
+    { A.match_text = "rm -rf *"; policy = A.Deny; exact = false };
+    { A.match_text = "echo *"; policy = A.Allow; exact = false }
   ] in
   let compound_deny = A.command_decision deny_rules
     "echo safe && rm -rf /tmp/pave-marker" in
   expect "deny detects a destructive subcommand despite allow"
     (compound_deny.policy = Some A.Deny);
-  let allow_rule = [{ A.match_text = "git status*"; policy = A.Allow }] in
+  let allow_rule = [{ A.match_text = "git status*"; policy = A.Allow;
+                      exact = false }] in
   expect "allow recognizes one simple command"
     ((A.command_decision allow_rule "git status --short").policy = Some A.Allow);
   let compound_allow = A.command_decision allow_rule
@@ -45,7 +46,16 @@ let () =
   expect "allow cannot promote a compound command"
     (compound_allow.policy <> Some A.Allow &&
      compound_allow.tier = A.Exec);
-  let prompt_rule = [{ A.match_text = "rm *"; policy = A.Prompt }] in
+  let prompt_rule = [{ A.match_text = "rm *"; policy = A.Prompt;
+                       exact = false }] in
+  (* Exact rules (persisted w/Always grants) match the literal normalized
+     command; `*` inside them is data, not a wildcard. *)
+  let exact_rule = [{ A.match_text = "ls *.log"; policy = A.Allow;
+                      exact = true }] in
+  expect "exact allow matches the literal command"
+    ((A.command_decision exact_rule "ls *.log").policy = Some A.Allow);
+  expect "exact allow does not widen with *"
+    ((A.command_decision exact_rule "ls keep.log").policy <> Some A.Allow);
   expect "prompt pattern detects a later compound segment"
     ((A.command_decision prompt_rule "echo safe; rm file").policy = Some A.Prompt);
   expect "wildcards match without regex semantics"

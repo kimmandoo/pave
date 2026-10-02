@@ -57,6 +57,11 @@ type notice =
   | Approve_tool of int * Approval.request * approval * (unit -> bool)
   | Finished of int * completion
   | External of string
+  (* Submissions originate on the owning thread; producers on other
+     threads (e.g. the session hub) enqueue here so every queue/start
+     mutation stays on the thread that calls drain. *)
+  | Enqueue of queued_submission
+  | Cancel_remote
 
 type t = {
   read_fd : Unix.file_descr;
@@ -69,16 +74,19 @@ type t = {
   mutable approvals : approval list;
   steering : queued_submission Queue.t;
   follow_ups : queued_submission Queue.t;
+  pending : int Atomic.t;
   mutable worker : Thread.t option;
   mutable active_turn : turn option;
   mutable next_turn_id : int;
   mutable next_queue_id : int;
   mutable closed : bool;
+  owner : Thread.t;
   run : cancel:(unit -> bool) -> submission -> unit;
   on_event : event -> unit;
   on_approve : string -> bool;
   on_approve_tool : Approval.request -> bool;
   on_queued : int -> unit;
+  on_record : submission -> unit;
 }
 
 let with_guard t callback =
@@ -86,7 +94,7 @@ let with_guard t callback =
   Fun.protect ~finally:(fun () -> Mutex.unlock t.guard) callback
 
 let create ~run ~on_event ~on_approve ~on_queued
-    ?(on_approve_tool = fun _ -> false) () =
+    ?(on_approve_tool = fun _ -> false) ?(on_record = fun _ -> ()) () =
   let read_fd, write_fd = Unix.pipe () in
   Unix.set_close_on_exec read_fd;
   Unix.set_close_on_exec write_fd;
@@ -97,14 +105,16 @@ let create ~run ~on_event ~on_approve ~on_queued
     guard = Mutex.create (); notices = Queue.create ();
     drafts = Hashtbl.create 8; approvals = [];
     steering = Queue.create (); follow_ups = Queue.create ();
+    pending = Atomic.make 0;
     worker = None; active_turn = None;
     next_turn_id = 0; next_queue_id = 0; closed = false;
-    run; on_event; on_approve; on_approve_tool; on_queued }
+    owner = Thread.self ();
+    run; on_event; on_approve; on_approve_tool; on_queued; on_record }
 let fd t = t.read_fd
 let busy t = t.worker <> None
 
 
-let queued_count t = Queue.length t.steering + Queue.length t.follow_ups
+let queued_count t = Atomic.get t.pending
 
 let queued t =
   List.rev (Queue.fold (fun pending item -> item :: pending)
@@ -112,9 +122,10 @@ let queued t =
     t.follow_ups)
 
 let make_queued t kind submission =
-  let id = t.next_queue_id in
-  t.next_queue_id <- id + 1;
-  { id; kind; submission }
+  with_guard t (fun () ->
+    let id = t.next_queue_id in
+    t.next_queue_id <- id + 1;
+    { id; kind; submission })
 
 
 let emit_finish t turn_id = function
@@ -142,8 +153,26 @@ let worker_turn t =
     | _ -> None)
 
 (* Completion enqueue and cancellation share the guard, so the first one wins. *)
+let wake t =
+  let rec write () =
+    try ignore (Unix.write t.write_fd t.wake_byte 0 1)
+    with
+    | Unix.Unix_error (Unix.EINTR, _, _) -> write ()
+    | Unix.Unix_error ((Unix.EAGAIN | Unix.EPIPE | Unix.EBADF), _, _) -> () in
+  write ()
+
+let post_notice t notice =
+  let fresh = with_guard t (fun () ->
+    if t.closed then false
+    else (
+      let empty = Queue.is_empty t.notices in
+      Queue.add notice t.notices;
+      empty)) in
+  if fresh then wake t
+
+(* Completion enqueue and cancellation share the guard, so the first one wins. *)
 let notify t turn notice =
-  let wake = with_guard t (fun () ->
+  let accepted = with_guard t (fun () ->
     match t.active_turn with
     | Some active when not t.closed && active.id = turn.id ->
         let notice = match notice with
@@ -154,28 +183,11 @@ let notify t turn notice =
         Queue.add notice t.notices;
         empty
     | _ -> false) in
-  if wake then (
-    let rec write () =
-      try ignore (Unix.write t.write_fd t.wake_byte 0 1)
-      with
-      | Unix.Unix_error (Unix.EINTR, _, _) -> write ()
-      | Unix.Unix_error ((Unix.EAGAIN | Unix.EPIPE | Unix.EBADF), _, _) -> () in
-    write ())
+  if accepted then wake t
 
-let post t message =
-  let wake = with_guard t (fun () ->
-    if t.closed then false
-    else (
-      let empty = Queue.is_empty t.notices in
-      Queue.add (External message) t.notices;
-      empty)) in
-  if wake then (
-    let rec write () =
-      try ignore (Unix.write t.write_fd t.wake_byte 0 1)
-      with
-      | Unix.Unix_error (Unix.EINTR, _, _) -> write ()
-      | Unix.Unix_error ((Unix.EAGAIN | Unix.EPIPE | Unix.EBADF), _, _) -> () in
-    write ())
+let post t message = post_notice t (External message)
+
+let remote t = Thread.self () <> t.owner
 
 let message t text =
   Option.iter (fun turn -> notify t turn (Message (turn.id, text)))
@@ -268,6 +280,7 @@ let start t submission =
   if t.closed then invalid_arg "turn runner closed";
   let turn_id = t.next_turn_id in
   t.next_turn_id <- t.next_turn_id + 1;
+  t.on_record submission;
   t.on_event (Turn_started { turn_id; submission });
   let turn = { id = turn_id; cancelled = Atomic.make false;
     thread_id = None } in
@@ -295,31 +308,45 @@ let make_submission ?display_prompt ?(attachments = []) ?(paste_ranges = [])
   let display_prompt = Option.value display_prompt ~default:prompt in
   { prompt; display_prompt; attachments; paste_ranges }
 
+(* A submission arriving on another thread is marshalled through the notice
+   pipe: the owning thread performs the queue/start mutation inside drain,
+   keeping queues, turn ids and TUI events single-threaded. *)
 let follow_up t ?display_prompt ?(attachments = []) ?(paste_ranges = []) text =
   if t.closed then invalid_arg "turn runner closed";
   let submission = make_submission ?display_prompt ~attachments
       ~paste_ranges text in
-  if busy t then (
-    Queue.add (make_queued t Follow_up submission) t.follow_ups;
+  if remote t then
+    post_notice t (Enqueue (make_queued t Follow_up submission))
+  else if busy t then (
+    let queued = make_queued t Follow_up submission in
+    Queue.add queued t.follow_ups;
+    ignore (Atomic.fetch_and_add t.pending 1);
     t.on_queued (queued_count t))
   else start t submission
 
 let submit = follow_up
 
-let cancel t =
+let cancel_local t =
   let requests = with_guard t (fun () ->
     Option.iter (fun turn -> Atomic.set turn.cancelled true) t.active_turn;
     t.approvals) in
   List.iter (fun request -> answer request false) requests
 
+let cancel t =
+  if remote t then post_notice t Cancel_remote else cancel_local t
+
 let steer t ?display_prompt ?(attachments = []) ?(paste_ranges = []) text =
   if t.closed then invalid_arg "turn runner closed";
   let submission = make_submission ?display_prompt ~attachments
       ~paste_ranges text in
-  if busy t then (
-    Queue.add (make_queued t Steering submission) t.steering;
+  if remote t then
+    post_notice t (Enqueue (make_queued t Steering submission))
+  else if busy t then (
+    let queued = make_queued t Steering submission in
+    Queue.add queued t.steering;
+    ignore (Atomic.fetch_and_add t.pending 1);
     t.on_queued (queued_count t);
-    cancel t)
+    cancel_local t)
   else start t submission
 
 let remove_queued t ~id =
@@ -334,9 +361,11 @@ let remove_queued t ~id =
         else Queue.add item queue
       done;
       !found) in
-  match remove t.steering with
-  | Some _ as found -> found
-  | None -> remove t.follow_ups
+  let selected = match remove t.steering with
+    | Some _ as found -> found
+    | None -> remove t.follow_ups in
+  Option.iter (fun _ -> ignore (Atomic.fetch_and_add t.pending (-1))) selected;
+  selected
 
 let take_queued t ~id =
   let selected = remove_queued t ~id in
@@ -352,9 +381,10 @@ let prioritize_queued t ~id ~interrupt =
         let remaining = Queue.create () in
         Queue.transfer t.steering remaining;
         Queue.add { selected with kind = Steering } t.steering;
+        ignore (Atomic.fetch_and_add t.pending 1);
         Queue.transfer remaining t.steering;
         t.on_queued (queued_count t);
-        if interrupt then cancel t)
+        if interrupt then cancel_local t)
       else (
         start t selected.submission;
         t.on_queued (queued_count t));
@@ -377,7 +407,9 @@ let dequeue_last t =
     | None -> pop_last t.follow_ups in
   (match queued with
   | None -> ()
-  | Some _ -> t.on_queued (queued_count t));
+  | Some _ ->
+      ignore (Atomic.fetch_and_add t.pending (-1));
+      t.on_queued (queued_count t));
   queued
 
 let restore_dequeued t queued =
@@ -385,6 +417,7 @@ let restore_dequeued t queued =
   (match queued.kind with
   | Steering -> Queue.add queued t.steering
   | Follow_up -> Queue.add queued t.follow_ups);
+  ignore (Atomic.fetch_and_add t.pending 1);
   t.on_queued (queued_count t)
 let drain_pipe t =
   let bytes = t.drain_bytes in
@@ -404,6 +437,20 @@ let drain t =
     | None -> ()
     | Some (External message) ->
         t.on_event (Background_notice { message });
+        handle ()
+    | Some (Enqueue queued) ->
+        if t.closed then ()
+        else if busy t then (
+          (match queued.kind with
+           | Steering -> Queue.add queued t.steering
+           | Follow_up -> Queue.add queued t.follow_ups);
+          ignore (Atomic.fetch_and_add t.pending 1);
+          t.on_queued (queued_count t);
+          if queued.kind = Steering then cancel_local t)
+        else start t queued.submission;
+        handle ()
+    | Some Cancel_remote ->
+        cancel_local t;
         handle ()
     | Some (Message (id, text)) ->
         if not (cancel_requested t id) then
@@ -472,6 +519,7 @@ let drain t =
                   Some (Queue.take t.follow_ups)
                 else None in
               Option.iter (fun queued ->
+                ignore (Atomic.fetch_and_add t.pending (-1));
                 start t queued.submission;
                 t.on_queued (queued_count t)) queued));
         handle () in
@@ -481,6 +529,7 @@ let close t =
   if not t.closed then (
     Queue.clear t.steering;
     Queue.clear t.follow_ups;
+    Atomic.set t.pending 0;
     cancel t;
     (match t.worker with Some worker -> Thread.join worker | None -> ());
     with_guard t (fun () -> t.closed <- true);

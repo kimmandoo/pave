@@ -2851,7 +2851,7 @@ let requires_explicit_approval ~name ~args =
        | _ -> false)
   | "publish_web" ->
       (match field "action" args with
-       | `String "publish" -> true
+       | `String ("publish" | "attach") -> true
        | _ -> false)
   | "read_file" ->
       (match field "path" args with
@@ -2882,7 +2882,7 @@ let non_reversible_tool ~name ~args =
        | _ -> false)
   | "publish_web" ->
       (match field "action" args with
-       | `String "publish" -> true
+       | `String ("publish" | "attach") -> true
        | _ -> false)
   | _ -> false
 
@@ -3216,6 +3216,10 @@ let approval_decision ~command_patterns ~name ~args =
       (match field "action" args with
        | `String "list" -> tier Approval.Read
        | _ -> tier Approval.Exec)
+  | "memory" ->
+      (match field "action" args with
+       | `String ("list" | "get") -> tier Approval.Read
+       | _ -> tier Approval.Write)
   | "ssh_write" | "write_file" | "edit_file" | "apply_edits" | "ast_edit"
   | "worktree_create" | "worktree_remove" | "clipboard_write" ->
       tier Approval.Write
@@ -3961,14 +3965,14 @@ let prepare ?cancel ?context ~root ~name ~args () =
       | _ -> ());
     if name = "publish_web" then (
       match optional_string "action" "" args with
-      | "publish" ->
-          ignore (Workspace_portal.detect_portal ());
-          ignore (optional_int "port" 0 ~minimum:1 ~maximum:65535 args);
+      | "publish" | "attach" ->
+          ignore (Workspace_portal.detect_backend ());
+          (if optional_string "action" "" args = "publish" then
+            ignore (optional_int "port" 0 ~minimum:1 ~maximum:65535 args));
           (match optional_string "name" "" args with
            | "" -> ()
            | value -> ignore (Workspace_portal.publish_name value))
       | "stop" -> ignore (required_string "name" args)
-      | "list" -> ()
       | _ -> ());
     if name = "start_process" then (
       Workspace_process.validate_id (required_string "id" args);

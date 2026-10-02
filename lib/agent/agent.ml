@@ -176,6 +176,14 @@ let emit_stage t name ~since ?detail () =
   match t.on_stage with
   | None -> ()
   | Some notify ->
+      (* Details may embed provider error text; cap them and run them through
+         the secret mask before they reach the journal or a recording. *)
+      let detail = Option.map (fun detail ->
+        let detail = match t.secret_mask with
+          | Some mask -> Secret_mask.redact mask detail
+          | None -> detail in
+        if String.length detail <= 512 then detail
+        else String.sub detail 0 512 ^ "…") detail in
       (try notify { name; elapsed_ms = milliseconds since; detail }
        with _ -> ())
 
@@ -419,6 +427,9 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
           }) in
         let calls = Array.of_list calls in
         let tool_started_at = Array.make (Array.length calls) 0. in
+        (* End time is captured when the tool body returns, so queue/delivery
+           latency in the scheduler does not inflate the reported duration. *)
+        let tool_ended_at = Array.make (Array.length calls) 0. in
         let skipped result start =
           for index = start to Array.length calls - 1 do
             let call = calls.(index) in
@@ -428,9 +439,9 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
         let cancellation_requested = ref false and scheduler_failure = ref None in
         let elapsed index =
           let start = tool_started_at.(index) in
-          if start <= 0. then None
-          else Some (max 0 (int_of_float
-            ((Unix.gettimeofday () -. start) *. 1000.))) in
+          let stop = tool_ended_at.(index) in
+          if start <= 0. || stop <= 0. then None
+          else Some (max 0 (int_of_float ((stop -. start) *. 1000.))) in
         let make_task index (call : Protocol.tool_call) :
             (Protocol.content_block list, string) result Tool_scheduler.task =
           let call = match t.secret_mask with
@@ -619,6 +630,8 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
               | Some execute -> execute
               | None -> assert false in
             tool_started_at.(index) <- Unix.gettimeofday ();
+            Fun.protect ~finally:(fun () ->
+              tool_ended_at.(index) <- Unix.gettimeofday ()) (fun () ->
             try
               Provider.check_cancel cancel;
               let decision = Tools.approval_decision
@@ -642,7 +655,12 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
                       `String call.name) t.external_tools in
                   let explicit_prompt = external_tool || Tools.requires_explicit_approval
                     ~name:call.name ~args:call.arguments in
-                  let prompt_required = delegate || shell || explicit_prompt ||
+                  (* A persisted exact-command Allow rule is the recorded user
+                     grant; it exempts the per-command shell prompt. *)
+                  let rule_allows = decision.Approval.policy = Some Approval.Allow in
+                  let prompt_required = delegate ||
+                    (explicit_prompt && not rule_allows) ||
+                    (shell && not rule_allows) ||
                     (match resolved with
                      | Approval.Requires_prompt _ -> true
                      | _ -> false) in
@@ -770,7 +788,7 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
             with
             | Provider.Cancelled -> raise Provider.Cancelled
             | Tools.Cancelled -> raise Tools.Cancelled
-            | exn -> Error ("Error: " ^ Printexc.to_string exn) in
+            | exn -> Error ("Error: " ^ Printexc.to_string exn)) in
           { Tool_scheduler.mode = Tools.execution_mode call.name;
             prepare; run } in
         let tasks = Array.mapi make_task calls in

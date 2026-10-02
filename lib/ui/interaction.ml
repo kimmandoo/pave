@@ -311,6 +311,11 @@ let parse ?(session = true) ?(interactive = true) ?(subagents = false)
     match List.find_opt (fun item -> item.name = name)
       (commands @ external_commands) with
     | None ->
+        (* Suggest only commands that are actually available: naming a hidden
+           command here would leak its existence to users who cannot run it. *)
+        let candidates =
+          List.filter (available ~session ~interactive ~subagents)
+            (commands @ external_commands) in
         let closest =
           List.fold_left (fun (best_name, best_score) item ->
             let limit = min (String.length name) (String.length item.name) in
@@ -319,7 +324,7 @@ let parse ?(session = true) ?(interactive = true) ?(subagents = false)
               else i in loop 0 in
             if score > best_score then (item.name, score)
             else (best_name, best_score)) ("", 0)
-            (commands @ external_commands) in
+            candidates in
         let closest = fst closest in
         Unknown (line ^ (if closest = "" then ""
           else " (did you mean " ^ closest ^ "?)"))
@@ -369,20 +374,40 @@ let parse ?(session = true) ?(interactive = true) ?(subagents = false)
         | A_retry, No_argument -> Retry
         | A_branch, Required_argument id -> Branch id
         | A_fork, Optional_argument text ->
+            (* until=STEP is a token; the remaining text is the path verbatim
+               so spaced journal paths keep working. *)
+            let parts text =
+              let length = String.length text in
+              let rec scan index =
+                if index >= length then []
+                else if is_whitespace_or_control text.[index] then
+                  scan (index + 1)
+                else
+                  let last = ref index in
+                  while !last + 1 < length &&
+                    not (is_whitespace_or_control text.[!last + 1]) do
+                    incr last
+                  done;
+                  String.sub text index (!last - index + 1) :: scan (!last + 1)
+              in scan 0 in
             let path, until = match text with
               | None -> None, None
               | Some text ->
-                  let parts = List.filter (fun part -> part <> "")
-                    (String.split_on_char ' ' text) in
                   List.fold_left (fun (path, until) part ->
                     if String.starts_with ~prefix:"until=" part then
                       (match int_of_string_opt
                          (String.sub part 6 (String.length part - 6)) with
                        | Some step when step > 0 -> path, Some step
                        | _ -> invalid_arg "until= expects a positive step number")
-                    else if path = None then Some part, until
-                    else invalid_arg "/fork accepts a path and an optional until=STEP")
-                    (None, None) parts in
+                    else
+                      let path = match path with
+                        | None -> part
+                        | Some path -> path ^ " " ^ part in
+                      Some path, until)
+                    (None, None) (parts text) in
+            let path = match path with
+              | None -> None
+              | Some path -> Some (require_path "/fork" path) in
             Fork { path; until }
         | A_tools, Optional_argument selected -> Tools selected
         | A_context, No_argument -> Context
