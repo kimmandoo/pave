@@ -2,6 +2,7 @@
 
 ## 2026-10-02
 
+- chore(release): published v0.1.79 for Linux and macOS on x86_64 and ARM64 after native tests, and verified public archive checksums, archive contents and the installer's latest-release discovery.
 - fix(provider): kept streaming transport failures reportable — a curl failure that was not retried (or a first-byte timeout after the last attempt) was swallowed or degraded to `missing HTTP response status`; it now raises its own `curl failed (exit status N)` / first-byte timeout message.
 - fix(provider): kept the results of two same-id tool calls inside one assistant turn attached to the right calls when sanitizing a transcript (the first result was re-pointed at the renamed duplicate), and built the sanitized message list without a quadratic append.
 - fix(tools): let `publish_web` publish a name again after its tunnel was stopped or failed instead of failing with `process job id is already in use`, and reported a still-running tunnel of the same name explicitly.
