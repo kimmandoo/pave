@@ -339,13 +339,18 @@ let rec accept_loop t =
       accept_loop t
     end
     else begin
-      (* Fail closed when saturated or shutting down. *)
-      (try
-         Unix.setsockopt_float client Unix.SO_SNDTIMEO io_timeout;
-         write_response client 503 (json_error "busy")
-       with _ -> ());
-      (try Unix.close client with Unix.Unix_error _ -> ());
-      if is_alive t then accept_loop t
+      (* A saturated hub answers 503; a closing hub tears the connection down
+         silently — a half-open socket that never joined must not observe a
+         response after close. *)
+      if is_alive t then (
+        (try
+           Unix.setsockopt_float client Unix.SO_SNDTIMEO io_timeout;
+           write_response client 503 (json_error "busy")
+         with _ -> ());
+        (try Unix.close client with Unix.Unix_error _ -> ());
+        accept_loop t)
+      else
+        (try Unix.close client with Unix.Unix_error _ -> ())
     end
   | None ->
     if is_alive t then begin
