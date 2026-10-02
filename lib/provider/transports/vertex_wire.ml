@@ -135,10 +135,24 @@ let untag_state ~model (msg : message) =
           fields)) }
   | _ -> invalid "malformed native state"
 
+(* Vertex honors per-category safety thresholds; default them to OFF so the
+   tool-use transcript cannot be blocked by content gating. *)
+let safety_settings =
+  let category name = `Assoc [ "category", `String name;
+    "threshold", `String "OFF" ] in
+  [ category "HARM_CATEGORY_HATE_SPEECH";
+    category "HARM_CATEGORY_DANGEROUS_CONTENT";
+    category "HARM_CATEGORY_SEXUALLY_EXPLICIT";
+    category "HARM_CATEGORY_HARASSMENT" ]
+
 let request ~model ?thinking messages tools =
   ignore (model_id model);
-  map_contents (Gemini_wire.request ~model ?thinking
-    (List.map (untag_state ~model) messages) tools)
+  let body = map_contents (Gemini_wire.request ~model ?thinking
+    (List.map (untag_state ~model) messages) tools) in
+  match body with
+  | `Assoc fields when not (List.mem_assoc "safetySettings" fields) ->
+      `Assoc (fields @ [ "safetySettings", `List safety_settings ])
+  | _ -> body
 
 let parse_completion ~model json =
   ignore (model_id model);

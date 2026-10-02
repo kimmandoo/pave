@@ -8,6 +8,7 @@
 - fix(provider): sent the GitHub Copilot vision header, carried Bedrock image tool results as `ImageData` protos, emitted a single `content: null` on Z.AI assistant turns, fell back to `us-east-1` for unsigned AWS regions, and defaulted Azure endpoints to `api-version=v1`.
 - fix(provider): continued streamed tool calls whose deltas omit `index`, accepted arguments delivered as a complete object, and read Mistral-style content part lists.
 - fix(provider): mapped Ollama `minimal`/`xhigh` effort to the `low`/`high` wire values instead of a bare `true`.
+- fix(provider): sent `safetySettings: OFF` on Google Vertex requests so agentic tool transcripts are not blocked by content gating.
 
 ## 2026-10-01
 
