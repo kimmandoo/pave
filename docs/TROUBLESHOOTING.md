@@ -967,3 +967,10 @@
 - **Solution:** The idle limit applies only inside a frame; waiting for the next message uses the 120 s operation bound plus slack, with cancellation still polled every 250 ms. The reverse index stores the forward key, and the profile is removed when spawn fails. Regression tests `test_long_silent_response` and `test_context_destroyed` failed before the fix.
 - **Prevention / Reference:** Keep liveness timeouts separate from per-operation deadlines when a protocol answers asynchronously. `dune exec test/test_workspace_browser.exe` covers both.
 
+### [2026-10-02] Retry wrapper swallowed streaming transport errors
+
+- **Context / Symptom:** After the transient-retry change, a streamed request whose curl exited with an unlisted status (for example 23) returned as if finished, and an exhausted retry on exit 7 or a first-byte timeout reported `missing HTTP response status` instead of the transport cause.
+- **Root Cause:** The `post_stream` exception handlers returned a boolean "retry?" and the fall-through path then read the dumped headers; a handler that answered `false` or ran out of attempts never re-raised the original `Provider_error`. Separately, the sanitizer cleared its duplicate-id rewrite queue per call, so two same-id calls in one turn lost the first call's pending entry and the results swapped.
+- **Solution:** Handlers raise the original error unless a retry is both applicable and still allowed; the rewrite queues are cleared once per assistant turn. `test_provider_retry` and `test_sanitize` case 10 failed before the fix. `publish_web` also needed `Workspace_process.release_finished` because finished job records keep their id.
+- **Prevention / Reference:** When an exception handler decides "retry or not", make the not-retry arm re-raise explicitly rather than falling through to shared post-processing. `test_devin_binary_http` is timing-sensitive and failed intermittently under load (4 s total-deadline case); rerun it alone before treating a failure as a regression.
+

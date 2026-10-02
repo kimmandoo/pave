@@ -2,6 +2,9 @@
 
 ## 2026-10-02
 
+- fix(provider): kept streaming transport failures reportable — a curl failure that was not retried (or a first-byte timeout after the last attempt) was swallowed or degraded to `missing HTTP response status`; it now raises its own `curl failed (exit status N)` / first-byte timeout message.
+- fix(provider): kept the results of two same-id tool calls inside one assistant turn attached to the right calls when sanitizing a transcript (the first result was re-pointed at the renamed duplicate), and built the sanitized message list without a quadratic append.
+- fix(tools): let `publish_web` publish a name again after its tunnel was stopped or failed instead of failing with `process job id is already in use`, and reported a still-running tunnel of the same name explicitly.
 - fix(provider): respected the model's advertised output ceiling instead of always sending `max_tokens: 4096`, threaded `thinking` effort into Anthropic Messages, OpenAI Responses/Chat, Codex, Gemini, Vertex and Ollama requests, and kept streaming responses alive while keep-alive bytes flow even without parsed events.
 - fix(provider): made Anthropic prompt caching a valid request — breakpoints anchor on the last system block, the last tool definition and the newest message's markable block; root `oneOf`/`anyOf`/`allOf` spill into the tool description; signed thinking/redacted blocks are preserved for replay; and `pause_turn`/`stop_sequence`/`model_context_window_exceeded` stop reasons are honored.
 - fix(provider): replayed assistant text on OpenAI Responses as a typed `output_text` message, read `output_text` items back in streamed completions, accepted bare `data:` SSE events and a leading UTF-8 BOM, tolerated server-side item kinds and `finish_reason` aliases, and reported DeepSeek/Gemini cache-hit token spellings.

@@ -570,14 +570,11 @@ let sanitize_messages (messages : message list) : message list =
   let stage2 = List.map (fun (msg : message) ->
     match msg.role with
     | "assistant" ->
+        (* A new turn clears the leftover rewrite queues: an older turn's
+           expected result never arrived, so a later real result belongs to
+           this turn. Calls inside one turn must keep their queued order. *)
+        Hashtbl.iter (fun _ queue -> Queue.clear queue) rename_map;
         let calls = List.map (fun (call : tool_call) ->
-          (* A redeclared call id clears the leftover rewrite queue: an older
-             duplicate's expected result never arrived, so a later real result
-             belongs to this occurrence. *)
-          (match Hashtbl.find_opt rename_map call.id with
-           | Some queue when not (Queue.is_empty queue) ->
-               Queue.clear queue
-           | _ -> ());
           match Hashtbl.find_opt seen call.id with
           | None -> Hashtbl.add seen call.id 1; enqueue call.id None; call
           | Some count ->
@@ -656,4 +653,4 @@ let sanitize_messages (messages : message list) : message list =
         flush ();
         Queue.add msg out) stage2;
   flush ();
-  Queue.fold (fun acc msg -> acc @ [msg]) [] out
+  List.of_seq (Queue.to_seq out)

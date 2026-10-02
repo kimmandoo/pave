@@ -693,6 +693,11 @@
  (modules test_browser_live)
  (libraries pave unix yojson threads))
 (test
+ (name test_provider_retry)
+ (modules test_provider_retry)
+ (libraries pave unix yojson))
+
+(test
  (name test_sanitize)
  (modules test_sanitize)
  (libraries pave unix yojson))

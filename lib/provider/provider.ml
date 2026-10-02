@@ -738,7 +738,12 @@ let post_stream ?max_request_bytes ?(local = false) ?cancel ~endpoint ~headers
              | None -> not !forwarded)
           with
           | Stream_complete -> false
-          | Stream_timeout `First_byte -> not !forwarded
+          | Stream_timeout `First_byte ->
+              if not !forwarded && attempts_allowed n then true
+              else
+                raise (Provider_error (Printf.sprintf
+                  "Transport error: provider stream timed out before the first response data byte (upload and response wait exceeded %d s)"
+                  buffered_max_seconds))
           | Stream_timeout `Idle ->
               raise (Provider_error (Printf.sprintf
                 "Transport error: provider stream stalled after response data (no data for %d s)"
@@ -758,7 +763,9 @@ let post_stream ?max_request_bytes ?(local = false) ?cancel ~endpoint ~headers
                   String.sub message (String.length prefix)
                     (String.length message - String.length prefix - 1)
                 else "" in
-              transient_curl_status code && not !forwarded
+              if transient_curl_status code && not !forwarded
+                 && attempts_allowed n then true
+              else raise (Provider_error message)
           in
         if retry && attempts_allowed n then (
           Unix.sleepf (retry_delay_seconds n);

@@ -1,5 +1,15 @@
 # Work checkpoint
 
+## Current session — review of the last five commits and v0.1.79 release
+
+- **Date:** 2026-10-02
+- **Active task:** Reviewed `002fd24`..`bac2dcb` (provider audit, Ollama/Vertex tweaks, transcript sanitizer + retries, `publish_web`), fixed the defects found, then released v0.1.79. Start: `main` five commits ahead of origin, clean tree.
+- **Fixes:** (1) `post_stream` retry handlers swallowed non-retried curl failures and degraded exhausted retries to `missing HTTP response status`. (2) `sanitize_messages` re-pointed the first result of two same-id calls in one turn at the renamed duplicate (queue cleared per call; now per turn) and used a quadratic list append. (3) `publish_web` could not republish a name after `stop`/failure (`process job id is already in use`); added `Workspace_process.release_finished`.
+- **Changed files:** `lib/provider/provider.ml`, `lib/core/protocol.ml`, `lib/tools/{workspace_portal,workspace_process}.ml`, `test/provider/test_provider_retry.ml` (new), `test/core/test_sanitize.ml`, `test/tools/test_workspace_portal.ml`, `test/dune`, `CHANGELOG.md`, `docs/{TROUBLESHOOTING,WORK_CHECKPOINT}.md`.
+- **Verification:** Each new regression failed before its fix. `opam exec -- dune build @install` and `dune runtest --force -j 1` results are recorded in the release step below. `test_devin_binary_http` (untouched by these commits) failed once under load in a parallel run and passed on reruns; treated as a timing flake.
+- **Not reviewed in depth:** wire-level details of `002fd24` beyond its own tests; `Retry-After` is not honored on 429, and a first-byte/curl-28 timeout on non-streaming `post_json` is retried (up to 3× the wait) by design.
+- **Exact next action:** See the release record appended below once published.
+
 ## Current session — provider request/response audit against the porting reference
 
 - **Date:** 2026-10-02

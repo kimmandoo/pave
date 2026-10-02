@@ -752,6 +752,16 @@ let prune_records_locked manager =
     match candidate with Some job -> remove_job_locked manager job
     | None -> fail "too many retained process jobs")
 
+(* Frees an id held by a finished record so it can start again; returns false
+   when the job is still live. Unknown ids are free. *)
+let release_finished manager ~id =
+  validate_id id;
+  with_lock manager.lock (fun () ->
+    match Hashtbl.find_opt manager.jobs id with
+    | None -> true
+    | Some job when job.worker_done -> remove_job_locked manager job; true
+    | Some _ -> false)
+
 let start_internal manager ~id ?(cwd = None) ?(environment = [])
     ?(inherit_environment = true) ?timeout_seconds
     ?(output_limit = default_output_limit) ?(pty_mode = false)

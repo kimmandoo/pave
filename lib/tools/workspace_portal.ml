@@ -77,6 +77,8 @@ let ready_regex = "service ready at \\|\"public_url\""
 
 let publish ?cancel manager ~id ~port ~name =
   let executable = detect_portal () in
+  if not (Workspace_process.release_finished manager ~id) then
+    fail ("tunnel " ^ name ^ " is already running; stop it first");
   let arguments = ["expose"; string_of_int port; "--name"; name] in
   Workspace_process.start manager ~id ~program:executable ~arguments ();
   let ready =

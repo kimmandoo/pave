@@ -97,4 +97,24 @@ let () =
   assert (ids out = ["one"]);
   assert (texts out = ["a"; "r1"; "b"])
 
+(* 10. Two calls sharing an id inside one turn keep their results in order:
+       the first result stays with the first call, the second follows the
+       renamed duplicate. *)
+let () =
+  let msgs = [ user "a";
+    assistant [call ~id:"same" (); call ~id:"same" ()];
+    result ~id:"same" "first"; result ~id:"same" "second" ] in
+  let out = P.sanitize_messages msgs in
+  assert (call_ids out = ["same"; "same_dup1"]);
+  assert (ids out = ["same"; "same_dup1"]);
+  let outcome id =
+    List.find_map (fun (m : P.message) ->
+      if m.tool_call_id = Some id then
+        (match m.tool_result_content with
+         | Some [P.Text text] -> Some text
+         | _ -> None)
+      else None) out in
+  assert (outcome "same" = Some "first");
+  assert (outcome "same_dup1" = Some "second")
+
 let () = print_endline "sanitize_messages: ok"

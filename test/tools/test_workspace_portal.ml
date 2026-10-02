@@ -55,6 +55,21 @@ let test_publish_list_stop () =
       let stopped = Yojson.Basic.to_string (Portal.stop manager ~id:"portal:demo") in
       assert (contains stopped "stopped")))
 
+(* A stopped or failed tunnel leaves a finished job record; publishing the
+   same name again must replace it, while a live tunnel keeps refusing. *)
+let test_republish_after_stop () =
+  with_fake_portal (fun () ->
+    let manager = Process.create_manager () in
+    Fun.protect ~finally:(fun () -> Process.close_manager manager) (fun () ->
+      let publish () =
+        Yojson.Basic.to_string
+          (Portal.publish manager ~id:"portal:again" ~port:3000 ~name:"again") in
+      assert (contains (publish ()) "published");
+      (try ignore (publish ()); assert false with Portal.Error _ -> ());
+      ignore (Portal.stop manager ~id:"portal:again");
+      assert (contains (publish ()) "published");
+      ignore (Portal.stop manager ~id:"portal:again")))
+
 let test_publish_name_validation () =
   assert (Portal.publish_name "my-app-1" = "my-app-1");
   (try ignore (Portal.publish_name "bad name"); assert false
@@ -65,5 +80,6 @@ let test_publish_name_validation () =
 let () =
   test_detect_and_url ();
   test_publish_list_stop ();
+  test_republish_after_stop ();
   test_publish_name_validation ();
   print_endline "workspace_portal: ok"
