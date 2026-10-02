@@ -11,14 +11,20 @@ type tool_event =
   | Tool_executing of { call_id : string; name : string }
   | Tool_updated of { call_id : string; name : string; received_bytes : int }
   | Tool_settled of {
-      call_id : string; name : string; result : string; is_error : bool
+      call_id : string; name : string; result : string; is_error : bool;
+      elapsed_ms : int option
     }
   | Tool_aborted of {
       call_id : string;
       name : string;
       result : string;
       side_effects_may_have_occurred : bool;
+      elapsed_ms : int option;
     }
+
+(* Stage events journal one named phase's elapsed time (turn boundary, model
+   request, tool execution); the consumer persists them as timeline records. *)
+type stage = { name : string; elapsed_ms : int; detail : string option }
 
 type draft_metadata = {
   scoped_key : string;
@@ -43,13 +49,14 @@ type t = {
   validate_external_tool : (name:string -> args:Yojson.Basic.t ->
     (unit, string) result) option;
   external_approval_details : (string -> string list) option;
-  delegate_task : (cancel:(unit -> bool) -> label:string -> task:string -> string) option;
+  delegate_task : (cancel:(unit -> bool) -> label:string -> task:string ->
+    model:string option -> string) option;
   stream : bool;
   preview_tools : bool;
   mutable request_serial : int;
   approval_mode : Approval.mode;
   tool_approval : (string * Approval.policy) list;
-  command_patterns : Approval.command_rule list;
+  mutable command_patterns : Approval.command_rule list;
   approve_command : string -> bool;
   approve_tool : (Approval.request -> bool) option;
   system : string;
@@ -62,6 +69,7 @@ type t = {
   on_phase : (phase -> unit) option;
   on_tool_event : (tool_event -> unit) option;
   on_workspace_effect : (workspace_effect -> unit) option;
+  on_stage : (stage -> unit) option;
   before_request : (cancel:(unit -> bool) option ->
     system:string -> messages:Protocol.message list ->
     tools:Yojson.Basic.t list -> Protocol.message list option) option;
@@ -76,7 +84,7 @@ let create ~provider ~root ~system ?workspace_context
     ?external_approval_details
     ?(approval_mode = Approval.Ask_exec) ?(tool_approval = [])
     ?(command_patterns = []) ?(approve_command = fun _ -> false)
-    ?approve_tool ?on_usage ?on_phase ?on_tool_event ?on_workspace_effect
+    ?approve_tool ?on_usage ?on_phase ?on_tool_event ?on_stage ?on_workspace_effect
     ?(on_change = fun _ -> ())
     ?(on_delta = fun _ -> ()) ~on_event () =
   let redact = match secret_mask with
@@ -93,13 +101,14 @@ let create ~provider ~root ~system ?workspace_context
     approve_tool = Option.map (fun approve (request : Approval.request) ->
       approve { request with
         tool_name = redact request.tool_name; impact = redact request.impact;
+        trigger = request.trigger;
         details = List.map redact request.details;
         reason = Option.map redact request.reason }) approve_tool;
     before_request;
     history_rev = List.rev history; scoped_pending = [];
     on_change; on_delta = (fun text -> on_delta (redact text));
     on_event = (fun text -> on_event (redact text));
-    on_usage; on_phase;
+    on_usage; on_phase; on_stage;
     on_tool_event = Option.map (fun notify event ->
       let event = match event with
         | Tool_draft _ | Tool_draft_ended _ -> event
@@ -111,13 +120,16 @@ let create ~provider ~root ~system ?workspace_context
             Tool_executing { call_id = redact call_id; name = redact name }
         | Tool_updated { call_id; name; received_bytes } -> Tool_updated {
             call_id = redact call_id; name = redact name; received_bytes }
-        | Tool_settled { call_id; name; result; is_error } -> Tool_settled {
-            call_id = redact call_id; name = redact name;
-            result = redact result; is_error }
-        | Tool_aborted { call_id; name; result; side_effects_may_have_occurred } ->
+        | Tool_settled { call_id; name; result; is_error; elapsed_ms } ->
+            Tool_settled {
+              call_id = redact call_id; name = redact name;
+              result = redact result; is_error; elapsed_ms }
+        | Tool_aborted { call_id; name; result; side_effects_may_have_occurred;
+            elapsed_ms } ->
             Tool_aborted {
               call_id = redact call_id; name = redact name;
-              result = redact result; side_effects_may_have_occurred } in
+              result = redact result; side_effects_may_have_occurred;
+              elapsed_ms } in
       notify event) on_tool_event;
     on_workspace_effect }
 
@@ -126,12 +138,14 @@ let task_definition = `Assoc [
   "function", `Assoc [
     "name", `String "task";
     "description", `String
-      "Start a bounded read-only child agent. It cannot edit files or run shell commands. The result is saved as a session-owned artifact.";
+      "Start a bounded read-only child agent. It cannot edit files or run shell commands. The result is saved as a session-owned artifact. The optional model selects a tier name (inherit, light, heavy, fastapply) or a provider@route/MODEL selector; inherit or omission uses the parent model.";
     "parameters", `Assoc [
       "type", `String "object";
       "properties", `Assoc [
         "label", `Assoc ["type", `String "string"; "maxLength", `Int 256];
-        "task", `Assoc ["type", `String "string"; "maxLength", `Int 8192]];
+        "task", `Assoc ["type", `String "string"; "maxLength", `Int 8192];
+        "model", `Assoc ["type", `String "string"; "maxLength", `Int 256;
+          "description", `String "Tier name (inherit, light, heavy, fastapply) resolved via the modelTiers setting, or a provider@route[#account]/MODEL selector"]];
       "required", `List [`String "label"; `String "task"];
       "additionalProperties", `Bool false]]]
 
@@ -154,6 +168,16 @@ let append t (message : Protocol.message) =
     | None -> message in
   t.on_change message;
   t.history_rev <- message :: t.history_rev
+
+let milliseconds since =
+  max 0 (int_of_float ((Unix.gettimeofday () -. since) *. 1000.))
+
+let emit_stage t name ~since ?detail () =
+  match t.on_stage with
+  | None -> ()
+  | Some notify ->
+      (try notify { name; elapsed_ms = milliseconds since; detail }
+       with _ -> ())
 
 let emit_tool_event t event =
   match t.on_tool_event with
@@ -340,6 +364,7 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
           call_id = Option.map (fun (call : Protocol.tool_call) -> call.id) call;
           valid })) drafts;
       Hashtbl.clear drafts) drafts in
+    let model_started = Unix.gettimeofday () in
     let reply =
       try
         let reply =
@@ -354,8 +379,13 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
             ?on_usage:t.on_usage ?cancel t.provider transcript definitions in
         Provider.check_cancel cancel;
         end_drafts reply.tool_calls;
+        emit_stage t "model" ~since:model_started ();
         reply
-      with exn -> end_drafts []; raise exn in
+      with exn ->
+        end_drafts [];
+        emit_stage t "model" ~since:model_started
+          ~detail:(Printexc.to_string exn) ();
+        raise exn in
     (match t.secret_mask with
      | Some _ when t.stream && Buffer.length streamed_text > 0 ->
          t.on_delta (Buffer.contents streamed_text)
@@ -385,9 +415,10 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
         let abort (call : Protocol.tool_call) result side_effects_may_have_occurred =
           emit_tool_event t (Tool_aborted {
             call_id = call.id; name = call.name; result;
-            side_effects_may_have_occurred
+            side_effects_may_have_occurred; elapsed_ms = None
           }) in
         let calls = Array.of_list calls in
+        let tool_started_at = Array.make (Array.length calls) 0. in
         let skipped result start =
           for index = start to Array.length calls - 1 do
             let call = calls.(index) in
@@ -395,7 +426,12 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
             append t (Protocol.tool_result_blocks call.id [Protocol.Text result])
           done in
         let cancellation_requested = ref false and scheduler_failure = ref None in
-        let make_task (call : Protocol.tool_call) :
+        let elapsed index =
+          let start = tool_started_at.(index) in
+          if start <= 0. then None
+          else Some (max 0 (int_of_float
+            ((Unix.gettimeofday () -. start) *. 1000.))) in
+        let make_task index (call : Protocol.tool_call) :
             (Protocol.content_block list, string) result Tool_scheduler.task =
           let call = match t.secret_mask with
             | Some mask -> { call with arguments =
@@ -469,20 +505,30 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
                 | Some delegate ->
                     let valid_fields = match call.arguments with
                       | `Assoc fields ->
-                          List.length fields = 2 &&
+                          (List.length fields = 2 || List.length fields = 3) &&
                           List.sort String.compare (List.map fst fields) =
-                            ["label"; "task"] &&
+                            (if List.length fields = 3
+                             then ["label"; "model"; "task"]
+                             else ["label"; "task"]) &&
                           List.for_all (function
-                            | ("label" | "task"), `String _ -> true
+                            | ("label" | "task" | "model"), `String _ -> true
                             | _ -> false) fields
                       | _ -> false in
                     let argument name = match Protocol.member name call.arguments with
                       | `String value -> Some value | _ -> None in
+                    let model = match argument "model" with
+                      | None | Some "" -> None
+                      | Some value when String.length value <= 256 &&
+                          not (String.exists (fun c ->
+                            Char.code c < 32 || Char.code c = 127) value) ->
+                          Some value
+                      | Some _ -> Some "\xffinvalid" in
                     if not valid_fields then
-                      complete "Error: task requires exactly one label and task string"
-                    else match argument "label", argument "task" with
-                    | Some label, Some task
-                      when String.trim label <> "" && String.length label <= 256 &&
+                      complete "Error: task requires label, task and optional model strings"
+                    else match argument "label", argument "task", model with
+                    | Some label, Some task, model
+                      when model <> Some "\xffinvalid" &&
+                        String.trim label <> "" && String.length label <= 256 &&
                         not (String.exists (fun c ->
                           Char.code c < 32 || Char.code c = 127) label) &&
                         String.trim task <> "" && String.length task <= 8192 &&
@@ -491,12 +537,12 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
                           Provider.check_cancel cancel;
                           let job_id = delegate
                             ~cancel:(Option.value ~default:(fun () -> false) cancel)
-                            ~label ~task in
+                            ~label ~task ~model in
                           Ok [Protocol.Text ("Started read-only child job " ^
                             job_id ^ ".")]);
                         Tool_scheduler.Run
                     | _ -> complete
-                        "Error: task requires a single-line label and a nonempty task of at most 8192 bytes")
+                        "Error: task requires a single-line label, a nonempty task of at most 8192 bytes, and an optional valid model selector")
               else if List.exists (fun definition ->
                 Protocol.member "name" (Protocol.member "function" definition) =
                   `String call.name) t.external_tools then
@@ -572,6 +618,7 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
             let execute = match !prepared with
               | Some execute -> execute
               | None -> assert false in
+            tool_started_at.(index) <- Unix.gettimeofday ();
             try
               Provider.check_cancel cancel;
               let decision = Tools.approval_decision
@@ -601,6 +648,7 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
                      | _ -> false) in
                   let request = if external_tool then
                     { Approval.tool_name = call.name; tier = Approval.Exec;
+                      trigger = Approval.Tool_call;
                       impact = "Runs an explicitly selected external tool; process or network effects may be non-reversible.";
                       details = ["Workspace: " ^ t.root] @
                         Option.fold ~none:[] ~some:(fun describe ->
@@ -610,6 +658,7 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
                       reason = Some "External tools require per-call interactive approval." }
                   else if delegate then
                     { Approval.tool_name = "task"; tier = Approval.Exec;
+                      trigger = Approval.Tool_call;
                       impact = "Starts a bounded read-only child agent; provider usage may be billed.";
                       details = [
                         "Label: " ^ Option.value ~default:"(missing)"
@@ -724,7 +773,7 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
             | exn -> Error ("Error: " ^ Printexc.to_string exn) in
           { Tool_scheduler.mode = Tools.execution_mode call.name;
             prepare; run } in
-        let tasks = Array.map make_task calls in
+        let tasks = Array.mapi make_task calls in
         let on_complete index outcome =
           let (call : Protocol.tool_call) = calls.(index) in
           match outcome with
@@ -734,7 +783,8 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
                 | Error message -> [Protocol.Text message], true in
               let result = Protocol.display_content_blocks content in
               emit_tool_event t (Tool_settled {
-                call_id = call.id; name = call.name; result; is_error
+                call_id = call.id; name = call.name; result; is_error;
+                elapsed_ms = elapsed index
               });
               append t (Protocol.tool_result_blocks call.id content)
           | Tool_scheduler.Failed Tools.Cancelled ->
@@ -752,14 +802,17 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
               scheduler_failure := Some exn;
               let result = "Error: " ^ Printexc.to_string exn in
               emit_tool_event t (Tool_settled {
-                call_id = call.id; name = call.name; result; is_error = true
+                call_id = call.id; name = call.name; result; is_error = true;
+                elapsed_ms = elapsed index
               });
               append t (Protocol.tool_result_blocks call.id [Protocol.Text result])
           | Tool_scheduler.Skipped -> () in
         let cancelled () = match cancel with
           | Some check -> check ()
           | None -> false in
+        let tools_started = Unix.gettimeofday () in
         let outcomes = Tool_scheduler.run ~cancelled ~on_complete tasks in
+        emit_stage t "tools" ~since:tools_started ();
         let rec first_skipped index =
           if index >= Array.length outcomes then None
           else match outcomes.(index) with
@@ -781,6 +834,13 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
              | None when !cancellation_requested -> raise Provider.Cancelled
              | None -> turn (remaining - 1))
   in
-  try turn max_turns with exn ->
+  let turn_started = Unix.gettimeofday () in
+  try
+    let result = turn max_turns in
+    emit_stage t "turn" ~since:turn_started ();
+    result
+  with exn ->
+    emit_stage t "turn" ~since:turn_started
+      ~detail:(Printexc.to_string exn) ();
     t.scoped_pending <- [];
     raise exn

@@ -15,7 +15,7 @@ let shutdown_cases () =
              Pave.Turn_runner.tool runner (Pave.Agent.Tool_aborted {
                call_id = "shutdown-call"; name = "run_command";
                result = "Error: cancelled before execution";
-               side_effects_may_have_occurred = false })) (fun () ->
+               side_effects_may_have_occurred = false; elapsed_ms = None })) (fun () ->
              (match mode with
               | "running" ->
                   while not (cancel ()) do Thread.delay 0.001 done
@@ -24,7 +24,9 @@ let shutdown_cases () =
               | "tool-approval" ->
                   ignore (Pave.Turn_runner.approve_tool runner {
                     Pave.Approval.tool_name = "write_file";
-                    tier = Pave.Approval.Write; impact = "Writes a file";
+                    tier = Pave.Approval.Write;
+                    trigger = Pave.Approval.File_access;
+                    impact = "Writes a file";
                     details = ["Path: blocked.txt"]; reason = None })
               | _ -> assert false);
              raise Pave.Provider.Cancelled) in
@@ -212,7 +214,7 @@ let () =
           Pave.Turn_runner.phase runner (Pave.Agent.Tool "old-turn-tool");
           Pave.Turn_runner.tool runner (Pave.Agent.Tool_settled {
             call_id = "old-call"; name = "read_file"; result = "stale";
-            is_error = false
+            is_error = false; elapsed_ms = None
           })) ());
         Pave.Turn_runner.message runner "old-turn-ready";
         while not (cancel ()) do Thread.delay 0.001 done;
@@ -266,7 +268,7 @@ let () =
         Pave.Turn_runner.tool runner (Pave.Agent.Tool_aborted {
           call_id = "aborted-call"; name = "read_file";
           result = "Error: turn canceled before execution";
-          side_effects_may_have_occurred = false
+          side_effects_may_have_occurred = false; elapsed_ms = None
         });
         raise Pave.Provider.Cancelled
     | "payload-one" ->

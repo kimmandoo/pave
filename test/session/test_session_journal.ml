@@ -129,7 +129,7 @@ let () =
     Pave.Session.record_tool_started terminal
       ~call_id:terminal_call.id ~name:terminal_call.name |> ignore;
     Pave.Session.record_tool_settled terminal
-      ~call_id:terminal_call.id ~name:terminal_call.name ~is_error:false |> ignore;
+      ~call_id:terminal_call.id ~name:terminal_call.name ~is_error:false () |> ignore;
     ignore (Pave.Session.record_exit terminal ~kind:Pave.Session.Fatal);
     let terminal = Pave.Session.open_file terminal_path in
     (match List.rev (Pave.Session.history terminal) with
@@ -157,7 +157,7 @@ let () =
       ~call_id:aborted_call.id ~name:aborted_call.name |> ignore;
     Pave.Session.record_tool_aborted terminal
       ~call_id:aborted_call.id ~name:aborted_call.name
-      ~side_effects_may_have_occurred:true |> ignore;
+      ~side_effects_may_have_occurred:true () |> ignore;
     ignore (Pave.Session.record_exit terminal ~kind:Pave.Session.Fatal);
     let terminal = Pave.Session.open_file terminal_path in
     (match List.rev (Pave.Session.history terminal) with
@@ -188,7 +188,7 @@ let () =
       ~call_id:finished_call.id ~name:finished_call.name |> ignore;
     let finished_result = Pave.Protocol.tool_result finished_call.id "read complete" in
     Pave.Session.record_tool_settled lifecycle
-      ~call_id:finished_call.id ~name:finished_call.name ~is_error:false |> ignore;
+      ~call_id:finished_call.id ~name:finished_call.name ~is_error:false () |> ignore;
     ignore (Pave.Session.append lifecycle finished_result);
     let aborted_call : Pave.Protocol.tool_call = {
       id = "aborted-call"; name = "run_command"; arguments = `Assoc [] } in
@@ -199,7 +199,7 @@ let () =
       "Error: command cancelled while running; side effects may have occurred" in
     Pave.Session.record_tool_aborted lifecycle
       ~call_id:aborted_call.id ~name:aborted_call.name
-      ~side_effects_may_have_occurred:true |> ignore;
+      ~side_effects_may_have_occurred:true () |> ignore;
     ignore (Pave.Session.append lifecycle aborted_result);
     ignore (Pave.Session.record_exit lifecycle ~kind:Pave.Session.Normal);
     let lifecycle = Pave.Session.open_file lifecycle_path in

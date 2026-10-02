@@ -136,6 +136,11 @@
  (libraries pave unix yojson))
 
 (test
+ (name test_session_hub)
+ (modules test_session_hub)
+ (libraries pave unix yojson threads))
+
+(test
  (name test_session_compaction)
  (modules test_session_compaction)
  (libraries pave unix yojson))
@@ -612,6 +617,10 @@
  (name test_session_rewind)
  (modules test_session_rewind)
  (libraries pave unix yojson threads))
+(test
+ (name test_session_recording)
+ (modules test_session_recording)
+ (libraries pave unix yojson))
 
 (test
  (name test_workspace_edit)
@@ -706,3 +715,8 @@
  (name test_workspace_portal)
  (modules test_workspace_portal)
  (libraries pave unix yojson threads))
+
+(test
+ (name test_project_memory)
+ (modules test_project_memory)
+ (libraries pave unix yojson))

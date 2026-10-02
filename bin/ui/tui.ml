@@ -2897,15 +2897,26 @@ let decide t ~title ?(context = "") ?(body = "") ~options () =
 let deny_option = "n", "Deny", "Nothing runs · the model is told you declined"
 let allow_once_option = "y", "Allow once", "Runs this call only · later calls ask again"
 
-let confirm t command =
-  confirm_review t ~title:"Run this shell command?"
+let confirm_command t command =
+  match confirm_review t ~title:"Run this shell command?"
     ~label:"run_command · exec tier · not sandboxed · runs as your user"
     ~body:command ~primary:max_int ~max_bytes:4096 ~wrap:false
-    ~options:[deny_option; allow_once_option]
+    ~options:[deny_option; allow_once_option;
+      "w", "Always allow this exact command",
+        "Remembers the literal command in your user settings and runs it without asking again"]
     ~too_large:"Shell command denied: too large to review on screen"
     ~unsafe_text:"Shell command denied: hidden/control text cannot be reviewed"
-    ~status:(function 0 -> "Shell command denied" | _ -> "Shell command approved")
-  <> 0
+    ~status:(function
+      | 0 -> "Shell command denied"
+      | 1 -> "Shell command approved"
+      | _ -> "Shell command allowed permanently")
+  with
+  | 0 -> Pave.Approval.Deny_once
+  | 1 -> Pave.Approval.Allow_once
+  | _ -> Pave.Approval.Allow_always
+
+let confirm t command =
+  confirm_command t command <> Pave.Approval.Deny_once
 
 (* Ask a question about the action, lead with exactly what will run, then
    explain its effect; the tier stays visible in plain words. *)
@@ -2922,6 +2933,7 @@ let approval_question (request : Pave.Approval.request) =
   | name -> "Allow " ^ name ^ "?"
 
 let approval_scope (request : Pave.Approval.request) =
+  let trigger = Pave.Approval.trigger_name request.trigger in
   let consequence = match request.tier with
     | Pave.Approval.Read -> "reads only"
     | Pave.Approval.Write -> "changes workspace files"
@@ -2930,7 +2942,7 @@ let approval_scope (request : Pave.Approval.request) =
         then "not sandboxed" else "process or network effects" in
   String.concat " · " [
     request.tool_name;
-    Pave.Approval.tier_name request.tier ^ " tier";
+    Pave.Approval.tier_name request.tier ^ " tier · " ^ trigger;
     consequence;
     (if Pave.Approval.session_grantable request.tool_name
      then "you may allow it until exit" else "asks every call") ]
@@ -2951,7 +2963,12 @@ let confirm_tool t (request : Pave.Approval.request) =
     String.starts_with ~prefix detail &&
     String.length detail - String.length prefix > 4096) request.details in
   let session = Pave.Approval.session_grantable request.tool_name in
+  let always = Pave.Approval.always_grantable request.tool_name in
   let options = [deny_option; allow_once_option] @
+    (if always then
+       ["w", "Always allow this exact command",
+        "Remembers the literal command in your user settings and runs it without asking again"]
+     else []) @
     (if session then
        ["a", "Allow all " ^ request.tool_name,
         "Runs this and every later " ^ request.tool_name ^
@@ -2973,4 +2990,5 @@ let confirm_tool t (request : Pave.Approval.request) =
     with
     | 0 -> Pave.Approval.Deny_once
     | 1 -> Pave.Approval.Allow_once
+    | 2 when always -> Pave.Approval.Allow_always
     | _ -> Pave.Approval.Allow_for_session

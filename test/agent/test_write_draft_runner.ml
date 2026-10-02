@@ -37,7 +37,7 @@ let () =
           write_content = Some "validated" })) ["0:a", "a"; "0:b", "b"];
       List.iter (fun call_id ->
         Pave.Turn_runner.tool runner (Pave.Agent.Tool_settled {
-          call_id; name = "write_file"; result = "Error: denied"; is_error = true })) ["b"; "a"]) in
+          call_id; name = "write_file"; result = "Error: denied"; is_error = true; elapsed_ms = None })) ["b"; "a"]) in
   let runner = Pave.Turn_runner.create ~run
     ~on_event:(fun event -> events := event :: !events)
     ~on_approve:(fun _ -> false) ~on_queued:ignore () in

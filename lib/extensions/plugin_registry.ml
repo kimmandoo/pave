@@ -5,6 +5,7 @@ type diagnostic = { path : string; code : string; message : string }
 type plugin = {
   name : string; version : string; source : string; digest : string;
   enabled : bool; references : capabilities; active : capabilities;
+  installed_from : string; is_builtin : bool; discovery_category : string;
 }
 type snapshot = { plugins : plugin list; active : capabilities; diagnostics : diagnostic list }
 type registry = {
@@ -56,19 +57,28 @@ let parse_manifest path data =
   let json = try Yojson.Basic.from_string data
     with Yojson.Json_error _ -> fail "invalid manifest JSON" in
   let fields = fields "manifest" json in
-  exact "manifest" ["schemaVersion"; "name"; "version"; "skills"; "commands"; "tools"] fields;
+  List.iter (fun (name, _) ->
+    if not (List.mem name ["schemaVersion"; "name"; "version"; "skills";
+        "commands"; "tools"; "installedFrom"; "category"]) then
+      fail ("unexpected or missing manifest fields")) fields;
   if field fields "schemaVersion" <> `Int 1 then fail "unsupported manifest schemaVersion";
   let name = text "plugin name" (field fields "name") in
   let version_text = text "plugin version" (field fields "version") in
   if not (valid_name name) then fail "invalid plugin name";
   if not (version version_text) then fail "plugin version must be major.minor.patch";
   if Filename.basename path <> name ^ ".json" then fail "plugin name differs from filename";
+  let optional_text label name =
+    match List.assoc_opt name fields with
+    | None -> ""
+    | Some value -> text label value in
   let references = {
     skills = names "skill" (field fields "skills");
     commands = names "command" (field fields "commands");
     tools = names "tool" (field fields "tools");
   } in
-  name, version_text, references
+  name, version_text, references,
+  optional_text "installedFrom" "installedFrom",
+  optional_text "category" "category"
 
 let same a b = a.Unix.st_dev = b.Unix.st_dev && a.Unix.st_ino = b.Unix.st_ino
 let private_directory path =
@@ -169,9 +179,11 @@ let scan directory available builtins enabled =
          not (valid_name (Filename.remove_extension filename)) then
         fail "plugin filename must be <lowercase-name>.json";
       let data = read_file path 65_536 in
-      let name, version, references = parse_manifest path data in
+      let name, version, references, installed_from, category =
+        parse_manifest path data in
       let digest = Digestif.SHA256.(to_hex (digest_string data)) in
-      discovered := (name, version, path, digest, references) :: !discovered
+      discovered := (name, version, path, digest, references,
+        installed_from, category) :: !discovered
     with
     | Invalid message -> diagnostics := issue path "invalid_manifest" message :: !diagnostics
     | Unix.Unix_error _ | Sys_error _ ->
@@ -180,7 +192,7 @@ let scan directory available builtins enabled =
   let discovered = List.rev !discovered in
   let collisions = Hashtbl.create 64 in
   let record kind builtin selector =
-    List.iter (fun (name, _, path, _, refs) ->
+    List.iter (fun (name, _, path, _, refs, _, _) ->
       List.iter (fun reference ->
         let key = kind ^ ":" ^ reference in
         let prior = match Hashtbl.find_opt collisions key with
@@ -204,7 +216,9 @@ let scan directory available builtins enabled =
         ("ambiguous plugin capability " ^ key) :: !diagnostics) owners
   ) collisions;
   let active = ref empty in
-  let plugins = List.filter_map (fun (name, version, source, digest, references) ->
+  let plugins = List.filter_map
+    (fun (name, version, source, digest, references,
+         installed_from, category) ->
     if Hashtbl.mem blocked source then None else
     let enabled = List.mem name enabled in
     let selected available values =
@@ -225,7 +239,13 @@ let scan directory available builtins enabled =
       missing "skill" available.skills references.skills;
       missing "command" available.commands references.commands;
       missing "tool" available.tools references.tools);
-    Some { name; version; source; digest; enabled; references; active = selected }
+    Some { name; version; source; digest; enabled; references;
+           active = selected;
+           installed_from = (if installed_from = "" then "local"
+             else installed_from);
+           is_builtin = false;
+           discovery_category = (if category = "" then "installed"
+             else category) }
   ) discovered in
   let dir_after = private_directory directory in
   if not (same dir_before dir_after) then fail "plugin directory changed during scan";

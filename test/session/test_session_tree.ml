@@ -4,7 +4,7 @@ let message role text : Pave.Protocol.message =
 
 let entry id parent_id message : Pave.Session.entry =
   { id; parent_id; timestamp = "2026-09-25T00:00:00Z";
-    kind = Pave.Session.Message message }
+    kind = Pave.Session.Message message; step = 0 }
 
 let () =
   let first = entry "a" None (message "user" "First prompt") in
@@ -33,8 +33,8 @@ let () =
     timestamp = "2026-09-25T00:00:01Z";
     kind = Pave.Session.Tool_lifecycle {
       call_id = "call-1"; name = "read_file";
-      state = Pave.Session.Tool_started
-    }
+      state = Pave.Session.Tool_started; elapsed_ms = None
+    }; step = 0
   } in
   let exit = {
     Pave.Session.id = "exit-entry"; parent_id = Some "tool-entry";
@@ -44,14 +44,15 @@ let () =
       pending_tool_calls = [{
         call_id = "call-1"; name = "read_file"; state = Pave.Session.Started
       }]
-    }
+    }; step = 0
   } in
   assert (Pave.Session_tree.summary tool = "tool · read_file · started");
   assert (Pave.Session_tree.summary exit =
     "session exit · fatal · 1 pending tool");
   let pin : Pave.Session.entry = {
     id = "pin-entry"; parent_id = Some "a";
-    timestamp = "2026-09-25T00:00:03Z"; kind = Pave.Session.Pin true
+    timestamp = "2026-09-25T00:00:03Z"; kind = Pave.Session.Pin true;
+    step = 0
   } in
   assert (Pave.Session_tree.summary pin = "pin · pinned");
   let attached_prompt = Pave.Protocol.user ~attachments:[{
@@ -75,14 +76,14 @@ let () =
     id = "artifact-message"; parent_id = None;
     timestamp = "2026-09-25T00:00:04Z";
     kind = Pave.Session.Message_artifact
-      (message "user" "Look at this", [reference]) } in
+      (message "user" "Look at this", [reference]); step = 0 } in
   assert (Pave.Session_tree.summary artifact_message =
     "user · Look at this · screenshot.png");
   let started : Pave.Session.entry = {
     id = "job-started"; parent_id = None;
     timestamp = "2026-09-25T00:00:05Z";
     kind = Pave.Session.Job_started {
-      owner; job_id = artifact_id; label = "Plan"; job_kind = "plan" } } in
+      owner; job_id = artifact_id; label = "Plan"; job_kind = "plan" }; step = 0 } in
   assert (Pave.Session_tree.summary started = "job · Plan · plan · started");
   let delivered : Pave.Session.entry = {
     id = "job-delivery"; parent_id = Some "job-started";
@@ -90,16 +91,16 @@ let () =
     kind = Pave.Session.Job_delivery {
       owner; job_id = artifact_id; label = "Plan";
       status = Pave.Session.Completed; summary = "Saved result";
-      artifact = Some (owner, artifact_id) } } in
+      artifact = Some (owner, artifact_id) }; step = 0 } in
   assert (Pave.Session_tree.summary delivered =
     "job · Plan · completed · Saved result · artifact " ^ artifact_id);
   let goal : Pave.Session.entry = {
     id = "goal"; parent_id = None; timestamp = "2026-09-25T00:00:07Z";
-    kind = Pave.Session.Workflow_goal (Some "Inspect the workflow") } in
+    kind = Pave.Session.Workflow_goal (Some "Inspect the workflow"); step = 0 } in
   assert (Pave.Session_tree.summary goal = "goal · Inspect the workflow");
   let interruption_rule : Pave.Session.entry = {
     id = "rule"; parent_id = Some "goal"; timestamp = "2026-09-25T00:00:08Z";
-    kind = Pave.Session.Interruption_rule (Some "Stop before irreversible changes") } in
+    kind = Pave.Session.Interruption_rule (Some "Stop before irreversible changes"); step = 0 } in
   assert (Pave.Session_tree.summary interruption_rule =
     "interruption rule · Stop before irreversible changes");
   let entries = List.init 1030 (fun n -> entry (string_of_int n)

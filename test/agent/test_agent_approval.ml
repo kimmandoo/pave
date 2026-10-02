@@ -324,7 +324,7 @@ let () =
       ~approve_tool:(fun request ->
         task_approval := Some request;
         true)
-      ~delegate_task:(fun ~cancel ~label ~task ->
+      ~delegate_task:(fun ~cancel ~label ~task ~model:_ ->
         expect "child delegation has not been cancelled" (not (cancel ()));
         expect "child label reached the delegate" (label = "review");
         expect "child task reached the delegate"
@@ -349,7 +349,7 @@ let () =
       ~allow_shell:false ~approval_mode:A.Auto_all ~tool_approval:[]
       ~command_patterns:[]
       ~approve_tool:(fun _ -> incr invalid_task_prompts; true)
-      ~delegate_task:(fun ~cancel:_ ~label:_ ~task:_ ->
+      ~delegate_task:(fun ~cancel:_ ~label:_ ~task:_ ~model:_ ->
         incr invalid_task_calls; "unused") ());
     expect "task schema rejects unknown arguments before approval or delegation"
       (!invalid_task_calls = 0 && !invalid_task_prompts = 0);

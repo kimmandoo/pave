@@ -31,6 +31,7 @@ type session_context = {
   ssh_lock : Mutex.t;
   ssh_sessions : (string, Workspace_ssh.session) Hashtbl.t;
   browser_manager : Workspace_browser.manager;
+  hub_port : (unit -> int) option;
   xcode_lock : Mutex.t;
   mutable xcode_discovery : Workspace_xcode.discovery option;
   mobile_lock : Mutex.t;
@@ -77,7 +78,7 @@ let require_session_context = function
   | Some _ -> raise (Tool_error "session tools are closed")
   | None -> raise (Tool_error "this tool requires a private saved session")
 
-let create_session_context ?lsp_manager ~owner ~root ~process_manager ~read_artifact
+let create_session_context ?lsp_manager ?hub_port ~owner ~root ~process_manager ~read_artifact
     ~record_file_change () =
   let lsp_manager = match lsp_manager with
     | Some manager -> manager
@@ -94,6 +95,7 @@ let create_session_context ?lsp_manager ~owner ~root ~process_manager ~read_arti
     eval_lock = Mutex.create (); python_kernel = None; javascript_kernel = None;
     ssh_lock = Mutex.create (); ssh_sessions = Hashtbl.create 8;
     browser_manager = Workspace_browser.create_manager ~owner;
+    hub_port;
     xcode_lock = Mutex.create (); xcode_discovery = None;
     mobile_lock = Mutex.create (); mobile_discovery = None;
     record_file_change; closed = false }
@@ -2330,10 +2332,58 @@ let publish_web_tool ~approved ?cancel ?context args =
           | value -> value in
         Workspace_portal.stop manager ~id:(tunnel_id name)
     | "list" -> Workspace_portal.list manager
+    | "attach" ->
+        require_explicit_approval approved;
+        (match context.hub_port with
+         | None -> fail "attach requires an interactive session hub"
+         | Some resolve ->
+             let port = try resolve () with
+               | exn -> fail (Printexc.to_string exn) in
+             let name = match optional_string "name" "" args with
+               | "" -> "pave-hub-" ^ string_of_int port
+               | value -> Workspace_portal.publish_name value in
+             let json = Workspace_portal.publish ?cancel manager
+               ~id:(tunnel_id name) ~port ~name in
+             (match json with
+              | `Assoc fields -> `Assoc (("attach", `Bool true) :: fields)
+              | other -> other))
     | _ -> fail "unsupported publish_web action" in
   [Protocol.Text (Yojson.Basic.to_string json)]
 
 
+
+let memory_tool ~approved ~root args =
+  let action = required_string "action" args in
+  match action with
+  | "list" ->
+      let memory, issues = Project_memory.scan ~root in
+      `Assoc [
+        "entries", `List (List.map (fun (item : Project_memory.entry) ->
+          `Assoc ["name", `String item.name;
+                  "bytes", `Int item.bytes;
+                  "summary", `String item.summary])
+          (Project_memory.entries memory));
+        "diagnostics", `List (List.map (fun (code, message) ->
+          `Assoc ["code", `String code; "message", `String message]) issues)]
+  | "get" ->
+      let name = required_string "name" args in
+      let memory, _ = Project_memory.scan ~root in
+      (match Project_memory.get memory ~name with
+       | Ok text -> `Assoc ["name", `String name; "text", `String text]
+       | Error message -> fail message)
+  | "put" ->
+      require_explicit_approval approved;
+      let name = required_string "name" args in
+      let text = required_string "text" args in
+      let path = Workspace_memory.put ~root ~name text in
+      `Assoc ["status", `String "saved"; "path", `String path]
+  | "forget" ->
+      require_explicit_approval approved;
+      let name = required_string "name" args in
+      if Workspace_memory.forget ~root ~name then
+        `Assoc ["status", `String "forgotten"; "name", `String name]
+      else `Assoc ["status", `String "absent"; "name", `String name]
+  | _ -> fail "unsupported memory action (list|get|put|forget)"
 
 let lsp_start ~approved ?context root args =
   require_explicit_approval approved;
@@ -3095,8 +3145,15 @@ let definitions = [
     ["format", enum_string_field "Result format (default summary)" ["summary"; "sarif"];
      "file_limit", integer_field "Maximum files scanned (default 2000)" 0 Repository_security.max_files;
      "finding_limit", integer_field "Maximum findings returned (default 100)" 0 100] [];
+  schema "memory" "Read and update the project memory store under .pave/memory. list shows saved knowledge entries; get returns one entry's text; put saves or replaces a <name>.md note (requires approval); forget deletes it (requires approval). Memory persists across sessions and is project-shared knowledge."
+    ["action", enum_string_field "Store operation" ["list"; "get"; "put"; "forget"];
+     "name", `Assoc ["type", `String "string"; "maxLength", `Int 48;
+       "description", `String "Entry name [a-z][a-z0-9_-]{0,47}; required by get/put/forget"];
+     "text", `Assoc ["type", `String "string"; "maxLength", `Int 32768;
+       "description", `String "UTF-8 note body for put"]]
+    ["action"];
   schema "publish_web" "Publish a localhost port to a public HTTPS URL through a Portal relay tunnel. publish starts a session-owned `portal expose` process and returns the public URL once ready; stop terminates a named tunnel; list shows running tunnels. Publishing exposes the local service publicly until stopped or the session ends."
-    ["action", enum_string_field "Tunnel operation" ["publish"; "stop"; "list"];
+    ["action", enum_string_field "Tunnel operation" ["publish"; "stop"; "list"; "attach"];
      "port", integer_field "Loopback port to publish (required for publish)" 1 65535;
      "name", string_field "Public hostname prefix and tunnel ID; auto-derived when omitted (required for stop)"]
     ["action"];
@@ -3644,7 +3701,14 @@ let approval_request ?cancel ?context ~root ~name ~args (decision : Approval.dec
     | _ ->
         "Performs a tool action that has no safe preview.",
         ["No argument preview is available."] in
-  { Approval.tool_name = name; tier = decision.tier; impact; details;
+  let trigger = match name with
+    | "run_command" | "start_shell" -> Approval.Dangerous_command
+    | "web_search" | "web_fetch" | "browser" | "ssh_command" | "publish_web" ->
+        Approval.Network
+    | "write_file" | "edit_file" | "apply_edits" | "ast_edit" | "workspace_rewind" ->
+        Approval.File_access
+    | _ -> Approval.Tool_call in
+  { Approval.tool_name = name; tier = decision.tier; trigger; impact; details;
     reason = decision.reason }
 
 let parameters_schema definitions name =
@@ -3931,6 +3995,9 @@ let prepare ?cancel ?context ~root ~name ~args () =
         let result = match name with
           | "browser" -> Ok (browser_tool ~approved ?cancel ?context args)
           | "publish_web" -> Ok (publish_web_tool ~approved ?cancel ?context args)
+          | "memory" -> Ok [Protocol.Text (Yojson.Basic.to_string
+              (try memory_tool ~approved ~root args
+               with Workspace_memory.Error message -> fail message))]
           | _ -> Ok [Protocol.Text (match name with
           | "read_file" -> read_file ?cancel ?context root args
           | "workspace_snapshot" -> workspace_snapshot ?cancel ?context tool_root tool_args

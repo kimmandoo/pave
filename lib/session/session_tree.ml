@@ -101,6 +101,10 @@ let summary (entry : Session.entry) =
   | Session.Interruption_rule None -> "interruption rule · cleared"
   | Session.Interruption_rule (Some rule) ->
       "interruption rule · " ^ first_line rule
+  | Session.Stage { stage; elapsed_ms; detail } ->
+      Printf.sprintf "stage · %s · %d ms%s" stage elapsed_ms
+        (match detail with
+         | Some detail -> " · " ^ first_line detail | None -> "")
   | Session.Tool_lifecycle { name; state; _ } ->
       let state = match state with
         | Session.Tool_started -> "started"

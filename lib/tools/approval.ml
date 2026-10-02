@@ -1,5 +1,9 @@
 type tier = Read | Write | Exec
 
+(* Where a permission demand originates, mirroring the reference
+   PermissionInteractionSpec.TriggerSource vocabulary. *)
+type trigger = Tool_call | Dangerous_command | File_access | Network
+
 type mode = Ask_writes | Ask_exec | Auto_all
 
 type policy = Allow | Deny | Prompt
@@ -18,6 +22,7 @@ type resolution = Allowed | Denied of string | Requires_prompt of string option
 type request = {
   tool_name : string;
   tier : tier;
+  trigger : trigger;
   impact : string;
   details : string list;
   reason : string option;
@@ -200,7 +205,7 @@ let confirmed_answer = function
       | "y" | "yes" | "\xe3\x85\x9b" -> true
       | _ -> false
 
-type answer = Deny_once | Allow_once | Allow_for_session
+type answer = Deny_once | Allow_once | Allow_for_session | Allow_always
 
 (* Only reviewable, low-blast-radius tools may be allowed for the rest of the
    run; shell, process, device, remote, external and child-agent actions keep
@@ -210,12 +215,24 @@ let session_grantable tool_name =
     "web_search"; "web_fetch"; "write_file"; "edit_file"; "apply_edits";
     "ast_edit"; "image_ocr" ]
 
+(* Only an exact, fully reviewed shell command may be remembered across runs;
+   the persisted rule matches the literal normalized command text. *)
+let always_grantable tool_name =
+  List.mem tool_name ["run_command"; "start_shell"]
+
+let trigger_name = function
+  | Tool_call -> "tool call"
+  | Dangerous_command -> "dangerous command"
+  | File_access -> "file access"
+  | Network -> "network"
+
 (* Line prompts add `a`/`all` (or ㅁ, the a key under a Korean two-set input
    method) for a session grant where one is offered. *)
-let answer_of_line ~session = function
+let answer_of_line ~session ?(always = false) = function
   | None -> Deny_once
   | Some line ->
       match String.lowercase_ascii (String.trim line) with
       | "y" | "yes" | "\xe3\x85\x9b" -> Allow_once
       | ("a" | "all" | "\xe3\x85\x81") when session -> Allow_for_session
+      | ("w" | "always") when always -> Allow_always
       | _ -> Deny_once

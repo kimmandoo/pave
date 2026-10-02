@@ -2,6 +2,16 @@
 
 ## 2026-10-02
 
+- feat(session): recorded per-stage turn timing (model, tools, turn) as journaled `stage` entries with elapsed milliseconds, surfaced in `/entries` and `--output jsonl` step events, and carried `call_id`/`elapsed_ms` on tool lifecycle records — the step-level timeline needed for slowdown analysis.
+- feat(session): added `/fork [PATH] [until=STEP]`, which copies the selected journal ancestry into a new private session, optionally truncated at a step ordinal, plus `pave hub --session FILE` serving a loopback-only, CSRF-token-gated read API (`/api/session`, `/api/entries`, `/api/poll`, `/api/prompt`, `/api/cancel`) and `/hub start|stop|status` for the live in-session endpoint.
+- feat(tools): added the opt-in `memory` tool and `/memory` command backed by `.pave/memory` knowledge notes; `--enable-memory` exposes list/get/put/forget to the model and injects the entry index into the system prompt.
+- feat(cli): added `--record PATH` (JSONL prompt/tool/stage/delta frames) and `--replay PATH` session-recording replay, and `--timeout MS` as an explicit non-interactive turn deadline (0 waits indefinitely).
+- feat(agent): subagent `task` calls accept a `model` tier — `inherit` (default), a name resolved through the new `modelTiers` setting (`light`, `heavy`, `fastapply`), or a full provider@route[#account]/MODEL selector — so cheap models can run child jobs.
+- feat(approval): permission requests now carry a trigger class (tool call, dangerous command, file access, network) shown in the review scope, and exact reviewed shell commands can be granted `w`/Always in the TUI or `[w] always` in line prompts, persisted to the user's `commandRules` allowlist.
+- feat(tools): `publish_web` gained an `attach` action that exposes the running session hub's loopback port through the configured tunnel backend, plus cloudflared and localhost.run fallbacks when `portal` is absent (`PAVE_PORTAL`, `PAVE_CLOUDFLARED`, `PAVE_SSH`, `PAVE_TUNNELS` pins).
+- feat(extensions): plugin manifests accept optional `installedFrom` and `category` provenance fields surfaced in `/plugin list`; activating a skill displays its "ACTION REQUIRED" preamble when present.
+- feat(ui): `/help` groups commands by category and an unknown command suggests the closest match.
+
 - chore(release): published v0.1.79 for Linux and macOS on x86_64 and ARM64 after native tests, and verified public archive checksums, archive contents and the installer's latest-release discovery.
 - fix(provider): kept streaming transport failures reportable — a curl failure that was not retried (or a first-byte timeout after the last attempt) was swallowed or degraded to `missing HTTP response status`; it now raises its own `curl failed (exit status N)` / first-byte timeout message.
 - fix(provider): kept the results of two same-id tool calls inside one assistant turn attached to the right calls when sanitizing a transcript (the first result was re-pointed at the renamed duplicate), and built the sanitized message list without a quadratic append.

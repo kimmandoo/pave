@@ -2,7 +2,12 @@ type tool_state =
   | Tool_started
   | Tool_settled of { is_error : bool }
   | Tool_aborted of { side_effects_may_have_occurred : bool }
-type tool_lifecycle = { call_id : string; name : string; state : tool_state }
+type tool_lifecycle = { call_id : string; name : string; state : tool_state;
+                        elapsed_ms : int option }
+(* A Stage entry records one named turn phase with its wall-clock elapsed
+   milliseconds and outcome detail (e.g. a failure reason), mirroring the
+   reference Loop.StageRecord timeline for per-turn slow-path analysis. *)
+type stage_record = { stage : string; elapsed_ms : int; detail : string option }
 type pending_state =
   | Unknown
   | Started
@@ -47,15 +52,20 @@ type kind =
   | Job_started of job_started
   | Job_delivery of job_delivery
   | Tool_lifecycle of tool_lifecycle
+  | Stage of stage_record
   | Workflow_goal of string option
   | Interruption_rule of string option
   | Session_exit of { kind : exit_kind; pending_tool_calls : pending_tool_call list }
-type entry = { id : string; parent_id : string option; timestamp : string; kind : kind }
+(* [step] is the entry's dense ordinal in the journal file (1-based), assigned
+   on write and derived from file order for legacy entries that predate it. *)
+type entry = { id : string; parent_id : string option; timestamp : string;
+               step : int; kind : kind }
 
 type t = {
   path : string;
   header : Yojson.Basic.t;
   artifacts : Session_artifact.t;
+  mutable next_step : int;
   mutable records_rev : entry list;
   by_id : (string, entry) Hashtbl.t;
   mutable leaf : string option;
@@ -123,10 +133,11 @@ let entry_json entry =
     | Workflow_goal _ -> "workflow_goal"
     | Interruption_rule _ -> "interruption_rule"
     | Job_started _ -> "job_started" | Job_delivery _ -> "job_delivery"
-    | Tool_lifecycle _ -> "tool" | Session_exit _ -> "exit" in
+    | Tool_lifecycle _ -> "tool" | Session_exit _ -> "exit"
+    | Stage _ -> "stage" in
   let fields = [ "type", `String type_name;
     "id", `String entry.id; "parentId", option_json entry.parent_id;
-    "timestamp", `String entry.timestamp ] in
+    "timestamp", `String entry.timestamp; "step", `Int entry.step ] in
   let serialize_message (message : Protocol.message) references =
     Protocol.validate_attachments message.attachments;
     let message_json = Protocol.message_to_json ~stored:true
@@ -210,7 +221,7 @@ let entry_json entry =
         (match artifact with None -> [] | Some (artifact_owner, id) ->
           ["artifactOwner", `String artifact_owner; "artifactId", `String id]))
 
-  | Tool_lifecycle { call_id; name; state } ->
+  | Tool_lifecycle { call_id; name; state; elapsed_ms } ->
       let state_fields = match state with
         | Tool_started -> ["state", `String "started"]
         | Tool_settled { is_error } ->
@@ -219,7 +230,13 @@ let entry_json entry =
             ["state", `String "aborted";
              "sideEffectsMayHaveOccurred", `Bool side_effects_may_have_occurred] in
       `Assoc (fields @ ["toolCallId", `String call_id;
-        "toolName", `String name] @ state_fields)
+        "toolName", `String name] @ state_fields @
+        (match elapsed_ms with
+         | None -> [] | Some value -> ["elapsedMs", `Int value]))
+  | Stage { stage; elapsed_ms; detail } ->
+      `Assoc (fields @ ["stage", `String stage;
+        "elapsedMs", `Int elapsed_ms;
+        "detail", option_json detail])
   | Session_exit { kind; pending_tool_calls } ->
       let pending = List.map (fun call ->
         let state_fields = match call.state with
@@ -398,12 +415,16 @@ let parse_disabled_tools json =
   | _ -> invalid "invalid disabled tools"
 
 
-let parse_entry json =
+let parse_entry ~step json =
   let get key = Protocol.member key json in
   let id = match get "id" with `String value when value <> "" -> value
     | _ -> invalid "entry ID missing" in
   let parent_id = match get "parentId" with `String value -> Some value
     | `Null -> None | _ -> invalid "invalid parent ID" in
+  let step = match get "step" with
+    | `Int value when value > 0 -> value
+    | `Null -> step
+    | _ -> invalid "invalid entry step" in
   let timestamp = match get "timestamp" with `String value -> value
     | _ -> invalid "entry timestamp missing" in
   let pending_tool_call json =
@@ -552,24 +573,39 @@ let parse_entry json =
          | _ -> invalid "invalid provider token usage")
     | `String "branch" -> Branch
     | `String "tool" ->
+        let elapsed_ms = match get "elapsedMs" with
+          | `Null -> None
+          | `Int value when value >= 0 -> Some value
+          | _ -> invalid "invalid tool elapsed time" in
         (match get "toolCallId", get "toolName", get "state" with
          | `String call_id, `String name, `String "started"
            when valid_model_field call_id && valid_model_field name ->
-             Tool_lifecycle { call_id; name; state = Tool_started }
+             Tool_lifecycle { call_id; name; state = Tool_started; elapsed_ms }
          | `String call_id, `String name, `String "settled"
            when valid_model_field call_id && valid_model_field name ->
              (match get "isError" with
               | `Bool is_error ->
-                  Tool_lifecycle { call_id; name; state = Tool_settled { is_error } }
+                  Tool_lifecycle { call_id; name;
+                    state = Tool_settled { is_error }; elapsed_ms }
               | _ -> invalid "invalid settled tool event")
          | `String call_id, `String name, `String "aborted"
            when valid_model_field call_id && valid_model_field name ->
              (match get "sideEffectsMayHaveOccurred" with
               | `Bool side_effects_may_have_occurred ->
-                  Tool_lifecycle { call_id; name; state =
+                  Tool_lifecycle { call_id; name; elapsed_ms; state =
                     Tool_aborted { side_effects_may_have_occurred } }
               | _ -> invalid "invalid aborted tool event")
          | _ -> invalid "invalid tool lifecycle event")
+    | `String "stage" ->
+        (match get "stage", get "elapsedMs" with
+         | `String stage, `Int elapsed_ms
+           when valid_text_field 48 stage && elapsed_ms >= 0 ->
+             (match get "detail" with
+              | `Null -> Stage { stage; elapsed_ms; detail = None }
+              | `String detail when String.length detail <= 256 ->
+                  Stage { stage; elapsed_ms; detail = Some detail }
+              | _ -> invalid "invalid stage detail")
+         | _ -> invalid "invalid stage record")
     | `String "workflow_goal" ->
         (match get "goal" with
          | `Null -> Workflow_goal None
@@ -616,7 +652,7 @@ let parse_entry json =
           | _ -> invalid "invalid pending tool calls" in
         Session_exit { kind; pending_tool_calls }
     | _ -> invalid "unsupported journal entry type" in
-  { id; parent_id; timestamp; kind }
+  { id; parent_id; timestamp; step; kind }
 
 let branch_entries_at t leaf =
   let rec walk id items =
@@ -698,7 +734,8 @@ let label_target t =
          | Model _ | Thinking _ | Tool_selection _ | Mode_change _
          | Title _ | Label _ | Pin _ | Reset_boundary | Usage _ | Branch
          | Workflow_goal _ | Interruption_rule _
-         | Job_started _ | Job_delivery _ | Tool_lifecycle _ | Session_exit _ -> find rest) in
+         | Job_started _ | Job_delivery _ | Tool_lifecycle _ | Session_exit _
+         | Stage _ -> find rest) in
   find entries
 let usage t =
   List.fold_left (fun total entry -> match entry.kind with
@@ -709,7 +746,7 @@ let usage t =
     | Message _ | Message_artifact _ | Compaction _ | Model _ | Thinking _
     | Tool_selection _ | Mode_change _ | Title _ | Label _ | Pin _ | Reset_boundary
     | Branch | Workflow_goal _ | Interruption_rule _ | Job_started _
-    | Job_delivery _ | Tool_lifecycle _ | Session_exit _ -> total)
+    | Job_delivery _ | Tool_lifecycle _ | Session_exit _ | Stage _ -> total)
     None (branch_entries t)
 module Usage_routes = Map.Make (struct
   type t = string * string option * string option * string
@@ -726,7 +763,7 @@ let usage_by_route t =
     | Message _ | Message_artifact _ | Compaction _ | Model _ | Thinking _
     | Tool_selection _ | Mode_change _ | Title _ | Label _ | Pin _ | Reset_boundary
     | Branch | Workflow_goal _ | Interruption_rule _ | Job_started _
-    | Job_delivery _ | Tool_lifecycle _ | Session_exit _ -> routes)
+    | Job_delivery _ | Tool_lifecycle _ | Session_exit _ | Stage _ -> routes)
     Usage_routes.empty (branch_entries t) in
   Usage_routes.bindings routes
 
@@ -748,7 +785,8 @@ let messages ?job_owner entries =
     | Compaction _ | Model _ | Thinking _ | Tool_selection _
     | Mode_change _ | Title _ | Label _ | Pin _ | Reset_boundary | Usage _ | Branch
     | Workflow_goal _ | Interruption_rule _
-    | Job_started _ | Job_delivery _ | Tool_lifecycle _ | Session_exit _ -> None) entries
+    | Job_started _ | Job_delivery _ | Tool_lifecycle _ | Session_exit _
+    | Stage _ -> None) entries
 let history t =
   let owner = match Protocol.member "id" t.header with
     | `String owner -> owner | _ -> invalid "session ID missing" in
@@ -801,7 +839,7 @@ let context t =
     | Message _ | Message_artifact _ | Model _ | Thinking _ | Tool_selection _
     | Mode_change _ | Title _ | Label _ | Pin _ | Usage _ | Branch
     | Workflow_goal _ | Interruption_rule _ | Job_started _ | Job_delivery _
-    | Tool_lifecycle _ | Session_exit _ -> found)
+    | Tool_lifecycle _ | Session_exit _ | Stage _ -> found)
     `None path in
   match latest with
   | `None -> messages ~job_owner:owner path
@@ -883,18 +921,21 @@ let unresolved_tool_calls entries =
     | Compaction _ | Model _ | Thinking _ | Tool_selection _
     | Mode_change _ | Title _ | Label _ | Pin _ | Usage _ | Branch
     | Workflow_goal _ | Interruption_rule _
-    | Job_started _ | Job_delivery _ | Session_exit _ -> ()) entries;
+    | Job_started _ | Job_delivery _ | Session_exit _ | Stage _ -> ()) entries;
   List.rev !pending
 
 let missing_results entries = unresolved_tool_calls entries
 
 let append_entry t kind =
-  let entry = { id = fresh_id (); parent_id = t.leaf; timestamp = timestamp (); kind } in
+  let entry = { id = fresh_id (); parent_id = t.leaf; timestamp = timestamp ();
+                step = t.next_step; kind } in
   append_line t (entry_json entry);
+  t.next_step <- t.next_step + 1;
   t.records_rev <- entry :: t.records_rev;
   Hashtbl.add t.by_id entry.id entry;
   t.leaf <- Some entry.id;
   entry
+
 
 let recovery_result (call : pending_tool_call) =
   match call.state with
@@ -925,7 +966,7 @@ let recover_pending_tools t =
     let result, recovery_state = recovery_result call in
     ignore (append_entry t (Message (Protocol.tool_result call.call_id result)));
     Option.iter (fun state -> ignore (append_entry t (Tool_lifecycle {
-      call_id = call.call_id; name = call.name; state
+      call_id = call.call_id; name = call.name; state; elapsed_ms = None
     }))) recovery_state) (missing_results (branch_entries t))
 
 let compact ?provider_state t ~summary ~first_kept_id =
@@ -1043,21 +1084,41 @@ let append_job_delivery t delivery =
       Some job_id
 
 
-let record_tool_event t ~call_id ~name state =
+let record_tool_event t ~call_id ~name ?elapsed_ms state =
+  let elapsed_ms = match elapsed_ms with
+    | None -> None
+    | Some value when value >= 0 -> Some value
+    | Some _ -> invalid "invalid tool elapsed time" in
   if not (valid_model_field call_id && valid_model_field name) then
     invalid "invalid tool lifecycle event";
-  (append_entry t (Tool_lifecycle { call_id; name; state })).id
+  (append_entry t (Tool_lifecycle { call_id; name; state; elapsed_ms })).id
 
 let record_tool_started t ~call_id ~name =
   record_tool_event t ~call_id ~name Tool_started
 
-let record_tool_settled t ~call_id ~name ~is_error =
-  record_tool_event t ~call_id ~name (Tool_settled { is_error })
+let record_tool_settled t ~call_id ~name ~is_error ?elapsed_ms () =
+  record_tool_event t ~call_id ~name ?elapsed_ms (Tool_settled { is_error })
 
-let record_tool_aborted t ~call_id ~name ~side_effects_may_have_occurred =
-  record_tool_event t ~call_id ~name
+let record_tool_aborted t ~call_id ~name ~side_effects_may_have_occurred
+    ?elapsed_ms () =
+  record_tool_event t ~call_id ~name ?elapsed_ms
     (Tool_aborted { side_effects_may_have_occurred })
 
+let valid_stage_name text =
+  String.length text >= 1 && String.length text <= 48 &&
+  String.for_all (function
+    | 'a'..'z' | '0'..'9' | '_' | '-' | '.' -> true | _ -> false) text
+
+(* Stage records journal one named phase's elapsed time and optional outcome
+   detail; they are timeline data only and never gate replay or approval. *)
+let record_stage t ~stage ~elapsed_ms ?detail () =
+  let detail = match detail with
+    | None -> None
+    | Some text when String.length text <= 256 -> Some text
+    | Some _ -> invalid "invalid stage detail" in
+  if not (valid_stage_name stage) || elapsed_ms < 0 then
+    invalid "invalid stage record";
+  (append_entry t (Stage { stage; elapsed_ms; detail })).id
 let pending_tool_calls t = unresolved_tool_calls (branch_entries t)
 
 let record_exit t ~kind =
@@ -1092,8 +1153,10 @@ let set_model ?registry t (identity : Model_identity.t) =
    | _ -> invalid "model selection uses an unsupported provider route");
   if model t <> Some normalized then (
     let entry = { id = fresh_id (); parent_id = t.leaf;
-      timestamp = timestamp (); kind = Model normalized } in
+      timestamp = timestamp (); step = t.next_step;
+      kind = Model normalized } in
     append_line t (entry_json entry);
+    t.next_step <- t.next_step + 1;
     t.records_rev <- entry :: t.records_rev;
     Hashtbl.add t.by_id entry.id entry;
     t.leaf <- Some entry.id)
@@ -1196,9 +1259,10 @@ let append_usage ?account_id ?route t ~provider ~model (tokens : Protocol.usage)
     not (modality_tokens_fit tokens.output_tokens tokens.output_modality_tokens) then
     invalid "invalid provider token usage";
   let entry = { id = fresh_id (); parent_id = t.leaf;
-    timestamp = timestamp ();
+    timestamp = timestamp (); step = t.next_step;
     kind = Usage { provider; account_id; route; model; tokens } } in
   append_line t (entry_json entry);
+  t.next_step <- t.next_step + 1;
   t.records_rev <- entry :: t.records_rev;
   Hashtbl.add t.by_id entry.id entry;
   t.leaf <- Some entry.id
@@ -1206,8 +1270,9 @@ let append_usage ?account_id ?route t ~provider ~model (tokens : Protocol.usage)
 let branch t id =
   if not (Hashtbl.mem t.by_id id) then invalid ("entry not found: " ^ id);
   let marker = { id = fresh_id (); parent_id = Some id; timestamp = timestamp ();
-                 kind = Branch } in
+                 step = t.next_step; kind = Branch } in
   append_line t (entry_json marker);
+  t.next_step <- t.next_step + 1;
   t.records_rev <- marker :: t.records_rev;
   Hashtbl.add t.by_id marker.id marker;
   t.leaf <- Some id;
@@ -1286,7 +1351,8 @@ let load_journal path =
     let seen_ids = Hashtbl.create 32 in
     let leaf = ref None in
     (try while true do
-      let entry = materialize (parse_entry (read_json ())) in
+      let step = List.length !records + 1 in
+      let entry = materialize (parse_entry ~step (read_json ())) in
       if Hashtbl.mem seen_ids entry.id then invalid "duplicate entry ID";
       Hashtbl.add seen_ids entry.id ();
       (match entry.parent_id with
@@ -1308,7 +1374,8 @@ let load_journal path =
        | Message _ | Message_artifact _ | Model _ | Thinking _ | Tool_selection _
        | Mode_change _ | Title _ | Label _ | Pin _ | Reset_boundary | Usage _
        | Workflow_goal _ | Interruption_rule _
-       | Tool_lifecycle _ | Job_started _ | Job_delivery _ | Session_exit _ ->
+       | Tool_lifecycle _ | Job_started _ | Job_delivery _ | Session_exit _
+       | Stage _ ->
            Hashtbl.add by_id entry.id entry; leaf := Some entry.id
        | Compaction { first_kept_id; _ } ->
            let rec ancestor = function
@@ -1330,7 +1397,10 @@ let load_journal path =
            leaf := entry.parent_id);
       records := entry :: !records
     done with End_of_file -> ());
-    { path; header; artifacts; records_rev = !records; by_id; leaf = !leaf;
+    { path; header; artifacts;
+      next_step = 1 + List.fold_left (fun high (entry : entry) ->
+        max high entry.step) 0 !records;
+      records_rev = !records; by_id; leaf = !leaf;
       disk_size = size })
 
 let migrate_legacy ~cwd path =
@@ -1355,9 +1425,12 @@ let migrate_legacy ~cwd path =
               | _ -> invalid "legacy session is not a JSON array" in
             let header = new_header cwd in
             let parent = ref None in
+            let step = ref 1 in
             let records = List.map (fun message ->
               let entry = { id = fresh_id (); parent_id = !parent;
-                            timestamp = timestamp (); kind = Message message } in
+                            timestamp = timestamp (); step = !step;
+                            kind = Message message } in
+              incr step;
               parent := Some entry.id;
               entry) messages in
             let body = line header ^ String.concat ""
@@ -1408,7 +1481,21 @@ let create_managed ~cwd ~directory =
   create ()
 
 
-let fork_header session =
+(* [until] bounds the copied records at the given journal step, mirroring the
+   reference Fork end-index; branch steps ascend, so the bound selects a
+   prefix of the source branch. *)
+let fork_entries ?until session =
+  let entries = branch_entries session in
+  match until with
+  | None -> entries
+  | Some bound ->
+      if bound < 1 then invalid "invalid fork bound";
+      List.filter (fun entry -> entry.step <= bound) entries
+
+let fork_header ?until session =
+  let copied = fork_entries ?until session in
+  if until <> None && copied = [] then
+    invalid "nothing to fork before that bound";
   let cwd = match Protocol.member "cwd" session.header with
     | `String cwd -> cwd | _ -> Unix.getcwd () in
   let parent_session = match Protocol.member "id" session.header with
@@ -1417,15 +1504,15 @@ let fork_header session =
     | Message_artifact (_, refs) ->
         List.map (fun (reference : attachment_reference) -> reference.owner) refs
     | Job_delivery { artifact = Some (owner, _); _ } -> [owner]
-    | _ -> []) (branch_entries session) in
+    | _ -> []) copied in
   new_header ~parent_session ~artifact_owners cwd
 
-let fork_content session header =
+let fork_content session ?until header =
   line header ^ String.concat ""
-    (List.map (fun entry -> line (entry_json entry)) (branch_entries session))
+    (List.map (fun entry -> line (entry_json entry)) (fork_entries ?until session))
 
-let finish_fork session path header =
-  write_new_file path (fork_content session header);
+let finish_fork session path ?until header =
+  write_new_file path (fork_content session ?until header);
   let forked = open_file path in
   (match title session with
    | Some selected when title forked <> Some selected ->
@@ -1434,15 +1521,15 @@ let finish_fork session path header =
   if pinned forked then set_pinned forked false;
   forked
 
-let fork session path =
-  finish_fork session path (fork_header session)
+let fork ?until session path =
+  finish_fork session path ?until (fork_header ?until session)
 
-let fork_managed session directory =
+let fork_managed ?until session directory =
   let rec create () =
-    let header = fork_header session in
+    let header = fork_header ?until session in
     let id = match Protocol.member "id" header with
       | `String id -> id | _ -> invalid "session ID missing during fork" in
     let path = Filename.concat directory (id ^ ".jsonl") in
-    try finish_fork session path header with
+    try finish_fork session path ?until header with
     | Unix.Unix_error (Unix.EEXIST, _, _) -> create () in
   create ()

@@ -178,7 +178,7 @@ let () =
      | [ Pave.Agent.Tool_started { call_id = "call-mobile"; name = "read_file";
            target = Some "App.swift"; _ };
          Pave.Agent.Tool_settled {
-           call_id = "call-mobile"; name = "read_file"; result; is_error = false
+           call_id = "call-mobile"; name = "read_file"; result; is_error = false; elapsed_ms = None
          } ] ->
          assert (String.starts_with ~prefix:source_text result)
      | _ -> failwith "tool call did not emit ordered typed lifecycle events");

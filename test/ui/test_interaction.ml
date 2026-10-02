@@ -91,7 +91,7 @@ let () =
    | Resume (Some "/tmp/saved session.jsonl") -> ()
    | _ -> fail "resume path with spaces");
   (match parse "/fork /tmp/saved session.jsonl" with
-   | Fork (Some "/tmp/saved session.jsonl") -> ()
+   | Fork { path = Some "/tmp/saved session.jsonl"; _ } -> ()
    | _ -> fail "fork path with spaces");
   (match parse "/clear", parse "/fresh", parse "/rename Fix login flow",
     parse "/label Need review", parse "/label", parse "/pin",
@@ -103,7 +103,7 @@ let () =
      Label None, Pin, Approval (Some "yolo"), Approval (Some "default"),
      Thinking (Some "high"), Thinking (Some "default"),
      Tool_toggle { name = "write_file"; enabled = false },
-     Attach (Some "Images/screen.png"), Attach None, Fork None -> ()
+     Attach (Some "Images/screen.png"), Attach None, Fork { path = None; until = None } -> ()
    | _ -> fail "journal lifecycle command parsing");
   (match parse "/new", parse "/entries", parse "/tree", parse "/tools",
     parse "/quit", parse "mobile task" with

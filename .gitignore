@@ -1,4 +1,5 @@
 _build/
+_build_rec/
 _opam/
 *.install
 .pave/

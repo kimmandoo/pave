@@ -9,6 +9,7 @@ type values = {
   approval_mode : Approval.mode option;
   tool_approval : (string * Approval.policy) list;
   command_patterns : Approval.command_rule list;
+  model_tiers : (string * string) list;
 }
 
 type loaded = { values : values; diagnostics : string list }
@@ -17,7 +18,7 @@ let empty = {
   default_provider = None; default_model = None; default_api = None;
   default_account_id = None; custom_providers = [];
   disable_shell = false; max_turns = None; approval_mode = None;
-  tool_approval = []; command_patterns = [];
+  tool_approval = []; command_patterns = []; model_tiers = [];
 }
 
 let member name fields = List.assoc_opt name fields
@@ -111,7 +112,7 @@ let parse ?(allow_custom = false) text =
   check_unique_fields "setting" fields;
   let allowed = ["default_provider"; "default_model"; "default_api";
     "default_account_id"; "disable_shell"; "max_turns"; "tools";
-    "custom_providers"] in
+    "custom_providers"; "model_tiers"] in
   List.iter (fun (name, _) ->
     if not (List.mem name allowed) then
       invalid_arg ("unknown setting " ^ name);
@@ -146,10 +147,27 @@ let parse ?(allow_custom = false) text =
   (match Provider_catalog.create_registry custom_providers with
    | Ok _ -> ()
    | Error message -> invalid_arg message);
+  let model_tiers = match member "model_tiers" fields with
+    | None -> []
+    | Some (`Assoc tiers) ->
+        check_unique_fields "model tier" tiers;
+        if List.length tiers > 8 then
+          invalid_arg "model_tiers allows at most 8 entries";
+        List.map (fun (tier, selector) ->
+          if not (List.mem tier ["light"; "heavy"; "fastapply"]) then
+            invalid_arg "model_tiers keys must be light, heavy, or fastapply";
+          match selector with
+          | `String value when String.trim value <> "" &&
+              String.length value <= 256 &&
+              not (String.exists (fun c -> Char.code c < 32) value) ->
+              tier, value
+          | _ -> invalid_arg "model tier values must be nonempty selectors")
+          tiers
+    | Some _ -> invalid_arg "model_tiers must be an object" in
   { default_provider; default_model; default_api; default_account_id;
     custom_providers; disable_shell;
     max_turns = positive_field "max_turns" fields;
-    approval_mode; tool_approval; command_patterns }
+    approval_mode; tool_approval; command_patterns; model_tiers }
 let same_file a b =
   a.Unix.st_dev = b.Unix.st_dev && a.Unix.st_ino = b.Unix.st_ino
 
@@ -228,6 +246,7 @@ let load ~root =
       tool_approval = merge_tool_approval user.tool_approval project.tool_approval;
       custom_providers = user.custom_providers;
       command_patterns = project.command_patterns @ user.command_patterns;
+      model_tiers = project.model_tiers @ user.model_tiers;
     };
     diagnostics = List.rev !diagnostics }
 
@@ -291,7 +310,11 @@ let update_file ?(require_owner = false) ?(allow_custom = false) ~directory chan
           ["tools", `Assoc tools_fields])
         @ (if updated.custom_providers = [] then []
           else ["custom_providers", `List
-            (List.map Custom_provider.to_json updated.custom_providers)]) in
+            (List.map Custom_provider.to_json updated.custom_providers)])
+        @ (if updated.model_tiers = [] then []
+          else ["model_tiers", `Assoc
+            (List.map (fun (tier, selector) -> tier, `String selector)
+              updated.model_tiers)]) in
       let text = Yojson.Basic.to_string (`Assoc fields) ^ "\n" in
       ignore (parse ~allow_custom text);
       let temp, output = Filename.open_temp_file ~mode:[Open_binary]

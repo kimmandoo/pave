@@ -1,5 +1,14 @@
 # Work checkpoint
 
+## Current session — port of agy reference features + publish_web fix
+
+- **Date:** 2026-10-02
+- **Active task:** Ported the requested antigravity-cli reference capabilities into pave and repaired `publish_web`.
+- **Shipped:** (1) Stage timeline — `Agent.stage {name;elapsed_ms;detail}` emitted for turn/model/tools, journaled as `Stage` entries with dense `step` ordinals; `/entries` shows `#step` and elapsed ms; JSONL emits `step` events. (2) `/fork [PATH] [until=STEP]` copies the selected ancestry into a new journal. (3) `task`'s `model` accepts `inherit`, a `modelTiers` setting name, or a full selector; resolved via `provider_for`. (4) Remote control — `pave hub --session FILE` (read-only) and `/hub start|stop|status` serve a 127.0.0.1 HTTP API gated by `x-pave-csrf-token`; `/publish attach` tunnels it. (5) `--record/--replay` JSONL session recording; `--timeout MS` per-turn deadline. (6) `memory` tool + `/memory` + `--enable-memory` backed by `.pave/memory`. (7) Permission triggers (`Approval.trigger`) shown in review scope; `w`/Always persists exact commands to user `commandRules`. (8) Plugin manifests accept `installedFrom`/`category`; `/plugin list` shows provenance; skill activation surfaces `## ACTION REQUIRED` preambles. (9) `/help` groups commands; unknown commands suggest the closest match. (10) `publish_web` gained cloudflared and localhost.run backends, env pins (`PAVE_PORTAL`/`PAVE_CLOUDFLARED`/`PAVE_SSH`/`PAVE_TUNNELS`), and a session-owned `attach` action.
+- **Files:** `bin/main.ml`, `bin/ui/tui.ml`, `lib/agent/agent.ml`, `lib/config/{settings,project_memory}.ml`, `lib/extensions/plugin_registry.{ml,mli}`, `lib/session/{session,session_store,session_tree,session_hub,session_recording}.ml`, `lib/tools/{approval,tools,workspace_memory,workspace_portal}.ml`, `lib/ui/interaction.ml`, tests under `test/`, `docs/*`, `CHANGELOG.md`.
+- **Verification:** `dune build` clean; hub smoke-verified (healthz open, CSRF 403/200, entries served); `--record`/`--replay` produce and read frames; `dune runtest` passes every suite including `test_cli_prompt` (545 s fixture run, exit 0). The `call_id` JSONL leak was fixed by dropping `call_id` from tool events.
+- **Exact next action:** none — committed and pushed.
+
 ## Current session — review of the last five commits and v0.1.79 release
 
 - **Date:** 2026-10-02

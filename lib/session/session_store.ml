@@ -343,9 +343,9 @@ let toggle_pin ~root session =
     write_pin_ids dir updated;
     pinned)
 
-let fork ~root session =
+let fork ~root ?until session =
   let dir = ensure ~root in
-  let forked = Session.fork_managed session dir in
+  let forked = Session.fork_managed ?until session dir in
   (match Session.title forked with
    | Some title ->
        let id = Protocol.member "id" forked.Session.header in

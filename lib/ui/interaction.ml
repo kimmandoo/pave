@@ -20,7 +20,7 @@ type command =
   | Retry
   | Tree
   | Branch of string
-  | Fork of string option
+  | Fork of { path : string option; until : int option }
   | Tools of string option
   | Context
   | Usage
@@ -42,6 +42,9 @@ type command =
   | Queue_view
   | Queue_prompt of string
   | Steer_prompt of string
+  | Publish of string option
+  | Hub of string option
+  | Memory of string option
   | Quit
   | Prompt of string
   | Skill of string
@@ -61,6 +64,9 @@ type action =
   | A_plugin
   | A_mcp
   | A_mcp_connect of string
+  | A_publish
+  | A_hub
+  | A_memory
 
 type grammar =
   | No_arguments
@@ -77,6 +83,7 @@ type grammar =
 
 type shortcut = {
   name : string;
+  group : string;
   grammar : grammar;
   summary : string;
   action : action;
@@ -85,8 +92,8 @@ type shortcut = {
 }
 
 let command ?(session_only = false) ?(interactive_only = false)
-    name grammar summary action =
-  { name; grammar; summary; action; session_only; interactive_only }
+    ?(group = "general") name grammar summary action =
+  { name; group; grammar; summary; action; session_only; interactive_only }
 
 let commands = [
   command "/model" (Optional_word "PROVIDER[@API][#ACCOUNT]/MODEL") "Switch model for this conversation" A_model;
@@ -119,7 +126,7 @@ let commands = [
   command ~session_only:true "/entries" No_arguments "List journal entries" A_entries;
   command ~session_only:true "/tree" No_arguments "Search journal ancestry and branch" A_tree;
   command ~session_only:true "/branch" (Required_word "ID") "Continue from an earlier entry" A_branch;
-  command ~session_only:true "/fork" (Optional_path "PATH") "Fork the selected journal branch into a private session" A_fork;
+  command ~session_only:true "/fork" (Optional_text "PATH|until=STEP") "Fork the selected journal branch into a private session; until=STEP copies only entries up to that step" A_fork;
   command ~session_only:true "/compact" No_arguments "Summarize older turns" A_compact;
   command ~session_only:true "/jobs" No_arguments "List session-owned background jobs" A_jobs;
   command ~session_only:true "/wait" (Required_word "JOB_ID") "Wait for a session-owned job result" A_wait;
@@ -134,6 +141,9 @@ let commands = [
   command ~session_only:true "/loop" (Optional_text "GOAL") "Run a bounded review-only planning loop" A_loop;
   command ~session_only:true "/autoresearch" (Optional_text "QUESTION") "Run bounded read-only research" A_autoresearch;
   command ~session_only:true "/rule" (Optional_text "TEXT|clear") "Show, set, or clear a session interruption rule" A_rule;
+  command ~session_only:true "/publish" (Optional_text "[PORT [NAME]]|attach|stop NAME|list") "Expose a loopback port or this session's hub through a tunnel (portal, cloudflared, or ssh)" A_publish;
+  command ~session_only:true "/hub" (Optional_text "start [PORT]|stop|status") "Expose this session on a loopback remote-control endpoint" A_hub;
+  command "/memory" (Optional_text "list|get NAME|forget NAME|add NAME TEXT") "Inspect or update the project memory store (.pave/memory)" A_memory;
   command "/help" No_arguments "Show commands and keys" A_help;
   command "/quit" No_arguments "Exit Pave" A_quit;
 ]
@@ -164,13 +174,29 @@ let suggestions ?(session = true) ?(interactive = true) ?(subagents = false)
     available ~session ~interactive ~subagents item &&
     String.starts_with ~prefix item.name) (commands @ external_commands)
 
+let group_order = ["general"; "model"; "session"; "control"; "jobs";
+  "extensions"; "remote"]
+
 let help ?(session = true) ?(interactive = true) ?(subagents = false)
     ?(external_commands = []) () =
-  List.filter (available ~session ~interactive ~subagents) (commands @ external_commands)
-  |> List.map (fun item ->
+  let items = List.filter (available ~session ~interactive ~subagents)
+    (commands @ external_commands) in
+  let order group = match List.find_index ((=) group) group_order with
+    | Some index -> index | None -> List.length group_order in
+  let items = List.stable_sort (fun a b ->
+    match compare (order a.group) (order b.group) with
+    | 0 -> String.compare a.name b.name
+    | n -> n) items in
+  let lines = ref [] and last_group = ref "" in
+  List.iter (fun item ->
+    if item.group <> !last_group then (
+      last_group := item.group;
+      lines := !lines @ [item.group ^ ":"]);
     let usage = usage item in
-    item.name ^ (if usage = "" then "" else " " ^ usage) ^
-    " · " ^ item.summary)
+    lines := !lines @ ["  " ^ item.name ^
+      (if usage = "" then "" else " " ^ usage) ^ " · " ^ item.summary])
+    items;
+  !lines
 
 
 let is_whitespace_or_control char =
@@ -284,7 +310,19 @@ let parse ?(session = true) ?(interactive = true) ?(subagents = false)
         if text = "" then None else Some text in
     match List.find_opt (fun item -> item.name = name)
       (commands @ external_commands) with
-    | None -> Unknown line
+    | None ->
+        let closest =
+          List.fold_left (fun (best_name, best_score) item ->
+            let limit = min (String.length name) (String.length item.name) in
+            let score = let rec loop i =
+              if i < limit && name.[i] = item.name.[i] then loop (i + 1)
+              else i in loop 0 in
+            if score > best_score then (item.name, score)
+            else (best_name, best_score)) ("", 0)
+            (commands @ external_commands) in
+        let closest = fst closest in
+        Unknown (line ^ (if closest = "" then ""
+          else " (did you mean " ^ closest ^ "?)"))
     | Some item when not (available ~session ~interactive ~subagents item) -> Unknown line
     | Some item ->
         let arguments =
@@ -315,6 +353,9 @@ let parse ?(session = true) ?(interactive = true) ?(subagents = false)
         | A_plugin, Optional_argument operation -> Plugin operation
         | A_approval, Optional_argument value -> Approval value
         | A_mcp, Optional_argument operation -> Mcp operation
+        | A_publish, Optional_argument text -> Publish text
+        | A_hub, Optional_argument text -> Hub text
+        | A_memory, Optional_argument text -> Memory text
         | A_mcp_connect name, No_argument -> Mcp (Some ("connect " ^ name))
         | A_thinking, Optional_argument value -> Thinking value
         | A_tool, Pair_argument (operation, tool_name) ->
@@ -327,7 +368,22 @@ let parse ?(session = true) ?(interactive = true) ?(subagents = false)
         | A_compact, No_argument -> Compact
         | A_retry, No_argument -> Retry
         | A_branch, Required_argument id -> Branch id
-        | A_fork, Optional_argument path -> Fork path
+        | A_fork, Optional_argument text ->
+            let path, until = match text with
+              | None -> None, None
+              | Some text ->
+                  let parts = List.filter (fun part -> part <> "")
+                    (String.split_on_char ' ' text) in
+                  List.fold_left (fun (path, until) part ->
+                    if String.starts_with ~prefix:"until=" part then
+                      (match int_of_string_opt
+                         (String.sub part 6 (String.length part - 6)) with
+                       | Some step when step > 0 -> path, Some step
+                       | _ -> invalid_arg "until= expects a positive step number")
+                    else if path = None then Some part, until
+                    else invalid_arg "/fork accepts a path and an optional until=STEP")
+                    (None, None) parts in
+            Fork { path; until }
         | A_tools, Optional_argument selected -> Tools selected
         | A_context, No_argument -> Context
         | A_usage, No_argument -> Usage

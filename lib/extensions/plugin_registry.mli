@@ -26,6 +26,12 @@ type plugin = {
   enabled : bool;
   references : capabilities;
   active : capabilities;
+  installed_from : string;
+    (** Manifest `installedFrom` provenance label; `"local"` when absent. *)
+  is_builtin : bool;
+    (** Reserved for curated registry plugins; always false for directory manifests. *)
+  discovery_category : string;
+    (** Manifest `category` label; `"installed"` when absent. *)
 }
 type snapshot = { plugins : plugin list; active : capabilities; diagnostics : diagnostic list }
 type registry

@@ -1,5 +1,19 @@
 # Troubleshooting
 
+### [2026-10-02] `pave hub` subcommand rejected its own name as an argument
+
+- **Context / Symptom:** `pave hub --session FILE --port N` exited with `unexpected argument: hub` and printed the hub usage line.
+- **Root Cause:** `Arg.parse` was called on raw `Sys.argv`; unlike `Arg.parse_argv`, it does not skip `argv[0]`-relative dispatch, so the literal `hub` token arrived as an anonymous argument.
+- **Solution:** Parse hub options via `Arg.parse_argv (Array.sub Sys.argv 1 (Array.length Sys.argv - 1))`.
+- **Prevention / Reference:** Any argv-dispatched subcommand that reuses `Arg.parse` must slice off the subcommand token first; smoke-test the subcommand path, not just the flag grammar.
+
+### [2026-10-02] `Session_store.fork` rejected empty journals after `until=` bound was added
+
+- **Context / Symptom:** `test_session_rewind` failed with `Invalid_response("invalid session journal: nothing to fork before that bound")` on a header-only journal.
+- **Root Cause:** The new `?until` implementation guarded `fork_header` with `copied = [] -> invalid`, which also rejected legitimate header-only forks (`until = None`).
+- **Solution:** Apply the empty-guard only when `until` is `Some _`: `if until <> None && copied = [] then invalid`.
+- **Prevention / Reference:** New optional bounds must not change the default (`None`) path; test both bounded and unbounded forks.
+
 ### [2026-10-02] Provider retry backoff stalled the test suite
 
 - **Context / Symptom:** `dune runtest` ran to the 300 s timeout after transient-retry logic was added to `Provider.post_json`/`post_stream`. Fixtures never hit real network errors, but a fixture returning HTTP 429/5xx triggered `Unix.sleepf` backoffs inside the loop.
