@@ -36,8 +36,18 @@
  (libraries pave unix yojson))
 
 (test
+ (name test_workspace_sensitive)
+ (modules test_workspace_sensitive)
+ (libraries pave unix yojson))
+
+(test
  (name test_workspace_flutter_focus)
  (modules test_workspace_flutter_focus)
+ (libraries pave unix yojson))
+
+(test
+ (name test_workspace_flutter_channels)
+ (modules test_workspace_flutter_channels)
  (libraries pave unix yojson))
 
 (test
@@ -46,8 +56,18 @@
  (libraries pave unix yojson))
 
 (test
+ (name test_workspace_rn_consistency)
+ (modules test_workspace_rn_consistency)
+ (libraries pave unix yojson))
+
+(test
  (name test_mobile_real)
  (modules test_mobile_real)
+ (libraries pave unix yojson))
+
+(test
+ (name test_workspace_mobile_run)
+ (modules test_workspace_mobile_run)
  (libraries pave unix yojson))
 
 (test

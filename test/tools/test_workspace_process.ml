@@ -186,6 +186,31 @@ let () =
       assert (isolated.termination = Process.Exited 0);
       assert (isolated.output = "PATH=/usr/bin:/bin\n");
       assert (not (contains isolated.output auth_sentinel)));
+  let java_home = "JAVA_HOME" in
+  let previous_java_home = Sys.getenv_opt java_home in
+  let java_home_path = "/runtime/test-jdk" in
+  Unix.putenv java_home java_home_path;
+  Fun.protect
+    ~finally:(fun () -> Unix.putenv java_home (Option.value ~default:"" previous_java_home))
+    (fun () ->
+      let inherited = Process.run ~program:"/usr/bin/printenv"
+        ~arguments:[java_home] () in
+      assert (inherited.termination = Process.Exited 0);
+      assert (inherited.output = java_home_path ^ "\n"));
+  let android_home = "ANDROID_HOME" in
+  let previous_android_home = Sys.getenv_opt android_home in
+  let android_home_path = "/sdk/test" in
+  Unix.putenv android_home android_home_path;
+  Fun.protect
+    ~finally:(fun () -> Unix.putenv android_home
+      (Option.value ~default:"" previous_android_home))
+    (fun () ->
+      let inherited = Process.run ~program:"/usr/bin/printenv"
+        ~arguments:[android_home] () in
+      assert (inherited.termination = Process.Exited 0);
+      assert (inherited.output = android_home_path ^ "\n"));
+
+
 
   let records = Process.create_manager ~max_jobs:1 () in
   for index = 0 to 64 do

@@ -117,7 +117,7 @@ let static_modules source =
     else complete := false);
   if !complete then Some (List.sort_uniq String.compare !modules) else None
 
-let command ~root ~subroot ~action ~task =
+let command ~root ~subroot ~action ~task ~serial =
   try
     let root = Workspace_path.root_path root in
     let cwd = validate_directory root subroot in
@@ -138,9 +138,15 @@ let command ~root ~subroot ~action ~task =
     let settings = Workspace_path.read_bounded manifest manifest_limit in
     match action with
     | "tasks" ->
-        if task <> "" then fail "Gradle task discovery does not accept a task";
+        if task <> "" || serial <> "" then
+          fail "Gradle task discovery does not accept a task or device";
         "gradle --offline tasks --all", cwd
-    | "run" ->
+    | "run" | "instrumented" ->
+        if serial = "" <> (action = "run") then
+          fail "Gradle instrumentation selects exactly one emulator serial; other Gradle actions take none";
+        if action = "instrumented" &&
+           not (Workspace_android_devices.emulator_serial serial) then
+          fail "select an exact ready emulator serial (emulator-NNNN)";
         if not (qualified_task task) then
           fail "select an exact qualified Gradle task (:task or :module:task)";
         let components = String.split_on_char ':' task in
@@ -153,8 +159,9 @@ let command ~root ~subroot ~action ~task =
         | Some module_path, Some observed when not (List.mem module_path observed) ->
             fail "Gradle task targets a module not declared in settings"
         | _ -> ());
-        "gradle --offline '" ^ task ^ "'", cwd
-    | _ -> fail "unsupported Gradle action (expected tasks or run)"
+        if action = "run" then "gradle --offline '" ^ task ^ "'", cwd
+        else "ANDROID_SERIAL='" ^ serial ^ "' gradle --offline '" ^ task ^ "'", cwd
+    | _ -> fail "unsupported Gradle action (expected tasks, run or instrumented)"
   with
   | Workspace_path.Error message -> fail message
   | Unix.Unix_error (error, _, _) -> fail ("Gradle settings unavailable: " ^ Unix.error_message error)

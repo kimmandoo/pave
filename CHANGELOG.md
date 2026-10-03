@@ -1,6 +1,10 @@
 # Changelog
 
 ## 2026-10-03
+- feat(mobile): added session-bound approved Android/iOS builds, device install/launch/stop previews, validated Android activity selection, stateful sessions, and the `/mobile` session dashboard.
+- test(mobile): verified real Android app-session build/install/component-launch/stop and AndroidJUnitRunner on `emulator-5554`, plus Xcode Simulator XCTest; signing and implicit SDK/dependency installation remained disabled.
+- fix(tools): preserved configured Java and Android SDK runtime paths for managed mobile-toolchain subprocesses without inheriting provider credentials.
+
 
 - fix(portal): replaced Cloudflare/SSH substitutions with gosuda Portal relay publishing for an already-listening localhost server, generated or accepted DNS prefixes, isolated persistent private identities by prefix, pinned optional HTTPS relays, required complete matching readiness, and cleaned up cancelled/failed owned tunnels; kept model publish/attach/stop explicitly approval-gated even in yolo mode.
 - fix(provider): removed automatic completion request replay, rejected incomplete SSE and contradictory terminal/tool state, preserved signed native transcripts without ID repair, restored direct Anthropic automatic caching, isolated custom-endpoint replay, corrected Anthropic/Gemini/Ollama thinking, Copilot image headers, optional Bedrock usage and missing AWS-region handling, and prevented shared curl, Devin and Apple helper cleanup from double-closing descriptors reused by concurrent parent/child requests.

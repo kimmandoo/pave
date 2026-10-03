@@ -1472,7 +1472,8 @@ let () =
             | Pave.Mcp_config.User -> "private user configuration"
             | Pave.Mcp_config.Project -> "workspace configuration");
           "Action: " ^ action];
-        reason = Some "MCP requires explicit interactive approval." } in
+        reason = Some "MCP requires explicit interactive approval.";
+        sensitive = None } in
     let mcp_authorize = function
       | Pave.Mcp_client.Start server -> mcp_approve server "Start server"
       | Pave.Mcp_client.Effect (server, name, arguments) ->
@@ -3113,6 +3114,22 @@ let () =
           let jobs = Pave.Session_jobs.jobs manager in
           emit_lines (if jobs = [] then ["No session-owned jobs."]
             else "Session jobs:" :: List.map format_job jobs) in
+    let mobile_dashboard () = match !journal with
+      | None -> notify "Error: mobile sessions require a private saved session"
+      | Some session ->
+          let context = tool_context session in
+          let rows = Pave.Workspace_mobile_run.sessions
+              context.Pave.Tools.mobile_run_manager
+            |> List.map Pave.Workspace_mobile_run.render in
+          (match !ui with
+           | Some screen ->
+               ignore (Tui.choose ~intro:[
+                 "Selected app, scheme, variant, device and lifecycle state."
+               ] ~empty_message:"No mobile app sessions. Use mobile_session to select one."
+                 screen ~title:"Mobile app sessions" ~choices:rows)
+           | None ->
+               emit_lines (if rows = [] then ["No mobile app sessions."]
+                 else "Mobile app sessions:" :: rows)) in
     let show_job manager id =
       match Pave.Session_jobs.find manager ~id with
       | None -> notify "Error: no such job in the active session"
@@ -3205,7 +3222,8 @@ let () =
                         "Tool: " ^ rewind_entry.tool_name;
                         "The restore proceeds only while current file bytes and mode match the recorded post-change state.";
                         "Shell and external effects are not reversed."];
-                      reason = Some "Review and confirm this workspace restore." } in
+                      reason = Some "Review and confirm this workspace restore.";
+                      sensitive = None } in
                     if not (approve_tool_request request) then
                       notify "Workspace rewind was not approved."
                     else
@@ -3661,8 +3679,8 @@ let () =
                | None -> send text)
          | _ when busy && (match command with
              | Pave.Interaction.Prompt _ | Pave.Interaction.Jobs
-             | Pave.Interaction.Wait _ | Pave.Interaction.Cancel_job _
-             | Pave.Interaction.Artifact _ -> false
+             | Pave.Interaction.Mobile | Pave.Interaction.Wait _
+             | Pave.Interaction.Cancel_job _ | Pave.Interaction.Artifact _ -> false
              | _ -> true) ->
              feedback "Wait for the current turn or /cancel it before changing session, model, or workflow."
          | Pave.Interaction.Mcp operation ->
@@ -4297,6 +4315,7 @@ let () =
            | Some screen -> Tui.events screen lines
            | None -> List.iter on_event lines)
         | Pave.Interaction.Jobs -> list_jobs ()
+        | Pave.Interaction.Mobile -> mobile_dashboard ()
         | Pave.Interaction.Wait id -> wait_job id
         | Pave.Interaction.Cancel_job id -> cancel_job id
         | Pave.Interaction.Artifact selected -> show_artifact selected

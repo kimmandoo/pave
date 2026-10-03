@@ -123,7 +123,8 @@ let validate_text label limit value =
 
 let inherited_environment_names = [
   "PATH"; "HOME"; "TMPDIR"; "TEMP"; "LANG"; "LC_ALL"; "LC_CTYPE";
-  "TERM"; "COLORTERM"; "USER"; "LOGNAME"; "SHELL"; "PWD"; "NO_COLOR"
+  "TERM"; "COLORTERM"; "USER"; "LOGNAME"; "SHELL"; "PWD"; "NO_COLOR";
+  "JAVA_HOME"; "ANDROID_HOME"; "ANDROID_SDK_ROOT"; "ANDROID_USER_HOME"
 ]
 
 (* Child processes inherit only portable runtime/navigation values. Provider,

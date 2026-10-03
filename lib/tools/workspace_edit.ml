@@ -39,6 +39,7 @@ type ast_edit = { path : string; expected_sha256 : string; operation : ast_opera
 
 type prepared = {
   absolute : string;
+  before : snapshot;
   after : string;
   preview : preview;
 }
@@ -159,21 +160,27 @@ let prepare_hunks ~root ~path ~expected_sha256 ~hunks = protect_workspace (fun (
   let before = { contents; sha256 = sha256 contents } in
   verify_snapshot expected_sha256 before.sha256;
   let after = hunks_result contents hunks in
-  { absolute; after; preview = make_preview path before after })
+  { absolute; before; after; preview = make_preview path before after })
 
 let preview_hunks ~root ~path ~expected_sha256 ~hunks =
   (prepare_hunks ~root ~path ~expected_sha256 ~hunks).preview
 
+(* Publish a prepared result only while the target still holds the bytes the
+   caller reviewed: the current content is hash-checked against the snapshot
+   used to compute [after]. *)
+let write_prepared prepared =
+  if prepared.preview.changed then (
+    verify_current_snapshot prepared.absolute prepared.before.sha256;
+    Workspace_path.atomic_write prepared.absolute prepared.after)
+
 let apply_hunks ~root ~path ~expected_sha256 ~hunks = protect_workspace (fun () ->
   let prepared = prepare_hunks ~root ~path ~expected_sha256 ~hunks in
-  if prepared.preview.changed then (
-    verify_current_snapshot prepared.absolute expected_sha256;
-    Workspace_path.atomic_write prepared.absolute prepared.after);
+  write_prepared prepared;
   prepared.preview)
 
-(* Compatibility operation for the existing edit_file contract: old_text must
-   occur exactly once, and no snapshot token is required. *)
-let replace_unique ~root ~path ~old_text ~new_text = protect_workspace (fun () ->
+(* Prepare-only variant of the existing edit_file contract: old_text must
+   occur exactly once; callers publish through [write_prepared]. *)
+let prepare_unique ~root ~path ~old_text ~new_text = protect_workspace (fun () ->
   ensure_text "replacement old_text" old_text;
   ensure_text "replacement new_text" new_text;
   if String.length old_text > max_hunk_bytes ||
@@ -192,10 +199,14 @@ let replace_unique ~root ~path ~old_text ~new_text = protect_workspace (fun () -
     | _ -> assert false in
   let after = replace_ranges contents
       [start, start + String.length old_text, new_text] in
-  if after <> contents then (
-    verify_current_snapshot absolute before.sha256;
-    Workspace_path.atomic_write absolute after);
-  make_preview path before after)
+  { absolute; before; after; preview = make_preview path before after })
+
+(* Compatibility operation for the existing edit_file contract: old_text must
+   occur exactly once, and no snapshot token is required. *)
+let replace_unique ~root ~path ~old_text ~new_text = protect_workspace (fun () ->
+  let prepared = prepare_unique ~root ~path ~old_text ~new_text in
+  write_prepared prepared;
+  prepared.preview)
 
 let parse_implementation ~filename source =
   ensure_text "OCaml source" source;
@@ -328,7 +339,7 @@ let prepare_ast ~root ~language edit = protect_workspace (fun () ->
   let before = { contents; sha256 = sha256 contents } in
   verify_snapshot edit.expected_sha256 before.sha256;
   let after = transform_ast ~language ~filename:edit.path ~source:contents edit.operation in
-  { absolute; after; preview = make_preview edit.path before after })
+  { absolute; before; after; preview = make_preview edit.path before after })
 
 let preview_ast ~root ~language ~edits =
   if not (List.mem language supported_languages) then
@@ -344,7 +355,5 @@ let preview_ast ~root ~language ~edits =
    partially publish a multi-file transaction. *)
 let apply_ast ~root ~language ~edit = protect_workspace (fun () ->
   let prepared = prepare_ast ~root ~language edit in
-  if prepared.preview.changed then (
-    verify_current_snapshot prepared.absolute edit.expected_sha256;
-    Workspace_path.atomic_write prepared.absolute prepared.after);
+  write_prepared prepared;
   prepared.preview)

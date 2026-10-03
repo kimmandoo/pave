@@ -20,6 +20,23 @@ type command_rule = { match_text : string; policy : policy;
 
 type resolution = Allowed | Denied of string | Requires_prompt of string option
 
+(* Exact-content authorization for sensitive workspace mutations (M21b/M22b):
+   the shown file/effect plus the reviewed original and result hashes a
+   mutation must match at apply time. *)
+type sensitive_effect = { effect_path : string; effect_summary : string }
+
+type sensitive_target = {
+  target_path : string;
+  original_sha256 : string;
+  result_sha256 : string;
+}
+
+type sensitive_review = {
+  effects : sensitive_effect list;
+  unresolved : string list;
+  targets : sensitive_target list;
+}
+
 type request = {
   tool_name : string;
   tier : tier;
@@ -27,6 +44,10 @@ type request = {
   impact : string;
   details : string list;
   reason : string option;
+  (* Set only when the proposed change was classified sensitive or
+     unresolved; consumers must prompt interactively every call and bind the
+     write to [targets]. *)
+  sensitive : sensitive_review option;
 }
 
 let mode_of_string = function

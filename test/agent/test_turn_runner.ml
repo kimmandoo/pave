@@ -27,7 +27,8 @@ let shutdown_cases () =
                     tier = Pave.Approval.Write;
                     trigger = Pave.Approval.File_access;
                     impact = "Writes a file";
-                    details = ["Path: blocked.txt"]; reason = None })
+                    details = ["Path: blocked.txt"]; reason = None;
+                    sensitive = None })
               | _ -> assert false);
              raise Pave.Provider.Cancelled) in
          let runner = Pave.Turn_runner.create ~run
@@ -293,7 +294,8 @@ let approval_stop_cases () =
       let approved = if tool then Runner.approve_tool runner {
         Pave.Approval.tool_name = "write_file"; tier = Pave.Approval.Write;
         trigger = Pave.Approval.File_access; impact = "Writes a file";
-        details = ["Path: denied.txt"]; reason = None }
+        details = ["Path: denied.txt"]; reason = None;
+        sensitive = None }
       else Runner.approve runner "touch denied.txt" in
       Atomic.set denied (not approved) in
     let runner = Runner.create ~run

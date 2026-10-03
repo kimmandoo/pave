@@ -78,6 +78,171 @@ let () =
             if contains result "release-not-selected" then
               failwith "Gradle ran an unselected variant";
             print_endline "real Gradle selected variant: exit 0"
+        | "android_test" ->
+            create (Filename.concat root "settings.gradle.kts")
+              {|pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+dependencyResolutionManagement { repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS); repositories { google(); mavenCentral() } }
+rootProject.name = "MobileInstrumentationFixture"
+include(":app")
+|};
+            mkdir (Filename.concat root "app");
+            create (Filename.concat root "app/build.gradle.kts")
+              {|plugins { id("com.android.application") version "9.1.1" }
+android {
+  namespace = "dev.pave.mobilefixture"
+  compileSdk = 35
+  defaultConfig {
+    applicationId = "dev.pave.mobilefixture"
+    minSdk = 23
+    targetSdk = 28
+    versionCode = 1
+    versionName = "1"
+    testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+  }
+  testOptions { animationsDisabled = true }
+}
+configurations.configureEach {
+  resolutionStrategy.force(
+    "androidx.lifecycle:lifecycle-common:2.6.2",
+    "androidx.annotation:annotation-jvm:1.9.1")
+}
+dependencies {
+  androidTestImplementation("androidx.test:runner:1.7.0")
+}
+|};
+            mkdir (Filename.concat root "app/src");
+            mkdir (Filename.concat root "app/src/main");
+            mkdir (Filename.concat root "app/src/main/java");
+            mkdir (Filename.concat root "app/src/main/java/dev");
+            mkdir (Filename.concat root "app/src/main/java/dev/pave");
+            mkdir (Filename.concat root "app/src/main/java/dev/pave/mobilefixture");
+            create (Filename.concat root "app/src/main/java/dev/pave/mobilefixture/SmokeActivity.java")
+              "package dev.pave.mobilefixture;\npublic final class SmokeActivity extends android.app.Activity {}\n";
+            mkdir (Filename.concat root "app/src/androidTest");
+            create (Filename.concat root "app/src/main/AndroidManifest.xml")
+              {|<manifest xmlns:android="http://schemas.android.com/apk/res/android"><application android:label="Pave Fixture"><activity android:name=".SmokeActivity" android:exported="true"><intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter></activity></application></manifest>|};
+            mkdir (Filename.concat root "app/src/androidTest/java");
+            mkdir (Filename.concat root "app/src/androidTest/java/dev");
+            mkdir (Filename.concat root "app/src/androidTest/java/dev/pave");
+            mkdir (Filename.concat root "app/src/androidTest/java/dev/pave/mobilefixture");
+            create (Filename.concat root "app/src/androidTest/java/dev/pave/mobilefixture/SmokeTest.java")
+              {|package dev.pave.mobilefixture;
+import org.junit.Test;
+import static org.junit.Assert.assertEquals;
+public final class SmokeTest {
+  @Test public void disposableInstrumentationRunsOnSelectedEmulator() {
+    assertEquals(4, 2 + 2);
+  }
+}
+|};
+            let approve name args =
+              let preview = Pave.Tools.approval_request ~context ~root ~name ~args
+                (Pave.Tools.approval_decision ~command_patterns:[] ~name ~args) in
+              if not (Unix.isatty (Unix.descr_of_in_channel stdin)) then
+                failwith "manual Android test acceptance requires an interactive terminal";
+              Printf.printf "Disposable project: %s\n%s\n" root preview.impact;
+              List.iter print_endline preview.details;
+              print_string "Approve this command? [y/N] ";
+              flush stdout;
+              if (try read_line () with End_of_file -> "") <> "y" then
+                failwith "manual Android command denied" in
+            let run_mobile fields =
+              let args = `Assoc fields in
+              approve "mobile_check" args;
+              call "mobile_check" fields in
+            let discovery = run_mobile [
+              "stack", `String "gradle"; "action", `String "tasks";
+              "subroot", `String "."; "timeout_seconds", `Int 300] in
+            expect "Gradle instrumentation task discovery" ":app:assembleDebugAndroidTest" discovery;
+            expect "Gradle app task discovery" ":app:assembleDebug" discovery;
+            let devices_args = `Assoc [
+              "action", `String "devices"; "subroot", `String "."] in
+            approve "android_devices" devices_args;
+            let inventory = call "android_devices"
+              ["action", `String "devices"; "subroot", `String "."] in
+            expect "Android emulator inventory" "Android ADB inventory: exit 0"
+              inventory;
+            let ready = String.split_on_char '\n' inventory
+              |> List.find_opt (fun line ->
+                   contains line "Ready emulators:" &&
+                   not (contains line "none")) in
+            let serial = match ready with
+              | None -> failwith ("no attached ready Android emulator: " ^ inventory)
+              | Some line ->
+                  let marker = "emulator-" in
+                  let rec find index =
+                    if index + String.length marker > String.length line then
+                      failwith ("ready inventory had no selectable emulator: " ^ line)
+                    else if String.sub line index (String.length marker) = marker
+                    then index + String.length marker
+                    else find (index + 1) in
+                  let start = find 0 in
+                  let stop = try String.index_from line start ' '
+                    with Not_found -> String.length line in
+                  String.sub line (start - String.length marker)
+                    (stop - start + String.length marker) in
+            Printf.printf "Selected ready emulator: %s\n" serial;
+            print_string "Use this emulator for the disposable instrumentation test? [y/N] ";
+            flush stdout;
+            if (try read_line () with End_of_file -> "") <> "y" then
+              failwith "Android emulator selection denied";
+            let session_fields = [
+              "platform", `String "android";
+              "subroot", `String ".";
+              "device", `String serial;
+              "app_id", `String "dev.pave.mobilefixture";
+              "app_path", `String "app/build/outputs/apk/debug/app-debug.apk";
+              "variant", `String "debug";
+              "activity", `String "dev.pave.mobilefixture/.SmokeActivity"] in
+            let selected = call "mobile_session"
+              (("action", `String "select") :: session_fields) in
+            expect "Android app session selection" "Selected mobile app session:" selected;
+            let run_session action extra =
+              let fields = ["action", `String action;
+                "session_id", `String "mobile-1";
+                "timeout_seconds", `Int 300] @ extra in
+              approve "mobile_session" (`Assoc fields);
+              call "mobile_session" fields in
+            expect "Android session build" "Mobile build completed"
+              (run_session "build" ["task", `String ":app:assembleDebug"]);
+            let build_test = run_mobile [
+              "stack", `String "gradle"; "action", `String "run";
+              "subroot", `String "."; "target", `String ":app:assembleDebugAndroidTest";
+              "timeout_seconds", `Int 300] in
+            expect "Android instrumentation APK build" "exit 0" build_test;
+            let run_shell command =
+              let args = `Assoc [
+                "command", `String command; "timeout_seconds", `Int 60] in
+              approve "run_command" args;
+              call "run_command" [
+                "command", `String command; "timeout_seconds", `Int 60] in
+            let test_apk = Filename.concat root "app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk" in
+            expect "Android session install" "Mobile install completed"
+              (run_session "install" []);
+            let package_state = run_shell ("adb -s " ^ Filename.quote serial ^
+              " shell dumpsys package dev.pave.mobilefixture") in
+            let relevant = String.split_on_char '\n' package_state
+              |> List.filter (fun line -> contains line "SmokeActivity" ||
+                   contains line "MAIN" || contains line "LAUNCHER") in
+            print_endline ("Android fixture package diagnostic:\n" ^
+              String.concat "\n" relevant);
+            expect "Android session launch" "Mobile launch completed"
+              (run_session "launch" []);
+            expect "Android session stop" "Mobile stop completed"
+              (run_session "stop" []);
+            print_endline ("real Android app session on " ^ serial ^
+              ": built, installed, launched and stopped");
+            if not (Sys.file_exists test_apk) then
+              failwith ("expected test APK missing: " ^ test_apk);
+            let installed_test = run_shell ("adb -s " ^ Filename.quote serial ^
+              " install -r " ^ Filename.quote test_apk) in
+            expect "selected emulator test APK install" "Success" installed_test;
+            let test = run_shell ("adb -s " ^ Filename.quote serial ^
+              " shell am instrument -w " ^
+              "dev.pave.mobilefixture.test/androidx.test.runner.AndroidJUnitRunner") in
+            expect "selected Android emulator instrumentation" "OK (1 test)" test;
+            print_endline ("real Android instrumentation on " ^ serial ^
+              ": 1 test passed")
         | "flutter" ->
             run "flutter create --project-name mobile_fixture --platforms=android .";
             let result = mobile "analyze" in
@@ -111,12 +276,23 @@ let () =
             let devices = inventory "devices" in
             expect "Android ADB inventory" "Android ADB inventory: exit 0" devices;
             print_endline devices
-        | "xcode" | "simulators" ->
+        | "xcode" | "simulators" | "xcode_test" ->
             mkdir (Filename.concat root "Sources");
             create (Filename.concat root "Sources/App.swift")
               "import UIKit\n@main final class AppDelegate: UIResponder, UIApplicationDelegate { var window: UIWindow?; func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool { true } }\n";
+            if stack = "xcode_test" then (
+              mkdir (Filename.concat root "Tests");
+              create (Filename.concat root "Tests/MobileFixtureTests.swift")
+                "import XCTest\nfinal class MobileFixtureTests: XCTestCase { func testDisposableFocus() { XCTAssertEqual(2 + 2, 4) } }\n");
             create (Filename.concat root "project.yml")
-              "name: MobileFixture\noptions:\n  bundleIdPrefix: dev.pave\ntargets:\n  MobileFixture:\n    type: application\n    platform: iOS\n    sources: [Sources]\n    settings:\n      base:\n        CODE_SIGNING_ALLOWED: NO\n        GENERATE_INFOPLIST_FILE: YES\n        IPHONEOS_DEPLOYMENT_TARGET: '15.0'\nschemes:\n  MobileFixture:\n    build:\n      targets:\n        MobileFixture: all\n";
+              ("name: MobileFixture\noptions:\n  bundleIdPrefix: dev.pave\ntargets:\n  MobileFixture:\n    type: application\n    platform: iOS\n    sources: [Sources]\n    settings:\n      base:\n        CODE_SIGNING_ALLOWED: NO\n        GENERATE_INFOPLIST_FILE: YES\n        IPHONEOS_DEPLOYMENT_TARGET: '15.0'\n" ^
+               (if stack = "xcode_test" then
+                 "  MobileFixtureTests:\n    type: bundle.unit-test\n    platform: iOS\n    sources: [Tests]\n    dependencies:\n      - target: MobileFixture\n    settings:\n      base:\n        CODE_SIGNING_ALLOWED: NO\n        GENERATE_INFOPLIST_FILE: YES\n        IPHONEOS_DEPLOYMENT_TARGET: '15.0'\n"
+               else "") ^
+               "schemes:\n  MobileFixture:\n    build:\n      targets:\n        MobileFixture: all\n" ^
+               (if stack = "xcode_test" then
+                 "    test:\n      targets:\n        - MobileFixtureTests\n"
+               else ""));
             run "xcodegen generate";
             let xcode action more =
               let fields = ["subroot", `String "MobileFixture.xcodeproj";
@@ -160,6 +336,16 @@ let () =
                 inventory;
               expect "Selected simulator" id inventory;
               print_endline ("real compatible Apple simulator: " ^ id))
+            else if stack = "xcode_test" then (
+              let inventory = xcode "simulators"
+                ["scheme", `String "MobileFixture"] in
+              expect "Apple simulator inventory" "Apple simulator inventory: exit 0"
+                inventory;
+              expect "Selected simulator" id inventory;
+              let result = xcode "test"
+                ["scheme", `String "MobileFixture"; "destination", `String id] in
+              expect "Xcode selected simulator test" "Xcode test: exit 0" result;
+              print_endline ("real Xcode simulator test on " ^ id ^ ": exit 0"))
             else (
               let result = xcode "build"
                 ["scheme", `String "MobileFixture"; "destination", `String id] in

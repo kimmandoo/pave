@@ -39,8 +39,8 @@ let () =
   if has_help (help ()) "/delegate" || suggestions "/del" <> [] then
     fail "disabled subagents remained visible";
   if not (has_help (help ~subagents:true ()) "/delegate") ||
-     not (has_help (help ()) "/jobs") then
-    fail "opt-in delegation or existing job management disappeared";
+     not (has_help (help ()) "/jobs") || not (has_help (help ()) "/mobile") then
+    fail "opt-in delegation or session-owned dashboards disappeared";
   let external_commands = [
     command "/skill:review" No_arguments "Review [user skill]" (A_skill "review");
     command "/summarize" No_arguments "Summarize [project command]"
@@ -128,7 +128,8 @@ let () =
   (match parse "/tools read_file" with
    | Tools (Some "read_file") -> ()
    | _ -> fail "tool detail selection");
-  (match parse "/jobs", parse "/wait 0123456789abcdef0123456789abcdef",
+  (match parse "/jobs", parse "/mobile",
+      parse "/wait 0123456789abcdef0123456789abcdef",
       parse "/cancel-job 0123456789abcdef0123456789abcdef",
       parse "/artifact 0123456789abcdef0123456789abcdef",
       parse ~subagents:true "/delegate reviewer inspect the selected source files",
@@ -139,7 +140,7 @@ let () =
       parse ~subagents:true "/loop review the goal",
       parse ~subagents:true "/autoresearch locate existing patterns",
       parse "/rule stop before irreversible changes", parse "/rule" with
-   | Jobs, Wait "0123456789abcdef0123456789abcdef",
+   | Jobs, Mobile, Wait "0123456789abcdef0123456789abcdef",
      Cancel_job "0123456789abcdef0123456789abcdef",
      Artifact (Some "0123456789abcdef0123456789abcdef"),
      Delegate { label = "reviewer"; task = "inspect the selected source files" },
@@ -149,7 +150,7 @@ let () =
      Watchdog (Some "inspect scope drift"), Loop (Some "review the goal"),
      Autoresearch (Some "locate existing patterns"),
      Rule (Some "stop before irreversible changes"), Rule None -> ()
-   | _ -> fail "session job and reviewed workflow command parsing");
+   | _ -> fail "mobile dashboard and session workflow command parsing");
 (match parse "/rewind",
     parse "/rewind 0123456789abcdef0123456789abcdef" with
  | Rewind None, Rewind (Some "0123456789abcdef0123456789abcdef") -> ()

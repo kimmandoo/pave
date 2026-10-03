@@ -545,7 +545,8 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
                           Char.code c < 32 || Char.code c = 127) label) &&
                         String.trim task <> "" && String.length task <= 8192 &&
                         not (String.contains task (Char.chr 0)) ->
-                        prepared := Some (fun ?cancel ?on_progress:_ ?approved:_ () ->
+                        prepared := Some (fun ?cancel ?on_progress:_ ?approved:_
+                            ?sensitive_review:_ () ->
                           Provider.check_cancel cancel;
                           let job_id = delegate
                             ~cancel:(Option.value ~default:(fun () -> false) cancel)
@@ -570,7 +571,7 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
                            | Error message -> complete ("Error: " ^ message)
                            | Ok () ->
                                prepared := Some (fun ?cancel ?on_progress:_
-                                   ?approved:_ () ->
+                                   ?approved:_ ?sensitive_review:_ () ->
                                  match execute ~name:call.name ~args:call.arguments
                                    ~cancel:(Option.value
                                      ~default:(fun () -> false) cancel) with
@@ -660,12 +661,6 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
                      never a session-owned managed process or another effect. *)
                   let rule_allows = call.name = "run_command" &&
                     decision.Approval.policy = Some Approval.Allow in
-                  let prompt_required = delegate ||
-                    (explicit_prompt && not rule_allows) ||
-                    (shell && not rule_allows) ||
-                    (match resolved with
-                     | Approval.Requires_prompt _ -> true
-                     | _ -> false) in
                   let request = if external_tool then
                     { Approval.tool_name = call.name; tier = Approval.Exec;
                       trigger = Approval.Tool_call;
@@ -675,7 +670,8 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
                           describe call.name) t.external_approval_details @
                         ["Arguments: " ^ Tools.preview_text
                           (Yojson.Basic.to_string call.arguments)];
-                      reason = Some "External tools require per-call interactive approval." }
+                      reason = Some "External tools require per-call interactive approval.";
+                      sensitive = None }
                   else if delegate then
                     { Approval.tool_name = "task"; tier = Approval.Exec;
                       trigger = Approval.Tool_call;
@@ -691,18 +687,16 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
                           (Option.value ~default:"(missing)"
                             (match Protocol.member "task" call.arguments with
                              | `String value -> Some value | _ -> None))];
-                      reason = Some "Child-agent work requires explicit approval." }
+                      reason = Some "Child-agent work requires explicit approval.";
+                      sensitive = None }
                   else
-                    let args = match t.secret_mask, call.name, call.arguments with
-                      | Some mask, "write_file", `Assoc fields ->
-                          `Assoc (List.map (function
-                            | "content", `String value ->
-                                "content", `String (Secret_mask.redact mask value)
-                            | field -> field) fields)
-                      | _ -> call.arguments in
+                    (* The real arguments build the request so any sensitive
+                       review binds the exact proposed bytes; the approver
+                       sees details redacted by the secret-mask wrapper and
+                       the path fixup below. *)
                     let request = Tools.approval_request ?cancel
                       ?context:t.workspace_context ~root:t.root
-                      ~name:call.name ~args decision in
+                      ~name:call.name ~args:call.arguments decision in
                     (* Redact complete path values before quoting; resolution above
                        must continue to use the actual workspace path. *)
                     match t.secret_mask, call.name, request.details with
@@ -717,6 +711,16 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
                     Approval.reason = (match reason with
                       | Some _ -> reason
                       | None -> request.reason) } in
+                  (* Sensitive mutations carry their reviewed exact content in
+                     the request; they prompt even under permissive modes and
+                     session grants, and the write is rebound to those targets. *)
+                  let prompt_required = delegate ||
+                    request.Approval.sensitive <> None ||
+                    (explicit_prompt && not rule_allows) ||
+                    (shell && not rule_allows) ||
+                    (match resolved with
+                     | Approval.Requires_prompt _ -> true
+                     | _ -> false) in
                   let approved =
                     if not prompt_required then true
                     else match t.approve_tool with
@@ -757,7 +761,8 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
                     if call.name = "write_file" then
                       emit_tool_event t (Tool_executing {
                         call_id = call.id; name = call.name });
-                    let content = execute ?cancel ?on_progress ~approved () in
+                    let content = execute ?cancel ?on_progress ~approved
+                        ~sensitive_review:request.Approval.sensitive () in
                     let failed = Result.is_error content in
                     (match !tracked_path, before with
                      | Some location, Some (_, before) when not failed ->

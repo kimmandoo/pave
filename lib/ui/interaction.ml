@@ -27,6 +27,7 @@ type command =
   | Hotkeys
   | Entries
   | Jobs
+  | Mobile
   | Wait of string
   | Cancel_job of string
   | Artifact of string option
@@ -58,7 +59,7 @@ type action =
   | A_rename | A_label | A_pin | A_approval | A_thinking | A_tool | A_attach
   | A_cancel | A_queue | A_steer | A_entries | A_tree | A_tools | A_context | A_usage
   | A_hotkeys | A_branch | A_fork | A_compact | A_retry | A_help | A_quit
-  | A_jobs | A_wait | A_cancel_job | A_artifact | A_rewind | A_delegate
+  | A_jobs | A_mobile | A_wait | A_cancel_job | A_artifact | A_rewind | A_delegate
   | A_plan | A_goal | A_advisor | A_watchdog | A_loop | A_autoresearch | A_rule
   | A_skill of string | A_prompt_command of string
   | A_plugin
@@ -129,6 +130,7 @@ let commands = [
   command ~session_only:true "/fork" (Optional_text "PATH|until=STEP") "Fork the selected journal branch into a private session; until=STEP copies only entries up to that step" A_fork;
   command ~session_only:true "/compact" No_arguments "Summarize older turns" A_compact;
   command ~session_only:true "/jobs" No_arguments "List session-owned background jobs" A_jobs;
+  command ~session_only:true "/mobile" No_arguments "Open the mobile app session dashboard" A_mobile;
   command ~session_only:true "/wait" (Required_word "JOB_ID") "Wait for a session-owned job result" A_wait;
   command ~session_only:true "/cancel-job" (Required_word "JOB_ID") "Cancel a background job" A_cancel_job;
   command ~session_only:true "/artifact" (Optional_word "ID") "List session artifacts or show text output" A_artifact;
@@ -413,6 +415,7 @@ let parse ?(session = true) ?(interactive = true) ?(subagents = false)
         | A_entries, No_argument -> Entries
         | A_tree, No_argument -> Tree
         | A_jobs, No_argument -> Jobs
+        | A_mobile, No_argument -> Mobile
         | A_wait, Required_argument id -> Wait id
         | A_cancel_job, Required_argument id -> Cancel_job id
         | A_artifact, Optional_argument id -> Artifact id

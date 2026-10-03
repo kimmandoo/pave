@@ -18,6 +18,12 @@ type mobile_discovery = {
   choices : string list;
 }
 
+type android_inventory = {
+  root : string;
+  subroot : string;
+  devices : Workspace_android_devices.device list;
+}
+
 type session_context = {
   owner : string;
   process_manager : Workspace_process.manager;
@@ -36,6 +42,8 @@ type session_context = {
   mutable xcode_discovery : Workspace_xcode.discovery option;
   mobile_lock : Mutex.t;
   mutable mobile_discovery : mobile_discovery option;
+  mutable android_inventory : android_inventory option;
+  mobile_run_manager : Workspace_mobile_run.manager;
   record_file_change : path:string -> before:string -> after:string -> unit;
   mutable closed : bool;
 }
@@ -98,6 +106,8 @@ let create_session_context ?lsp_manager ?hub_port ~owner ~root ~process_manager 
     hub_port;
     xcode_lock = Mutex.create (); xcode_discovery = None;
     mobile_lock = Mutex.create (); mobile_discovery = None;
+    android_inventory = None;
+    mobile_run_manager = Workspace_mobile_run.create_manager ();
     record_file_change; closed = false }
 
 let close_session_context context =
@@ -109,11 +119,13 @@ let close_session_context context =
     Mutex.unlock context.xcode_lock;
     Mutex.lock context.mobile_lock;
     context.mobile_discovery <- None;
+    context.android_inventory <- None;
     Mutex.unlock context.mobile_lock;
     let ignore_failure action = try action () with _ -> () in
     ignore_failure (fun () -> Workspace_lsp.close_manager context.lsp_manager);
     ignore_failure (fun () -> Workspace_dap.close_manager context.dap_manager);
     ignore_failure (fun () -> Workspace_browser.close_manager context.browser_manager);
+    ignore_failure (fun () -> Workspace_mobile_run.close_manager context.mobile_run_manager);
     let python_kernel, javascript_kernel =
       Mutex.lock context.eval_lock;
       let kernels = context.python_kernel, context.javascript_kernel in
@@ -224,6 +236,77 @@ let find_from text needle start =
     else scan (i + 1)
   in
   scan start
+(* Sensitive-mutation review plumbing (M21b/M22b). A call that will write
+   files computes the proposed target set before publishing; when the
+   classifier flags the change it must match the exact review the user
+   approved, otherwise nothing is written. *)
+let file_state absolute =
+  match (try Some (Unix.lstat absolute) with Unix.Unix_error _ -> None) with
+  | Some stat when stat.Unix.st_kind = Unix.S_REG ->
+      (match (try Some (Workspace_path.read_bounded absolute max_write_bytes)
+              with
+              | Workspace_path.Error _ | Sys_error _ | Unix.Unix_error _ -> None)
+       with
+       | Some contents -> Workspace_edit.sha256 contents, Some contents
+       | None -> Sensitive_mutation.unreadable_sha256, None)
+  | Some _ -> Sensitive_mutation.unreadable_sha256, None
+  | None -> Sensitive_mutation.new_file_sha256, None
+
+let confirmed_before ~root ~path original_sha256 =
+  match (try Some (Workspace_edit.read_snapshot ~root ~path)
+         with Workspace_edit.Error _ -> None) with
+  | Some snapshot when snapshot.Workspace_edit.sha256 = original_sha256 ->
+      Some snapshot.Workspace_edit.contents
+  | _ -> None
+
+let proposed_of_prepared (prepared : Workspace_edit.prepared) =
+  { Sensitive_mutation.path = prepared.preview.path;
+    original_sha256 = prepared.before.sha256;
+    before = Some prepared.before.contents;
+    after = prepared.after }
+
+let write_proposal ~root ~path ~content =
+  let absolute = Workspace_path.writable_path root path in
+  let original_sha256, before = file_state absolute in
+  absolute, { Sensitive_mutation.path; original_sha256; before; after = content }
+
+(* LSP previews record only hashes plus proposed content; the confirmed
+   original bytes are recovered through the snapshot check. Files marked
+   unchanged never reach the disk, so they are excluded. *)
+let lsp_apply_proposals ~root files =
+  Workspace_lsp.preview_file_rows files
+  |> List.filter_map (fun row ->
+    if Protocol.member "changed" row = `Bool true then
+      let path = required_string "path" row in
+      let original_sha256 = required_string "original_sha256" row in
+      Some { Sensitive_mutation.path;
+             original_sha256;
+             before = confirmed_before ~root ~path original_sha256;
+             after = required_string "content" row }
+    else None)
+
+(* Gate one prepared write on the supplied exact-content review. A supplied
+   review always binds: the current proposed bytes must match its targets
+   exactly, or nothing is written. Without a review, ordinary diffs keep the
+   existing behavior while sensitive or unresolved diffs fail closed. *)
+let require_sensitive_review ~approved ~sensitive_review ~root proposals =
+  let targets =
+    List.map Sensitive_mutation.target_of_proposed proposals in
+  match sensitive_review with
+  | Some approved_review ->
+      if not approved then
+        fail "sensitive workspace change requires explicit interactive approval";
+      if not (Sensitive_mutation.targets_match
+          approved_review.Approval.targets targets) then
+        fail "the approved sensitive change no longer matches the workspace; request a fresh review";
+      true
+  | None ->
+      (match Sensitive_mutation.review ~root proposals with
+       | None -> false
+       | Some _ ->
+           if not approved then
+             fail "sensitive workspace change requires explicit interactive approval";
+           fail "sensitive workspace change requires exact-content approval")
 (* A segment cannot cross a separator; memoization also bounds repeated stars. *)
 let glob_metacharacter = function '*' | '?' | '[' | '\\' -> true | _ -> false
 
@@ -840,30 +923,35 @@ let read_file ?cancel ?context root args =
       ?read_artifact:(Option.map (fun context -> context.read_artifact) context)
       ~root:reader_root ~path:reader_path () in
     bounded_text (limit_lines text max_lines) (min limit (max_read_bytes - 128)))
-let write_file root args =
+let write_file ~approved ~sensitive_review root args =
   let relative = required_string "path" args in
   let content = required_string "content" args in
-  let path = Workspace_path.writable_path root relative in
-  Workspace_path.atomic_write path content;
+  let absolute, proposal = write_proposal ~root ~path:relative ~content in
+  let reviewed = require_sensitive_review ~approved ~sensitive_review ~root
+      [proposal] in
+  (* A reviewed write republishes only while the target still matches the
+     approved original: existing bytes keep their hash and an absent file
+     stays absent. *)
+  if reviewed then (
+    let current_sha256, _ = file_state absolute in
+    if current_sha256 <> proposal.Sensitive_mutation.original_sha256 then
+      fail "workspace file changed since the sensitive-change review");
+  Workspace_path.atomic_write absolute content;
   Printf.sprintf "Wrote %d bytes to %s" (String.length content) relative
 
-let edit_file root args =
+let edit_file ~approved ~sensitive_review root args =
   let relative = required_string "path" args in
   let old_text = required_string "old_string" args in
   let new_text = required_string "new_string" args in
   if old_text = "" then fail "old_string must not be empty";
-  let path = Workspace_path.writable_path root relative in
-  let contents = Workspace_path.read_bounded path max_write_bytes in
-  let index = match find_from contents old_text 0 with
-    | Some index -> index
-    | None -> fail "old_string was not found; read_file to check the exact text" in
-  (match find_from contents old_text (index + 1) with
-   | Some _ -> fail "old_string matches more than once; provide a longer unique excerpt"
-   | None -> ());
-  let result = String.sub contents 0 index ^ new_text ^
-    String.sub contents (index + String.length old_text)
-      (String.length contents - index - String.length old_text) in
-  Workspace_path.atomic_write path result;
+  let prepared =
+    try Workspace_edit.prepare_unique ~root ~path:relative
+        ~old_text ~new_text
+    with Workspace_edit.Error message -> fail message in
+  ignore (require_sensitive_review ~approved ~sensitive_review ~root
+    [proposed_of_prepared prepared]);
+  (try Workspace_edit.write_prepared prepared
+   with Workspace_edit.Error message -> fail message);
   Printf.sprintf "Edited %s" relative
 
 let shell_quote text =
@@ -1112,6 +1200,7 @@ let mobile_project ?cancel root args =
   and truncated = ref false in
   let directories = Hashtbl.create 256 in
   let lockfiles = Hashtbl.create 32 in
+  let consistency_files = ref [] in
   Hashtbl.replace directories "." ();
   let add_candidate candidate =
     if !candidate_count < max_candidates then (
@@ -1181,6 +1270,8 @@ let mobile_project ?cancel root args =
          with Unix.Unix_error _ | Workspace_path.Error _ -> ())
     | name when Filename.check_suffix name ".xcscheme" ->
         add_shared_scheme relative
+    | _ when Workspace_rn_consistency.relevant relative ->
+        consistency_files := relative :: !consistency_files
     | _ -> () in
 
   let walk_truncated = walk ~hidden:true ?cancel ~visit_directory
@@ -1425,12 +1516,24 @@ let mobile_project ?cancel root args =
                  if host "ios" <> [] || host "android" <> [] then "Flutter app"
                  else "Flutter package"
                else "Dart package" in
-             add_stack (String.concat "\n"
-               (("  " ^ kind ^ ": " ^ path) ::
-                ("  Package root: " ^ relative_label package_root) ::
-                (if !flutter_sdk then host "ios" @ host "android" else []) @
-                ["  Pubspec was read as bounded text; SDK and build readiness remain unknown."]))
-               [])
+            add_stack (String.concat "\n"
+              (("  " ^ kind ^ ": " ^ path) ::
+               ("  Package root: " ^ relative_label package_root) ::
+               (if !flutter_sdk then host "ios" @ host "android" else []) @
+               ["  Pubspec was read as bounded text; SDK and build readiness remain unknown."]))
+              [];
+            if !flutter_sdk then
+              (try
+                Workspace_flutter_channels.report_lines ~root
+                  ~subroot:package_root
+                |> List.iter add_diagnostic
+              with
+              | Workspace_flutter_channels.Error message ->
+                  add_diagnostic
+                    ("Flutter channel pairing unavailable: " ^ message)
+              | Unix.Unix_error _ ->
+                  add_diagnostic
+                    "Flutter channel pairing unavailable: workspace scan failed"))
     | Node_manifest path ->
         (match read_manifest path with
          | None -> add_diagnostic
@@ -1496,11 +1599,35 @@ let mobile_project ?cancel root args =
                            ["  Declared scripts: none."]
                          else List.map (fun name ->
                            "  Declared script: " ^ name) scripts in
+                       let consistency = if not (can_suggest ()) then [] else
+                         let package_dirs = List.filter_map (function
+                           | Node_manifest manifest -> Some (directory manifest)
+                           | _ -> None) candidates in
+                         let test_hint =
+                           if List.mem "test" scripts then
+                             (match selection with
+                              | Some manager ->
+                                  "Observed declared test script: " ^
+                                    command_in path
+                                      (if manager = "npm" then
+                                         "npm run 'test'"
+                                       else manager ^ " 'test'") ^
+                                    " (preview only; run via approved mobile_check)"
+                              | None ->
+                                  "Declared 'test' script exists but the package manager is ambiguous; choose one explicitly before running it.")
+                           else
+                             "No declared 'test' script in " ^ path ^
+                               "; no test suggested." in
+                         List.map (fun line -> "  " ^ line)
+                           (Workspace_rn_consistency.report ~root
+                              ~subroot:package_root ~platform
+                              ~files:!consistency_files ~directories
+                              ~package_dirs ~expo:(kind = "Expo") ~test_hint) in
                        add_stack
                          (String.concat "\n"
                            (("  " ^ kind ^ ": " ^ path) ::
                             ("  Package root: " ^ relative_label package_root) ::
-                            lock_lines @ hosts @ script_lines @
+                            lock_lines @ hosts @ script_lines @ consistency @
                             ["  Native build, SDK and script effects remain unverified."]))
                          commands)
               | _ -> add_diagnostic
@@ -1563,17 +1690,32 @@ let xcode_command args =
       let destination = required_string "destination" args in
       if scheme = "" || destination = "" then
         fail "select a discovered scheme and simulator destination";
+      let derived = optional_string "derived_data_path" "" args in
       prefix ^ " -scheme " ^ shell_quote scheme ^
       " -destination " ^
       shell_quote ("platform=iOS Simulator,id=" ^ destination) ^
+      (if derived = "" then "" else
+        " -derivedDataPath " ^ shell_quote derived) ^
       " CODE_SIGNING_ALLOWED=NO " ^ action
   | _ -> fail "unsupported Xcode preflight action"
 
 let xcode_preflight ~approved ?cancel ?on_progress ?context root args =
   if not approved then fail "this action requires explicit interactive approval";
   let context = require_session_context context in
+  let root = Workspace_path.root_path root in
   let bundle = required_string "subroot" args in
   let action = required_string "action" args in
+  let derived_data_path = optional_string "derived_data_path" "" args in
+  if derived_data_path <> "" then (
+    let relative = if Filename.is_relative derived_data_path then
+        derived_data_path
+      else
+        let prefix = root ^ Filename.dir_sep in
+        if not (starts_with derived_data_path prefix) then
+          fail "Xcode derived data path must be inside the workspace";
+        String.sub derived_data_path (String.length prefix)
+          (String.length derived_data_path - String.length prefix) in
+    ignore (Workspace_path.checked_path root relative));
   let command = xcode_command args in
   let manifest = Filename.concat bundle
     (if Filename.check_suffix bundle ".xcworkspace" then
@@ -1582,8 +1724,7 @@ let xcode_preflight ~approved ?cancel ?on_progress ?context root args =
   let stat = Unix.lstat file in
   if stat.Unix.st_kind <> Unix.S_REG || stat.Unix.st_size > max_write_bytes then
     fail "selected Xcode bundle has no bounded regular manifest";
-  let manifest_hash = Digestif.SHA256.(
-    to_hex (digest_string (Workspace_path.read_bounded file max_write_bytes))) in
+  let fingerprint = Workspace_xcode.fingerprint ~root ~bundle in
   let observed = ref false in
   let truncated = walk ?cancel ~hidden:true ~visit_directory:(fun path _ ->
     if path = bundle then observed := true) root "." (fun _ _ -> ()) in
@@ -1598,9 +1739,9 @@ let xcode_preflight ~approved ?cancel ?on_progress ?context root args =
       let discovery = match context.xcode_discovery with
         | Some state when state.bundle = bundle && state.root = root -> state
         | _ -> fail "approve scheme discovery for this exact Xcode bundle first" in
-      if discovery.manifest_hash <> manifest_hash then (
+      if discovery.fingerprint <> fingerprint then (
         context.xcode_discovery <- None;
-        fail "Xcode manifest changed since discovery; discover schemes again");
+        fail "Xcode project inputs changed since discovery; discover schemes again");
       if not (List.mem scheme discovery.schemes) then
         fail "scheme was not discovered for this Xcode bundle";
       if action = "build" || action = "test" || action = "simulators" then (
@@ -1612,7 +1753,14 @@ let xcode_preflight ~approved ?cancel ?on_progress ?context root args =
         else
           let destination = required_string "destination" args in
           if not (List.mem destination destinations) then
-            fail "simulator destination was not discovered for this scheme"));
+            fail "simulator destination was not discovered for this scheme";
+          if action = "test" then
+            match List.assoc_opt scheme discovery.simulators with
+            | None ->
+                fail "approve compatible simulator inventory for this scheme before testing"
+            | Some inventoried ->
+                if not (List.mem destination inventoried) then
+                  fail "selected simulator was absent from the approved inventory; refresh simulators"));
     let cwd = Filename.dirname (Workspace_path.checked_path root bundle) in
     let result = Workspace_process.run_shell ?cancel ?on_progress
       ~timeout_seconds:(optional_int "timeout_seconds" 120
@@ -1628,18 +1776,28 @@ let xcode_preflight ~approved ?cancel ?on_progress ?context root args =
     if action = "schemes" then (
       if successful then (
         let schemes = Workspace_xcode.schemes result.output in
-        context.xcode_discovery <- Some
-          { Workspace_xcode.root; bundle; manifest_hash; schemes; destinations = [] };
-        "Xcode scheme discovery: " ^ outcome ^ "\nVerified schemes: " ^
-        (if schemes = [] then
-           "none; select another project/workspace or configure a shared scheme"
-         else String.concat ", " schemes))
+        match fingerprint with
+        | Workspace_xcode.Complete _ ->
+            context.xcode_discovery <- Some
+              { Workspace_xcode.root; bundle; fingerprint; schemes;
+                destinations = []; simulators = [] };
+            "Xcode scheme discovery: " ^ outcome ^ "\nVerified schemes: " ^
+            (if schemes = [] then
+               "none; select another project/workspace or configure a shared scheme"
+             else String.concat ", " schemes)
+        | Workspace_xcode.Unresolved ->
+            "Xcode scheme discovery: " ^ outcome ^
+            "\nNo verified schemes: shared scheme files or directly " ^
+            "referenced .xcodeproj manifests are missing, escaping the " ^
+            "workspace, not regular, or oversized. Resolve them and approve " ^
+            "scheme discovery again.")
       else "Xcode scheme discovery: " ^ outcome ^
         (if result.truncated then " (output truncated)" else "") ^
         "\n" ^ result.output)
     else if action = "destinations" then (
       let discovery = Option.get context.xcode_discovery in
       discovery.destinations <- List.remove_assoc scheme discovery.destinations;
+      discovery.simulators <- List.remove_assoc scheme discovery.simulators;
       if successful then (
         let destinations = Workspace_xcode.destinations result.output in
         discovery.destinations <- (scheme, destinations) ::
@@ -1652,13 +1810,17 @@ let xcode_preflight ~approved ?cancel ?on_progress ?context root args =
       else "Xcode destination discovery: " ^ outcome ^
         (if result.truncated then " (output truncated)" else "") ^
         "\n" ^ result.output)
-    else if action = "simulators" then
+    else if action = "simulators" then (
+      let discovery = Option.get context.xcode_discovery in
+      discovery.simulators <- List.remove_assoc scheme discovery.simulators;
       if successful then (
-        let discovery = Option.get context.xcode_discovery in
         let destinations = Option.get
           (List.assoc_opt scheme discovery.destinations) in
         let devices = Workspace_xcode.compatible_simulators
           ~destinations result.output in
+        discovery.simulators <- (scheme,
+          List.map (fun (device : Workspace_xcode.simulator) -> device.id)
+            devices) :: discovery.simulators;
         "Apple simulator inventory: " ^ outcome ^ " (scheme " ^ scheme ^ ")" ^
         (if devices = [] then
            "\nNo available compatible iOS Simulator devices; no device was booted."
@@ -1670,7 +1832,7 @@ let xcode_preflight ~approved ?cancel ?on_progress ?context root args =
       else
         "Apple simulator inventory: " ^ outcome ^
         (if result.truncated then " (output truncated; no devices accepted)"
-         else "; no devices accepted")
+         else "; no devices accepted"))
     else
       let locations = if result.termination = Workspace_process.Exited 0 then []
         else Workspace_swift_diagnostics.locations ~root ~cwd result.output in
@@ -1686,11 +1848,14 @@ let mobile_command ~root args =
   let subroot = required_string "subroot" args in
   let target = optional_string "target" "" args in
   let manager = optional_string "manager" "" args in
+  if stack <> "gradle" && optional_string "serial" "" args <> "" then
+    fail "an emulator serial applies only to Gradle instrumented runs";
   match stack with
   | "swiftpm" ->
       Workspace_swiftpm_focus.command ~root ~subroot ~action ~target
   | "gradle" ->
       Workspace_gradle_focus.command ~root ~subroot ~action ~task:target
+        ~serial:(optional_string "serial" "" args)
   | "flutter" ->
       Workspace_flutter_focus.command ~root ~subroot ~action ~target
   | "node" ->
@@ -1722,8 +1887,8 @@ let mobile_check ~approved ?cancel ?on_progress ?context root args =
   let command, cwd = mobile_command ~root args in
   let discovery_action = (stack = "swiftpm" && action = "discover") ||
     (stack = "gradle" && action = "tasks") in
-  let needs_discovery = (stack = "swiftpm" || stack = "gradle") &&
-    action = "run" in
+  let needs_discovery = (stack = "swiftpm" && action = "run") ||
+    (stack = "gradle" && (action = "run" || action = "instrumented")) in
   let manifest_hash = if discovery_action || needs_discovery then
       Some (mobile_manifest ~root ~stack ~subroot)
     else None in
@@ -1742,6 +1907,31 @@ let mobile_check ~approved ?cancel ?on_progress ?context root args =
       let target = required_string "target" args in
       if not (List.mem target state.choices) then
         fail "focused task was not in the approved discovery result");
+    if stack = "gradle" && action = "instrumented" then (
+      let serial = optional_string "serial" "" args in
+      let state_label = function
+        | Workspace_android_devices.Ready -> "ready"
+        | Workspace_android_devices.Offline -> "offline"
+        | Workspace_android_devices.Unauthorized -> "unauthorized"
+        | Workspace_android_devices.Unavailable -> "unavailable" in
+      let inventory = match context.android_inventory with
+        | Some inventory when inventory.root = root &&
+                              inventory.subroot = subroot -> inventory
+        | _ -> fail ("approve an Android device inventory for this project " ^
+            "first; no emulator is selected implicitly") in
+      match List.find_opt (fun (device : Workspace_android_devices.device) ->
+          device.serial = serial) inventory.devices with
+      | Some device when not device.emulator ->
+          fail ("selected serial " ^ serial ^
+            " is not an emulator; no install or test was attempted")
+      | Some device when device.state <> Workspace_android_devices.Ready ->
+          fail ("selected emulator " ^ serial ^ " is " ^
+            state_label device.state ^
+            " in the current inventory; refresh inventory and select a ready emulator")
+      | Some _ -> ()
+      | None ->
+          fail ("emulator " ^ serial ^
+            " was absent from the approved inventory; refresh android_devices"));
     let result = Workspace_process.run_shell ?cancel ?on_progress
       ~timeout_seconds:(optional_int "timeout_seconds" 120
         ~minimum:1 ~maximum:300 args)
@@ -1774,7 +1964,8 @@ let mobile_check ~approved ?cancel ?on_progress ?context root args =
         else if stack = "swiftpm" && action = "run" then
           Workspace_swift_diagnostics.locations ~within_cwd:true
             ~root ~cwd result.output
-        else if stack = "gradle" && action = "run" then
+        else if stack = "gradle" &&
+            (action = "run" || action = "instrumented") then
           Workspace_android_diagnostics.locations ~root ~cwd ~subroot
             ~task:(required_string "target" args) result.output
         else if stack = "flutter" then
@@ -1784,7 +1975,11 @@ let mobile_check ~approved ?cancel ?on_progress ?context root args =
         else [] in
       "Mobile " ^ stack ^ " " ^ action ^ ": " ^ outcome ^ note ^
       (if stack = "gradle" && action = "run" then
-         " (selected task " ^ required_string "target" args ^ ")" else "") ^
+         " (selected task " ^ required_string "target" args ^ ")"
+       else if stack = "gradle" && action = "instrumented" then
+         " (selected task " ^ required_string "target" args ^
+         " on " ^ required_string "serial" args ^ ")"
+       else "") ^
       (if locations = [] then "" else
          "\nChecked " ^ (if stack = "flutter" then "Dart"
            else if stack = "node" then "JS/TS"
@@ -1796,7 +1991,7 @@ let android_device_command ~root args =
   let subroot = required_string "subroot" args in
   let action = required_string "action" args in
   let _, cwd = Workspace_gradle_focus.command ~root ~subroot
-    ~action:"tasks" ~task:"" in
+    ~action:"tasks" ~task:"" ~serial:"" in
   let command = match action with
     | "avds" -> "emulator -list-avds"
     | "devices" -> "adb devices"
@@ -1806,6 +2001,7 @@ let android_device_command ~root args =
 let android_devices ~approved ?cancel ?on_progress ?context root args =
   if not approved then fail "Android inventory requires explicit interactive approval";
   let context = require_session_context context in
+  let root = Workspace_path.root_path root in
   check_session_context context;
   let command, cwd = android_device_command ~root args in
   let action = required_string "action" args in
@@ -1818,15 +2014,30 @@ let android_devices ~approved ?cancel ?on_progress ?context root args =
     | Workspace_process.Cancelled -> raise Cancelled in
   let label = if action = "avds" then "AVD" else "ADB" in
   let prefix = "Android " ^ label ^ " inventory: " ^ outcome in
-  if result.termination <> Workspace_process.Exited 0 || result.truncated then
-    prefix ^ " (no device choices; command failed or output was truncated)"
+  if result.termination <> Workspace_process.Exited 0 || result.truncated then (
+    if action = "devices" then (
+      Mutex.lock context.mobile_lock;
+      Fun.protect ~finally:(fun () -> Mutex.unlock context.mobile_lock)
+        (fun () -> context.android_inventory <- None));
+    prefix ^ " (no device choices; command failed or output was truncated)")
   else if action = "avds" then
     let names = Workspace_android_devices.avds result.output in
     prefix ^ "\nConfigured AVDs (not running; SDK image readiness unknown): " ^
     (if names = [] then "none"
      else String.concat ", " (List.map (Printf.sprintf "%S") names))
   else
-    let devices = Workspace_android_devices.adb_devices result.output in
+    let devices =
+      try Workspace_android_devices.adb_devices result.output
+      with Workspace_android_devices.Error _ as error ->
+        Mutex.lock context.mobile_lock;
+        Fun.protect ~finally:(fun () -> Mutex.unlock context.mobile_lock)
+          (fun () -> context.android_inventory <- None);
+        raise error in
+    Mutex.lock context.mobile_lock;
+    Fun.protect ~finally:(fun () -> Mutex.unlock context.mobile_lock)
+      (fun () ->
+        context.android_inventory <- Some {
+          root; subroot = required_string "subroot" args; devices });
     let emulators, other = List.partition
       (fun device -> device.Workspace_android_devices.emulator) devices in
     let ready = List.filter
@@ -1857,6 +2068,232 @@ let android_devices ~approved ?cancel ?on_progress ?context root args =
       (count Workspace_android_devices.Offline)
       (count Workspace_android_devices.Unauthorized)
       (count Workspace_android_devices.Unavailable)
+
+let mobile_session_select ~context ~root args =
+  let subroot = required_string "subroot" args in
+  let platform = required_string "platform" args in
+  let device = required_string "device" args in
+  let scheme = optional_string "scheme" "" args in
+  let device_ready, scheme_ready =
+    if platform = "android" then (
+      Mutex.lock context.mobile_lock;
+      Fun.protect ~finally:(fun () -> Mutex.unlock context.mobile_lock)
+        (fun () ->
+          let inventory = match context.android_inventory with
+            | Some inventory when inventory.root = root &&
+                inventory.subroot = subroot -> inventory
+            | _ -> fail "approve Android device inventory for this exact project first" in
+          let ready = List.exists (fun candidate ->
+            candidate.Workspace_android_devices.serial = device &&
+            candidate.emulator &&
+            candidate.state = Workspace_android_devices.Ready)
+            inventory.devices in
+          ready, false))
+    else if platform = "ios" then (
+      let discovery = match context.xcode_discovery with
+        | Some discovery when discovery.root = root &&
+            discovery.bundle = subroot -> discovery
+        | _ -> fail "approve Xcode scheme and simulator inventory for this bundle first" in
+      let fingerprint = Workspace_xcode.fingerprint ~root ~bundle:subroot in
+      if discovery.fingerprint <> fingerprint then (
+        context.xcode_discovery <- None;
+        fail "Xcode project inputs changed since discovery; discover again");
+      let destinations = Option.value ~default:[]
+        (List.assoc_opt scheme discovery.destinations) in
+      let simulators = Option.value ~default:[]
+        (List.assoc_opt scheme discovery.simulators) in
+      let scheme_ready = List.mem scheme discovery.schemes &&
+        List.mem device destinations && List.mem device simulators in
+      scheme_ready, scheme_ready)
+    else fail "mobile session platform must be android or ios" in
+  Workspace_mobile_run.select context.mobile_run_manager ~root ~subroot
+    ~platform ~device ~app_id:(required_string "app_id" args)
+    ~app_path:(required_string "app_path" args)
+    ~scheme:(if scheme = "" then None else Some scheme)
+    ~variant:(match field "variant" args with
+      | `Null -> None | `String value -> Some value
+      | _ -> fail "variant must be a string")
+    ~activity:(match optional_string "activity" "" args with
+      | "" -> None | value -> Some value)
+    ~device_ready ~scheme_ready
+let xcode_derived_data_path ~root ~app_path =
+  let parts = String.split_on_char '/' app_path in
+  let rec locate prefix = function
+    | "Build" :: "Products" :: configuration :: product :: _
+      when (String.starts_with ~prefix:"Debug-iphonesimulator" configuration ||
+            String.starts_with ~prefix:"Release-iphonesimulator" configuration) &&
+           product = Filename.basename app_path ->
+        let relative = match prefix with
+          | [] -> "." | _ -> String.concat "/" prefix in
+        Workspace_path.checked_path root relative
+    | part :: rest -> locate (prefix @ [part]) rest
+    | [] -> fail "iOS app artifact must be under DerivedData Build/Products/<configuration>-iphonesimulator"
+  in
+  locate [] parts
+let mobile_session_build_request ~context ~root session args =
+  if session.Workspace_mobile_run.state = Workspace_mobile_run.Running then
+    fail "cannot build a running mobile app session";
+  let timeout_seconds = optional_int "timeout_seconds" 120
+    ~minimum:1 ~maximum:300 args in
+  match session.Workspace_mobile_run.platform with
+  | Workspace_mobile_run.Android ->
+      let task = required_string "task" args in
+      let variant = Option.value ~default:"" session.variant in
+      if variant = "" ||
+         not (String.ends_with ~suffix:("assemble" ^
+           String.capitalize_ascii variant) task) then
+        fail "Android session build task must assemble the selected variant";
+      let discovery = match context.mobile_discovery with
+        | Some discovery when discovery.stack = "gradle" &&
+            discovery.root = session.root &&
+            discovery.subroot = session.subroot -> discovery
+        | _ -> fail "approve Gradle task discovery for this exact project first" in
+      if discovery.manifest_hash <>
+          mobile_manifest ~root:session.root ~stack:"gradle"
+            ~subroot:session.subroot then (
+        context.mobile_discovery <- None;
+        fail "Gradle settings changed since task discovery; discover tasks again");
+      if not (List.mem task discovery.choices) then
+        fail "selected variant task was not in the approved Gradle discovery";
+      let fields = [
+        "stack", `String "gradle"; "action", `String "run";
+        "subroot", `String session.subroot; "target", `String task;
+        "timeout_seconds", `Int timeout_seconds] in
+      let command, cwd = mobile_command ~root:session.root
+        (`Assoc fields) in
+      ("gradle", `Assoc fields, command, cwd, "Mobile gradle run: exit 0")
+  | Workspace_mobile_run.Ios ->
+      let scheme = Option.value ~default:"" session.scheme in
+      let derived_data_path = xcode_derived_data_path ~root:session.root
+        ~app_path:session.app_path in
+      let fields = [
+        "action", `String "build"; "subroot", `String session.subroot;
+        "scheme", `String scheme; "destination", `String session.device;
+        "derived_data_path", `String derived_data_path;
+        "timeout_seconds", `Int timeout_seconds] in
+      let discovery = match context.xcode_discovery with
+        | Some discovery when discovery.root = session.root &&
+            discovery.bundle = session.subroot &&
+            discovery.fingerprint =
+              Workspace_xcode.fingerprint ~root:session.root ~bundle:session.subroot &&
+            List.mem scheme discovery.schemes &&
+            List.mem session.device
+              (Option.value ~default:[] (List.assoc_opt scheme discovery.destinations)) ->
+            discovery
+        | _ -> fail "approve unchanged Xcode scheme and destination discovery for this app session first" in
+      ignore discovery;
+      let command = xcode_command (`Assoc fields) in
+      let cwd = Filename.dirname
+        (Workspace_path.checked_path root session.subroot) in
+      ("xcode", `Assoc fields, command, cwd, "Xcode build: exit 0")
+
+let includes text fragment =
+  let text_length = String.length text and fragment_length = String.length fragment in
+  let rec search offset =
+    offset + fragment_length <= text_length &&
+    (String.sub text offset fragment_length = fragment || search (offset + 1)) in
+  search 0
+
+let mobile_session_build ~approved ?cancel ?on_progress ~context ~root args =
+  if not approved then
+    fail "mobile app build requires explicit interactive approval";
+  let id = required_string "session_id" args in
+  let session = Workspace_mobile_run.get context.mobile_run_manager id in
+  if session.root <> root then
+    fail "mobile app session belongs to a different workspace root";
+  let stack, build_args, _command, _cwd, success =
+    mobile_session_build_request ~context ~root session args in
+  let output = if stack = "gradle" then
+      mobile_check ~approved ?cancel ?on_progress ~context session.root build_args
+    else
+      xcode_preflight ~approved ?cancel ?on_progress ~context session.root build_args in
+  if not (String.starts_with ~prefix:success output) ||
+     includes output "incomplete result" then
+    fail ("Mobile app build did not complete successfully:\n" ^ output);
+  ignore (Workspace_mobile_run.mark_built context.mobile_run_manager ~id);
+  "Mobile build completed for " ^ id ^ ".\n" ^ output
+
+
+let mobile_session ~approved ?cancel ?on_progress ?context root args =
+  let context = require_session_context context in
+  let root = Workspace_path.root_path root in
+  check_session_context context;
+  match required_string "action" args with
+  | "list" ->
+      let sessions = Workspace_mobile_run.sessions context.mobile_run_manager in
+      if sessions = [] then "No mobile app sessions are selected."
+      else String.concat "\n" (List.map Workspace_mobile_run.render sessions)
+  | "select" ->
+      let session = mobile_session_select ~context ~root args in
+      "Selected mobile app session:\n" ^ Workspace_mobile_run.render session
+  | "status" ->
+      let session = Workspace_mobile_run.get context.mobile_run_manager
+        (required_string "session_id" args) in
+      Workspace_mobile_run.render session
+  | "build" ->
+      mobile_session_build ~approved ?cancel ?on_progress ~context ~root args
+  | ("install" | "launch" | "stop") as action ->
+      if not approved then fail "mobile device action requires explicit interactive approval";
+      let id = required_string "session_id" args in
+      let run ~root:working_root ~command =
+        let result = Workspace_process.run_shell ?cancel ?on_progress
+          ~timeout_seconds:(optional_int "timeout_seconds" 60 ~minimum:1
+            ~maximum:300 args)
+          ~output_limit:max_command_bytes ~cwd:(Some working_root) ~command () in
+        let outcome = match result.termination with
+          | Workspace_process.Exited 0 when not result.truncated -> "exit 0"
+          | Workspace_process.Exited code -> Printf.sprintf "exit %d" code
+          | Workspace_process.Signaled signal -> Printf.sprintf "signal %d" signal
+          | Workspace_process.Timed_out -> "timed out"
+          | Workspace_process.Cancelled -> raise Cancelled in
+        if outcome <> "exit 0" then
+          fail ("Mobile " ^ action ^ " failed: " ^ outcome ^ "\n" ^ result.output);
+        result.output in
+      let output = Workspace_mobile_run.execute context.mobile_run_manager
+        ~approved ~run ~action ~id in
+      "Mobile " ^ action ^ " completed for " ^ id ^ ".\n" ^ output
+  | _ -> fail "mobile session action must be list, select, status, install, launch or stop"
+
+let mobile_session_preview ~context ~root args =
+  match optional_string "action" "" args with
+  | "build" ->
+      let session = Workspace_mobile_run.get context.mobile_run_manager
+        (required_string "session_id" args) in
+      let stack, _, command, cwd, _ =
+        mobile_session_build_request ~context ~root session args in
+      ("Builds the selected " ^ session.app_id ^ " app for " ^
+       Workspace_mobile_run.platform_name session.platform ^
+       " using the chosen scheme/variant and approved task.",
+       ["Working directory: " ^ Printf.sprintf "%S" cwd;
+        "Selected app: " ^ session.app_id ^ " · artifact: " ^ session.app_path;
+        "Build path: " ^ stack;
+        "Exact command: " ^ command])
+  | ("install" | "launch" | "stop") as action ->
+      let session = Workspace_mobile_run.get context.mobile_run_manager
+        (required_string "session_id" args) in
+      let command = Workspace_mobile_run.command action session in
+      (("Performs one " ^ action ^ " action for the selected " ^
+        Workspace_mobile_run.platform_name session.platform ^ " app on " ^
+        session.device ^ "; this command may change device state."),
+       ["Working directory: " ^ Printf.sprintf "%S" session.root;
+        "Exact command: " ^ command;
+        "App: " ^ session.app_id ^ " · artifact: " ^ session.app_path])
+  | "select" ->
+      let subroot = required_string "subroot" args in
+      let platform = required_string "platform" args in
+      let device = required_string "device" args in
+      let app_id = required_string "app_id" args in
+      let app_path = required_string "app_path" args in
+      let activity = optional_string "activity" "" args in
+      ignore root;
+      ("Stores a mobile app/device selection in this private session; executes no project or device command.",
+       ["Project: " ^ subroot; "Platform: " ^ platform;
+        "Device: " ^ device; "App: " ^ app_id;
+        "Activity: " ^ if activity = "" then "(launcher intent)" else activity;
+        "Artifact: " ^ app_path])
+  | "list" | "status" ->
+      ("Reads session-owned mobile app state; no device command is executed.", [])
+  | _ -> fail "mobile session action must be list, select, status, install, launch or stop"
 
 let string_list name args =
   match field name args with
@@ -2414,13 +2851,17 @@ let lsp_preview_paths ?context ~root args =
   let _, files = lsp_preview ?context ~root args in
   Workspace_lsp.preview_paths files
 
-let lsp_execute ~approved ?cancel ?context root args =
+let lsp_execute ~approved ~sensitive_review ?cancel ?context root args =
   let context = require_session_context context in
   check_session_context context;
   let program = required_string "program" args in
   let arguments = string_list "arguments" args in
   let apply_requested = optional_string "action" "" args = "apply_preview" in
   if apply_requested then require_explicit_approval approved;
+  if apply_requested && Sensitive_mutation.installed () then (
+    let _, files = lsp_preview ~context ~root args in
+    ignore (require_sensitive_review ~approved ~sensitive_review ~root
+      (lsp_apply_proposals ~root files)));
   let apply_approved = apply_requested && approved in
   try
     Workspace_lsp.execute context.lsp_manager ~owner:context.owner ~root
@@ -2825,8 +3266,9 @@ let repository_security_scan ?cancel root args =
 
 let is_shell_tool = function
   | "run_command" | "start_process" | "start_shell" | "xcode_preflight"
-  | "mobile_check" | "android_devices" -> true
+  | "mobile_check" | "android_devices" | "mobile_session" -> true
   | _ -> false
+
 
 let requires_explicit_approval ~name ~args =
   match name with
@@ -2839,6 +3281,9 @@ let requires_explicit_approval ~name ~args =
   | "lsp_start" | "workspace_eval"
   | "ssh_open" | "ssh_read" | "ssh_write" | "ssh_command"
   | "dap_start" -> true
+  | "mobile_session" ->
+      List.mem (optional_string "action" "" args)
+        ["build"; "install"; "launch"; "stop"]
   | "lsp" -> optional_string "action" "" args = "apply_preview"
   | "dap" ->
       (match field "action" args with
@@ -2871,6 +3316,9 @@ let non_reversible_tool ~name ~args =
   | "lsp_start" | "dap_start" | "ssh_open" | "ssh_read"
   | "ssh_write" | "ssh_command" | "web_search" | "web_fetch"
   | "clipboard_write" -> true
+  | "mobile_session" ->
+      List.mem (optional_string "action" "" args)
+        ["build"; "install"; "launch"; "stop"]
   | "workspace_eval" -> optional_string "action" "run" args = "run"
   | "dap" ->
       (match field "action" args with
@@ -2996,13 +3444,15 @@ let definitions = [
      "subroot", string_field "Exact scanned Xcode .xcworkspace or .xcodeproj bundle";
      "scheme", string_field "Exact scheme returned by approved discovery";
      "destination", string_field "Exact available iOS Simulator ID returned for this scheme";
+     "derived_data_path", string_field "Optional workspace-relative output directory for Xcode build artifacts";
      "timeout_seconds", integer_field "Per-command deadline (default 120 seconds)" 1 300]
     ["action"; "subroot"];
-  schema "mobile_check" "Run one explicitly approved focused SwiftPM test, offline system-Gradle task, Flutter analysis/test, or local React Native/Expo script. Discovery and selected execution require separate approvals; project code runs as your user. No dependency installation or implicit SDK setup."
+  schema "mobile_check" "Run one explicitly approved focused SwiftPM test, offline system-Gradle task, Gradle instrumentation test bound to one inventoried ready emulator, Flutter analysis/test, or local React Native/Expo script. Discovery, device inventory and each execution need separate approvals; project code runs as your user. No dependency installation, SDK setup or emulator boot."
     ["stack", enum_string_field "Selected mobile stack" ["swiftpm"; "gradle"; "flutter"; "node"];
-     "action", enum_string_field "SwiftPM discover/run, Gradle tasks/run, Flutter analyze/test, or Node test/lint" ["discover"; "tasks"; "run"; "analyze"; "test"; "lint"];
+     "action", enum_string_field "SwiftPM discover/run, Gradle tasks/run/instrumented, Flutter analyze/test, or Node test/lint" ["discover"; "tasks"; "run"; "instrumented"; "analyze"; "test"; "lint"];
      "subroot", string_field "Exact workspace-relative package/settings/project root";
      "target", string_field "Exact discovered Swift test or Gradle task; for Flutter test, exact workspace-relative .dart test file";
+     "serial", string_field "Gradle instrumented only: exact ready emulator serial reported by the approved android_devices inventory";
      "manager", enum_string_field "Node script runner when multiple lockfiles exist" ["npm"; "pnpm"; "yarn"];
      "timeout_seconds", integer_field "Per-command deadline (default 120 seconds)" 1 300]
     ["stack"; "action"; "subroot"];
@@ -3010,6 +3460,21 @@ let definitions = [
     ["action", enum_string_field "AVD configuration or ADB transport listing" ["avds"; "devices"];
      "subroot", string_field "Exact workspace-relative Gradle settings directory"]
     ["action"; "subroot"];
+  schema "mobile_session" "Select an app, build its chosen Android variant or non-signing iOS Simulator scheme, then separately install, launch and stop the session. Each build/device effect has an exact explicit approval; no physical device is selectable."
+    ["action", enum_string_field "Session action" ["list"; "select"; "status"; "build"; "install"; "launch"; "stop"];
+     "session_id", string_field "Session ID returned by select";
+     "platform", enum_string_field "Verified app platform" ["ios"; "android"];
+     "subroot", string_field "Exact workspace-relative project root; Xcode bundle path for iOS";
+     "device", string_field "Exact iOS Simulator UUID or ready emulator serial from approved inventory";
+     "app_id", string_field "Exact bundle identifier or Android application ID";
+     "app_path", string_field "Workspace-relative expected .app directory or .apk build artifact";
+     "scheme", string_field "Exact approved Xcode scheme for iOS";
+     "variant", string_field "Selected Android build variant for session";
+     "activity", string_field "Optional exact Android component package/activity, for example com.example.app/.MainActivity";
+     "task", string_field "Exact discovered Gradle assemble task for the selected variant";
+     "timeout_seconds", integer_field "Per-command deadline (default 120 seconds)" 1 300]
+    ["action"];
+
   schema "read_file" "Read bounded workspace files, directories, documents, archives, notebooks, SQLite, owned artifacts, managed worktrees, or public HTTPS URLs. HTTPS fetches send no credentials and require approval."
     ["path", string_field "Workspace-relative path or supported local://, artifact://, worktree://, or HTTPS source";
      "offset", integer_field "Byte offset for ordinary local text files (default 0; do not combine with a line other than 1)" 0 max_int;
@@ -3271,12 +3736,19 @@ let parse_hunks args =
         | _ -> fail "each hunk must be an object") values
   | _ -> fail "hunks must be an array"
 
-let apply_edits ?cancel ?context root args =
+let apply_edits ~approved ~sensitive_review ?cancel ?context root args =
   let root, args = resolve_path_arguments ?cancel ?context ~root args in
   let path = required_string "path" args in
   let expected_sha256 = required_string "expected_sha256" args in
   let hunks = parse_hunks args in
-  let preview = Workspace_edit.apply_hunks ~root ~path ~expected_sha256 ~hunks in
+  let prepared =
+    try Workspace_edit.prepare_hunks ~root ~path ~expected_sha256 ~hunks
+    with Workspace_edit.Error message -> fail message in
+  ignore (require_sensitive_review ~approved ~sensitive_review ~root
+    [proposed_of_prepared prepared]);
+  (try Workspace_edit.write_prepared prepared
+   with Workspace_edit.Error message -> fail message);
+  let preview = prepared.Workspace_edit.preview in
   Printf.sprintf "%s %s; SHA-256: %s"
     (if preview.changed then "Applied" else "No changes to")
     path preview.result_sha256
@@ -3305,7 +3777,7 @@ let ast_operation_text = function
   | Workspace_edit.Replace_expression { target; replacement } ->
       Printf.sprintf "replace unique expression %S with %S" target replacement
 
-let ast_edit ?cancel ?context root args =
+let ast_edit ~approved ~sensitive_review ?cancel ?context root args =
   let root, args = resolve_path_arguments ?cancel ?context ~root args in
   let path = required_string "path" args in
   let language = required_string "language" args in
@@ -3324,10 +3796,17 @@ let ast_edit ?cancel ?context root args =
           (ast_operation_text edit.operation)
           (bounded_tool_text preview.content (max_read_bytes - 512))
     | _ -> assert false
-  else
-    let preview = Workspace_edit.apply_ast ~root ~language ~edit in
+  else (
+    let prepared =
+      try Workspace_edit.prepare_ast ~root ~language edit
+      with Workspace_edit.Error message -> fail message in
+    ignore (require_sensitive_review ~approved ~sensitive_review ~root
+      [proposed_of_prepared prepared]);
+    (try Workspace_edit.write_prepared prepared
+     with Workspace_edit.Error message -> fail message);
+    let preview = prepared.Workspace_edit.preview in
     Printf.sprintf "Applied AST edit to %s; SHA-256: %s; changed: %b"
-      path preview.result_sha256 preview.changed
+      path preview.result_sha256 preview.changed)
 
 
 let approval_request ?cancel ?context ~root ~name ~args (decision : Approval.decision) =
@@ -3532,7 +4011,11 @@ let approval_request ?cancel ?context ~root ~name ~args (decision : Approval.dec
         "Executes selected mobile project code as your user; discovery and execution each need approval. Commands do not install dependencies, provision SDKs, or sandbox project code.",
         ["Working directory: " ^ Printf.sprintf "%S" cwd;
          "Exact command: " ^ command;
-         "The selected toolchain may write local build artifacts or invoke project-defined code."]
+         (if optional_string "stack" "" args = "gradle" &&
+             optional_string "action" "" args = "instrumented" then
+            "Runs the selected Gradle task with ANDROID_SERIAL bound to the one emulator you choose; that task may install and run test APKs on it. Boot and standalone install remain separately approved actions."
+          else
+            "The selected toolchain may write local build artifacts or invoke project-defined code.")]
     | "android_devices" ->
         let command, cwd = android_device_command ~root:base_root args in
         "Lists Android devices as your user; this inventory is not authorization to boot, install, launch or test. Each phase requires separate interactive approval.",
@@ -3542,6 +4025,9 @@ let approval_request ?cancel ?context ~root ~name ~args (decision : Approval.dec
             "ADB may start its local server and access your configured ADB identity. Physical serials are withheld; offline and unauthorized transports are not ready."
           else
             "Reads locally configured AVD names; no SDK or system image is installed, and no emulator is booted.")]
+    | "mobile_session" ->
+        let context = require_session_context context in
+        mobile_session_preview ~context ~root:base_root args
     | "run_command" ->
         "Runs /bin/sh as your user from the workspace root. It is not sandboxed and may access or modify files outside the workspace or use the network.",
         ["Working directory: " ^ Printf.sprintf "%S" base_root;
@@ -3713,6 +4199,70 @@ let approval_request ?cancel ?context ~root ~name ~args (decision : Approval.dec
     | _ ->
         "Performs a tool action that has no safe preview.",
         ["No argument preview is available."] in
+  (* Sensitive-diff authorization (M21b/M22b): when a classifier is
+     installed, review the exact proposed bytes for every mutation path and
+     carry the binding target set in the request so the write can be
+     re-verified at apply time. Unresolvable previews fail closed as
+     unresolved reviews; the write then still needs a matching approval and
+     revalidates on its own. *)
+  let sensitive : Approval.sensitive_review option =
+    if not (Sensitive_mutation.installed ()) then None
+    else
+      let review proposals = Sensitive_mutation.review ~root:preview_root proposals in
+      (try
+         match name with
+         | "write_file" ->
+             let _, proposal = write_proposal ~root:preview_root
+                 ~path:(required_string "path" preview_args)
+                 ~content:(required_string "content" preview_args) in
+             review [proposal]
+         | "edit_file" ->
+             let prepared = Workspace_edit.prepare_unique ~root:preview_root
+                 ~path:(required_string "path" preview_args)
+                 ~old_text:(required_string "old_string" preview_args)
+                 ~new_text:(required_string "new_string" preview_args) in
+             review [proposed_of_prepared prepared]
+         | "apply_edits" ->
+             let prepared = Workspace_edit.prepare_hunks ~root:preview_root
+                 ~path:(required_string "path" preview_args)
+                 ~expected_sha256:(required_string "expected_sha256" preview_args)
+                 ~hunks:(parse_hunks preview_args) in
+             review [proposed_of_prepared prepared]
+         | "ast_edit" when not (optional_bool "dry_run" true args) ->
+             let prepared = Workspace_edit.prepare_ast ~root:preview_root
+                 ~language:(required_string "language" preview_args)
+                 { Workspace_edit.path = required_string "path" preview_args;
+                   expected_sha256 =
+                     required_string "expected_sha256" preview_args;
+                   operation = ast_operation preview_args } in
+             review [proposed_of_prepared prepared]
+         | "lsp" when optional_string "action" "" args = "apply_preview" ->
+             let _, files = lsp_preview ?context ~root:base_root args in
+             Sensitive_mutation.review ~root:base_root
+               (lsp_apply_proposals ~root:base_root files)
+         | _ -> None
+       with
+       | Cancelled | Provider.Cancelled -> raise Cancelled
+       | Workspace_edit.Error message | Workspace_path.Error message
+       | Workspace_lsp.Error message -> fail message) in
+  let details = match sensitive with
+    | None -> details
+    | Some review ->
+        let lines = List.map (fun (item : Approval.sensitive_effect) ->
+            "Sensitive change: " ^ item.effect_path ^ " — " ^
+            item.effect_summary) review.effects in
+        let lines = lines @ List.map (fun reason ->
+            "Unresolved sensitive classification: " ^ reason)
+            review.unresolved in
+        let lines = lines @
+          ["This change needs its own exact-content approval; it is checked again against the reviewed hashes before writing."] in
+        let lines = lines @ List.concat_map
+          (fun (target : Approval.sensitive_target) ->
+            ["Reviewed file: " ^ Printf.sprintf "%S" target.target_path;
+             "Reviewed original SHA-256: " ^ target.original_sha256;
+             "Reviewed result SHA-256: " ^ target.result_sha256])
+          review.targets in
+        details @ lines in
   let trigger = match name with
     | "run_command" | "start_shell" -> Approval.Dangerous_command
     | "web_search" | "web_fetch" | "browser" | "ssh_command" | "publish_web" ->
@@ -3721,7 +4271,11 @@ let approval_request ?cancel ?context ~root ~name ~args (decision : Approval.dec
         Approval.File_access
     | _ -> Approval.Tool_call in
   { Approval.tool_name = name; tier = decision.tier; trigger; impact; details;
-    reason = decision.reason }
+    reason = (match sensitive with
+      | Some _ ->
+          Some "The proposed change touches sensitive mobile configuration or cannot be classified; it requires separate exact-content approval."
+      | None -> decision.reason);
+    sensitive }
 
 let parameters_schema definitions name =
   match List.find_opt (fun json -> function_name json = `String name) definitions with
@@ -3921,7 +4475,7 @@ let session_tool_names = [
   "lsp_start"; "lsp"; "workspace_eval";
   "ssh_open"; "ssh_close"; "ssh_read"; "ssh_write"; "ssh_command";
   "dap_start"; "dap"; "xcode_preflight"; "mobile_check"; "android_devices";
-  "browser"; "publish_web"
+  "mobile_session"; "browser"; "publish_web"
 ]
 
 let path_tool_names = [
@@ -3940,7 +4494,7 @@ let error_message = function
   | Workspace_ssh.Error message | Native_tokenizer.Error message
   | Workspace_xcode.Error message | Workspace_swiftpm_focus.Error message
   | Workspace_gradle_focus.Error message | Workspace_flutter_focus.Error message
-  | Workspace_node_scripts.Error message
+  | Workspace_node_scripts.Error message | Workspace_flutter_channels.Error message
   | Workspace_android_devices.Error message
   | Workspace_browser.Error message | Workspace_portal.Error message ->
       "Error: " ^ message
@@ -4009,7 +4563,8 @@ let prepare ?cancel ?context ~root ~name ~args () =
       ignore (optional_int "output_limit" 65_536 ~minimum:1
         ~maximum:Workspace_process.max_output_limit args);
       ignore (optional_bool "pty" false args));
-    let execute ?cancel ?on_progress ?(approved = false) () =
+    let execute ?cancel ?on_progress ?(approved = false)
+        ?(sensitive_review = None) () =
       try
         let result = match name with
           | "browser" -> Ok (browser_tool ~approved ?cancel ?context args)
@@ -4025,10 +4580,10 @@ let prepare ?cancel ?context ~root ~name ~args () =
           | "search" -> search tool_root tool_args
           | "glob" -> glob tool_root tool_args
           | "grep" -> grep tool_root tool_args
-          | "write_file" -> write_file tool_root tool_args
-          | "edit_file" -> edit_file tool_root tool_args
-          | "apply_edits" -> apply_edits ?cancel ?context tool_root tool_args
-          | "ast_edit" -> ast_edit ?cancel ?context tool_root tool_args
+          | "write_file" -> write_file ~approved ~sensitive_review tool_root tool_args
+          | "edit_file" -> edit_file ~approved ~sensitive_review tool_root tool_args
+          | "apply_edits" -> apply_edits ~approved ~sensitive_review ?cancel ?context tool_root tool_args
+          | "ast_edit" -> ast_edit ~approved ~sensitive_review ?cancel ?context tool_root tool_args
           | "run_command" -> run_command ?cancel ?on_progress root args
           | "xcode_preflight" ->
               xcode_preflight ~approved ?cancel ?on_progress ?context root args
@@ -4036,6 +4591,8 @@ let prepare ?cancel ?context ~root ~name ~args () =
               mobile_check ~approved ?cancel ?on_progress ?context root args
           | "android_devices" ->
               android_devices ~approved ?cancel ?on_progress ?context root args
+          | "mobile_session" ->
+              mobile_session ~approved ?cancel ?on_progress ?context root args
           | "start_process" -> start_process ~approved ?cancel ?context root args
           | "start_shell" -> start_shell ~approved ?cancel ?context root args
           | "process_list" -> process_list ?context root args
@@ -4060,7 +4617,7 @@ let prepare ?cancel ?context ~root ~name ~args () =
           | "clipboard_read" -> clipboard_read ~approved ?cancel ()
           | "clipboard_write" -> clipboard_write ~approved ?cancel args
           | "lsp_start" -> lsp_start ~approved ?context root args
-          | "lsp" -> lsp_execute ~approved ?cancel ?context root args
+          | "lsp" -> lsp_execute ~approved ~sensitive_review ?cancel ?context root args
           | "workspace_eval" -> workspace_eval ~approved ?cancel ?context root args
           | "ssh_open" -> ssh_open ~approved ?cancel ?context args
           | "ssh_close" -> ssh_close ?context args
@@ -4107,7 +4664,7 @@ let prepare ?cancel ?context ~root ~name ~args () =
 
 
 let execute ?cancel ?on_progress ?preflight ?context ?(approved = false)
-    ~root ~name ~args () =
+    ?(sensitive_review = None) ~root ~name ~args () =
   match prepare ?cancel ?context ~root ~name ~args () with
   | Error result -> Error result
   | Ok execute ->
@@ -4116,9 +4673,29 @@ let execute ?cancel ?on_progress ?preflight ?context ?(approved = false)
         | Some check ->
             (match check () with
              | Some message -> Error message
-             | None -> execute ?cancel ?on_progress ~approved ())
-        | None -> execute ?cancel ?on_progress ~approved ()
+             | None -> execute ?cancel ?on_progress ~approved ~sensitive_review ())
+        | None -> execute ?cancel ?on_progress ~approved ~sensitive_review ()
       with
       | Cancelled -> raise Cancelled
       | exn -> Error (error_message exn)
 
+
+(* Install the real iOS/Android sensitive-change classifier as the
+   mutation-review source. The adapter is pure and bounded by
+   Workspace_sensitive; unresolved proposals fail closed in
+   require_sensitive_review. Callers may still replace the classifier in
+   tests via Sensitive_mutation.set_classifier. *)
+let () =
+  Sensitive_mutation.set_classifier
+    (Some (fun ~root:_ (change : Sensitive_mutation.change) ->
+      match Workspace_sensitive.classify_proposal ~path:change.path
+          ~before:change.before ~after:change.after with
+      | Workspace_sensitive.Ordinary -> Sensitive_mutation.Ordinary
+      | Workspace_sensitive.Literal report ->
+          Sensitive_mutation.Sensitive
+            (List.map (fun (finding : Workspace_sensitive.finding) ->
+              { Approval.effect_path = report.file;
+                effect_summary = finding.detail }) report.findings)
+      | Workspace_sensitive.Unresolved report ->
+          Sensitive_mutation.Unresolved
+            (Workspace_sensitive.describe (Workspace_sensitive.Unresolved report))))

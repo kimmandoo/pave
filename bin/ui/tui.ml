@@ -2991,6 +2991,9 @@ let approval_question (request : Pave.Approval.request) =
   | "web_search" -> "Search the web for this query?"
   | "web_fetch" -> "Fetch this web page?"
   | "browser" -> "Control an isolated headless browser?"
+  | "write_file" | "edit_file" | "apply_edits" | "ast_edit"
+    when request.sensitive <> None ->
+      "Apply this reviewed sensitive change?"
   | "write_file" -> "Write this file?"
   | "edit_file" | "apply_edits" | "ast_edit" -> "Edit this file?"
   | "task" -> "Start a read-only child agent?"
@@ -3008,7 +3011,8 @@ let approval_scope (request : Pave.Approval.request) =
     request.tool_name;
     Pave.Approval.tier_name request.tier ^ " tier · " ^ trigger;
     consequence;
-    (if Pave.Approval.session_grantable request.tool_name
+    (if request.sensitive <> None then "exact-content approval every call"
+     else if Pave.Approval.session_grantable request.tool_name
      then "you may allow it until exit"
      else if request.tool_name = "run_command" then "per-command approval"
      else "asks every call") ]
@@ -3028,7 +3032,8 @@ let confirm_tool ?(always = true) t (request : Pave.Approval.request) =
     let prefix = "Command: " in
     String.starts_with ~prefix detail &&
     String.length detail - String.length prefix > 4096) request.details in
-  let session = Pave.Approval.session_grantable request.tool_name in
+  let session = request.sensitive = None &&
+    Pave.Approval.session_grantable request.tool_name in
   let always = always && Pave.Approval.always_grantable request.tool_name &&
     List.exists (fun detail ->
       let prefix = "Command: " in

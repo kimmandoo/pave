@@ -68,43 +68,76 @@ let () =
       "rootProject.name = \"mobile\"\ninclude(\":app\", \":lib\")\n";
     write (Filename.concat android "gradlew") "#!/bin/sh\nexit 7\n";
     let tasks, cwd = Gradle.command ~root ~subroot:"android"
-      ~action:"tasks" ~task:"" in
-    expect "system Gradle offline listing; never wrapper" 
+      ~action:"tasks" ~task:"" ~serial:"" in
+    expect "system Gradle offline listing; never wrapper"
       (tasks = "gradle --offline tasks --all" && cwd = android);
     let run, cwd = Gradle.command ~root ~subroot:"android"
-      ~action:"run" ~task:":app:assembleDebug" in
+      ~action:"run" ~task:":app:assembleDebug" ~serial:"" in
     expect "exact quoted qualified task and selected settings root"
       (run = "gradle --offline ':app:assembleDebug'" && cwd = android);
     expect "root task allowed" (fst (Gradle.command ~root ~subroot:"android"
-      ~action:"run" ~task:":check") = "gradle --offline ':check'");
+      ~action:"run" ~task:":check" ~serial:"") =
+       "gradle --offline ':check'");
+    let instrumented, _ = Gradle.command ~root ~subroot:"android"
+      ~action:"instrumented" ~task:":app:connectedDebugAndroidTest"
+      ~serial:"emulator-5554" in
+    expect "instrumented run binds the one selected emulator serial"
+      (instrumented =
+        "ANDROID_SERIAL='emulator-5554' gradle --offline ':app:connectedDebugAndroidTest'");
+    rejects "instrumented without an explicit serial" (fun () ->
+      Gradle.command ~root ~subroot:"android" ~action:"instrumented"
+        ~task:":app:connectedDebugAndroidTest" ~serial:"");
+    rejects "instrumented physical serial shape" (fun () ->
+      Gradle.command ~root ~subroot:"android" ~action:"instrumented"
+        ~task:":app:connectedDebugAndroidTest" ~serial:"ABCD1234");
+    rejects "instrumented network serial shape" (fun () ->
+      Gradle.command ~root ~subroot:"android" ~action:"instrumented"
+        ~task:":app:connectedDebugAndroidTest" ~serial:"192.168.1.5:5555");
+    rejects "instrumented shell-smuggling serial" (fun () ->
+      Gradle.command ~root ~subroot:"android" ~action:"instrumented"
+        ~task:":app:connectedDebugAndroidTest" ~serial:"emulator-5554' x");
+    rejects "run must not carry a serial" (fun () ->
+      Gradle.command ~root ~subroot:"android" ~action:"run"
+        ~task:":app:assembleDebug" ~serial:"emulator-5554");
+    rejects "task discovery must not carry a serial" (fun () ->
+      Gradle.command ~root ~subroot:"android" ~action:"tasks"
+        ~task:"" ~serial:"emulator-5554");
+    rejects "instrumented undeclared module" (fun () ->
+      Gradle.command ~root ~subroot:"android" ~action:"instrumented"
+        ~task:":missing:connectedDebugAndroidTest" ~serial:"emulator-5554");
     rejects "absent statically declared module" (fun () ->
       Gradle.command ~root ~subroot:"android" ~action:"run"
-        ~task:":missing:assembleDebug");
+        ~task:":missing:assembleDebug" ~serial:"");
     rejects "ambiguous unqualified task" (fun () ->
       Gradle.command ~root ~subroot:"android" ~action:"run"
-        ~task:"assembleDebug");
+        ~task:"assembleDebug" ~serial:"");
     rejects "Gradle abbreviation" (fun () ->
       Gradle.command ~root ~subroot:"android" ~action:"run"
-        ~task:":app:build --offline");
+        ~task:":app:build --offline" ~serial:"");
     rejects "task discovery accepts no target" (fun () ->
-      Gradle.command ~root ~subroot:"android" ~action:"tasks" ~task:":check");
+      Gradle.command ~root ~subroot:"android" ~action:"tasks"
+        ~task:":check" ~serial:"");
     rejects "parent traversal" (fun () ->
-      Gradle.command ~root ~subroot:"android/../android" ~action:"tasks" ~task:"");
+      Gradle.command ~root ~subroot:"android/../android" ~action:"tasks"
+        ~task:"" ~serial:"");
     Unix.symlink android (Filename.concat root "linked");
     rejects "symlinked selected directory" (fun () ->
-      Gradle.command ~root ~subroot:"linked" ~action:"tasks" ~task:"");
+      Gradle.command ~root ~subroot:"linked" ~action:"tasks" ~task:""
+        ~serial:"");
     let original = Filename.concat android "settings.gradle.kts" in
     Unix.unlink original;
     Unix.symlink (Filename.concat root "outside-settings") original;
     rejects "symlinked settings" (fun () ->
-      Gradle.command ~root ~subroot:"android" ~action:"tasks" ~task:"");
+      Gradle.command ~root ~subroot:"android" ~action:"tasks" ~task:""
+        ~serial:"");
     Unix.unlink original;
     write original (String.make (Pave.Workspace_path.max_write_bytes + 1) 'x');
     rejects "oversized manifest" (fun () ->
-      Gradle.command ~root ~subroot:"android" ~action:"tasks" ~task:"");
+      Gradle.command ~root ~subroot:"android" ~action:"tasks" ~task:""
+        ~serial:"");
     write original "include(projectsFromPlugin)\n";
     expect "dynamic include cannot establish static absence"
       (fst (Gradle.command ~root ~subroot:"android" ~action:"run"
-        ~task:":external:assembleDebug") =
+        ~task:":external:assembleDebug" ~serial:"") =
          "gradle --offline ':external:assembleDebug'");
     print_endline "workspace Gradle focused discovery: ok")

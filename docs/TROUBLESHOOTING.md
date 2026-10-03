@@ -1,5 +1,20 @@
 # Troubleshooting
 
+### [2026-10-03] approved Android builds lost the configured toolchain and offline test-host dependencies
+
+- **Context / Symptom:** Approved Gradle task discovery first failed with `Unable to locate a Java Runtime`; the selected Android instrumentation build then reported that `ANDROID_HOME`/`sdk.dir` was missing. After forwarding runtime/SDK paths, `connectedDebugAndroidTest` built APKs but failed because the AGP 9.1.1 test-host artifact `com.android.tools.utp:android-test-plugin-host-additional-test-output:32.1.1` and some AndroidX transitive versions were not cached in offline mode.
+- **Root Cause:** The managed subprocess environment omitted non-secret `JAVA_HOME` and Android SDK path variables. The disposable host had Gradle, SDK, emulator and AndroidX runner installed but no cached AGP unified-test-platform host dependency; installing/downloading project dependencies was not authorized.
+- **Solution:** Preserved `JAVA_HOME`, `ANDROID_HOME`, `ANDROID_SDK_ROOT` and `ANDROID_USER_HOME` in managed subprocesses while keeping provider credentials filtered. Kept the fixture offline by aligning its AndroidX transitive versions to cached artifacts, built the app and instrumentation APK in separately approved Gradle actions, then separately approved APK installs and `am instrument` on the selected emulator. The real AndroidJUnitRunner reported one passed test; no network fetch or implicit boot was performed.
+- **Prevention / Reference:** Check SDK/JDK variables in the same filtered environment as Gradle. When AGP's connected-test host artifacts are absent offline, report that exact gate; a separately approved build/install/`am instrument` can establish real instrumentation only if its runner output confirms the test pass.
+
+### [2026-10-03] disposable Xcode test target defaulted above the selected simulator runtime
+
+- **Context / Symptom:** The approved Xcode test failed before running because the disposable test target required iOS Simulator 27.0 while the selected iPad (A16) ran iOS Simulator 26.5.
+- **Root Cause:** Xcode's test-target default deployment target was newer than the installed compatible simulator runtime; the destination inventory itself was valid.
+- **Solution:** Set the disposable fixture's `IPHONEOS_DEPLOYMENT_TARGET` to 15.0, then reran the separately approved test on the exact discovered compatible simulator UUID with signing disabled.
+- **Prevention / Reference:** Set a deliberate supported deployment target on disposable test targets; destination compatibility alone does not guarantee the target's deployment range includes that simulator.
+
+
 ### [2026-10-03] concurrent parent/child requests closed each other's reused curl descriptors
 
 - **Context / Symptom:** An actual `task.model=light` child completed, but the continuing parent turn failed with `Unix.Unix_error(Unix.EBADF, "select", "")`. Deterministic ownership regressions failed with EBADF on read in shared curl and on fstat in Devin's independent binary executor and Apple's helper.
@@ -398,6 +413,13 @@
 - **Root Cause:** `Transcript_view` applied ordinary Markdown list parsing to raw tool lines and one undifferentiated `Code` style to every fenced line. Tool previews selected the first nonempty line before seeing the diff file header.
 - **Solution:** Classified sanitized unified-diff headers, hunks, changes, context and metadata in the existing transcript path; kept the literal `+`/`-` markers, reset raw diff state at boundaries and preferred file headers in collapsed command previews. Tinted diff rows in the TUI while retaining monochrome gutters. Focused tests and colored/`NO_COLOR` PTY paints displayed both an expanded raw diff and a fenced assistant diff.
 - **Prevention / Reference:** Keep ordinary Markdown lists and non-diff code fences as controls; verify wrapped, streamed and collapsed/expanded diff rows through `test_transcript_view` and the opt-in `PAVE_REAL_DIFF_TUI=1` PTY smoke.
+
+### [2026-10-03] Android package launcher intent failed despite a registered activity
+
+- **Context / Symptom:** On the selected disposable Android emulator, `am start -W -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -p dev.pave.mobilefixture` exited 1 with `Activity not started, unable to resolve Intent`. An individually approved `dumpsys package dev.pave.mobilefixture` showed the installed exported `.SmokeActivity` with both MAIN and LAUNCHER declarations.
+- **Root Cause:** The package-only launcher intent was not resolved by this emulator's activity manager even though the package dump showed a matching activity. The observed evidence did not identify a deeper platform defect.
+- **Solution:** Added an optional package-scoped activity component to the app session and launched the exact selected component with `am start -W -n`; validated it against the selected application ID and retained the exact command in the approval preview. The real disposable app then built, installed, launched and stopped successfully before a separate instrumentation run passed.
+- **Prevention / Reference:** When a package-scoped launcher intent cannot resolve, select and approve the explicit activity component; do not treat the manifest/package dump alone as launch success.
 
 ### [2026-09-29] Xcode 27 simulator destinations appeared empty despite installed runtimes
 

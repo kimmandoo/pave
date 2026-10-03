@@ -1,10 +1,10 @@
 # Tasks — ordered remaining work
 
-**Audit:** 2026-09-30, source baseline `acbdab8`. This is the single active backlog, replacing `TASKS.md`. Only unfinished, independently verifiable work belongs here. Completed M01–M18 and EX01–EX10 were removed; their acceptance history remains in [the mobile plan](docs/MOBILE_DEVELOPMENT_PLAN.md), [changelog](CHANGELOG.md) and Git. Existing file tools, LSP/DAP, approved processes/eval/network tools, read-only jobs, local extensions/MCP, compact read cards and Devin status diagnostics are not new implementation tasks.
+**Audit:** 2026-10-03, continuing the existing mobile backlog. This is the single active backlog. Only unfinished, independently verifiable work belongs here. Completed M01–M24 and EX01–EX10 were removed; acceptance history remains in [the mobile plan](docs/MOBILE_DEVELOPMENT_PLAN.md), [changelog](CHANGELOG.md) and Git. Existing file tools, LSP/DAP, approved processes/eval/network tools, read-only jobs, local extensions/MCP, compact read cards and Devin status diagnostics are not new implementation tasks.
 
 ## How to execute this list
 
-- Work top-to-bottom within P1 → P2 → P3 → P4. A named dependency must finish first; a missing external gate blocks only that card. Skip gated cards rather than invent credentials, device readiness, registry contracts or hosted services. Start with **AU01**; M19a remains the next mobile delivery after MB01.
+- Work top-to-bottom within P1 → P2 → P3 → P4. A named dependency must finish first; a missing external gate blocks only that card. Skip gated cards rather than inventing credentials, device readiness, registry contracts or hosted services. Complete the remaining mobile core capabilities in their listed order before returning to unrelated backlog cards.
 - Each checkbox is one deliverable, not an entire subsystem. Letter suffixes split an old card; the unsuffixed ID is a scope family, not another checkbox. `Depends: none` means no unfinished prerequisite, not permission to ignore existing contracts.
 - **Evidence** describes inspected source or an existing plan, not an executed failure. Cards labeled **diagnostic** must first reproduce the suspected behavior; close with evidence if not reproduced, rather than inventing a fix. Other new gaps are source-observed and still require failing-before/passing-after proof when implemented.
 - **Accept** is future acceptance, not a claim that this audit ran it. Runtime changes require focused behavioral checks plus actual CLI/tool/PTY smoke. Real Xcode simulator acceptance stays manual-only, never CI. No model/tool request is automatically replayed, and every shell/device command retains separate informed approval.
@@ -60,87 +60,52 @@
   **Depends:** PL06.
   **Gate:** packaged current-target binaries; no public release required.
 
-- [ ] **MB01 — Diagnose Xcode discovery fingerprint freshness**
-  **Evidence:** [discovery checks](lib/tools/tools.ml#L1450-L1487) fingerprint only the principal workspace/project manifest. **Deliver:** reproduce shared-scheme/referenced-project changes and define bounded relevant-file invalidation; arbitrary executable project code is not fully fingerprintable.
-  **Accept:** unchanged supported input reuses discovery; changed in-scope schemes/projects require fresh approved discovery, and unresolved/oversized inputs never become verified choices.
-  **Depends:** none.
-  **Gate:** none for fake-tool diagnosis; **diagnostic**, not a claimed live misdeployment.
 
 ## P2 — Mobile completion and focused existing-product improvements
 
-M01–M18 are satisfied prerequisites, not repeated tasks. Mobile suffixes retain every acceptance condition in the [mobile plan](docs/MOBILE_DEVELOPMENT_PLAN.md#L48-L63).
+M01–M24 are satisfied prerequisites. The remaining mobile core capabilities are delivered end-to-end here; their active acceptance contracts live in the [mobile plan](docs/MOBILE_DEVELOPMENT_PLAN.md).
 
-- [ ] **M19a — Bind Xcode test selection to simulator inventory**
-  **Evidence:** [Xcode execution/inventory](lib/tools/tools.ml#L1478-L1552) already supports approved tests, but inventory is rendered rather than retained as a test-selection prerequisite. **Deliver:** bind the selected UUID to successful current-session compatible inventory for the unchanged scheme/project.
-  **Accept:** the verified selected UUID reaches the exact non-signing test command; absent/failed/incompatible inventory and cancellation invoke no test.
-  **Depends:** MB01.
-  **Gate:** none for fake-tool safety checks; do not reimplement existing build/test execution.
+- [ ] **AO01 — Observe a selected mobile screen**
+  **Deliver:** capture a bounded screenshot and accessibility tree from the selected app/device session.
+  **Accept:** image bytes are returned as an image block and tree nodes preserve text, role, bounds and accessibility identifiers; denied, malformed, oversized or stale-session observations yield no false state.
+  **Depends:** AS01.
+  **Gate:** selected running Android emulator or compatible iOS Simulator.
 
-- [ ] **M19b — Exercise a real disposable iOS simulator test**
-  **Evidence:** [manual acceptance fixture](test/tools/test_mobile_real.ml#L112-L165) covers build/inventory, not a test target. **Deliver:** extend opt-in manual acceptance with a disposable test target and separately approved test invocation.
-  **Accept:** report actual target, selected simulator and test exit; cancellation starts no test, with no physical deployment/signing and no CI simulator execution.
-  **Depends:** M19a.
-  **Gate:** authorized Mac, Xcode, compatible simulator/runtime and exact-command approval.
+- [ ] **UI01 — Control and verify mobile UI**
+  **Deliver:** approved tap, swipe, text input and back actions bound to the selected device, with a post-action observation.
+  **Accept:** the real emulator fixture changes from a known pre-state to the expected accessible state; denial, out-of-bounds coordinates and failed commands do not claim a transition.
+  **Depends:** AO01.
+  **Gate:** interactive disposable app on an approved emulator/simulator.
 
-- [ ] **M20a — Bind Android instrumentation to one ready emulator**
-  **Evidence:** [Gradle focused execution](lib/tools/workspace_gradle_focus.ml#L120-L156) binds a task but not an emulator; [device inventory](lib/tools/workspace_android_devices.ml) is separate. **Deliver:** exact ready-emulator/module/test selection with explicit install/test effects; boot and install remain separately authorized.
-  **Accept:** only the selected ready emulator receives the approved task; offline, unauthorized, physical or unselected serials cause no install/test. Task filtering is not a sandbox.
-  **Depends:** none.
-  **Gate:** none for fake-tool checks; no implicit SDK/image installation.
+- [ ] **BR01 — Persist and replay mobile bug scenarios**
+  **Deliver:** private, versioned scenario records of exact app/device identity, steps and assertions, with explicit replay.
+  **Accept:** a saved deterministic scenario replays the same steps and reports the first failed assertion; mismatched app/device identity, missing records and cancelled actions stop replay without implicit retries.
+  **Depends:** UI01.
+  **Gate:** disposable deterministic mobile fixture.
 
-- [ ] **M20b — Exercise a real disposable Android emulator test**
-  **Evidence:** [M18 acceptance](docs/MOBILE_DEVELOPMENT_PLAN.md#L9) found configured AVDs but no attached emulator. **Deliver:** manually select a ready emulator and run one real disposable app's selected test, recording separate boot/install approvals if needed.
-  **Accept:** retain actual emulator/task/exit; denial or device becoming offline starts no test or fallback deployment.
-  **Depends:** M20a.
-  **Gate:** ready authorized emulator, installed SDK/dependencies and per-command approvals.
+- [ ] **LD01 — Diagnose mobile runtime logs and crashes**
+  **Deliver:** bounded Android logcat/ANR and iOS crash/dSYM-or-mapping evidence tied to the selected app/session.
+  **Accept:** fixture crashes and ANR evidence identify the owning app and useful source/symbol location when verified; truncated, foreign, malformed or unsymbolicated evidence remains explicitly incomplete.
+  **Depends:** AS01.
+  **Gate:** disposable platform runtime and available local symbols.
 
-- [ ] **M21a — Classify sensitive iOS proposed changes**
-  **Evidence:** [mobile safety contract](docs/MOBILE_DEVELOPMENT_PLAN.md#L56) lacks a corresponding diff classifier in [tool policy](lib/tools/tools.ml). **Deliver:** bounded proposed-diff classification for entitlements, bundle/deployment and signing configuration, without keychain reads.
-  **Accept:** literal sensitive changes cite exact files/effects; ordinary Swift remains ordinary and unsupported dynamic configuration is labeled unresolved.
-  **Depends:** none.
-  **Gate:** none.
+- [ ] **FV01 — Verify edits against a real mobile build**
+  **Deliver:** connect the guarded source edit snapshot to focused build/test results and source-linked diagnostics for the same app session.
+  **Accept:** one deliberate fixture defect fails before repair and passes afterward; stale snapshots, build failures and incomplete output cannot be reported as verified.
+  **Depends:** AS01.
+  **Gate:** installed platform toolchain and disposable project.
 
-- [ ] **M21b — Authorize sensitive iOS mutations consistently**
-  **Evidence:** [mutation dispatch](lib/tools/tools.ml) and [LSP previews](lib/tools/workspace_lsp.ml) currently use ordinary effect approval. **Deliver:** distinct exact-content authorization across write/edit/apply/AST/LSP paths using the classifier and existing snapshots.
-  **Accept:** denied or stale sensitive edits leave all targeted bytes unchanged; approved exact changes apply, ordinary Swift policy remains unchanged, and no signing is performed.
-  **Depends:** M21a, WK07.
-  **Gate:** none.
+- [ ] **VR01 — Compare mobile screenshot regressions**
+  **Deliver:** save and compare bounded screenshots with exact device, OS, locale, theme and declared dynamic-region metadata.
+  **Accept:** unchanged captures compare equal and a controlled pixel change is reported outside masked dynamic regions; mismatched metadata or incomplete captures are not compared as valid baselines.
+  **Depends:** AO01.
+  **Gate:** deterministic simulator/emulator screen.
 
-- [ ] **M22a — Classify sensitive Android proposed changes**
-  **Evidence:** [Android guard contract](docs/MOBILE_DEVELOPMENT_PLAN.md#L57) is not a concrete diff classifier in [tool policy](lib/tools/tools.ml). **Deliver:** classify manifest permissions, SDK levels and signing-setting changes without reading keystore secrets.
-  **Accept:** exact permission/build effects are identified; Kotlin-only edits remain ordinary and dynamic unresolved settings do not become verified values.
-  **Depends:** none.
-  **Gate:** none.
-
-- [ ] **M22b — Authorize sensitive Android mutations consistently**
-  **Evidence:** [workspace mutations](lib/tools/tools.ml) share ordinary effect paths. **Deliver:** wire exact-content Android guard approval through write/edit/apply/AST/LSP without a second writer.
-  **Accept:** denied/stale permission or signing-setting changes preserve bytes; approved changes apply and unrelated Kotlin policy is unchanged, with no keystore material in previews.
-  **Depends:** M22a, WK07.
-  **Gate:** none.
-
-- [ ] **M23a — Pair literal Flutter channel declarations**
-  **Evidence:** [Flutter helpers](lib/tools/workspace_flutter_focus.ml) provide focused checks, not channel consistency. **Deliver:** read-only pairing of literal Dart channel names with verified native handlers.
-  **Accept:** a name mismatch cites both real files; computed names, missing/out-of-root handlers and Dart-only packages remain unresolved without invented native code.
-  **Depends:** none.
-  **Gate:** none.
-
-- [ ] **M23b — Link supported channel shapes and focused tests**
-  **Evidence:** [M23 contract](docs/MOBILE_DEVELOPMENT_PLAN.md#L58) also requires argument shapes and existing tests. **Deliver:** compare supported literal method/argument shapes and suggest only observed focused tests.
-  **Accept:** a supported mismatch names both declarations and existing test; unsupported shape or absent test stays unknown, with no command execution or handler generation.
-  **Depends:** M23a.
-  **Gate:** none.
-
-- [ ] **M24a — Pair RN JS/native module declarations**
-  **Evidence:** [RN helpers](lib/tools/workspace_node_scripts.ml) execute declared scripts but do not pair bridge declarations. **Deliver:** bounded literal JS/TS-to-native declaration matching with observed test suggestions.
-  **Accept:** a mismatch cites actual files; dynamic/absent/out-of-root native declarations remain unknown and no absent script is invented.
-  **Depends:** none.
-  **Gate:** none.
-
-- [ ] **M24b — Check static Expo configuration consistency**
-  **Evidence:** [M24 contract](docs/MOBILE_DEVELOPMENT_PLAN.md#L59) includes config distinct from native bridges. **Deliver:** compare supported static Expo configuration with existing native declarations without evaluating config, prebuild or installs.
-  **Accept:** supported disagreement cites real configuration; managed Expo with no native roots and executable/dynamic config remain honestly unresolved.
-  **Depends:** none.
-  **Gate:** none.
+- [ ] **MD01 — Complete the mobile TUI dashboard**
+  **Deliver:** expose selected sessions, live observation, approved controls, scenario replay, diagnostics and verification/visual results in the TUI.
+  **Accept:** a real PTY creates/selects a session, observes it, performs a separately approved action and shows its settled state; cancellation preserves session/draft state and never grants effects.
+  **Depends:** AO01, UI01, BR01, LD01, FV01, VR01.
+  **Gate:** interactive PTY and selected disposable emulator/simulator.
 
 - [ ] **PG02 — Diagnose reserved-slot permission failures**
   **Evidence:** [Singularity reserved route](lib/provider/transports/singularity_tech_api.ml) lacks slot-specific classification; [HTTP errors](lib/provider/provider.ml) already have generic permission handling. **Deliver:** distinguish documented inactive-reservation denial from a bad key on this exact route only.

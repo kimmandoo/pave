@@ -6,9 +6,9 @@ let contains text fragment =
 
 let args fields = `Assoc (List.map (fun (k, v) -> k, `String v) fields)
 let execute_text ?cancel ?on_progress ?preflight ?context ?approved
-    ~root ~name ~args () =
+    ?sensitive_review ~root ~name ~args () =
   match Pave.Tools.execute ?cancel ?on_progress ?preflight ?context ?approved
-      ~root ~name ~args () with
+      ?sensitive_review ~root ~name ~args () with
   | Ok blocks -> Pave.Protocol.display_content_blocks blocks
   | Error message -> message
 let tool_json root name fields =
@@ -485,6 +485,252 @@ let () =
            path = "other/Second.swift" &&
            contains text "SECOND-SCOPE-ONLY instruction") scopes)
      | Error message -> failwith message);
+    (* The production Tools adapter must be active before fixture classifiers
+       override it below. A newly proposed Android permission gets the real
+       sensitive review, and approval of the ordinary tool tier alone cannot
+       write it. *)
+    let production_manifest =
+      "<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\">\n" ^
+      "  <uses-permission android:name=\"android.permission.CAMERA\"/>\n" ^
+      "  <application/>\n</manifest>\n" in
+    let production_args = args [
+      "path", "AndroidManifest.xml"; "content", production_manifest] in
+    let production_request = Pave.Tools.approval_request ~root
+      ~name:"write_file" ~args:production_args
+      (Pave.Tools.approval_decision ~command_patterns:[] ~name:"write_file"
+        ~args:production_args) in
+    assert (production_request.sensitive <> None);
+    assert (rejected (fun () -> execute_text ~root ~name:"write_file"
+      ~approved:true ~args:production_args ()));
+    assert (not (Sys.file_exists (Filename.concat root "AndroidManifest.xml")));
+    (* M21b/M22b: a classifier flagging exact content makes write/edit/
+       apply/AST/LSP mutations need distinct exact-content authorization.
+       Marker-driven fixture: after text containing the sensitive marker is
+       classified sensitive; the unresolved marker is unclassifiable; all
+       other content stays ordinary (no policy invented here). *)
+    Pave.Sensitive_mutation.set_classifier
+      (Some (fun ~root:_ (change : Pave.Sensitive_mutation.change) ->
+        if contains change.after "PAVE-SENSITIVE-ENTITLEMENT" then
+          Pave.Sensitive_mutation.Sensitive
+            [{ Pave.Approval.effect_path = change.path;
+               effect_summary = "marks sensitive mobile configuration" }]
+        else if contains change.after "PAVE-UNRESOLVED-SETTING" then
+          Pave.Sensitive_mutation.Unresolved "dynamic signing setting"
+        else Pave.Sensitive_mutation.Ordinary));
+    (* Files the tools write directly are tracked here for teardown. *)
+    List.iter (fun path ->
+      files := Filename.concat root path :: !files)
+      ["plain.swift"; "app.entitlements"; "AndroidManifest.xml"];
+    let mutation_approval name fields =
+      Pave.Tools.approval_request ~root ~name ~args:fields
+        (Pave.Tools.approval_decision ~command_patterns:[] ~name ~args:fields) in
+    (* Ordinary write_file keeps the existing policy while the classifier is
+       installed. *)
+    assert (not (contains
+      (tool root "write_file" ["path", "plain.swift"; "content", "let v = 1\n"])
+      "rror"));
+    let ordinary_request = mutation_approval "write_file"
+      (args ["path", "plain2.swift"; "content", "let v = 2\n"]) in
+    assert (ordinary_request.sensitive = None);
+    (* A sensitive write without an approval review writes nothing. *)
+    assert (rejected (fun () -> tool root "write_file"
+      ["path", "app.entitlements"; "content", "<plist>PAVE-SENSITIVE-ENTITLEMENT\n"]));
+    assert (not (Sys.file_exists (Filename.concat root "app.entitlements")));
+    assert (rejected (fun () -> execute_text ~root ~name:"write_file"
+      ~approved:true
+      ~args:(args ["path", "app.entitlements";
+                   "content", "<plist>PAVE-SENSITIVE-ENTITLEMENT\n"]) ()));
+    assert (not (Sys.file_exists (Filename.concat root "app.entitlements")));
+    let ent_request = mutation_approval "write_file"
+      (args ["path", "app.entitlements";
+             "content", "<plist>PAVE-SENSITIVE-ENTITLEMENT\n"]) in
+    assert (ent_request.sensitive <> None);
+    assert (contains (String.concat "\n" ent_request.details) "Sensitive change:");
+    (match ent_request.sensitive with
+     | Some review ->
+         (* Applying the exact reviewed content proceeds. *)
+         assert (not (contains (execute_text ~root ~name:"write_file"
+           ~approved:true ~sensitive_review:(Some review)
+           ~args:(args ["path", "app.entitlements";
+                        "content", "<plist>PAVE-SENSITIVE-ENTITLEMENT\n"]) ()) "rror"));
+         assert (contains
+           (tool root "read_file" ["path", "app.entitlements"])
+           "PAVE-SENSITIVE-ENTITLEMENT");
+         (* A stale review no longer matches the file and writes nothing. *)
+         let rewrite =
+           execute_text ~root ~name:"write_file" ~approved:true
+             ~sensitive_review:(Some review)
+             ~args:(args ["path", "app.entitlements";
+                          "content", "<plist>changed\n"]) () in
+         assert (contains rewrite "no longer matches" ||
+           contains (String.lowercase_ascii rewrite) "error");
+         assert (contains
+           (tool root "read_file" ["path", "app.entitlements"])
+           "PAVE-SENSITIVE-ENTITLEMENT");
+         (* A concurrent workspace edit invalidates the approved review. *)
+         let concurrent =
+           mutation_approval "write_file"
+             (args ["path", "app.entitlements";
+                    "content", "<plist>PAVE-SENSITIVE-ENTITLEMENT-v2\n"]) in
+         assert (concurrent.sensitive <> None);
+         create "app.entitlements" "<plist>user-changed\n";
+         let stale = execute_text ~root ~name:"write_file" ~approved:true
+           ~sensitive_review:concurrent.sensitive
+           ~args:(args ["path", "app.entitlements";
+                        "content", "<plist>PAVE-SENSITIVE-ENTITLEMENT-v2\n"]) () in
+         assert (contains stale "no longer matches" ||
+           contains (String.lowercase_ascii stale) "error");
+         assert (Pave.Workspace_path.read_bounded
+           (Filename.concat root "app.entitlements") 65_536 =
+           "<plist>user-changed\n")
+     | None -> failwith "sensitive write did not produce a review");
+    (* An unresolved classification is also a distinct review and still needs
+       the matching approved targets. *)
+    let manifest_request = mutation_approval "write_file"
+      (args ["path", "AndroidManifest.xml";
+             "content", "<manifest PAVE-UNRESOLVED-SETTING/>\n"]) in
+    assert (manifest_request.sensitive <> None);
+    assert (contains (String.concat "\n" manifest_request.details)
+      "Unresolved sensitive classification");
+    assert (rejected (fun () -> execute_text ~root ~name:"write_file"
+      ~approved:true
+      ~args:(args ["path", "AndroidManifest.xml";
+                   "content", "<manifest PAVE-UNRESOLVED-SETTING/>\n"]) ()));
+    assert (not (contains (execute_text ~root ~name:"write_file"
+      ~approved:true
+      ~sensitive_review:manifest_request.sensitive
+      ~args:(args ["path", "AndroidManifest.xml";
+                   "content", "<manifest PAVE-UNRESOLVED-SETTING/>\n"]) ())
+      "rror"));
+    (* edit_file follows the same exact-content binding. *)
+    let edit_request = mutation_approval "edit_file"
+      (args ["path", "App.swift"; "old_string", "two\n"; "new_string", "two\n"]) in
+    assert (edit_request.sensitive = None);
+    let sensitive_edit = mutation_approval "edit_file"
+      (args ["path", "App.swift"; "old_string", "two\n";
+             "new_string", "PAVE-SENSITIVE-ENTITLEMENT\n"]) in
+    assert (sensitive_edit.sensitive <> None);
+    assert (rejected (fun () -> execute_text ~root ~name:"edit_file"
+      ~approved:true
+      ~args:(args ["path", "App.swift"; "old_string", "two\n";
+                   "new_string", "PAVE-SENSITIVE-ENTITLEMENT\n"]) ()));
+    assert (not (contains
+      (tool root "read_file" ["path", "App.swift"])
+      "PAVE-SENSITIVE-ENTITLEMENT"));
+    assert (not (contains (execute_text ~root ~name:"edit_file"
+      ~approved:true ~sensitive_review:sensitive_edit.sensitive
+      ~args:(args ["path", "App.swift"; "old_string", "two\n";
+                   "new_string", "PAVE-SENSITIVE-ENTITLEMENT\n"]) ()) "rror"));
+    assert (contains
+      (tool root "read_file" ["path", "App.swift"])
+      "PAVE-SENSITIVE-ENTITLEMENT");
+    (* apply_edits uses the same binding over the snapshot-checked path. *)
+    let guarded = "guarded.txt" in
+    create guarded "safe\n";
+    let guarded_snapshot = Pave.Workspace_edit.read_snapshot ~root ~path:guarded in
+    let guarded_args = `Assoc [
+      "path", `String guarded;
+      "expected_sha256", `String guarded_snapshot.sha256;
+      "hunks", `List [`Assoc ["old_text", `String "safe";
+                              "new_text", `String "PAVE-SENSITIVE-ENTITLEMENT"]]
+    ] in
+    assert (rejected (fun () -> execute_text ~root ~name:"apply_edits"
+      ~approved:true ~args:guarded_args ()));
+    assert (Pave.Workspace_path.read_bounded
+      (Filename.concat root guarded) 65_536 = "safe\n");
+    let guarded_request = mutation_approval "apply_edits" guarded_args in
+    assert (guarded_request.sensitive <> None);
+    assert (not (contains (execute_text ~root ~name:"apply_edits"
+      ~approved:true
+      ~sensitive_review:guarded_request.sensitive
+      ~args:guarded_args ()) "rror"));
+    assert (contains (tool root "read_file" ["path", guarded])
+      "PAVE-SENSITIVE-ENTITLEMENT");
+    (* ast_edit applies only when its review still matches. *)
+    create "sensitive_ast.ml" "let v = \"plain\"\n";
+    let ast_snapshot = Pave.Workspace_edit.read_snapshot ~root ~path:"sensitive_ast.ml" in
+    let ast_args = `Assoc [
+      "path", `String "sensitive_ast.ml";
+      "language", `String "ocaml";
+      "operation", `String "replace_expression";
+      "expected_sha256", `String ast_snapshot.sha256;
+      "target", `String "\"plain\"";
+      "replacement", `String "\"PAVE-SENSITIVE-ENTITLEMENT\"";
+      "dry_run", `Bool false
+    ] in
+    assert (rejected (fun () -> execute_text ~root ~name:"ast_edit"
+      ~approved:true ~args:ast_args ()));
+    assert (Pave.Workspace_path.read_bounded
+      (Filename.concat root "sensitive_ast.ml") 65_536 =
+      "let v = \"plain\"\n");
+    let ast_request = mutation_approval "ast_edit" ast_args in
+    assert (ast_request.sensitive <> None);
+    assert (not (contains (execute_text ~root ~name:"ast_edit"
+      ~approved:true ~sensitive_review:ast_request.sensitive
+      ~args:ast_args ()) "rror"));
+    assert (contains (tool root "read_file" ["path", "sensitive_ast.ml"])
+      "PAVE-SENSITIVE-ENTITLEMENT");
+    (* The LSP apply_preview consumer boundary honors the same review. *)
+    create "lsp_sensitive.swift" "alpha\n";
+    let lsp_original = Pave.Workspace_edit.read_snapshot ~root
+      ~path:"lsp_sensitive.swift" in
+    let lsp_proposed = "PAVE-SENSITIVE-ENTITLEMENT\n" in
+    let lsp_files = `List [`Assoc [
+      "path", `String "lsp_sensitive.swift";
+      "original_sha256", `String lsp_original.sha256;
+      "result_sha256", `String (Pave.Workspace_edit.sha256 lsp_proposed);
+      "content", `String lsp_proposed;
+      "changed", `Bool true
+    ]] in
+    let lsp_apply_args preview_id = `Assoc [
+      "action", `String "apply_preview";
+      "program", `String "/usr/bin/example-lsp";
+      "arguments", `List [`String "--stdio"];
+      "preview_id", `String preview_id
+    ] in
+    let lsp_preview_id = Pave.Workspace_lsp.store_edit_preview
+      tool_context.lsp_manager ~owner:"tools-test-session" ~root
+      ~program:"/usr/bin/example-lsp" ~arguments:["--stdio"]
+      ~title:"Sensitive rename" lsp_files in
+    assert (contains (execute_text ~root ~name:"lsp" ~context:tool_context
+      ~approved:true ~args:(lsp_apply_args lsp_preview_id) ())
+      "exact-content approval");
+    assert (Pave.Workspace_path.read_bounded
+      (Filename.concat root "lsp_sensitive.swift") 65_536 = "alpha\n");
+    let lsp_approval = Pave.Tools.approval_request ~context:tool_context
+      ~root ~name:"lsp" ~args:(lsp_apply_args lsp_preview_id)
+      (Pave.Tools.approval_decision ~command_patterns:[] ~name:"lsp"
+        ~args:(lsp_apply_args lsp_preview_id)) in
+    assert (lsp_approval.sensitive <> None);
+    assert (contains (String.concat "\n" lsp_approval.details)
+      "Sensitive change:");
+    (* A file changed between review and apply leaves every byte unchanged. *)
+    create "lsp_sensitive.swift" "user diverged\n";
+    assert (contains (execute_text ~root ~name:"lsp" ~context:tool_context
+      ~approved:true
+      ~sensitive_review:lsp_approval.sensitive
+      ~args:(lsp_apply_args lsp_preview_id) ())
+      "changed since");
+    assert (Pave.Workspace_path.read_bounded
+      (Filename.concat root "lsp_sensitive.swift") 65_536 =
+      "user diverged\n");
+    create "lsp_sensitive.swift" "alpha\n";
+    let lsp_preview_id = Pave.Workspace_lsp.store_edit_preview
+      tool_context.lsp_manager ~owner:"tools-test-session" ~root
+      ~program:"/usr/bin/example-lsp" ~arguments:["--stdio"]
+      ~title:"Sensitive rename" lsp_files in
+    let lsp_approval = Pave.Tools.approval_request ~context:tool_context
+      ~root ~name:"lsp" ~args:(lsp_apply_args lsp_preview_id)
+      (Pave.Tools.approval_decision ~command_patterns:[] ~name:"lsp"
+        ~args:(lsp_apply_args lsp_preview_id)) in
+    assert (not (contains (execute_text ~root ~name:"lsp"
+      ~context:tool_context ~approved:true
+      ~sensitive_review:lsp_approval.sensitive
+      ~args:(lsp_apply_args lsp_preview_id) ()) "rror"));
+    assert (Pave.Workspace_path.read_bounded
+      (Filename.concat root "lsp_sensitive.swift") 65_536 =
+      "PAVE-SENSITIVE-ENTITLEMENT\n");
+
     let eval_request = approval_case ~context:tool_context "workspace_eval"
       ["language", `String "python"; "code", `String "print(1)"]
       Pave.Approval.Exec in
@@ -1106,12 +1352,20 @@ other.include(":not-a-gradle-module")
         "Xcode scheme discovery: exit 127");
       assert (contains (xcode ~approved:true "destinations" scheme)
         "approve scheme discovery"));
+    (* The oversized shared scheme stays an inventory diagnostic above; remove
+       it here so approved discovery keeps only bounded, resolvable inputs. *)
+    Sys.remove (Filename.concat root
+      "ios/App.xcodeproj/xcshareddata/xcschemes/Oversized.xcscheme");
+    files := List.filter (( <> ) (Filename.concat root
+      "ios/App.xcodeproj/xcshareddata/xcschemes/Oversized.xcscheme")) !files;
     directory "fake-xcode-bin";
     create "fake-xcode-bin/xcodebuild" {|#!/bin/sh
 case " $* " in
+  *" -workspace "*"-list -json "*) printf '%s\n' '{"workspace":{"schemes":["AppShared","WorkspaceFlow"]}}' ;;
   *" -list -json "*) printf '%s\n' '{"project":{"schemes":["AppShared"]}}' ;;
-  *" -showdestinations "*) printf '%s\n' 'Destinations compatible with the "AppShared" scheme:' '  { platform:iOS, id:cccccccc-cccc-cccc-cccc-cccccccccccc, name:Device }' '  { platform:iOS Simulator, arch:arm64, id:12345678-1234-1234-1234-123456789abc, OS:26.5, name:iPhone }' 'Destinations incompatible with the "AppShared" scheme:' '  { platform:iOS Simulator, id:aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa, error:missing runtime }' ;;
+  *" -showdestinations "*) printf '%s\n' 'Destinations compatible with the "AppShared" scheme:' '  { platform:iOS, id:cccccccc-cccc-cccc-cccc-cccccccccccc, name:Device }' '  { platform:iOS Simulator, arch:arm64, id:12345678-1234-1234-1234-123456789abc, OS:26.5, name:iPhone }' '  { platform:iOS Simulator, id:dddddddd-dddd-dddd-dddd-dddddddddddd, OS:26.5, name:iPad }' 'Destinations incompatible with the "AppShared" scheme:' '  { platform:iOS Simulator, id:aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa, error:missing runtime }' ;;
   *" build "*) printf '%s\n' 'Source.swift:1:13: error: cannot find unknown' 'fixture build failed'; exit 7 ;;
+  *" test "*) printf '%s\n' 'Test Suite Fixture.xctest passed' 'Executed 1 test, with 0 failures' ;;
   *) printf '%s\n' 'unexpected xcodebuild invocation'; exit 8 ;;
 esac
 |};
@@ -1137,6 +1391,10 @@ esac
         ["scheme", `String "Wrong"]) "scheme was not discovered");
       assert (contains (xcode ~approved:true "destinations" scheme)
         "Available iOS Simulator IDs: 12345678-1234-1234-1234-123456789abc");
+      (* M19a: test requires a successful simulator inventory bound to this
+         scheme; build remains destination-bound only. *)
+      assert (contains (xcode ~approved:true "test" (scheme @ destination))
+        "approve compatible simulator inventory");
       let inventory = xcode ~approved:true "simulators" scheme in
       assert (contains inventory "Apple simulator inventory: exit 0 (scheme AppShared)" &&
         contains inventory "iOS 26.5 | 12345678-1234-1234-1234-123456789abc | Shutdown | iPhone 17" &&
@@ -1144,6 +1402,21 @@ esac
         not (contains inventory "incompatible") &&
         not (contains inventory "offline") &&
         not (contains inventory "TV"));
+      (* M19a: a compatible destination absent from the inventoried
+         intersection cannot be tested. *)
+      assert (contains (xcode ~approved:true "test"
+        (scheme @ ["destination", `String
+          "dddddddd-dddd-dddd-dddd-dddddddddddd"]))
+        "absent from the approved inventory");
+      let test_run = xcode ~approved:true "test" (scheme @ destination) in
+      assert (contains test_run "Xcode test: exit 0" &&
+        contains test_run "Executed 1 test" &&
+        contains test_run "scheme AppShared");
+      (* M19a: refreshing destination discovery drops the retained inventory. *)
+      assert (contains (xcode ~approved:true "destinations" scheme)
+        "Available iOS Simulator IDs:");
+      assert (contains (xcode ~approved:true "test" (scheme @ destination))
+        "approve compatible simulator inventory");
       create "ios/no-runtime" "";
       let unavailable = xcode ~approved:true "simulators" scheme in
       assert (contains unavailable "No available compatible iOS Simulator devices" &&
@@ -1168,9 +1441,82 @@ esac
         contains build "scheme AppShared" &&
         contains build "Checked Swift errors:\nios/Source.swift:1:13" &&
         contains build "fixture build failed");
+      (* MB01: unchanged in-scope inputs reuse the approved discovery. *)
+      let reused = xcode ~approved:true "build" (scheme @ destination) in
+      assert (contains reused "Xcode build: exit 7" &&
+        contains reused "fixture build failed");
+      (* MB01: a changed shared scheme file invalidates verified choices even
+         though the principal manifest is unchanged. *)
+      create "ios/App.xcodeproj/xcshareddata/xcschemes/AppShared.xcscheme"
+        "<Scheme version = \"1.7\"><!-- misleading scheme content --></Scheme>\n";
+      assert (contains (xcode ~approved:true "build" (scheme @ destination))
+        "project inputs changed since discovery");
+      create "ios/App.xcodeproj/xcshareddata/xcschemes/AppShared.xcscheme"
+        "<Scheme version = \"1.7\"></Scheme>\n";
+      assert (contains (xcode ~approved:true "schemes" [])
+        "Verified schemes: AppShared");
+      assert (contains (xcode ~approved:true "destinations" scheme)
+        "Available iOS Simulator IDs: 12345678-1234-1234-1234-123456789abc");
+      (* MB01: a changed manifest of a project referenced by project.pbxproj
+         invalidates verified choices. *)
+      create "ios/App.xcodeproj/project.pbxproj"
+        "// iOS project manifest\npath = Core.xcodeproj;\n";
+      assert (contains (xcode ~approved:true "schemes" [])
+        "Verified schemes: AppShared");
+      assert (contains (xcode ~approved:true "destinations" scheme)
+        "Available iOS Simulator IDs: 12345678-1234-1234-1234-123456789abc");
+      create "ios/Core.xcodeproj/project.pbxproj" "// Core changed\n";
+      assert (contains (xcode ~approved:true "build" (scheme @ destination))
+        "project inputs changed since discovery");
+      create "ios/Core.xcodeproj/project.pbxproj" "// Core project manifest\n";
+      (* MB01: a workspace FileRef member project is in scope. *)
+      let wsx_args action more = `Assoc
+        (["action", `String action;
+          "subroot", `String "ios/Workspace.xcworkspace"] @ more) in
+      let wsx ?(approved = true) action more =
+        execute_text ~root ~context:tool_context ~approved
+          ~name:"xcode_preflight" ~args:(wsx_args action more) () in
+      let ws_scheme = ["scheme", `String "WorkspaceFlow"] in
+      create "ios/Workspace.xcworkspace/contents.xcworkspacedata"
+        {|<Workspace version = "1.0"><FileRef location = "group:App.xcodeproj"/><FileRef location = "group:Core.xcodeproj"/></Workspace>|};
+      assert (contains (wsx "schemes" [])
+        "Verified schemes: AppShared, WorkspaceFlow");
+      assert (contains (wsx "destinations" ws_scheme)
+        "Available iOS Simulator IDs: 12345678-1234-1234-1234-123456789abc");
+      create "ios/Core.xcodeproj/project.pbxproj" "// Core changed again\n";
+      assert (contains (wsx "build" (ws_scheme @ destination))
+        "project inputs changed since discovery");
+      create "ios/Core.xcodeproj/project.pbxproj" "// Core project manifest\n";
+      (* MB01: an unresolved referenced project never yields verified
+         schemes. *)
+      create "ios/Workspace.xcworkspace/contents.xcworkspacedata"
+        {|<Workspace version = "1.0"><FileRef location = "group:Missing.xcodeproj"/></Workspace>|};
+      assert (contains (wsx "schemes" [])
+        "No verified schemes");
+      assert (contains (wsx "destinations" ws_scheme)
+        "approve scheme discovery");
+      create "ios/Workspace.xcworkspace/contents.xcworkspacedata"
+        {|<Workspace version = "1.0"><FileRef location = "group:App.xcodeproj"/><FileRef location = "group:Core.xcodeproj"/></Workspace>|};
+      (* MB01: an oversized shared scheme file likewise yields no verified
+         choices. *)
+      create "ios/App.xcodeproj/xcshareddata/xcschemes/TooLarge.xcscheme"
+        (String.make (Pave.Workspace_path.max_write_bytes + 1) 'x');
+      assert (contains (xcode ~approved:true "schemes" [])
+        "No verified schemes");
+      assert (contains (xcode ~approved:true "destinations" scheme)
+        "approve scheme discovery");
+      Sys.remove (Filename.concat root
+        "ios/App.xcodeproj/xcshareddata/xcschemes/TooLarge.xcscheme");
+      files := List.filter (( <> ) (Filename.concat root
+        "ios/App.xcodeproj/xcshareddata/xcschemes/TooLarge.xcscheme")) !files;
+      (* Restoring the project manifest re-enables a complete discovery; a
+         changed principal manifest still invalidates it. *)
+      create "ios/App.xcodeproj/project.pbxproj" "// iOS project manifest\n";
+      assert (contains (xcode ~approved:true "schemes" [])
+        "Verified schemes: AppShared");
       create "ios/App.xcodeproj/project.pbxproj" "// changed Xcode manifest\n";
       assert (contains (xcode ~approved:true "build" (scheme @ destination))
-        "manifest changed since discovery");
+        "project inputs changed since discovery");
       assert (contains (xcode ~approved:true "simulators" scheme)
         "approve scheme discovery");
       assert (contains (xcode ~approved:true "destinations" scheme)
@@ -1289,7 +1635,8 @@ printf '%s\n' 'Test Suite Selected tests passed. Executed 0 tests, with 0 failur
       create "focus/gradle/other/Other.kt" "other\n";
       create "focus/bin/gradle" {|#!/bin/sh
 case " $* " in
-  *" tasks --all "*) printf '%s\n' "Tasks runnable from root project 'Fixture'" '------------------------------------------------------------' 'Build tasks' '-----------' 'app:assembleDebug - selected variant' '' 'BUILD SUCCESSFUL in 1s' ;;
+  *" tasks --all "*) printf '%s\n' "Tasks runnable from root project 'Fixture'" '------------------------------------------------------------' 'Build tasks' '-----------' 'app:assembleDebug - selected variant' 'app:connectedDebugAndroidTest - selected instrumented test' '' 'BUILD SUCCESSFUL in 1s' ;;
+  *" :app:connectedDebugAndroidTest "*) if [ -n "$ANDROID_SERIAL" ]; then printf '%s\n' "instrumented-test-ok $ANDROID_SERIAL"; else printf '%s\n' 'instrumented ran without a serial'; exit 3; fi ;;
   *" :app:assembleDebug "*) printf '%s\n' 'e: app/src/Main.kt: (1, 14): Unresolved reference' 'other/Other.kt:1:2: error: unrelated' 'selected variant failed'; exit 7 ;;
   *) exit 9 ;;
 esac
@@ -1355,6 +1702,172 @@ esac
         not (contains devices "private-serial") &&
         not (contains devices "private-offline") &&
         not (contains devices "Ready emulators: emulator-5556"));
+      (* M20a: only the selected ready emulator receives the approved task. *)
+      assert (contains (mobile "gradle" "tasks" "focus/gradle" [] true)
+        ":app:connectedDebugAndroidTest");
+      let serial value = ["serial", `String value] in
+      let instrumented ?(task = ":app:connectedDebugAndroidTest") extra =
+        mobile "gradle" "instrumented" "focus/gradle"
+          (["target", `String task] @ extra) true in
+      let instrumented_preview = Pave.Tools.approval_request ~root
+        ~name:"mobile_check"
+        ~args:(`Assoc ["stack", `String "gradle"; "action", `String "instrumented";
+          "subroot", `String "focus/gradle";
+          "target", `String ":app:connectedDebugAndroidTest";
+          "serial", `String "emulator-5554"])
+        (Pave.Tools.approval_decision ~command_patterns:[]
+          ~name:"mobile_check" ~args:(`Assoc [])) in
+      assert (contains (String.concat "\n" instrumented_preview.details)
+        "ANDROID_SERIAL='emulator-5554' gradle --offline ':app:connectedDebugAndroidTest'" &&
+        contains (String.concat "\n" instrumented_preview.details)
+          "may install and run test APKs");
+      assert (contains (mobile "gradle" "instrumented" "focus/gradle"
+        (["target", `String ":app:connectedDebugAndroidTest"] @
+          serial "emulator-5554") false) "explicit interactive approval");
+      let no_serial = instrumented [] in
+      assert (contains no_serial "exactly one emulator serial" &&
+        not (contains no_serial "instrumented-test-ok") &&
+        not (contains no_serial "without a serial"));
+      let ready_run = instrumented (serial "emulator-5554") in
+      assert (contains ready_run "Mobile gradle instrumented: exit 0" &&
+        contains ready_run
+          "selected task :app:connectedDebugAndroidTest on emulator-5554" &&
+        contains ready_run "instrumented-test-ok emulator-5554" &&
+        not (contains ready_run "without a serial"));
+      let offline_run = instrumented (serial "emulator-5556") in
+      assert (contains offline_run "emulator-5556 is offline" &&
+        not (contains offline_run "instrumented-test-ok"));
+      let unauthorized_run = instrumented (serial "emulator-5558") in
+      assert (contains unauthorized_run "emulator-5558 is unauthorized" &&
+        not (contains unauthorized_run "instrumented-test-ok"));
+      let physical_run = instrumented (serial "private-serial") in
+      assert (contains physical_run "exact ready emulator serial" &&
+        not (contains physical_run "instrumented-test-ok"));
+      let absent_run = instrumented (serial "emulator-9999") in
+      assert (contains absent_run "absent from the approved inventory" &&
+        not (contains absent_run "instrumented-test-ok"));
+      let undiscovered = instrumented ~task:":app:assembleRelease"
+        (serial "emulator-5554") in
+      assert (contains undiscovered "not in the approved discovery" &&
+        not (contains undiscovered "instrumented-test-ok"));
+      let stray_serial = mobile "gradle" "run" "focus/gradle"
+        (["target", `String ":app:assembleDebug"] @ serial "emulator-5554")
+        true in
+      assert (contains stray_serial "Gradle actions take none" &&
+        not (contains stray_serial "instrumented-test-ok"));
+      assert (contains (mobile "swiftpm" "run" "focus/swift"
+        (target @ serial "emulator-5554") true)
+        "applies only to Gradle instrumented runs");
+      create "focus/devices.txt"
+        "List of devices attached\nemulator-5554\toffline\n";
+      ignore (inventory "devices" true);
+      let went_offline = instrumented (serial "emulator-5554") in
+      assert (contains went_offline "emulator-5554 is offline" &&
+        not (contains went_offline "instrumented-test-ok"));
+      let foreign_inventory = execute_text ~root ~context:tool_context
+        ~approved:true ~name:"android_devices" ~args:(`Assoc [
+          "action", `String "devices"; "subroot", `String "legacy"]) () in
+      assert (contains foreign_inventory "Android ADB inventory");
+      let foreign = instrumented (serial "emulator-5554") in
+      assert (contains foreign "inventory for this project" &&
+        not (contains foreign "instrumented-test-ok"));
+      create "focus/devices.txt"
+        "List of devices attached\nemulator-5554\tdevice\n";
+      ignore (inventory "devices" true);
+      assert (contains (instrumented (serial "emulator-5554"))
+        "instrumented-test-ok emulator-5554");
+      directory "focus/gradle/app/build";
+      directory "focus/gradle/app/build/outputs";
+      directory "focus/gradle/app/build/outputs/apk";
+      directory "focus/gradle/app/build/outputs/apk/debug";
+      let session_apk =
+        "focus/gradle/app/build/outputs/apk/debug/app-debug.apk" in
+      create session_apk "fixture apk";
+      files := Filename.concat root "mobile-session-adb.log" :: !files;
+      create "focus/bin/adb"
+        ("#!/bin/sh\nif [ \"$*\" = devices ]; then cat " ^
+          Filename.quote (Filename.concat root "focus/devices.txt") ^
+          "; exit $?; fi\nprintf '%s\\n' \"$*\" >> " ^
+          Filename.quote (Filename.concat root "mobile-session-adb.log") ^
+          "\n[ \"$1\" = '-s' ] && [ \"$2\" = 'emulator-5554' ] || exit 71\ncase \"$3\" in install|shell) exit 0 ;; *) exit 72 ;; esac\n");
+      Unix.chmod (Filename.concat root "focus/bin/adb") 0o700;
+      let session action fields approved =
+        execute_text ~root ~context:tool_context ~approved
+          ~name:"mobile_session" ~args:(`Assoc
+            (("action", `String action) :: fields)) () in
+      let selected_session = session "select"
+        ["subroot", `String "focus/gradle";
+         "platform", `String "android";
+         "device", `String "emulator-5554";
+         "app_id", `String "dev.pave.fixture";
+         "app_path", `String session_apk;
+         "variant", `String "debug";
+         "activity", `String "dev.pave.fixture/.MainActivity"] false in
+      if not (contains selected_session "Selected mobile app session:" &&
+          contains selected_session "device emulator-5554" &&
+          contains selected_session "activity dev.pave.fixture/.MainActivity")
+      then failwith ("mobile selection output:\n" ^ selected_session);
+      let mobile_action =
+        ["session_id", `String "mobile-1";
+         "timeout_seconds", `Int 10] in
+      let build_fields = mobile_action @ [
+        "task", `String ":app:assembleDebug"] in
+      let build_args = `Assoc (("action", `String "build") :: build_fields) in
+      let build_preview = Pave.Tools.approval_request ~context:tool_context
+        ~root ~name:"mobile_session" ~args:build_args
+        (Pave.Tools.approval_decision ~command_patterns:[]
+          ~name:"mobile_session" ~args:build_args) in
+      assert (Pave.Tools.requires_explicit_approval ~name:"mobile_session"
+          ~args:build_args &&
+        contains (String.concat "\n" build_preview.details)
+          "gradle --offline ':app:assembleDebug'" &&
+        contains (session "build" build_fields false)
+          "explicit interactive approval" &&
+        contains (session "build" build_fields true)
+          "did not complete successfully" &&
+        contains (session "status" ["session_id", `String "mobile-1"] false)
+          "android · selected");
+      assert (Pave.Tools.is_shell_tool "mobile_session" &&
+        Pave.Tools.requires_explicit_approval ~name:"mobile_session"
+          ~args:(`Assoc ["action", `String "install";
+            "session_id", `String "mobile-1"]));
+      let install_args = `Assoc (("action", `String "install") ::
+        mobile_action) in
+      let install_preview = Pave.Tools.approval_request ~context:tool_context
+        ~root ~name:"mobile_session" ~args:install_args
+        (Pave.Tools.approval_decision ~command_patterns:[]
+          ~name:"mobile_session" ~args:install_args) in
+      assert (contains (String.concat "\n" install_preview.details)
+          ("adb -s " ^ Filename.quote "emulator-5554" ^ " install -r") &&
+        contains (String.concat "\n" install_preview.details) session_apk);
+      assert (contains (session "install" mobile_action false)
+        "explicit interactive approval" &&
+        contains (session "status" ["session_id", `String "mobile-1"] false)
+          "android · selected" &&
+        not (Sys.file_exists (Filename.concat root "mobile-session-adb.log")));
+      assert (contains (session "install" mobile_action true)
+        "Mobile install completed" &&
+        contains (session "status" ["session_id", `String "mobile-1"] false)
+          "android · installed");
+      assert (contains (session "launch" mobile_action true)
+        "Mobile launch completed" &&
+        contains (session "status" ["session_id", `String "mobile-1"] false)
+          "android · running");
+      assert (contains (session "stop" mobile_action true)
+        "Mobile stop completed" &&
+        contains (session "status" ["session_id", `String "mobile-1"] false)
+          "android · stopped");
+      let logged_adb = Pave.Workspace_path.read_bounded
+        (Filename.concat root "mobile-session-adb.log") 65_536 in
+      assert (contains logged_adb "-s emulator-5554 install -r" &&
+        contains logged_adb "-s emulator-5554 shell am start -W -n dev.pave.fixture/.MainActivity" &&
+        contains logged_adb "-s emulator-5554 shell am force-stop" &&
+        not (contains logged_adb "private-serial"));
+      create "focus/devices.txt" "garbage without a header\n";
+      ignore (inventory "devices" true);
+      let cleared = instrumented (serial "emulator-5554") in
+      assert (contains cleared "inventory for this project" &&
+        not (contains cleared "instrumented-test-ok"));
       create "focus/devices.txt"
         "List of devices attached\nemulator-5556\toffline\nemulator-5558\tunauthorized\n";
       assert (contains (inventory "devices" true) "Ready emulators: none");
