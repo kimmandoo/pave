@@ -3115,12 +3115,13 @@ let () =
           emit_lines (if jobs = [] then ["No session-owned jobs."]
             else "Session jobs:" :: List.map format_job jobs) in
     let mobile_dashboard () = match !journal with
-      | None -> notify "Error: mobile workflows require a private saved session"
+      | None -> notify "Mobile workflows need a private saved session. Start one with /new or launch with --session PATH."
       | Some session ->
           let context = tool_context session in
           let sessions = Pave.Workspace_mobile_run.sessions
               context.Pave.Tools.mobile_run_manager in
           let rows = List.map Pave.Workspace_mobile_run.render sessions in
+          let initial_session = match rows with row :: _ -> Some row | [] -> None in
           let launch prompt = match !ui, !runner with
             | Some screen, Some active ->
                 if Pave.Turn_runner.busy active then
@@ -3170,12 +3171,14 @@ let () =
                  else "Mobile app sessions · /mobile opens actions:" :: rows)
            | Some screen ->
                let choices = "Create or select app session" :: rows in
-               let selected = Tui.choose ~intro:[
-                 "Session lifecycle and live results are shown here.";
-                 "Every device/shell action still needs its own explicit approval.";
-                 "Escape cancels without changing the session or composer draft."]
-                 ~empty_message:"No app sessions yet; create or select one."
-                 screen ~title:"Mobile dashboard" ~choices in
+               let intro = if rows = [] then [
+                 "No app sessions yet; choose Create or select app session.";
+                 "Device/shell actions need approval; Esc cancels."]
+               else [
+                 "Newest session preselected; select a row to open its actions.";
+                 "Create/select starts discovery; effects need approval; Esc cancels."] in
+               let selected = Tui.choose ?initial_selected:initial_session
+                 ~intro screen ~title:"Mobile dashboard" ~choices in
                match selected with
                | None -> ()
                | Some "Create or select app session" ->

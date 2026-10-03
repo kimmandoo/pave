@@ -1,6 +1,19 @@
 # Work checkpoint
 
 
+## Current session — mobile dashboard UX review and v0.1.81 release
+
+- **Date:** 2026-10-03.
+- **Active task:** Completed the `/mobile` UX audit and verification; prepare the v0.1.81 release after the pushed main-branch CI passes.
+- **Starting state:** Clean `main` at `5310726 feat(mobile): complete interactive dashboard`, aligned with `origin/main`; GitHub's latest published release was `v0.1.80`.
+- **UX findings and changes:** `Tui.chooser_sections` displays at most two intro lines, so the dashboard's former four-line introduction hid approval/cancellation guidance. Replaced it with two concise state-specific lines. `/mobile` now explains the private saved-session prerequisite and `/new`/`--session`; its command description exposes that prerequisite. Session rows sort by descending numeric ID (`mobile-12` before `mobile-2`) and preselect the newest existing session, avoiding a fresh assistant workflow when reopening the dashboard.
+- **Changed files:** `bin/main.ml`, `lib/tools/workspace_mobile_run.ml`, `lib/ui/interaction.ml`, `test/tools/test_workspace_mobile_run.ml`, `CHANGELOG.md`, `docs/DESIGN_RULES.md`, `docs/USAGE.md`, and this checkpoint.
+- **Changed-surface proof:** `python3 /tmp/pave-mobile-ux-pty.py` exercised the actual saved-session TUI at 100×30; it observed the empty-state start/approval/Escape guidance, canceled with Escape, reopened `/mobile`, and observed the unchanged empty state. `opam exec -- dune build bin/main.exe test/test_workspace_mobile_run.exe && opam exec -- dune exec test/test_workspace_mobile_run.exe` passed; the unit regression created 12 sessions and verified descending numeric order.
+- **Full verification:** `opam exec -- dune build @install && opam exec -- dune exec test/test_apple_foundation_models.exe && opam exec -- dune runtest --force -j 1 && opam lint pave.opam` passed. The optional `test_browser_live` was skipped because `CHROME_BIN` and `SMOKE_URL` were not configured.
+- **Final comparator recheck:** Replaced allocating numeric-suffix parsing with allocation-free length/lexicographic ordering for generated numeric session IDs; `opam exec -- dune build @install && opam exec -- dune exec test/test_workspace_mobile_run.exe && opam lint pave.opam` passed afterward.
+- **Limits:** The previous mobile acceptance's AGP connected-test host dependency remains unavailable offline; its separately approved AndroidJUnitRunner test passed. This UX pass changed no strategy defaults or strategy selection.
+- **Exact next action / blockers:** Commit and push the UX review. Wait for all four main CI matrix jobs to pass, then tag `v0.1.81` and verify the release workflow, five published assets, archive checksums and packaged CLI. No local implementation or test blocker remains.
+
 ## Current session — mobile core completion (MD01)
 
 - **Date:** 2026-10-03.

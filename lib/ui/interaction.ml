@@ -130,7 +130,7 @@ let commands = [
   command ~session_only:true "/fork" (Optional_text "PATH|until=STEP") "Fork the selected journal branch into a private session; until=STEP copies only entries up to that step" A_fork;
   command ~session_only:true "/compact" No_arguments "Summarize older turns" A_compact;
   command ~session_only:true "/jobs" No_arguments "List session-owned background jobs" A_jobs;
-  command ~session_only:true "/mobile" No_arguments "Open the mobile app session dashboard" A_mobile;
+  command ~session_only:true "/mobile" No_arguments "Open the mobile app session dashboard (private saved session required)" A_mobile;
   command ~session_only:true "/wait" (Required_word "JOB_ID") "Wait for a session-owned job result" A_wait;
   command ~session_only:true "/cancel-job" (Required_word "JOB_ID") "Cancel a background job" A_cancel_job;
   command ~session_only:true "/artifact" (Optional_word "ID") "List session artifacts or show text output" A_artifact;

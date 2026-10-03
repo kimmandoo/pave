@@ -153,7 +153,9 @@ let get manager id = with_lock manager (fun () -> lookup manager id)
 let sessions manager = with_lock manager (fun () ->
   if manager.closed then fail "mobile session manager is closed";
   Hashtbl.fold (fun _ session rows -> session :: rows) manager.sessions []
-  |> List.sort (fun left right -> String.compare left.id right.id))
+  |> List.sort (fun left right ->
+    let length_order = Int.compare (String.length right.id) (String.length left.id) in
+    if length_order <> 0 then length_order else String.compare right.id left.id))
 
 let command action session =
   let quote = Filename.quote in

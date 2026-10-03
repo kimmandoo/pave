@@ -109,6 +109,17 @@ let () =
       (Run.command "install" ios) "simctl install '26ae0000-0000-0000-0000-000000000000'");
     expect "iOS launch selects exact bundle" (contains
       (Run.command "launch" ios) "simctl launch '26ae0000-0000-0000-0000-000000000000' 'com.example.ios'");
+    for _index = 4 to 12 do
+      ignore (Run.select manager ~root ~subroot:"android"
+        ~platform:"android" ~device:"emulator-5554"
+        ~app_id:"com.example.fixture" ~app_path:"apps/My Fixture.apk"
+        ~scheme:None ~variant:None ~activity:None
+        ~device_ready:true ~scheme_ready:false)
+    done;
+    let session_ids = Run.sessions manager |> List.map (fun row -> row.Run.id) in
+    expect "session rows are sorted by descending numeric ID"
+      (session_ids = List.init 12 (fun index ->
+        Printf.sprintf "mobile-%d" (12 - index)));
     rejects "iOS selection without scheme inventory" (fun () ->
       Run.select manager ~root ~subroot:"ios/App.xcodeproj" ~platform:"ios"
         ~device:"26ae0000-0000-0000-0000-000000000000"
