@@ -380,7 +380,6 @@ let feed t bytes =
   with Invalid_response _ as error ->
     t.failed <- true;
     raise error
-let events t = match t.parser with Some parser -> Sse.events parser | None -> 0
 let is_done t = t.done_seen && not t.failed
 let is_finished t = t.completed <> None && not t.failed
 let usage t = if t.completed <> None && not t.failed then t.usage else None

@@ -94,6 +94,21 @@ let () =
   (match parse "/fork /tmp/saved session.jsonl" with
    | Fork { path = Some "/tmp/saved session.jsonl"; _ } -> ()
    | _ -> fail "fork path with spaces");
+  List.iter (fun line ->
+    match parse line with
+    | Fork { path = Some "/tmp/saved  session.jsonl"; until } ->
+        if until <> (if String.ends_with ~suffix:"until=7" line then Some 7 else None)
+        then fail "fork boundary changed"
+    | _ -> fail "fork collapsed significant path whitespace")
+    ["/fork /tmp/saved  session.jsonl";
+     "/fork /tmp/saved  session.jsonl until=7"];
+  (match parse "/fork until=7 /tmp/saved  session.jsonl" with
+   | Fork { path = Some "/tmp/saved  session.jsonl"; until = Some 7 } -> ()
+   | _ -> fail "fork prefix boundary lost path bytes");
+  invalid "duplicate fork boundary"
+    (fun () -> parse "/fork until=7 until=9");
+  invalid "fork path control text"
+    (fun () -> parse "/fork /tmp/saved\tsession.jsonl");
   (match parse "/clear", parse "/fresh", parse "/rename Fix login flow",
     parse "/label Need review", parse "/label", parse "/pin",
     parse "/approval yolo", parse "/approval default",

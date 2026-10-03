@@ -59,6 +59,92 @@ let () =
     let selected = Pave.Session.append journal (message "selected") in
     assert (Pave.Session.history journal = [ message "base"; message "selected" ]);
     assert (List.length (Pave.Session.entries journal) = 4);
+    (* Branch forks use source ordinals for the bound, but their own file
+       ordinals are dense. Managed forks must pass the same bound as explicit
+       path forks, retaining ancestor settings and session-global titles. *)
+    let bounded = Pave.Session.open_file ~cwd:dir
+        (Filename.concat dir "bounded.jsonl") in
+    Pave.Session.set_thinking bounded (Some "high");
+    let anchor = Pave.Session.append bounded (message "fork anchor") in
+    ignore (Pave.Session.append bounded (message "off-branch"));
+    Pave.Session.set_thinking bounded (Some "low");
+    Pave.Session.branch bounded anchor;
+    ignore (Pave.Session.append bounded (message "selected fork turn"));
+    ignore (Pave.Session.record_stage bounded ~stage:"turn" ~elapsed_ms:12 ());
+    Pave.Session.set_title bounded "Global fork title";
+    Pave.Session.set_pinned bounded true;
+    let bound = (List.find (fun (entry : Pave.Session.entry) -> entry.id = anchor)
+        (Pave.Session.entries bounded)).step in
+    let assert_bounded copy =
+      assert (Pave.Session.history copy = [message "fork anchor"]);
+      assert (Pave.Session.thinking copy = Some "high");
+      assert (Pave.Session.title copy = Some "Global fork title");
+      assert (not (Pave.Session.pinned copy));
+      assert (Pave.Session.parent_session copy =
+              Some (Pave.Session.session_id bounded));
+      let steps = List.map (fun (entry : Pave.Session.entry) -> entry.step)
+          (Pave.Session.entries copy) in
+      assert (steps = List.init (List.length steps) (fun i -> i + 1)) in
+    let explicit = Pave.Session.fork ~until:bound bounded
+        (Filename.concat dir "bounded-fork.jsonl") in
+    assert_bounded explicit;
+    assert_bounded (Pave.Session.fork_managed ~until:bound bounded dir);
+    let full_fork = Pave.Session.fork bounded
+        (Filename.concat dir "dense-fork.jsonl") in
+    let steps = List.map (fun (entry : Pave.Session.entry) -> entry.step)
+        (Pave.Session.entries full_fork) in
+    assert (steps = List.init (List.length steps) (fun i -> i + 1));
+    assert (Pave.Session.history full_fork =
+            [message "fork anchor"; message "selected fork turn"]);
+    (* Earlier fork files persisted source steps with gaps. Loading keeps all
+       records but derives local ordinals, and the next append remains dense. *)
+    let sparse_path = Filename.concat dir "sparse-fork.jsonl" in
+    let sparse_out = open_out_bin sparse_path in
+    Fun.protect ~finally:(fun () -> close_out sparse_out) (fun () ->
+      output_string sparse_out (Yojson.Basic.to_string (Pave.Session.new_header dir) ^ "\n");
+      List.iter (fun entry ->
+        output_string sparse_out
+          (Yojson.Basic.to_string (Pave.Session.entry_json entry) ^ "\n"))
+        (Pave.Session.branch_entries bounded));
+    let sparse = Pave.Session.open_file sparse_path in
+    ignore (Pave.Session.append sparse (message "after sparse legacy fork"));
+    let steps = List.map (fun (entry : Pave.Session.entry) -> entry.step)
+        (Pave.Session.entries sparse) in
+    assert (steps = List.init (List.length steps) (fun i -> i + 1));
+    let concurrent = Pave.Session.open_file ~cwd:dir
+        (Filename.concat dir "concurrent.jsonl") in
+    let errors = ref [] and errors_lock = Mutex.create () in
+    let run action =
+      Thread.create (fun () ->
+        try for i = 1 to 40 do action i done
+        with exn -> Mutex.protect errors_lock (fun () -> errors := exn :: !errors)) () in
+    let messages = run (fun i ->
+        ignore (Pave.Session.append concurrent (message (string_of_int i)))) in
+    let usages = run (fun _ ->
+        Pave.Session.append_usage concurrent ~provider:"ollama" ~model:"fixture"
+          { input_tokens = 1; output_tokens = 1; cached_input_tokens = None;
+            cache_creation_input_tokens = None; reasoning_output_tokens = None;
+            input_modality_tokens = None; cached_input_modality_tokens = None;
+            output_modality_tokens = None }) in
+    let models = run (fun i -> Pave.Session.set_model concurrent
+        (model_identity "ollama" "chat" (if i mod 2 = 0 then "even" else "odd"))) in
+    List.iter Thread.join [messages; usages; models];
+    assert (!errors = []);
+    assert (List.length (Pave.Session.entries concurrent) = 120);
+    let steps = List.map (fun (entry : Pave.Session.entry) -> entry.step)
+        (Pave.Session.entries concurrent) in
+    assert (steps = List.init 120 (fun i -> i + 1));
+    assert (List.length (Pave.Session.entries
+              (Pave.Session.open_file concurrent.path)) = 120);
+    List.iter (fun stage ->
+      let json = `Assoc [
+        "type", `String "stage"; "id", `String "bad-stage";
+        "parentId", `Null; "timestamp", `String "2026-10-03T00:00:00Z";
+        "stage", `String stage; "elapsedMs", `Int 1; "detail", `Null ] in
+      match Pave.Session.parse_entry ~step:1 json with
+      | exception Pave.Protocol.Invalid_response _ -> ()
+      | _ -> failwith "journal parser accepted a stage name the writer rejects")
+      ["Turn"; "turn phase"; "turn\226\128\174"];
     let reopened = Pave.Session.open_file path in
     assert (Pave.Session.history reopened = [ message "base"; message "selected" ]);
     Pave.Session.branch reopened abandoned;

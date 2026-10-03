@@ -88,13 +88,24 @@ let request ~model ?thinking messages tools =
     | _ -> invalid "unsupported transcript role" in
   let converted = List.map convert messages in
   if !pending <> [] then invalid "missing tool results";
+  let named_thinking = thinking <> None &&
+    (model = "gpt-oss" || String.starts_with ~prefix:"gpt-oss:" model) in
+  let boolean_thinking = thinking <> None && not named_thinking &&
+    (model = "qwen3" || String.starts_with ~prefix:"qwen3:" model ||
+     model = "deepseek-r1" || String.starts_with ~prefix:"deepseek-r1:" model) in
   let think = match thinking with
     | None -> None
-    | Some "none" -> Some (`Bool false)
-    | Some ("minimal" | "low") -> Some (`String "low")
-    | Some ("xhigh") -> Some (`String "high")
-    | Some ("medium" | "high" | "max" as level) -> Some (`String level)
-    | Some _ -> invalid_arg "unsupported Ollama thinking level" in
+    | Some "none" when named_thinking ->
+        invalid_arg "gpt-oss cannot disable thinking"
+    | Some ("minimal" | "low") when named_thinking -> Some (`String "low")
+    | Some ("high" | "xhigh" | "max") when named_thinking -> Some (`String "high")
+    | Some "medium" when named_thinking -> Some (`String "medium")
+    | Some "none" when boolean_thinking -> Some (`Bool false)
+    | Some ("minimal" | "low" | "medium" | "high" | "xhigh" | "max")
+      when boolean_thinking -> Some (`Bool true)
+    | Some _ when named_thinking || boolean_thinking ->
+        invalid_arg "unsupported Ollama thinking level"
+    | Some _ -> None in
   `Assoc ([ "model", `String model; "messages", `List converted;
     "stream", `Bool false ] @
     (match think with None -> [] | Some value -> ["think", value]) @

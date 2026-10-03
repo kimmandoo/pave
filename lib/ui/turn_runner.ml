@@ -1,3 +1,7 @@
+(* Approval consumers may explicitly request shutdown without teaching this
+   library about terminal-specific exception types. *)
+exception Stop of exn
+
 type completion = Completed | Cancelled | Failed of exn
 type submission = {
   prompt : string;
@@ -61,7 +65,7 @@ type notice =
      threads (e.g. the session hub) enqueue here so every queue/start
      mutation stays on the thread that calls drain. *)
   | Enqueue of queued_submission
-  | Cancel_remote
+  | Cancel_remote of int option
 
 type t = {
   read_fd : Unix.file_descr;
@@ -86,7 +90,6 @@ type t = {
   on_approve : string -> bool;
   on_approve_tool : Approval.request -> bool;
   on_queued : int -> unit;
-  on_record : submission -> unit;
 }
 
 let with_guard t callback =
@@ -94,7 +97,7 @@ let with_guard t callback =
   Fun.protect ~finally:(fun () -> Mutex.unlock t.guard) callback
 
 let create ~run ~on_event ~on_approve ~on_queued
-    ?(on_approve_tool = fun _ -> false) ?(on_record = fun _ -> ()) () =
+    ?(on_approve_tool = fun _ -> false) () =
   let read_fd, write_fd = Unix.pipe () in
   Unix.set_close_on_exec read_fd;
   Unix.set_close_on_exec write_fd;
@@ -109,7 +112,7 @@ let create ~run ~on_event ~on_approve ~on_queued
     worker = None; active_turn = None;
     next_turn_id = 0; next_queue_id = 0; closed = false;
     owner = Thread.self ();
-    run; on_event; on_approve; on_approve_tool; on_queued; on_record }
+    run; on_event; on_approve; on_approve_tool; on_queued }
 let fd t = t.read_fd
 let busy t = t.worker <> None
 
@@ -166,6 +169,9 @@ let post_notice t notice =
     if t.closed then false
     else (
       let empty = Queue.is_empty t.notices in
+      (match notice with
+       | Enqueue _ -> ignore (Atomic.fetch_and_add t.pending 1)
+       | _ -> ());
       Queue.add notice t.notices;
       empty)) in
   if fresh then wake t
@@ -276,12 +282,13 @@ let approve_tool t approval_request =
   if cancel () then raise Provider.Cancelled;
   result
 
-let start t submission =
+let start_worker t ~on_start ~run =
+  if remote t then invalid_arg "turn runner work must start on its owner thread";
   if t.closed then invalid_arg "turn runner closed";
+  if busy t then invalid_arg "turn runner busy";
   let turn_id = t.next_turn_id in
   t.next_turn_id <- t.next_turn_id + 1;
-  t.on_record submission;
-  t.on_event (Turn_started { turn_id; submission });
+  on_start turn_id;
   let turn = { id = turn_id; cancelled = Atomic.make false;
     thread_id = None } in
   with_guard t (fun () -> t.active_turn <- Some turn);
@@ -290,7 +297,7 @@ let start t submission =
        with_guard t (fun () -> turn.thread_id <- Some (Thread.id (Thread.self ())));
        let cancel () = Atomic.get turn.cancelled in
        let outcome = try
-         t.run ~cancel submission;
+         run ~cancel;
          if cancel () then Cancelled else Completed
        with
        | Provider.Cancelled -> Cancelled
@@ -302,6 +309,17 @@ let start t submission =
        | Some active when active.id = turn.id -> t.active_turn <- None
        | _ -> ());
      emit_finish t turn.id (Failed exn))
+
+let start t submission =
+  start_worker t
+    ~on_start:(fun turn_id ->
+      t.on_event (Turn_started { turn_id; submission }))
+    ~run:(fun ~cancel -> t.run ~cancel submission)
+
+(* User-launched non-model work shares cancellation, approval ownership and
+   FIFO continuation, but never invents a provider prompt or recording frame. *)
+let start_work t ~run () =
+  start_worker t ~on_start:(fun _ -> ()) ~run
 
 let make_submission ?display_prompt ?(attachments = []) ?(paste_ranges = [])
     prompt =
@@ -333,7 +351,11 @@ let cancel_local t =
   List.iter (fun request -> answer request false) requests
 
 let cancel t =
-  if remote t then post_notice t Cancel_remote else cancel_local t
+  if remote t then (
+    let turn_id = with_guard t (fun () ->
+      Option.map (fun turn -> turn.id) t.active_turn) in
+    post_notice t (Cancel_remote turn_id))
+  else cancel_local t
 
 let steer t ?display_prompt ?(attachments = []) ?(paste_ranges = []) text =
   if t.closed then invalid_arg "turn runner closed";
@@ -444,13 +466,16 @@ let drain t =
           (match queued.kind with
            | Steering -> Queue.add queued t.steering
            | Follow_up -> Queue.add queued t.follow_ups);
-          ignore (Atomic.fetch_and_add t.pending 1);
           t.on_queued (queued_count t);
           if queued.kind = Steering then cancel_local t)
-        else start t queued.submission;
+        else (
+          ignore (Atomic.fetch_and_add t.pending (-1));
+          start t queued.submission);
         handle ()
-    | Some Cancel_remote ->
-        cancel_local t;
+    | Some (Cancel_remote turn_id) ->
+        (match turn_id with
+         | Some id when Option.is_some (active_turn t id) -> cancel_local t
+         | _ -> ());
         handle ()
     | Some (Message (id, text)) ->
         if not (cancel_requested t id) then
@@ -484,7 +509,9 @@ let drain t =
     | Some (Approve (id, command, request, cancelled)) ->
         if cancelled () || cancel_requested t id then answer request false
         else (try answer request (t.on_approve command)
-          with exn ->
+          with
+          | Stop cause -> answer request false; raise cause
+          | exn ->
             answer request false;
             if not (cancel_requested t id) then
               t.on_event (Transcript_message {
@@ -495,7 +522,9 @@ let drain t =
     | Some (Approve_tool (id, approval_request, request, cancelled)) ->
         if cancelled () || cancel_requested t id then answer request false
         else (try answer request (t.on_approve_tool approval_request)
-          with exn ->
+          with
+          | Stop cause -> answer request false; raise cause
+          | exn ->
             answer request false;
             if not (cancel_requested t id) then
               t.on_event (Transcript_message {
@@ -533,6 +562,7 @@ let close t =
     cancel t;
     (match t.worker with Some worker -> Thread.join worker | None -> ());
     with_guard t (fun () -> t.closed <- true);
+    Atomic.set t.pending 0;
     Fun.protect ~finally:(fun () ->
       t.worker <- None;
       with_guard t (fun () ->

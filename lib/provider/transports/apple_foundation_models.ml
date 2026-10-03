@@ -227,10 +227,15 @@ let run_helper ?cancel ?on_text helper request =
   close_fd output_write;
   close_fd error_fd;
   let waited = ref false in
+  let input_open = ref true and output_open = ref true in
+  let close_input () =
+    if !input_open then (input_open := false; close_fd input_write) in
+  let close_output () =
+    if !output_open then (output_open := false; close_fd output_read) in
   Fun.protect
     ~finally:(fun () ->
-      close_fd input_write;
-      close_fd output_read;
+      close_input ();
+      close_output ();
       if not !waited then (
         (try Unix.kill pid Sys.sigkill with Unix.Unix_error (Unix.ESRCH, _, _) -> ());
         (try ignore (Unix.waitpid [] pid) with Unix.Unix_error _ -> ())))
@@ -238,7 +243,7 @@ let run_helper ?cancel ?on_text helper request =
       let write_failed =
         try write_all input_write request; false
         with Unix.Unix_error (Unix.EPIPE, _, _) -> true in
-      close_fd input_write;
+      close_input ();
       let state = { on_text; text = Buffer.create 256; line = Buffer.create 256;
         bytes = 0; done_ = false; error = None } in
       let deadline = Unix.gettimeofday () +. request_timeout_seconds in
@@ -261,7 +266,7 @@ let run_helper ?cancel ?on_text helper request =
       read_output ();
       if Buffer.length state.line <> 0 then
         raise (Error "Apple model helper returned a truncated event");
-      close_fd output_read;
+      close_output ();
       let status = wait_for ?cancel ~deadline pid in
       waited := true;
       check_cancel cancel;

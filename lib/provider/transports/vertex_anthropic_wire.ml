@@ -18,11 +18,14 @@ let endpoint ~project ~location ~model ~streaming =
     host project location model
     (if streaming then "streamRawPredict" else "rawPredict")
 let request ~model ~max_tokens ~streaming ?thinking messages tools =
-  let model = Vertex_wire.model_id model in
-  if not (String.starts_with ~prefix:"claude-" model) then
+  let upstream_model = Vertex_wire.model_id model in
+  if not (String.starts_with ~prefix:"claude-" upstream_model) then
     invalid_arg "Vertex Claude requires a Claude model ID";
   if max_tokens <= 0 then invalid_arg "invalid Claude max_tokens";
-  let body = Anthropic_wire.request ~model ~max_tokens ?thinking messages tools in
+  let replay_assistant_content =
+    Anthropic_wire.replay_native_content ~provider:"google-vertex" ~model in
+  let body = Anthropic_wire.request ~model:upstream_model ~max_tokens ?thinking
+    ~replay_assistant_content messages tools in
   match body with
   | `Assoc fields -> `Assoc (List.filter (fun (key, _) -> key <> "model") fields @ [
       "anthropic_version", `String "vertex-2023-10-16";

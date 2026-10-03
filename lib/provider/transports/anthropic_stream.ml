@@ -4,12 +4,12 @@ type block =
   (* Thinking/redacted_thinking replay: accumulate the reconstructed block so
      finish can attach it to provider_state. *)
   | Thinking of { kind : string; text : Buffer.t; signature : Buffer.t }
-  | Ignored
 
 type t = {
   on_text : string -> unit;
   provider : string;
   model : string;
+  endpoint_digest : string option;
   on_tool_arguments : (Protocol.tool_argument_delta -> unit) option;
   blocks : (int, block * bool) Hashtbl.t;
   mutable started : bool;
@@ -67,21 +67,25 @@ let handle_block_start t json =
              call_id = Some id; name; fragment = "" });
         Tool (id, name, input, Buffer.create 128)
     | `String "thinking" ->
-        let text = match field "thinking" content with
-          | `String value -> value | _ -> "" in
+        let text = required_string "thinking" content in
+        reserve t text;
+        let signature_text = match field "signature" content with
+          | `Null -> "" | `String value -> value
+          | _ -> invalid "invalid thinking signature" in
+        reserve t signature_text;
         let text_buffer = Buffer.create (String.length text + 64) in
         Buffer.add_string text_buffer text;
-        reserve t text;
-        Thinking { kind = "thinking"; text = text_buffer;
-          signature = Buffer.create 64 }
+        let signature = Buffer.create (String.length signature_text + 64) in
+        Buffer.add_string signature signature_text;
+        Thinking { kind = "thinking"; text = text_buffer; signature }
     | `String "redacted_thinking" ->
-        let data = match field "data" content with
-          | `String value -> value | _ -> "" in
+        let data = required_string "data" content in
+        reserve t data;
         let signature = Buffer.create (String.length data + 8) in
         Buffer.add_string signature data;
         Thinking { kind = "redacted_thinking"; text = Buffer.create 0;
           signature }
-    | _ -> Ignored (* future content block kinds *) in
+    | _ -> invalid "unsupported content block" in
   Hashtbl.add t.blocks n (block, false)
 
 let handle_block_delta t json =
@@ -112,7 +116,6 @@ let handle_block_delta t json =
        let value = required_string "signature" delta in
        reserve t value;
        Buffer.add_string signature value
-   | `String _, Ignored -> ()
    | _ -> invalid "delta type does not match content block")
 
 let handle_message_delta t json =
@@ -179,8 +182,9 @@ let handle_event t event data =
       t.stopped <- true
   | _ -> () (* unknown events ignored for forward compatibility *)
 
-let create ?on_tool_arguments ?(provider = "anthropic") ?(model = "") ~on_text () =
-  let t = { on_text; provider; model; on_tool_arguments;
+let create ?on_tool_arguments ?endpoint_digest ?(provider = "anthropic")
+    ?(model = "") ~on_text () =
+  let t = { on_text; provider; model; endpoint_digest; on_tool_arguments;
     blocks = Hashtbl.create 4; started = false; stopped = false;
     reason = None; input_tokens = None; output_tokens = None;
     cached_input_tokens = None; cache_creation_input_tokens = None;
@@ -197,7 +201,6 @@ let feed t bytes =
     t.failed <- true;
     raise error
 
-let events t = match t.parser with Some parser -> Sse.events parser | None -> 0
 let is_done t = t.stopped && not t.failed
 let is_finished t = t.stopped && not t.failed
 
@@ -247,26 +250,25 @@ let finish t =
           let fields = if kind = "thinking" && Buffer.length signature > 0
             then fields @ ["signature", `String (Buffer.contents signature)]
             else fields in
-          state_blocks := `Assoc fields :: !state_blocks
-      | Ignored ->
-          if not closed then invalid "unclosed content block") blocks;
+          state_blocks := `Assoc fields :: !state_blocks) blocks;
     let calls = List.rev !calls in
     (match t.reason with
      | Some "end_turn" when calls = [] -> ()
      | Some "tool_use" when calls <> [] -> ()
      | Some ("end_turn" | "tool_use") ->
          invalid "stop_reason/content mismatch"
-     | Some ("pause_turn" | "stop_sequence" | "compaction") -> ()
+     | Some "stop_sequence" when calls = [] -> ()
      | Some ("max_tokens" | "model_context_window_exceeded" as reason) ->
          Protocol.truncated ("stop_reason " ^ reason)
      | Some ("refusal" | "sensitive" as reason) -> invalid reason
-     | Some _ -> () (* Unknown stop reasons degrade to a normal stop. *)
+     | Some reason -> invalid ("unsupported stop_reason: " ^ reason)
      | None -> assert false);
     let provider_state =
       let blocks = List.rev !state_blocks in
       if t.model <> "" &&
          List.exists Anthropic_wire.native_thinking_block blocks
-      then Some (`Assoc (Anthropic_wire.native_state_tag t.provider t.model @
+      then Some (`Assoc (Anthropic_wire.native_state_tag
+        ?endpoint_digest:t.endpoint_digest t.provider t.model @
         ["content", `List blocks]))
       else None in
     { Protocol.role = "assistant"; content = (if Buffer.length text = 0 then None else Some (Buffer.contents text));

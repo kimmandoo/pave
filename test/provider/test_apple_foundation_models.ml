@@ -97,8 +97,21 @@ let tests () =
       "function", `Assoc ["name", `String "read_file";
         "description", `String "Read a workspace file";
         "parameters", `Assoc ["type", `String "object"]]] in
-    let reply = Provider.complete ~apple_helper_path:helper_path
-      ~on_text:(Buffer.add_string streamed) (configuration ()) [user] [tool] in
+    let unrelated = ref [] in
+    let reply = Fun.protect
+      ~finally:(fun () -> List.iter (fun fd ->
+        try Unix.close fd with Unix.Unix_error _ -> ()) !unrelated)
+      (fun () ->
+        let on_text text =
+          Buffer.add_string streamed text;
+          if !unrelated = [] then
+            unrelated := List.init 8 (fun _ ->
+              Unix.openfile test_executable [Unix.O_RDONLY] 0) in
+        let reply = Provider.complete ~apple_helper_path:helper_path
+          ~on_text (configuration ()) [user] [tool] in
+        List.iter (fun fd -> assert ((Unix.fstat fd).Unix.st_kind = Unix.S_REG))
+          !unrelated;
+        reply) in
     assert (reply.role = "assistant");
     assert (reply.content = Some "Local answer.");
     assert (reply.tool_calls = []);

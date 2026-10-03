@@ -2315,21 +2315,24 @@ let publish_web_tool ~approved ?cancel ?context args =
   check_session_context context;
   let action = required_string "action" args in
   let manager = context.process_manager in
-  let tunnel_id name = "portal:" ^ name in
+  let relay = match optional_string "relay" "" args with
+    | "" -> None | value -> Some (Workspace_portal.https_origin value) in
+  let tunnel_id = Workspace_portal.job_id in
   let json = match action with
     | "publish" ->
         require_explicit_approval approved;
         let port = optional_int "port" 0 ~minimum:1 ~maximum:65535 args in
         if port = 0 then fail "publish requires a loopback port";
         let name = match optional_string "name" "" args with
-          | "" -> "pave-" ^ string_of_int port
+          | "" -> Workspace_portal.fresh_name ()
           | value -> Workspace_portal.publish_name value in
         Workspace_portal.publish ?cancel manager ~id:(tunnel_id name)
-          ~port ~name
+          ?relay ~port ~name
     | "stop" ->
+        require_explicit_approval approved;
         let name = match optional_string "name" "" args with
           | "" -> fail "stop requires a tunnel name"
-          | value -> value in
+          | value -> Workspace_portal.publish_name value in
         Workspace_portal.stop manager ~id:(tunnel_id name)
     | "list" -> Workspace_portal.list manager
     | "attach" ->
@@ -2340,10 +2343,10 @@ let publish_web_tool ~approved ?cancel ?context args =
              let port = try resolve () with
                | exn -> fail (Printexc.to_string exn) in
              let name = match optional_string "name" "" args with
-               | "" -> "pave-hub-" ^ string_of_int port
+               | "" -> Workspace_portal.fresh_name ()
                | value -> Workspace_portal.publish_name value in
              let json = Workspace_portal.publish ?cancel manager
-               ~id:(tunnel_id name) ~port ~name in
+               ~id:(tunnel_id name) ?relay ~port ~name in
              (match json with
               | `Assoc fields -> `Assoc (("attach", `Bool true) :: fields)
               | other -> other))
@@ -2851,7 +2854,7 @@ let requires_explicit_approval ~name ~args =
        | _ -> false)
   | "publish_web" ->
       (match field "action" args with
-       | `String ("publish" | "attach") -> true
+       | `String ("publish" | "attach" | "stop") -> true
        | _ -> false)
   | "read_file" ->
       (match field "path" args with
@@ -2882,7 +2885,7 @@ let non_reversible_tool ~name ~args =
        | _ -> false)
   | "publish_web" ->
       (match field "action" args with
-       | `String ("publish" | "attach") -> true
+       | `String ("publish" | "attach" | "stop") -> true
        | _ -> false)
   | _ -> false
 
@@ -3152,10 +3155,11 @@ let definitions = [
      "text", `Assoc ["type", `String "string"; "maxLength", `Int 32768;
        "description", `String "UTF-8 note body for put"]]
     ["action"];
-  schema "publish_web" "Publish a localhost port to a public HTTPS URL through a Portal relay tunnel. publish starts a session-owned `portal expose` process and returns the public URL once ready; stop terminates a named tunnel; list shows running tunnels. Publishing exposes the local service publicly until stopped or the session ends."
+  schema "publish_web" "Publish an already-running localhost web server through gosuda/portal-tunnel relays. publish starts a session-owned portal expose process; name is an optional hostname prefix (random when omitted). stop ends one tunnel; list inspects owned tunnels; attach publishes the session hub. No other tunnel service is used. The local server and tunnel must remain running; the hostname is publicly relay-listed."
     ["action", enum_string_field "Tunnel operation" ["publish"; "stop"; "list"; "attach"];
      "port", integer_field "Loopback port to publish (required for publish)" 1 65535;
-     "name", string_field "Public hostname prefix and tunnel ID; auto-derived when omitted (required for stop)"]
+     "name", bounded_string_field "Lowercase DNS hostname prefix; randomly generated when omitted; required for stop" 63;
+     "relay", bounded_string_field "Optional HTTPS relay origin; pins this relay and disables discovery when provided" 2048]
     ["action"];
 ]
 
@@ -3430,16 +3434,20 @@ let approval_request ?cancel ?context ~root ~name ~args (decision : Approval.dec
               "Session: " ^ quoted "id" "browser" args])
     | "publish_web" ->
         (match value "action" "" args with
-         | "publish" ->
-             "Publishes this localhost port on a public Portal relay; anyone with the URL can reach it until the tunnel is stopped or the session ends.",
-             ["Local port: " ^ value "port" "(missing)" args;
-              "Public name prefix: " ^
+         | "publish" | "attach" as action ->
+             "Publishes this localhost service through gosuda Portal; anyone can discover its hostname in the relay listing and reach it until stopped or session exit.",
+             ["Local service: " ^ (if action = "attach" then "session control hub (token required)"
+               else "127.0.0.1:" ^ value "port" "(missing)" args);
+              "Public hostname prefix: " ^
                 (match value "name" "" args with
-                 | "" -> "pave-" ^ value "port" "?" args
-                 | name -> name);
-              "Process: portal expose (PAVE_PORTAL or PATH)"]
+                 | "" -> "randomly generated" | name -> name);
+              "Relay: " ^ value "relay" "Portal public discovery" args;
+              "Process: portal expose (PAVE_PORTAL or PATH); private identity outside the workspace"]
+         | "stop" ->
+             "Stops only the named session-owned Portal tunnel.",
+             ["Prefix: " ^ value "name" "(missing)" args]
          | _ ->
-             "Manages a session-owned Portal tunnel; publish exposes a local port publicly.",
+             "Lists session-owned gosuda Portal tunnels.",
              ["Action: " ^ value "action" "(missing)" args])
     | "workspace_snapshot" ->
         "Reads a bounded text page and the file's SHA-256 snapshot; it makes no changes.",
@@ -3966,13 +3974,20 @@ let prepare ?cancel ?context ~root ~name ~args () =
     if name = "publish_web" then (
       match optional_string "action" "" args with
       | "publish" | "attach" ->
-          ignore (Workspace_portal.detect_backend ());
-          (if optional_string "action" "" args = "publish" then
-            ignore (optional_int "port" 0 ~minimum:1 ~maximum:65535 args));
+          ignore (Workspace_portal.detect_portal ());
+          (if optional_string "action" "" args = "publish" then (
+            let port = optional_int "port" 0 ~minimum:1 ~maximum:65535 args in
+            if port = 0 then fail "publish requires a loopback port";
+            if not (Workspace_process.port_accepting port) then
+              fail "localhost web server is not listening on the requested 127.0.0.1 port"));
           (match optional_string "name" "" args with
-           | "" -> ()
-           | value -> ignore (Workspace_portal.publish_name value))
-      | "stop" -> ignore (required_string "name" args)
+           | "" -> () | value -> ignore (Workspace_portal.publish_name value));
+          (match optional_string "relay" "" args with
+           | "" -> () | value -> ignore (Workspace_portal.https_origin value));
+          (if optional_string "action" "" args = "attach" then
+            let context = require_session_context context in
+            if context.hub_port = None then fail "attach requires an interactive session hub")
+      | "stop" -> ignore (Workspace_portal.publish_name (required_string "name" args))
       | _ -> ());
     if name = "start_process" then (
       Workspace_process.validate_id (required_string "id" args);

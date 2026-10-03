@@ -118,7 +118,7 @@ let check_cancel = function
   | Some cancel when cancel () -> raise Cancelled
   | _ -> ()
 
-let read_all ?on_chunk ?is_done ?is_finished ?cancel ?stream_timeouts ?progress fd =
+let read_all ?on_chunk ?is_done ?is_finished ?cancel ?stream_timeouts fd =
   let buffer = Buffer.create 128 in
   let chunk = Bytes.create 8192 in
   let finished_at = ref None in
@@ -182,13 +182,6 @@ let read_all ?on_chunk ?is_done ?is_finished ?cancel ?stream_timeouts ?progress 
                 let tail = Buffer.sub buffer (Buffer.length buffer - 128) 128 in
                 Buffer.clear buffer;
                 Buffer.add_string buffer tail));
-          (* A keep-alive comment still yields bytes but no parsed event; only
-             a delivered event counts as real stream progress for the idle
-             watchdog. *)
-          (match progress with
-           | Some advanced when advanced () ->
-               last_received_at := Some (Unix.gettimeofday ())
-           | _ -> ());
           loop ()))
     else (
       (match deadline with
@@ -225,14 +218,10 @@ module Test = struct
   let use_curl_helper executable =
     curl_helper := Some (Unix.realpath executable)
 
-  (* Step-ordered fixtures assert exactly one request per call; disable
-     retries so an error response does not shift the scripted sequence. *)
-  let retry_disabled = ref false
-  let disable_retries () = retry_disabled := true
 end
 
 
-let run_curl ?on_chunk ?is_done ?is_finished ?cancel ?stream_timeouts ?progress configuration =
+let run_curl ?on_chunk ?is_done ?is_finished ?cancel ?stream_timeouts configuration =
   check_cancel cancel;
   let executable = match !Test.curl_helper with
     | Some executable -> executable
@@ -283,10 +272,15 @@ let run_curl ?on_chunk ?is_done ?is_finished ?cancel ?stream_timeouts ?progress 
   close_fd output_write;
   close_fd errors;
   let waited = ref false in
+  let input_open = ref true and output_open = ref true in
+  let close_input () =
+    if !input_open then (input_open := false; close_fd input_write) in
+  let close_output () =
+    if !output_open then (output_open := false; close_fd output_read) in
   Fun.protect
     ~finally:(fun () ->
-      close_fd input_write;
-      close_fd output_read;
+      close_input ();
+      close_output ();
       if not !waited then (
         (try Unix.kill pid Sys.sigkill with Unix.Unix_error (Unix.ESRCH, _, _) -> ());
         ignore (wait_for pid)))
@@ -297,10 +291,10 @@ let run_curl ?on_chunk ?is_done ?is_finished ?cancel ?stream_timeouts ?progress 
           false
         with Unix.Unix_error (Unix.EPIPE, _, _) -> true
       in
-      close_fd input_write;
+      close_input ();
       let status_code = read_all ?on_chunk ?is_done ?is_finished ?cancel
-        ?stream_timeouts ?progress output_read in
-      close_fd output_read;
+        ?stream_timeouts output_read in
+      close_output ();
       let status = wait_for ?cancel pid in
       waited := true;
       check_cancel cancel;
@@ -562,27 +556,6 @@ let curl_options ~local ~max_seconds ~endpoint ~headers ~body_path =
   ^ (if local then option "proxy" "" ^ option "noproxy" "*" ^
       option "max-redirs" "0" else "")
 
-(* Transient transport states where a retry cannot double-apply the request:
-   an explicit rejection (429/5xx) or a connection-level curl failure before
-   any response arrived. Timeouts after response bytes started are never
-   retried — remote acceptance is unknown. *)
-let transient_curl_status = function
-  | "5" | "6" | "7" | "35" | "52" | "55" | "56" | "92" -> true
-  | _ -> false
-
-let retryable_status = function
-  | 429 -> true
-  | code -> code >= 500 && code <= 599
-
-let retry_attempts = 3
-
-let attempts_allowed n =
-  n < retry_attempts && not !Test.retry_disabled
-
-let retry_delay_seconds attempt =
-  (* Under the injected curl fixture, retries must not wall-clock sleep. *)
-  if !Test.curl_helper <> None then 0.0
-  else min 4.0 (0.5 *. float_of_int attempt)
 
 let post_json ?max_request_bytes ?(local = false) ?cancel
     ~endpoint ~headers ~secret body_json =
@@ -599,53 +572,20 @@ let post_json ?max_request_bytes ?(local = false) ?cancel
       ^ option "output" "/dev/stdout"
       ^ option "max-filesize" (string_of_int max_response_bytes)
       ^ option "write-out" "%{http_code}" in
-    let rec attempt n =
-      let received = Buffer.create 8192 in
-      let consume chunk =
-        (* curl appends a three-byte HTTP status after the body. *)
-        if String.length chunk > max_response_bytes + 3 - Buffer.length received then
-          raise (Provider_error "completion response exceeds 16 MiB");
-        Buffer.add_string received chunk in
-      let status =
-        try
-          ignore (run_curl ?cancel ~on_chunk:consume configuration);
-          let length = Buffer.length received in
-          if length >= 3 then
-            (try int_of_string (Buffer.sub received (length - 3) 3)
-             with Failure _ -> 0)
-          else 0
-        with
-        | Provider_error "Transport error: curl failed (exit status 28)" ->
-            if Buffer.length received = 0 && attempts_allowed n then -1
-            else
-              raise (Provider_error (curl_timeout_message ~streaming:false
-                ~response_body_seen:(Buffer.length received > 0)))
-        | Provider_error "Transport error: curl failed (exit status 63)" ->
-            raise (Provider_error "completion response exceeds 16 MiB")
-        | Provider_error message when
-            String.starts_with
-              ~prefix:"Transport error: curl failed (exit status " message
-            && attempts_allowed n ->
-            (* Connection-level curl failures are safe to retry. *)
-            let code =
-              let prefix = "Transport error: curl failed (exit status " in
-              let suffix = ")" in
-              if String.ends_with ~suffix message then
-                String.sub message (String.length prefix)
-                  (String.length message - String.length prefix - 1)
-              else "" in
-            if transient_curl_status code then -1
-            else raise (Provider_error message)
-      in
-      if status = -1 || retryable_status status then
-        if attempts_allowed n then (
-          Unix.sleepf (retry_delay_seconds n);
-          check_cancel cancel;
-          attempt (n + 1))
-        else received
-      else received
-    in
-    let received = attempt 1 in
+    let received = Buffer.create 8192 in
+    let consume chunk =
+      (* curl appends a three-byte HTTP status after the body. *)
+      if String.length chunk > max_response_bytes + 3 - Buffer.length received then
+        raise (Provider_error "completion response exceeds 16 MiB");
+      Buffer.add_string received chunk in
+    (* A failed response does not prove that the remote request was rejected.
+       Leave replay to the user's explicit, tool-free retry action. *)
+    (try ignore (run_curl ?cancel ~on_chunk:consume configuration) with
+      | Provider_error "Transport error: curl failed (exit status 28)" ->
+          raise (Provider_error (curl_timeout_message ~streaming:false
+            ~response_body_seen:(Buffer.length received > 0)))
+      | Provider_error "Transport error: curl failed (exit status 63)" ->
+          raise (Provider_error "completion response exceeds 16 MiB"));
     check_cancel cancel;
     let length = Buffer.length received in
     if length < 3 then raise (Provider_error "curl returned an invalid HTTP status");
@@ -677,7 +617,7 @@ let status_from_headers headers =
     else current) None (String.split_on_char '\n' headers)
 
 let post_stream ?max_request_bytes ?(local = false) ?cancel ~endpoint ~headers
-    ~secret ?progress body_json ~on_chunk ~is_done ~is_finished =
+    ~secret body_json ~on_chunk ~is_done ~is_finished =
   (* SSE endpoints content-negotiate on Accept; add it unless the caller (or a
      signed request) already supplied one. *)
   let headers =
@@ -701,88 +641,49 @@ let post_stream ?max_request_bytes ?(local = false) ?cancel ~endpoint ~headers
           ~endpoint ~headers ~body_path
         ^ "no-buffer\n"
         ^ option "dump-header" header_path in
-      let rec attempt n =
-        let status = ref None in
-        let response_body_seen = ref false in
-        let forwarded = ref false in
-        let pending = Buffer.create 256 in
-        let consume chunk =
-          if chunk <> "" then response_body_seen := true;
-          if !status = None then
-            status := status_from_headers (read_file header_path);
-          match !status with
-          | Some code when code >= 200 && code < 300 ->
-              forwarded := true;
-              if Buffer.length pending <> 0 then (
-                on_chunk (Buffer.contents pending);
-                Buffer.clear pending);
-              on_chunk chunk
-          | _ ->
-              if Buffer.length pending + String.length chunk > 16_384 then
-                raise (Provider_error
-                  "HTTP error or missing response headers exceeded 16 KiB");
-              Buffer.add_string pending chunk in
-        (* A retry is safe only before any response byte reached the consumer:
-           an explicit error status, a first-byte timeout, or a curl failure
-           while the request was still one-shot from our side. *)
-        let retry =
-          try
-            ignore (run_curl ~on_chunk:consume ~is_done ~is_finished ?cancel
-              ?progress
-              ~stream_timeouts:{
-                first_byte_seconds = float_of_int buffered_max_seconds;
-                idle_seconds = float_of_int stream_idle_seconds;
-              } configuration);
-            (match status_from_headers (read_file header_path) with
-             | Some code -> retryable_status code && not !forwarded
-             | None -> not !forwarded)
-          with
-          | Stream_complete -> false
-          | Stream_timeout `First_byte ->
-              if not !forwarded && attempts_allowed n then true
-              else
-                raise (Provider_error (Printf.sprintf
-                  "Transport error: provider stream timed out before the first response data byte (upload and response wait exceeded %d s)"
-                  buffered_max_seconds))
-          | Stream_timeout `Idle ->
-              raise (Provider_error (Printf.sprintf
-                "Transport error: provider stream stalled after response data (no data for %d s)"
-                stream_idle_seconds))
-          | Provider_error "Transport error: curl failed (exit status 28)" ->
-              if not !forwarded && attempts_allowed n then true
-              else
-                raise (Provider_error (curl_timeout_message ~streaming:true
-                  ~response_body_seen:!response_body_seen))
-          | Provider_error message when
-              String.starts_with
-                ~prefix:"Transport error: curl failed (exit status " message ->
-              let code =
-                let prefix =
-                  "Transport error: curl failed (exit status " in
-                if String.ends_with ~suffix:")" message then
-                  String.sub message (String.length prefix)
-                    (String.length message - String.length prefix - 1)
-                else "" in
-              if transient_curl_status code && not !forwarded
-                 && attempts_allowed n then true
-              else raise (Provider_error message)
-          in
-        if retry && attempts_allowed n then (
-          Unix.sleepf (retry_delay_seconds n);
-          check_cancel cancel;
-          attempt (n + 1))
-        else (
-          check_cancel cancel;
-          let code = match status_from_headers (read_file header_path) with
-            | Some code -> code
-            | None -> raise (Provider_error "missing HTTP response status") in
-          if code < 200 || code >= 300 then (
-            let error = try Yojson.Basic.from_string (Buffer.contents pending)
-              with Yojson.Json_error _ -> `Null in
-            raise (Provider_error (http_error_reason secret code error)));
-          if Buffer.length pending <> 0 then
-            on_chunk (Buffer.contents pending)) in
-      attempt 1))
+      let status = ref None in
+      let response_body_seen = ref false in
+      let pending = Buffer.create 256 in
+      let consume chunk =
+        if chunk <> "" then response_body_seen := true;
+        if !status = None then status := status_from_headers (read_file header_path);
+        match !status with
+        | Some code when code >= 200 && code < 300 ->
+            if Buffer.length pending <> 0 then (
+              on_chunk (Buffer.contents pending);
+              Buffer.clear pending);
+            on_chunk chunk
+        | _ ->
+            if Buffer.length pending + String.length chunk > 16_384 then
+              raise (Provider_error "HTTP error or missing response headers exceeded 16 KiB");
+            Buffer.add_string pending chunk in
+      (try ignore (run_curl ~on_chunk:consume ~is_done ~is_finished ?cancel
+         ~stream_timeouts:{
+           first_byte_seconds = float_of_int buffered_max_seconds;
+           idle_seconds = float_of_int stream_idle_seconds;
+         } configuration)
+       with
+       | Stream_complete -> ()
+       | Stream_timeout `First_byte ->
+           raise (Provider_error (Printf.sprintf
+             "Transport error: provider stream timed out before the first response data byte (upload and response wait exceeded %d s)"
+             buffered_max_seconds))
+       | Stream_timeout `Idle ->
+           raise (Provider_error (Printf.sprintf
+             "Transport error: provider stream stalled after response data (no data for %d s)"
+             stream_idle_seconds))
+       | Provider_error "Transport error: curl failed (exit status 28)" ->
+           raise (Provider_error (curl_timeout_message ~streaming:true
+             ~response_body_seen:!response_body_seen)));
+      check_cancel cancel;
+      let code = match status_from_headers (read_file header_path) with
+        | Some code -> code
+        | None -> raise (Provider_error "missing HTTP response status") in
+      if code < 200 || code >= 300 then (
+        let error = try Yojson.Basic.from_string (Buffer.contents pending)
+          with Yojson.Json_error _ -> `Null in
+        raise (Provider_error (http_error_reason secret code error)));
+      if Buffer.length pending <> 0 then on_chunk (Buffer.contents pending)))
 
 let supports_user_media = function
   | Openai_completions | Local_chat | Anthropic_messages | Openai_responses
@@ -832,7 +733,9 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage
      config.api <> Gemini_direct && config.api <> Vertex_generate then
     raise (Provider_error
       "audio/video attachments require a Gemini generateContent route");
-  let messages = Protocol.sanitize_messages messages in
+  let messages = try Protocol.sanitize_messages messages with
+    | Protocol.Invalid_response reason ->
+        raise (Provider_error ("invalid transcript: " ^ reason)) in
   let config = if config.api = Local_chat then
     { config with endpoint = local_endpoint config.endpoint } else config in
   if config.api = Apple_foundation_models && authentication <> Api_key then
@@ -917,6 +820,10 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage
       let fields = [ "model", `String config.model;
                      "messages", Protocol.chat_messages_to_json messages ] in
       let fields = if tools = [] then fields else fields @ [ "tools", `List tools ] in
+      let fields = match thinking, config.api with
+        | Some effort, (Openai_completions | Local_chat | Azure_chat) ->
+            fields @ [ "reasoning_effort", `String effort ]
+        | _ -> fields in
       if config.api = Local_chat &&
          (String.length api_key > 8192 ||
           not (String.for_all (fun c -> Char.code c > 32 &&
@@ -950,29 +857,18 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage
       | Some emit ->
           let stream = Openai_stream.create ?on_tool_arguments ~on_text:emit () in
           let fields = fields @ [ "stream", `Bool true ] in
-          (* Usage arrives on a trailing usage-only chunk only when asked.
-             Official and local endpoints accept stream_options; strict compat
-             hosts may 400 on the unknown field, so they keep the omission. *)
-          let fields = if config.api = Local_chat ||
-            (config.api = Openai_completions &&
-             config.endpoint = "https://api.openai.com/v1/chat/completions") then
+          (* Compatible/local hosts may reject this optional usage control. *)
+          let fields = if config.api = Openai_completions &&
+            config.endpoint = "https://api.openai.com/v1/chat/completions" then
               fields @ [ "stream_options", `Assoc [ "include_usage", `Bool true ] ]
             else fields in
-          let fields = match thinking, config.api with
-            | Some effort, (Openai_completions | Local_chat) ->
-                fields @ [ "reasoning_effort", `String effort ]
-            | _ -> fields in
           let body = `Assoc fields in
           parse_with_secret secret (fun () ->
-            let sse_events = ref (Openai_stream.events stream) in
             post_stream ~local:(config.api = Local_chat) ?cancel
               ~endpoint ~headers ~secret body
               ~on_chunk:(Openai_stream.feed stream)
               ~is_done:(fun () -> Openai_stream.is_done stream)
-              ~is_finished:(fun () -> Openai_stream.is_finished stream)
-              ~progress:(fun () ->
-                let count = Openai_stream.events stream in
-                count > !sse_events && (sse_events := count; true));
+              ~is_finished:(fun () -> Openai_stream.is_finished stream);
             let reply = Openai_stream.finish stream in
             (match on_usage with
              | None -> ()
@@ -1411,12 +1307,15 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage
   | Anthropic_messages ->
       let allow_direct_api_key_features = authentication = Api_key &&
         config.endpoint = "https://api.anthropic.com/v1/messages" in
+      let endpoint_digest =
+        if config.endpoint = "https://api.anthropic.com/v1/messages" then None
+        else Some (Digest.to_hex (Digest.string config.endpoint)) in
       let allow_compaction = allow_direct_api_key_features in
       let allow_prompt_caching = allow_direct_api_key_features in
       let compaction_beta = allow_compaction &&
         Anthropic_wire.requires_compaction_beta ~model:config.model messages in
       let replay_assistant_content =
-        Anthropic_wire.replay_native_content ~provider:"anthropic"
+        Anthropic_wire.replay_native_content ?endpoint_digest ~provider:"anthropic"
           ~model:config.model in
       let body = parse (fun () ->
         Anthropic_wire.request ~allow_compaction ~allow_prompt_caching
@@ -1440,7 +1339,7 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage
       | None ->
           let json = post_json ?cancel ~endpoint:config.endpoint ~headers ~secret:api_key body in
           let reply = parse (fun () ->
-            Anthropic_wire.parse_native_completion ~provider:"anthropic"
+            Anthropic_wire.parse_native_completion ?endpoint_digest ~provider:"anthropic"
               ~model:config.model json) in
           (match on_usage with
            | None -> ()
@@ -1449,20 +1348,16 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage
                Option.iter report (Anthropic_wire.usage json));
           reply
       | Some emit ->
-          let stream = Anthropic_stream.create ?on_tool_arguments
+          let stream = Anthropic_stream.create ?on_tool_arguments ?endpoint_digest
             ~provider:"anthropic" ~model:config.model ~on_text:emit () in
           let body = match body with
             | `Assoc fields -> `Assoc (fields @ [ "stream", `Bool true ])
             | _ -> assert false in
           parse (fun () ->
-            let sse_events = ref (Anthropic_stream.events stream) in
             post_stream ?cancel ~endpoint:config.endpoint ~headers ~secret:api_key
               body ~on_chunk:(Anthropic_stream.feed stream)
               ~is_done:(fun () -> Anthropic_stream.is_done stream)
-              ~is_finished:(fun () -> Anthropic_stream.is_finished stream)
-              ~progress:(fun () ->
-                let count = Anthropic_stream.events stream in
-                count > !sse_events && (sse_events := count; true));
+              ~is_finished:(fun () -> Anthropic_stream.is_finished stream);
             let reply = Anthropic_stream.finish stream in
             (match on_usage with
              | None -> ()
@@ -1507,14 +1402,10 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage
               ~max_output_tokens:output_tokens
               ~model:config.model messages tools) in
           parse_with_secret secret (fun () ->
-            let sse_events = ref (Openai_responses_stream.events stream) in
             post_stream ?cancel ~endpoint ~headers ~secret
               body ~on_chunk:(Openai_responses_stream.feed stream)
               ~is_done:(fun () -> Openai_responses_stream.is_done stream)
-              ~is_finished:(fun () -> Openai_responses_stream.is_finished stream)
-              ~progress:(fun () ->
-                let count = Openai_responses_stream.events stream in
-                count > !sse_events && (sse_events := count; true));
+              ~is_finished:(fun () -> Openai_responses_stream.is_finished stream);
             let reply = Openai_responses_stream.finish stream in
             (match on_usage with
              | None -> ()
@@ -1667,15 +1558,11 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage
           let stream = Gemini_stream.create ?on_tool_arguments ~model:config.model ~on_text:emit () in
           let endpoint = base ^ "/" ^ model_path ^ ":streamGenerateContent?alt=sse" in
           parse (fun () ->
-            let sse_events = ref (Gemini_stream.events stream) in
             post_stream ~max_request_bytes:gemini_max_request_bytes ?cancel
               ~endpoint ~headers ~secret:api_key body
               ~on_chunk:(Gemini_stream.feed stream)
               ~is_done:(fun () -> Gemini_stream.is_done stream)
-              ~is_finished:(fun () -> Gemini_stream.is_finished stream)
-              ~progress:(fun () ->
-                let count = Gemini_stream.events stream in
-                count > !sse_events && (sse_events := count; true));
+              ~is_finished:(fun () -> Gemini_stream.is_finished stream);
 
             let reply = Gemini_stream.finish stream in
             (match on_usage with
@@ -1703,15 +1590,11 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage
       let emit = Option.value ~default:(fun _ -> ()) on_text in
       let stream = Gemini_stream.create ?on_tool_arguments ~model:config.model ~on_text:emit () in
       parse (fun () ->
-        let sse_events = ref (Gemini_stream.events stream) in
         post_stream ~max_request_bytes:gemini_max_request_bytes ?cancel
           ~endpoint ~headers:["Authorization: Bearer " ^ access] ~secret:access
           body ~on_chunk:(Gemini_stream.feed stream)
           ~is_done:(fun () -> Gemini_stream.is_done stream)
-          ~is_finished:(fun () -> Gemini_stream.is_finished stream)
-          ~progress:(fun () ->
-            let count = Gemini_stream.events stream in
-            count > !sse_events && (sse_events := count; true));
+          ~is_finished:(fun () -> Gemini_stream.is_finished stream);
         let reply = Vertex_wire.finish_stream ~model:config.model stream in
         (match on_usage with
         | None -> ()
@@ -1744,15 +1627,11 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage
         let stream = Vertex_anthropic_wire.create_stream ?on_tool_arguments
           ~model:config.model ~on_text:emit () in
         parse (fun () ->
-          let sse_events = ref (Anthropic_stream.events stream) in
           post_stream ?cancel ~endpoint ~headers ~secret:access body
             ~on_chunk:(Vertex_anthropic_wire.feed_stream stream)
             ~is_done:(fun () -> Anthropic_stream.is_done stream)
             ~is_finished:(fun () ->
-              Vertex_anthropic_wire.stream_is_finished stream)
-            ~progress:(fun () ->
-              let count = Anthropic_stream.events stream in
-              count > !sse_events && (sse_events := count; true));
+              Vertex_anthropic_wire.stream_is_finished stream);
           let reply = Vertex_anthropic_wire.finish_stream
             ~model:config.model stream in
           (match on_usage with
@@ -1838,14 +1717,10 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage
       let emit = match on_text with Some emit -> emit | None -> fun _ -> () in
       let stream = Codex_stream.create ?on_tool_arguments ~model:config.model ~on_text:emit () in
       (try parse (fun () ->
-        let sse_events = ref (Codex_stream.events stream) in
         post_stream ?cancel ~endpoint:config.endpoint ~headers ~secret:api_key
           body ~on_chunk:(Codex_stream.feed stream)
           ~is_done:(fun () -> Codex_stream.is_done stream)
-          ~is_finished:(fun () -> Codex_stream.is_finished stream)
-          ~progress:(fun () ->
-            let count = Codex_stream.events stream in
-            count > !sse_events && (sse_events := count; true));
+          ~is_finished:(fun () -> Codex_stream.is_finished stream);
         let reply = Codex_stream.finish stream in
         (match on_usage with
          | None -> ()
@@ -1878,7 +1753,9 @@ let compact_anthropic_messages ?(authentication = Api_key) ?resolve_credential
   let api_key = credential.access in
   reject_controls "API key" api_key;
   if api_key = "" then raise (Provider_error "missing Anthropic API key");
-  let messages = Protocol.sanitize_messages messages in
+  let messages = try Protocol.sanitize_messages messages with
+    | Protocol.Invalid_response reason ->
+        raise (Provider_error ("invalid transcript: " ^ reason)) in
   check_cancel cancel;
   let body = Anthropic_wire.compaction_request ~allow_prompt_caching:true
     ~model:config.model
@@ -1907,7 +1784,9 @@ let compact_openai_responses ?(authentication = Api_key) ?resolve_credential
     raise (Provider_error "native compaction requires the OpenAI Responses API-key route");
   if config.model = "" then raise (Provider_error "empty Responses model");
   reject_controls "model" config.model;
-  let messages = Protocol.sanitize_messages messages in
+  let messages = try Protocol.sanitize_messages messages with
+    | Protocol.Invalid_response reason ->
+        raise (Provider_error ("invalid transcript: " ^ reason)) in
   let endpoint =
     if String.ends_with ~suffix:"/responses" config.endpoint &&
        not (String.contains config.endpoint '?' ||

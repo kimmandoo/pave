@@ -28,9 +28,7 @@ let region ?(getenv = environment) () =
       String.for_all (function 'a'..'z' | '0'..'9' | '-' -> true | _ -> false) value &&
       not (String.contains value '/') -> value
   | Some _ -> invalid_arg "invalid AWS region"
-  (* AWS SigV4 needs a region claim even when none is configured; the SDK
-     convention is to fall back to us-east-1 rather than fail. *)
-  | None -> "us-east-1"
+  | None -> invalid_arg "AWS_REGION or AWS_DEFAULT_REGION is required for Bedrock"
 
 let validate label value =
   if value = "" || String.exists (fun c -> Char.code c < 33 || Char.code c = 127) value then

@@ -1,7 +1,7 @@
 type mode =
   | Normal
   | Escape
-  | Utf8 of int
+  | Utf8 of int * bool
   | Csi
   | Discard_csi
   | Discard_escape
@@ -63,9 +63,10 @@ let append t c =
   Bytes.set t.scratch t.size c;
   t.size <- t.size + 1
 
-let replacement t =
+let replacement ?(meta = false) t =
   t.size <- 0;
   t.mode <- Normal;
+  if meta then append t '\027';
   append t '\xef'; append t '\xbf'; append t '\xbd';
   flush t
 
@@ -91,25 +92,26 @@ let rec accept t c =
         append t c;
         if t.size = Bytes.length t.scratch then flush t)
       else if byte >= 0xc2 && byte <= 0xdf then
-        (flush t; append t c; t.mode <- Utf8 2)
+        (flush t; append t c; t.mode <- Utf8 (2, false))
       else if byte >= 0xe0 && byte <= 0xef then
-        (flush t; append t c; t.mode <- Utf8 3)
+        (flush t; append t c; t.mode <- Utf8 (3, false))
       else if byte >= 0xf0 && byte <= 0xf4 then
-        (flush t; append t c; t.mode <- Utf8 4)
+        (flush t; append t c; t.mode <- Utf8 (4, false))
       else (flush t; replacement t)
-  | Utf8 expected ->
-      if byte land 0xc0 <> 0x80 then (replacement t; accept t c)
+  | Utf8 (expected, meta) ->
+      if byte land 0xc0 <> 0x80 then (replacement ~meta t; accept t c)
       else (
         append t c;
-        if t.size = expected then (
+        let offset = if meta then 1 else 0 in
+        if t.size = expected + offset then (
           t.mode <- Normal;
-          let first = Char.code (Bytes.get t.scratch 0) in
-          let second = Char.code (Bytes.get t.scratch 1) in
+          let first = Char.code (Bytes.get t.scratch offset) in
+          let second = Char.code (Bytes.get t.scratch (offset + 1)) in
           if (first = 0xe0 && second < 0xa0)
              || (first = 0xed && second >= 0xa0)
              || (first = 0xf0 && second < 0x90)
              || (first = 0xf4 && second >= 0x90)
-          then replacement t else flush t))
+          then replacement ~meta t else flush t))
   | Escape ->
       if t.size = 1 && byte = 27 then
         (t.mode <- Normal; flush t; accept t c)
@@ -117,8 +119,10 @@ let rec accept t c =
         (append t c; t.mode <- Csi)
       else if t.size = 1 && (c = ']' || c = 'P' || c = '_' || c = '^' || c = 'X') then
         (t.size <- 0; t.mode <- String (c = ']', false))
-      else if t.size = 1 && byte >= 0xc2 && byte <= 0xf4 then
-        (t.mode <- Normal; flush t; accept t c)
+      else if t.size = 1 && byte >= 0xc2 && byte <= 0xf4 then (
+        append t c;
+        let expected = if byte < 0xe0 then 2 else if byte < 0xf0 then 3 else 4 in
+        t.mode <- Utf8 (expected, true))
       else if t.size = 1 && byte >= 0x80 then
         (t.size <- 0; t.mode <- Discard_escape)
       else if t.size = 1 && byte < 0x20 then
@@ -166,6 +170,12 @@ let expire_escape t =
   | String (osc, escaped) -> t.mode <- Discard_string (osc, escaped); t.size <- 0
   | _ -> ()
 
+let finish_decoder t =
+  (match t.mode with
+   | Utf8 (_, meta) -> replacement ~meta t
+   | _ -> expire_escape t);
+  flush_ascii t
+
 let pending t =
   flush_ascii t.decoder;
   if not (Queue.is_empty t.decoder.events) || Notty_unix.Term.pending t.term then true
@@ -211,7 +221,9 @@ let event ?wake_fd ?(wake_fds = []) ?timeout t =
       else if List.mem t.fd readable then (
         let count = try Unix.read t.fd t.input 0 (Bytes.length t.input)
           with Unix.Unix_error (Unix.EINTR, _, _) -> -1 in
-        if count = 0 then `End
+        if count = 0 then (
+          finish_decoder d;
+          if Queue.is_empty d.events then `End else next ())
         else (
           if count > 0 then
             for i = 0 to count - 1 do accept d (Bytes.get t.input i) done;

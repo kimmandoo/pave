@@ -474,7 +474,6 @@ let () =
       not (String.contains jsonl.stdout '\r'))
       "JSONL stdout contained terminal control characters";
     let jsonl_records = records jsonl.stdout in
-    check (List.length jsonl_records >= 3) "JSONL omitted turn/text/outcome records";
     List.iteri (fun index record ->
       check (member "turn_id" record = `String "turn-1" &&
         member "sequence" record = `Int (index + 1))
@@ -485,6 +484,59 @@ let () =
       record_type (List.hd (List.rev jsonl_records)) = `String "outcome" &&
       record_status (List.hd (List.rev jsonl_records)) = `String "completed")
       "JSONL success event sequence or final outcome was incorrect";
+    List.iter (fun stage ->
+      check (List.exists (fun record ->
+        record_type record = `String "step" &&
+        member "stage" record = `String stage &&
+        match member "elapsed_ms" record with
+        | `Int elapsed -> elapsed >= 0 | _ -> false) jsonl_records)
+        ("ephemeral JSONL omitted measured " ^ stage ^ " stage")) ["model"; "turn"];
+    let recording_path = Filename.concat root "masked-recording.jsonl" in
+    let masked_recording = with_server
+      [response 200 "text/event-stream" jsonl_response]
+      (fun _ _ _ -> ())
+      (fun endpoint -> run Sys.argv.(1) root
+        (base_arguments endpoint @ ["--prompt"; "inspect fixture-secret safely";
+          "--mask-secrets"; "--record"; recording_path; "--output"; "jsonl"])) in
+    assert_success masked_recording "masked prompt recording";
+    let recording = read_file recording_path in
+    check (not (contains recording "fixture-secret"))
+      "recording persisted the active provider secret from the prompt";
+    let input_frames = Pave.Session_recording.frames_of_string recording
+      |> List.filter (fun (frame : Pave.Session_recording.frame) ->
+        frame.direction = `Input && frame.kind = "prompt") in
+    check (match input_frames with
+      | [frame] ->
+          let text = member "text" frame.data in
+          (match text with `String value -> contains value "inspect" &&
+             contains value "safely" | _ -> false)
+      | _ -> false) "recording omitted or duplicated the submitted prompt";
+    let replayed = run Sys.argv.(1) root ["--replay"; recording_path] in
+    assert_success replayed "masked recording replay";
+    check (not (contains replayed.stdout "fixture-secret"))
+      "replay exposed the provider secret";
+    let project = Filename.concat root ".pave" in
+    if not (Sys.file_exists project) then Unix.mkdir project 0o700;
+    let memory_dir = Filename.concat project "memory" in
+    Unix.mkdir memory_dir 0o700;
+    write_file (Filename.concat memory_dir "facts.md") "memory-summary-marker\n";
+    let memory_request = with_server
+      [response 200 "text/event-stream" jsonl_response]
+      (fun _ _ request ->
+        let messages = match member "messages" request with
+          | `List messages -> messages | _ -> assert false in
+        let has_summary message = match member "content" message with
+          | `String text -> contains text "memory-summary-marker" | _ -> false in
+        check (List.exists (fun message -> member "role" message = `String "user"
+          && has_summary message) messages)
+          "memory index was omitted from user task context";
+        check (not (List.exists (fun message ->
+          member "role" message = `String "system" && has_summary message) messages))
+          "untrusted memory data was promoted to system instructions")
+      (fun endpoint -> run Sys.argv.(1) root
+        (base_arguments endpoint @ ["--prompt"; "inspect memory"; "--enable-memory";
+          "--output"; "jsonl"])) in
+    assert_success memory_request "untrusted memory task context";
     let long_text = String.make 4095 'x' ^ "🙂" ^ String.make 1000 'y' in
     let long_event = Yojson.Basic.to_string (`Assoc [
       "choices", `List [`Assoc [

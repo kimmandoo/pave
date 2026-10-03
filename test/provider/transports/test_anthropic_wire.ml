@@ -54,31 +54,11 @@ let () =
   assert (field "cache_control" wire = `Null);
   let cached_request = Pave.Anthropic_wire.request ~allow_prompt_caching:true
     ~model:"claude-test" ~max_tokens:4096 transcript [definition] in
-  (* Caching now anchors per-block: last system block, last tool, and the
-     newest message's markable block. *)
   let ephemeral = `Assoc ["type", `String "ephemeral"] in
-  let cache_control json = field "cache_control" json in
-  assert (field "cache_control" cached_request = `Null);
-  assert (field "system" cached_request = `List [
-    `Assoc ["type", `String "text"; "text", `String "Follow instructions";
-      "cache_control", ephemeral]]);
-  assert (match field "tools" cached_request with
-    | `List tools ->
-        (match List.rev tools with
-         | last :: _ -> cache_control last = ephemeral
-         | [] -> false)
-    | _ -> false);
-  assert (match field "messages" cached_request with
-    | `List messages ->
-        (match List.rev messages with
-         | last :: _ ->
-             (match field "content" last with
-              | `List blocks ->
-                  List.exists (fun block ->
-                    cache_control block = ephemeral) blocks
-              | _ -> false)
-         | [] -> false)
-    | _ -> false);
+  assert (field "cache_control" cached_request = ephemeral);
+  assert (field "system" cached_request = field "system" wire);
+  assert (field "tools" cached_request = field "tools" wire);
+  assert (field "messages" cached_request = field "messages" wire);
   let native_content = "signed context" and native_signature = "opaque-signature" in
   let native_state = Pave.Anthropic_wire.compaction_state ~model:"claude-test"
     ~content:native_content ~signature:native_signature in
@@ -91,13 +71,7 @@ let () =
     ~allow_prompt_caching:true ~model:"claude-test" ~max_tokens:4096
     ~instructions:"preserve decisions"
     [system "Follow instructions"; compacted; user "recent turn"] [definition] in
-  assert (field "cache_control" cached_compaction = `Null);
-  assert (match field "system" cached_compaction with
-    | `List blocks ->
-        (match List.rev blocks with
-         | last :: _ -> cache_control last = ephemeral
-         | [] -> false)
-    | _ -> false);
+  assert (field "cache_control" cached_compaction = ephemeral);
   assert (field "system" native_request = `String "Follow instructions");
   assert (field "tools" native_request = `List [
     `Assoc ["name", `String "read_file"; "input_schema", schema;

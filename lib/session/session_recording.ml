@@ -52,6 +52,8 @@ let record recorder ~direction ~kind data =
   Mutex.lock recorder.mutex;
   Fun.protect ~finally:(fun () -> Mutex.unlock recorder.mutex) (fun () ->
     if recorder.closed then invalid_arg "session recorder is closed";
+    if recorder.seq >= max_frames then
+      invalid_arg "session recording exceeds frame bound";
     if not (valid_kind kind) then invalid_arg "invalid frame kind";
     let data_json = Yojson.Basic.to_string data in
     if String.length data_json > max_data_bytes then
@@ -64,10 +66,17 @@ let record recorder ~direction ~kind data =
       | `Input -> "input"
       | `Output -> "output" in
     (* kind is charset-validated, so it embeds verbatim. *)
-    Printf.ksprintf (output_string recorder.out)
-      "{\"seq\":%d,\"at_ms\":%d,\"direction\":\"%s\",\"kind\":\"%s\",\"data\":%s}\n"
-      recorder.seq at_ms direction_json kind data_json;
-    flush recorder.out)
+    (try
+       Printf.ksprintf (output_string recorder.out)
+         "{\"seq\":%d,\"at_ms\":%d,\"direction\":\"%s\",\"kind\":\"%s\",\"data\":%s}\n"
+         recorder.seq at_ms direction_json kind data_json;
+       flush recorder.out
+     with exn ->
+       (* A failed write may have left a partial frame. Never append another
+          frame to that stream, including through an already-waiting writer. *)
+       recorder.closed <- true;
+       close_out_noerr recorder.out;
+       raise exn))
 
 let close_recorder recorder =
   Mutex.lock recorder.mutex;
@@ -138,6 +147,8 @@ let parse_frame player line =
     | `String s when valid_kind s -> s
     | _ -> bad () in
   let data = field "data" in
+  if String.length (Yojson.Basic.to_string data) > max_data_bytes then
+    invalid_arg "session recording frame data exceeds 1 MiB";
   if seq <> player.last_seq + 1 then bad ();
   if at_ms < player.last_at_ms then bad ();
   player.last_seq <- seq;
@@ -152,6 +163,8 @@ let next player =
         None
     | line ->
         player.line_no <- player.line_no + 1;
+        if String.length line > max_line_bytes then
+          invalid_arg "session recording line exceeds size bound";
         if player.frames_seen >= max_frames then
           invalid_arg "session recording exceeds frame bound";
         player.frames_seen <- player.frames_seen + 1;
@@ -165,10 +178,11 @@ let frames_of_string text =
     let stop = match String.index_from_opt text !pos '\n' with
       | Some index -> index
       | None -> length in
-    let line = String.sub text !pos (stop - !pos) in
-    pos := stop + 1;
-    if String.length line > max_line_bytes then
+    let width = stop - !pos in
+    if width > max_line_bytes then
       invalid_arg "session recording line exceeds size bound";
+    let line = String.sub text !pos width in
+    pos := stop + 1;
     line in
   let player = new_player read_line in
   let rec collect acc =

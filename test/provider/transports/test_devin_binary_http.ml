@@ -123,6 +123,24 @@ let expect_cancelled call =
 
 let () =
   Http.Test.use_curl_helper Sys.executable_name;
+  with_fixture "ready" (fun directory ->
+    let unrelated = ref [] in
+    Fun.protect ~finally:(fun () ->
+      List.iter (fun fd -> try Unix.close fd with Unix.Unix_error _ -> ()) !unrelated)
+      (fun () ->
+        let completed = Filename.concat directory "completed" in
+        let cancel () =
+          if !unrelated = [] && Sys.file_exists completed then
+            for _ = 1 to 8 do
+              unrelated := Unix.openfile completed [Unix.O_RDONLY] 0 :: !unrelated
+            done;
+          false in
+        let response = post ~cancel (timeouts 2. 2. 5.) () in
+        if response <> (200, "ready") then fail "descriptor ownership corrupted response";
+        List.iter (fun fd ->
+          if (Unix.fstat fd).Unix.st_kind <> Unix.S_REG then
+            fail "request cleanup changed an unrelated descriptor") !unrelated;
+        assert_reaped directory));
   with_fixture "delayed" (fun directory ->
     let response = post (timeouts 2. 0.3 4.) () in
     if response <> (200, "delayed") then fail "delayed first body was corrupted";

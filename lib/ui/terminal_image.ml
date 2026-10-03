@@ -110,7 +110,8 @@ let encode_image ~capability ~enabled image =
       let _bytes = validate image in
       (match capability with
        | Unsupported -> []
-       | Supported Kitty -> kitty_payload image.data
+       | Supported Kitty ->
+           if image.mime_type = "image/png" then kitty_payload image.data else []
        | Supported ITerm2 ->
            ["\027]1337;File=inline=1;width=auto;height=auto;preserveAspectRatio=1:"
             ^ image.data ^ "\007"])

@@ -1,300 +1,140 @@
 module Portal = Pave.Workspace_portal
 module Process = Pave.Workspace_process
 
-let contains haystack needle =
-  let hay_len = String.length haystack and n_len = String.length needle in
-  let rec scan index =
-    if index + n_len > hay_len then false
-    else if String.sub haystack index n_len = needle then true
-    else scan (index + 1) in
-  scan 0
+let with_dir body =
+  let dir = Filename.temp_dir "pave-portal-test-" "" in
+  let rec remove path =
+    match (Unix.lstat path).Unix.st_kind with
+    | Unix.S_DIR -> Array.iter (fun name -> remove (Filename.concat path name)) (Sys.readdir path); Unix.rmdir path
+    | _ -> Unix.unlink path in
+  Fun.protect ~finally:(fun () -> remove dir) (fun () -> body dir)
 
-(* Deterministic environment seam: detect_* and publish take ?env, so tests
-   never mutate process state. [vars] overlays defaults; [path_dirs] becomes
-   the injected PATH. *)
-let fake_env ?(vars = []) ?(path_dirs = []) () =
-  let path = String.concat ":" path_dirs in
-  fun name ->
-    match List.assoc_opt name vars with
-    | Some value -> value
-    | None when name = "PATH" -> Some path
-    | None -> None
-
-
-let fake_script dir name body =
+let script dir name body =
   let path = Filename.concat dir name in
   let oc = open_out_bin path in
-  output_string oc ("#!/bin/sh\n" ^ body);
-  close_out oc;
-  Unix.chmod path 0o700;
-  path
+  output_string oc ("#!/bin/sh\n" ^ body); close_out oc;
+  Unix.chmod path 0o700; path
 
-let with_temp_dir body =
-  let dir = Filename.temp_dir "pave-portal-test-" "" in
-  let rec rm path =
-    match Sys.is_directory path with
-    | true -> Sys.readdir path |> Array.iter (fun e -> rm (Filename.concat path e));
-        Unix.rmdir path
-    | false -> Sys.remove path in
-  Fun.protect ~finally:(fun () -> try rm dir with _ -> ())
-    (fun () -> body dir)
+let env portal key = if key = "PAVE_PORTAL" then Some portal else Sys.getenv_opt key
+let with_listener body =
+  let fd = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
+  Fun.protect ~finally:(fun () -> Unix.close fd) (fun () ->
+    Unix.bind fd (Unix.ADDR_INET (Unix.inet_addr_loopback, 0)); Unix.listen fd 16;
+    let port = match Unix.getsockname fd with Unix.ADDR_INET (_, port) -> port | _ -> assert false in
+    body port)
 
-(* Fake portal honored through the PAVE_PORTAL pin, like before. *)
-let with_fake_portal body =
-  with_temp_dir (fun dir ->
-    let path = fake_script dir "portal"
-      "if [ \"$1\" = \"expose\" ]; then\n\
-       \techo '{\"level\":\"info\",\"public_url\":\"https://demo.test-relay.example\",\"time\":\"now\",\"message\":\"service ready at https://demo.test-relay.example\"}'\n\
-       \twhile true; do sleep 1; done\n\
-       else\n\techo 'unknown command' >&2; exit 64\nfi\n" in
-    body (fake_env ~vars:[Portal.portal_variable, Some path] ()) )
-
-let test_detect_and_url env =
-  let executable = Portal.detect_portal ~env () in
-  assert (executable <> "");
-  let text = Printf.sprintf
-    "prelude\nINF service ready at https://alpha.relay.example tail\n" in
-  assert (Portal.public_url text = Some "https://alpha.relay.example");
-  let json = "{\"level\":\"info\",\"public_url\":\"https://beta.relay.example\",\"message\":\"x\"}" in
-  assert (Portal.public_url json = Some "https://beta.relay.example");
-  assert (Portal.public_url "no url here" = None)
-
-let test_backend_detection () =
-  with_temp_dir (fun dir ->
-    let portal_dir = Filename.concat dir "portal-bin"
-    and cf_dir = Filename.concat dir "cf-bin"
-    and ssh_dir = Filename.concat dir "ssh-bin" in
-    Unix.mkdir portal_dir 0o700; Unix.mkdir cf_dir 0o700;
-    Unix.mkdir ssh_dir 0o700;
-    let portal = fake_script portal_dir "portal" "exit 0\n"
-    and cf = fake_script cf_dir "cloudflared" "exit 0\n"
-    and ssh = fake_script ssh_dir "ssh" "exit 0\n" in
-    let all = [portal_dir; cf_dir; ssh_dir] in
-    (* PATH order is the chain: portal first, then cloudflared, then ssh. *)
-    let detect ?(ssh_candidates = []) ?(vars = []) path_dirs =
-      Portal.detect_backend ~env:(fake_env ~vars ~path_dirs ())
-        ~ssh_candidates () in
-    let backend, exe = detect all in
-    assert (backend = Portal.Portal && exe = portal);
-    let backend, exe = detect [cf_dir; ssh_dir] in
-    assert (backend = Portal.Cloudflared && exe = cf);
-    let backend, exe = detect [ssh_dir] in
-    assert (backend = Portal.Localhost_run && exe = ssh);
-    (* Conventional /usr/bin/ssh is checked before a PATH ssh when the
-       candidate exists (tests pass it explicitly to stay hermetic). *)
-    let backend, exe = detect ~ssh_candidates:[ssh] [] in
-    assert (backend = Portal.Localhost_run && exe = ssh);
-    (* Within a stage the pin beats PATH, and the pin path is what gets
-       spawned. Stages still resolve in order: a portal PATH hit wins over
-       a PAVE_SSH pin, and a cloudflared PATH hit wins over a PAVE_SSH pin. *)
-    let other_dir = Filename.concat dir "cf-other" in
-    Unix.mkdir other_dir 0o700;
-    let pinned_cf = fake_script other_dir "cloudflared-pinned" "exit 0\n" in
-    let vars = [ Portal.cloudflared_variable, Some pinned_cf ] in
-    let backend, exe = detect ~vars [cf_dir; ssh_dir] in
-    assert (backend = Portal.Cloudflared && exe = pinned_cf);
-    let vars = [ Portal.ssh_variable, Some ssh ] in
-    let backend, exe = detect ~vars [portal_dir] in
-    assert (backend = Portal.Portal && exe = portal);
-    let backend, exe = detect ~vars [cf_dir] in
-    assert (backend = Portal.Cloudflared && exe = cf);
-    let backend, exe = detect ~vars [] in
-    assert (backend = Portal.Localhost_run && exe = ssh);
-    (* Set-but-unusable pins fail loudly naming the variable, even when a
-       later backend would be usable. *)
-    let expect var vars path_dirs =
-      try ignore (detect ~vars path_dirs); assert false
-      with Portal.Error message -> assert (contains message var) in
-    expect Portal.portal_variable
-      [Portal.portal_variable, Some "/nonexistent/bad-portal"] all;
-    expect Portal.portal_variable
-      [Portal.portal_variable, Some ""] all;
-    expect Portal.cloudflared_variable
-      [ Portal.cloudflared_variable, Some "/nonexistent/bad-cf" ] [ssh_dir];
-    expect Portal.ssh_variable
-      [ Portal.ssh_variable, Some "/nonexistent/bad-ssh" ] [ssh_dir];
-    (* PAVE_TUNNELS=off disables every backend, even pinned ones. *)
-    let vars = [ Portal.tunnels_variable, Some "off";
-                 Portal.portal_variable, Some portal ] in
-    (try ignore (detect ~vars all); assert false
-     with Portal.Error message -> assert (contains message "PAVE_TUNNELS")))
-
-let test_no_backend_error () =
-  try
-    ignore (Portal.detect_backend ~env:(fake_env ~vars:[] ())
-              ~ssh_candidates:[] ());
-    assert false
-  with Portal.Error message ->
-    assert (contains message "portal-tunnel");
-    assert (contains message "cloudflared");
-    assert (contains message "ssh");
-    assert (contains message "PAVE_PORTAL");
-    assert (contains message "PAVE_CLOUDFLARED")
-
-let test_backend_url_parsing () =
-  let cf_log = "2026-10-02T00:00:00Z INF +------------------------------------------------+\n\
-    2026-10-02T00:00:00Z INF |  Your quick Tunnel has been created!  |\n\
-    2026-10-02T00:00:00Z INF |  https://abc-def-123.trycloudflare.com |\n" in
-  assert (Portal.cloudflared_url cf_log =
-    Some "https://abc-def-123.trycloudflare.com");
-  assert (Portal.cloudflared_url "visit https://trycloudflare.com docs" = None);
-  assert (Portal.cloudflared_url "no url" = None);
-  let lhr = "Welcome to localhost.run!\n\
-    Connect to http://localhost.run:8080\n\
-    abc123def.lhr.life tunneled with tls termination, https://abc123def.lhr.life\n" in
-  assert (Portal.localhost_run_url lhr = Some "https://abc123def.lhr.life");
-  (* The welcome banner links reserved *.localhost.run hosts (admin console,
-     docs); only an *.lhr.life host is a real assigned relay URL. *)
-  assert (Portal.localhost_run_url
-    "Welcome to localhost.run! go to https://admin.localhost.run/" = None);
-  assert (Portal.localhost_run_url
-    "tunneled at https://zz99.localhost.run\n" = None);
-  assert (Portal.localhost_run_url "https://lhr.life itself" = None);
-  assert (Portal.localhost_run_url "nothing" = None);
-
-  (* Readiness regexes match the URL shapes each backend emits. *)
-  let matches regex text =
-    match Str.search_forward (Str.regexp regex) text 0 with
-    | _ -> true
-    | exception Not_found -> false in
-  assert (matches (Portal.ready_regex Portal.Cloudflared) cf_log);
-  assert (not (matches (Portal.ready_regex Portal.Localhost_run)
-    "go to https://admin.localhost.run/"));
-  assert (matches (Portal.ready_regex Portal.Localhost_run) lhr);
-  assert (matches (Portal.ready_regex Portal.Portal)
-    "INF service ready at https://x.relay");
-  assert (not (matches (Portal.ready_regex Portal.Cloudflared) lhr));
-  (* The advertised name is the leftmost label of the emitted URL. *)
-  assert (Portal.advertised_name "https://abc123def.lhr.life" =
-    Some "abc123def");
-  assert (Portal.advertised_name "https://demo.test-relay.example" =
-    Some "demo");
-  assert (Portal.advertised_name "ftp://nope.example" = None)
-
-let test_argv_builders () =
-  assert (Portal.cloudflared_arguments ~port:4321 ~name:"demo" =
-    ["tunnel"; "--url"; "http://127.0.0.1:4321"; "--no-autoupdate"]);
-  let ssh = Portal.localhost_run_arguments ~port:8080 ~name:"demo"
-    ~known_hosts:"/state/tunnel_known_hosts" in
-  assert (ssh = ["-NT"; "-R"; "80:127.0.0.1:8080";
-                 "-o"; "BatchMode=yes";
-                 "-o"; "StrictHostKeyChecking=accept-new";
-                 "-o"; "UserKnownHostsFile=/state/tunnel_known_hosts";
-                 "-o"; "ExitOnForwardFailure=yes";
-                 "nokey@localhost.run"])
-
-let test_publish_list_stop env =
+let with_manager body =
   let manager = Process.create_manager () in
-  Fun.protect ~finally:(fun () -> Process.close_manager manager) (fun () ->
-    let json = Portal.publish ~env manager ~id:"portal:demo" ~port:3000
-      ~name:"demo" in
-    let text = Yojson.Basic.to_string json in
-    assert (contains text "https://demo.test-relay.example");
-    assert (contains text "\"published\"");
-    assert (contains text "\"backend\":\"portal\"");
-    assert (contains text "\"name\":\"demo\"");
-    let listed = Yojson.Basic.to_string (Portal.list manager) in
-    assert (contains listed "demo");
-    assert (contains listed "running");
-    let stopped = Yojson.Basic.to_string (Portal.stop manager ~id:"portal:demo") in
-    assert (contains stopped "stopped"))
+  Fun.protect ~finally:(fun () -> Process.close_manager manager) (fun () -> body manager)
 
-(* A stopped or failed tunnel leaves a finished job record; publishing the
-   same name again must replace it, while a live tunnel keeps refusing. *)
-let test_republish_after_stop env =
-  let manager = Process.create_manager () in
-  Fun.protect ~finally:(fun () -> Process.close_manager manager) (fun () ->
-    let publish () =
-      Yojson.Basic.to_string
-        (Portal.publish ~env manager ~id:"portal:again" ~port:3000
-           ~name:"again") in
-    assert (contains (publish ()) "published");
-    (try ignore (publish ()); assert false with Portal.Error _ -> ());
-    ignore (Portal.stop manager ~id:"portal:again");
-    assert (contains (publish ()) "published");
-    ignore (Portal.stop manager ~id:"portal:again"))
+let field key json = Pave.Protocol.member key json
+let rejected body = match body () with
+  | _ -> assert false
+  | exception Portal.Error _ -> ()
 
-let test_publish_cloudflared () =
-  with_temp_dir (fun dir ->
-    let capture = Filename.concat dir "argv" in
-    let cf = fake_script dir "cloudflared"
-      (Printf.sprintf "printf '%%s\\n' \"$@\" > %s\n\
-       echo 'INF |  https://quick-99.trycloudflare.com |'\n\
-       while true; do sleep 1; done\n" capture) in
-    let env = fake_env
-      ~vars:[ Portal.cloudflared_variable, Some cf ] () in
-    let manager = Process.create_manager () in
-    Fun.protect ~finally:(fun () -> Process.close_manager manager) (fun () ->
-      let json = Portal.publish ~env manager ~id:"portal:cf" ~port:4321
-        ~name:"ignored-name" in
-      let text = Yojson.Basic.to_string json in
-      assert (contains text "https://quick-99.trycloudflare.com");
-      assert (contains text "\"backend\":\"cloudflared\"");
-      (* `name` is the requested tunnel name used by `stop`; `advertised`
-         carries the random subdomain the backend actually assigned. *)
-      assert (contains text "\"name\":\"ignored-name\"");
-      assert (contains text "\"advertised\":\"quick-99\"");
-      let ic = open_in capture in
-      let argv = really_input_string ic (in_channel_length ic) in
-      close_in ic;
-      assert (contains argv "tunnel");
-      assert (contains argv "http://127.0.0.1:4321");
-      assert (contains argv "--no-autoupdate");
-      ignore (Portal.stop manager ~id:"portal:cf")))
+(* This fixture implements Portal's persisted-identity name precedence, so
+   reusing identity.json across prefixes produces the wrong public endpoint. *)
+let identity_portal dir = script dir "portal" {|name=''
+identity='identity.json'
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --name) name="$2"; shift 2 ;;
+    --identity-path) identity="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+if [ -f "$identity" ]; then
+  name=$(/usr/bin/tr -d '\n' < "$identity" | /usr/bin/cut -d '"' -f 4)
+else
+  printf '{"name":"%s"}\n' "$name" > "$identity"
+  chmod 600 "$identity"
+fi
+printf '{ "message": "service ready at https://%s.relay.example", "public_url": "https://%s.relay.example" }\n' "$name" "$name"
+while true; do sleep 1; done
+|}
 
-(* localhost.run ignores the requested name without auth; publish reports
-   the assigned subdomain and notes the caveat. *)
-let test_publish_localhost_run () =
-  with_temp_dir (fun dir ->
-    let state = Filename.concat dir "state" in
-    Unix.mkdir state 0o700;
-    let capture = Filename.concat dir "argv" in
-    let ssh = fake_script dir "ssh"
-      (Printf.sprintf "printf '%%s\\n' \"$@\" > %s\n\
-       echo 'abc123def.lhr.life tunneled with tls termination, https://abc123def.lhr.life'\n\
-       while true; do sleep 1; done\n" capture) in
-    let env = fake_env
-      ~vars:[ Portal.ssh_variable, Some ssh ] () in
-    let manager = Process.create_manager () in
-    Fun.protect ~finally:(fun () -> Process.close_manager manager) (fun () ->
-      let json = Portal.publish ~env ~state_dir:state manager
-        ~id:"portal:lhr" ~port:8080 ~name:"wanted" in
-      let text = Yojson.Basic.to_string json in
-      assert (contains text "https://abc123def.lhr.life");
-      assert (contains text "\"backend\":\"localhost.run\"");
-      assert (contains text "\"name\":\"wanted\"");
-      assert (contains text "\"advertised\":\"abc123def\"");
-      let ic = open_in capture in
-      let argv = really_input_string ic (in_channel_length ic) in
-      close_in ic;
-      assert (contains argv "-NT");
-      assert (contains argv "80:127.0.0.1:8080");
-      assert (contains argv "BatchMode=yes");
-      assert (contains argv "StrictHostKeyChecking=accept-new");
-      assert (contains argv
-        ("UserKnownHostsFile=" ^ Filename.concat state "tunnel_known_hosts"));
-      assert (contains argv "ExitOnForwardFailure=yes");
-      assert (contains argv "nokey@localhost.run");
-      assert (not (contains argv "wanted"));
-      ignore (Portal.stop manager ~id:"portal:lhr")))
+let test_prefixes_and_lifecycle () = with_dir (fun dir ->
+  let portal = identity_portal dir in
+  with_listener (fun port -> with_manager (fun manager ->
+    let publish name = Portal.publish ~env:(env portal) ~state_dir:dir manager
+      ~id:(Portal.job_id name) ~port ~name in
+    let first = publish "first" in
+    let second = publish "second" in
+    assert (field "url" first = `String "https://first.relay.example");
+    assert (field "url" second = `String "https://second.relay.example");
+    assert (field "identity_path" first <> field "identity_path" second);
+    rejected (fun () -> publish "first");
+    ignore (Portal.stop manager ~id:(Portal.job_id "first"));
+    assert (field "url" (publish "first") = `String "https://first.relay.example");
+    let rows = match field "tunnels" (Portal.list manager) with `List rows -> rows | _ -> assert false in
+    assert (List.exists (fun row -> field "name" row = `String "second" && field "status" row = `String "running") rows);
+    ignore (Portal.stop manager ~id:(Portal.job_id "first"));
+    ignore (Portal.stop manager ~id:(Portal.job_id "second"));
+    assert (List.for_all (fun (job : Process.job_summary) -> job.status <> Process.Running) (Process.jobs manager)))))
 
-let test_publish_name_validation () =
-  assert (Portal.publish_name "my-app-1" = "my-app-1");
-  (try ignore (Portal.publish_name "bad name"); assert false
-   with Portal.Error _ -> ());
-  (try ignore (Portal.publish_name ""); assert false
-   with Portal.Error _ -> ())
+let test_dns_boundaries () =
+  List.iter (fun name -> assert (Portal.publish_name name = name))
+    ["a"; "my-app-1"; String.make 63 'a'];
+  List.iter (fun name -> rejected (fun () -> Portal.publish_name name))
+    [""; "-bad"; "bad-"; "bad name"; "bad.name"; "BAD"; String.make 64 'a'];
+  let first = Portal.fresh_name () and second = Portal.fresh_name () in
+  assert (first <> second);
+  assert (Portal.publish_name first = first && Portal.publish_name second = second)
+
+let test_ready_records () =
+  assert (Portal.public_url "INF listener_relays=[\"https://listener.example\"]\n" = None);
+  assert (Portal.public_url "INF service ready at https://demo.relay.example" = None);
+  assert (Portal.public_url "INF service ready at https://demo.relay.example\n" = Some "https://demo.relay.example");
+  assert (Portal.public_url "{ \"public_url\": \"https://demo.relay.example\", \"message\": \"service ready at https://demo.relay.example\" }\n" = Some "https://demo.relay.example");
+  assert (Portal.public_url "{\"public_url\":\"https://admin.relay.example\",\"message\":\"relay discovered\"}\n" = None);
+  assert (Portal.public_url "INF service ready at https://user:secret@relay.example\n" = None);
+  assert (Portal.public_url "INF service ready at https://demo.relay.example/evil\n" = None)
+
+let test_identity_safety () = with_dir (fun dir ->
+  let target = Filename.concat dir "outside.json" in
+  let oc = open_out target in output_string oc "{\"name\":\"demo\"}"; close_out oc;
+  Unix.chmod target 0o600;
+  Unix.symlink target (Filename.concat dir "demo.json");
+  rejected (fun () -> Portal.identity_path ~state_dir:dir ~name:"demo" ());
+  Unix.unlink (Filename.concat dir "demo.json");
+  let oc = open_out (Filename.concat dir "demo.json") in output_string oc "{\"name\":\"different\"}"; close_out oc;
+  Unix.chmod (Filename.concat dir "demo.json") 0o600;
+  rejected (fun () -> Portal.identity_path ~state_dir:dir ~name:"demo" ()))
+
+let test_failed_start_and_cleanup () = with_dir (fun dir ->
+  let bad = script dir "bad-portal" "echo 'service ready at https://wrong.relay.example'\nwhile true; do sleep 1; done\n" in
+  with_listener (fun port -> with_manager (fun manager ->
+    rejected (fun () -> Portal.publish ~env:(env bad) ~state_dir:dir manager
+      ~id:"portal:demo" ~port ~name:"demo");
+    assert (List.for_all (fun (job : Process.job_summary) -> job.status <> Process.Running) (Process.jobs manager));
+    let good = identity_portal dir in
+    assert (field "url" (Portal.publish ~env:(env good) ~state_dir:dir manager
+      ~id:"portal:demo" ~port ~name:"demo") = `String "https://demo.relay.example"))))
+
+let test_absent_server_and_backend () = with_dir (fun dir ->
+  let portal = identity_portal dir in
+  let socket = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
+  Unix.bind socket (Unix.ADDR_INET (Unix.inet_addr_loopback, 0));
+  let port = match Unix.getsockname socket with Unix.ADDR_INET (_, port) -> port | _ -> assert false in
+  Unix.close socket;
+  with_manager (fun manager ->
+    rejected (fun () -> Portal.publish ~env:(env portal) ~state_dir:dir manager ~id:"portal:demo" ~port ~name:"demo");
+    assert (Process.jobs manager = []));
+  let fallbacks = Filename.concat dir "fallbacks" in
+  Unix.mkdir fallbacks 0o700;
+  ignore (script fallbacks "cloudflared" "exit 0\n");
+  ignore (script fallbacks "ssh" "exit 0\n");
+  let missing key = if key = "PATH" then Some fallbacks else None in
+  rejected (fun () -> Portal.detect_portal ~env:missing ()))
+
+let test_relay_validation () =
+  assert (Portal.https_origin "https://relay.example:8443/" = "https://relay.example:8443");
+  List.iter (fun relay -> rejected (fun () -> Portal.https_origin relay))
+    ["http://relay.example"; "https://user@relay.example"; "https://relay.example/path";
+     "https://relay.example?token=secret"; "https://relay.example:0"; "https://-bad.example"]
 
 let () =
-  with_fake_portal (fun env ->
-    test_detect_and_url env;
-    test_publish_list_stop env;
-    test_republish_after_stop env);
-  test_backend_detection ();
-  test_no_backend_error ();
-  test_backend_url_parsing ();
-  test_argv_builders ();
-  test_publish_cloudflared ();
-  test_publish_localhost_run ();
-  test_publish_name_validation ();
+  test_dns_boundaries (); test_ready_records (); test_identity_safety ();
+  test_prefixes_and_lifecycle (); test_failed_start_and_cleanup ();
+  test_absent_server_and_backend (); test_relay_validation ();
   print_endline "workspace_portal: ok"

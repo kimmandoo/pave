@@ -56,8 +56,8 @@ type kind =
   | Workflow_goal of string option
   | Interruption_rule of string option
   | Session_exit of { kind : exit_kind; pending_tool_calls : pending_tool_call list }
-(* [step] is the entry's dense ordinal in the journal file (1-based), assigned
-   on write and derived from file order for legacy entries that predate it. *)
+(* [step] is the entry's dense 1-based ordinal in this journal file.
+   Derive it from file order on load, including older sparse fork copies. *)
 type entry = { id : string; parent_id : string option; timestamp : string;
                step : int; kind : kind }
 
@@ -291,6 +291,10 @@ let append_line t json =
 let valid_model_field text =
   text <> "" && not (String.exists (fun char ->
     Char.code char <= 32 || Char.code char = 127) text)
+let valid_stage_name text =
+  String.length text >= 1 && String.length text <= 48 &&
+  String.for_all (function
+    | 'a'..'z' | '0'..'9' | '_' | '-' | '.' -> true | _ -> false) text
 let valid_modality_name name =
   name <> "" && String.length name <= 64 &&
   String.for_all (function
@@ -425,7 +429,7 @@ let parse_entry ~step json =
   let parent_id = match get "parentId" with `String value -> Some value
     | `Null -> None | _ -> invalid "invalid parent ID" in
   let step = match get "step" with
-    | `Int value when value > 0 -> value
+    | `Int value when value > 0 -> step
     | `Null -> step
     | _ -> invalid "invalid entry step" in
   let timestamp = match get "timestamp" with `String value -> value
@@ -602,7 +606,7 @@ let parse_entry ~step json =
     | `String "stage" ->
         (match get "stage", get "elapsedMs" with
          | `String stage, `Int elapsed_ms
-           when valid_text_field 48 stage && elapsed_ms >= 0 ->
+           when valid_stage_name stage && elapsed_ms >= 0 ->
              (match get "detail" with
               | `Null -> Stage { stage; elapsed_ms; detail = None }
               | `String detail when String.length detail <= 256 ->
@@ -657,7 +661,7 @@ let parse_entry ~step json =
     | _ -> invalid "unsupported journal entry type" in
   { id; parent_id; timestamp; step; kind }
 
-let branch_entries_at t leaf =
+let branch_entries_at_unlocked t leaf =
   let rec walk id items =
     match id with
     | None -> items
@@ -667,9 +671,12 @@ let branch_entries_at t leaf =
         walk entry.parent_id (entry :: items) in
   walk leaf []
 
-let branch_entries t = Mutex.protect t.guard (fun () -> branch_entries_at t t.leaf)
+let branch_entries_at t leaf =
+  Mutex.protect t.guard (fun () -> branch_entries_at_unlocked t leaf)
+let branch_entries t =
+  Mutex.protect t.guard (fun () -> branch_entries_at_unlocked t t.leaf)
 let entries t = Mutex.protect t.guard (fun () -> List.rev t.records_rev)
-let leaf_id t = t.leaf
+let leaf_id t = Mutex.protect t.guard (fun () -> t.leaf)
 let parent_session t = match Protocol.member "parentSession" t.header with
   | `String id -> Some id | _ -> None
 
@@ -712,7 +719,7 @@ let title_at t _leaf =
   | None -> (match Protocol.member "title" t.header with
       | `String value when value <> "" -> Some value | _ -> None)
 
-let title t = title_at t t.leaf
+let title t = title_at t None
 
 let labels_at t leaf =
   List.fold_left (fun labels entry -> match entry.kind with
@@ -1108,10 +1115,6 @@ let record_tool_aborted t ~call_id ~name ~side_effects_may_have_occurred
   record_tool_event t ~call_id ~name ?elapsed_ms
     (Tool_aborted { side_effects_may_have_occurred })
 
-let valid_stage_name text =
-  String.length text >= 1 && String.length text <= 48 &&
-  String.for_all (function
-    | 'a'..'z' | '0'..'9' | '_' | '-' | '.' -> true | _ -> false) text
 
 (* Stage records journal one named phase's elapsed time and optional outcome
    detail; they are timeline data only and never gate replay or approval. *)
@@ -1155,15 +1158,8 @@ let set_model ?registry t (identity : Model_identity.t) =
             if normalized.config_revision <> None then
               invalid "model selection uses an unsupported custom configuration")
    | _ -> invalid "model selection uses an unsupported provider route");
-  if model t <> Some normalized then (
-    let entry = { id = fresh_id (); parent_id = t.leaf;
-      timestamp = timestamp (); step = t.next_step;
-      kind = Model normalized } in
-    append_line t (entry_json entry);
-    t.next_step <- t.next_step + 1;
-    t.records_rev <- entry :: t.records_rev;
-    Hashtbl.add t.by_id entry.id entry;
-    t.leaf <- Some entry.id)
+  if model t <> Some normalized then
+    ignore (append_entry t (Model normalized))
 let clear t =
   if unresolved_tool_calls (branch_entries t) <> [] then
     invalid "cannot clear while tool calls are unresolved";
@@ -1262,24 +1258,18 @@ let append_usage ?account_id ?route t ~provider ~model (tokens : Protocol.usage)
     not cached_modalities_fit ||
     not (modality_tokens_fit tokens.output_tokens tokens.output_modality_tokens) then
     invalid "invalid provider token usage";
-  let entry = { id = fresh_id (); parent_id = t.leaf;
-    timestamp = timestamp (); step = t.next_step;
-    kind = Usage { provider; account_id; route; model; tokens } } in
-  append_line t (entry_json entry);
-  t.next_step <- t.next_step + 1;
-  t.records_rev <- entry :: t.records_rev;
-  Hashtbl.add t.by_id entry.id entry;
-  t.leaf <- Some entry.id
+  ignore (append_entry t (Usage { provider; account_id; route; model; tokens }))
 
 let branch t id =
-  if not (Hashtbl.mem t.by_id id) then invalid ("entry not found: " ^ id);
-  let marker = { id = fresh_id (); parent_id = Some id; timestamp = timestamp ();
-                 step = t.next_step; kind = Branch } in
-  append_line t (entry_json marker);
-  t.next_step <- t.next_step + 1;
-  t.records_rev <- marker :: t.records_rev;
-  Hashtbl.add t.by_id marker.id marker;
-  t.leaf <- Some id;
+  Mutex.protect t.guard (fun () ->
+    if not (Hashtbl.mem t.by_id id) then invalid ("entry not found: " ^ id);
+    let marker = { id = fresh_id (); parent_id = Some id; timestamp = timestamp ();
+                   step = t.next_step; kind = Branch } in
+    append_line t (entry_json marker);
+    t.next_step <- t.next_step + 1;
+    t.records_rev <- marker :: t.records_rev;
+    Hashtbl.add t.by_id marker.id marker;
+    t.leaf <- Some id);
   recover_pending_tools t
 let load_journal path =
   let ic = open_in_bin path in
@@ -1354,9 +1344,10 @@ let load_journal path =
     let by_id = Hashtbl.create 32 in
     let seen_ids = Hashtbl.create 32 in
     let leaf = ref None in
+    let next_step = ref 1 in
     (try while true do
-      let step = List.length !records + 1 in
-      let entry = materialize (parse_entry ~step (read_json ())) in
+      let entry = materialize (parse_entry ~step:!next_step (read_json ())) in
+      incr next_step;
       if Hashtbl.mem seen_ids entry.id then invalid "duplicate entry ID";
       Hashtbl.add seen_ids entry.id ();
       (match entry.parent_id with
@@ -1402,8 +1393,7 @@ let load_journal path =
       records := entry :: !records
     done with End_of_file -> ());
     { path; header; artifacts;
-      next_step = 1 + List.fold_left (fun high (entry : entry) ->
-        max high entry.step) 0 !records;
+      next_step = !next_step;
       records_rev = !records; by_id; leaf = !leaf;
       disk_size = size; guard = Mutex.create () })
 
@@ -1488,18 +1478,27 @@ let create_managed ~cwd ~directory =
 (* [until] bounds the copied records at the given journal step, mirroring the
    reference Fork end-index; branch steps ascend, so the bound selects a
    prefix of the source branch. *)
-let fork_entries ?until session =
-  let entries = branch_entries session in
-  match until with
-  | None -> entries
-  | Some bound ->
-      if bound < 1 then invalid "invalid fork bound";
-      List.filter (fun entry -> entry.step <= bound) entries
+let fork_snapshot ?until session =
+  Mutex.protect session.guard (fun () ->
+    let entries = branch_entries_at_unlocked session session.leaf in
+    let copied = match until with
+      | None -> entries
+      | Some bound ->
+          if bound < 1 then invalid "invalid fork bound";
+          let copied = List.filter (fun entry -> entry.step <= bound) entries in
+          if copied = [] then invalid "nothing to fork before that bound";
+          copied in
+    let copied = List.mapi (fun index entry ->
+      { entry with step = index + 1 }) copied in
+    let selected_title = latest_value (List.rev session.records_rev) (function
+      | Title title -> Some (Some title) | _ -> None) None in
+    let selected_title = match selected_title with
+      | Some _ -> selected_title
+      | None -> (match Protocol.member "title" session.header with
+          | `String value when value <> "" -> Some value | _ -> None) in
+    copied, selected_title)
 
-let fork_header ?until session =
-  let copied = fork_entries ?until session in
-  if until <> None && copied = [] then
-    invalid "nothing to fork before that bound";
+let fork_header session copied =
   let cwd = match Protocol.member "cwd" session.header with
     | `String cwd -> cwd | _ -> Unix.getcwd () in
   let parent_session = match Protocol.member "id" session.header with
@@ -1511,14 +1510,12 @@ let fork_header ?until session =
     | _ -> []) copied in
   new_header ~parent_session ~artifact_owners cwd
 
-let fork_content session ?until header =
-  line header ^ String.concat ""
-    (List.map (fun entry -> line (entry_json entry)) (fork_entries ?until session))
-
-let finish_fork session path ?until header =
-  write_new_file path (fork_content session ?until header);
+let finish_fork path header copied selected_title =
+  let content = line header ^ String.concat ""
+      (List.map (fun entry -> line (entry_json entry)) copied) in
+  write_new_file path content;
   let forked = open_file path in
-  (match title session with
+  (match selected_title with
    | Some selected when title forked <> Some selected ->
        set_title forked selected
    | _ -> ());
@@ -1526,14 +1523,16 @@ let finish_fork session path ?until header =
   forked
 
 let fork ?until session path =
-  finish_fork session path ?until (fork_header ?until session)
+  let copied, selected_title = fork_snapshot ?until session in
+  finish_fork path (fork_header session copied) copied selected_title
 
 let fork_managed ?until session directory =
+  let copied, selected_title = fork_snapshot ?until session in
   let rec create () =
-    let header = fork_header ?until session in
+    let header = fork_header session copied in
     let id = match Protocol.member "id" header with
       | `String id -> id | _ -> invalid "session ID missing during fork" in
     let path = Filename.concat directory (id ^ ".jsonl") in
-    try finish_fork session path ?until header with
+    try finish_fork path header copied selected_title with
     | Unix.Unix_error (Unix.EEXIST, _, _) -> create () in
   create ()

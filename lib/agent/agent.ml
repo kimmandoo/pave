@@ -183,7 +183,7 @@ let emit_stage t name ~since ?detail () =
           | Some mask -> Secret_mask.redact mask detail
           | None -> detail in
         if String.length detail <= 512 then detail
-        else String.sub detail 0 512 ^ "…") detail in
+        else String.sub detail 0 (Context_budget.utf8_floor detail 509) ^ "…") detail in
       (try notify { name; elapsed_ms = milliseconds since; detail }
        with _ -> ())
 
@@ -420,10 +420,10 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
         append t reply;
         let cancellation_result =
           "Error: turn cancelled before this tool ran; do not assume it executed" in
-        let abort (call : Protocol.tool_call) result side_effects_may_have_occurred =
+        let abort ?elapsed_ms (call : Protocol.tool_call) result side_effects_may_have_occurred =
           emit_tool_event t (Tool_aborted {
             call_id = call.id; name = call.name; result;
-            side_effects_may_have_occurred; elapsed_ms = None
+            side_effects_may_have_occurred; elapsed_ms
           }) in
         let calls = Array.of_list calls in
         let tool_started_at = Array.make (Array.length calls) 0. in
@@ -528,8 +528,9 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
                     let argument name = match Protocol.member name call.arguments with
                       | `String value -> Some value | _ -> None in
                     let model = match argument "model" with
-                      | None | Some "" -> None
-                      | Some value when String.length value <= 256 &&
+                      | None -> None
+                      | Some value when String.trim value <> "" &&
+                          String.length value <= 256 &&
                           not (String.exists (fun c ->
                             Char.code c < 32 || Char.code c = 127) value) ->
                           Some value
@@ -655,9 +656,10 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
                       `String call.name) t.external_tools in
                   let explicit_prompt = external_tool || Tools.requires_explicit_approval
                     ~name:call.name ~args:call.arguments in
-                  (* A persisted exact-command Allow rule is the recorded user
-                     grant; it exempts the per-command shell prompt. *)
-                  let rule_allows = decision.Approval.policy = Some Approval.Allow in
+                  (* Command grants authorize ordinary shell execution only,
+                     never a session-owned managed process or another effect. *)
+                  let rule_allows = call.name = "run_command" &&
+                    decision.Approval.policy = Some Approval.Allow in
                   let prompt_required = delegate ||
                     (explicit_prompt && not rule_allows) ||
                     (shell && not rule_allows) ||
@@ -681,6 +683,9 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
                       details = [
                         "Label: " ^ Option.value ~default:"(missing)"
                           (match Protocol.member "label" call.arguments with
+                           | `String value -> Some value | _ -> None);
+                        "Model: " ^ Option.value ~default:"inherit"
+                          (match Protocol.member "model" call.arguments with
                            | `String value -> Some value | _ -> None);
                         "Task: " ^ Tools.preview_text
                           (Option.value ~default:"(missing)"
@@ -809,11 +814,11 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
               cancellation_requested := true;
               let result =
                 "Error: command cancelled while running; side effects may have occurred" in
-              abort call result true;
+              abort ?elapsed_ms:(elapsed index) call result true;
               append t (Protocol.tool_result_blocks call.id [Protocol.Text result])
           | Tool_scheduler.Failed Provider.Cancelled ->
               cancellation_requested := true;
-              abort call cancellation_result false;
+              abort ?elapsed_ms:(elapsed index) call cancellation_result false;
               append t (Protocol.tool_result_blocks call.id
                 [Protocol.Text cancellation_result])
           | Tool_scheduler.Failed exn ->

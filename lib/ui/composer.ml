@@ -364,6 +364,8 @@ let insert t value =
         t.boundary_count <- count;
         t.text <- t.text ^ value;
         t.cursor <- String.length t.text;
+        clear_selection t;
+        t.preferred_column <- None;
         if List.exists (fun (_, stop) -> stop > suffix_start) t.pasted then
           normalize_pasted_ranges t)
       else replace t ~start ~stop ~value
@@ -400,12 +402,15 @@ let prepend t value =
   if value = "" then true
   else if String.length t.text + inserted > 16_384 then false
   else (
-    let before = t.cursor in
+    let before = t.cursor and before_selection = selection_snapshot t in
     t.journal.grouping <- false;
     set_at t (value ^ t.text) (before + inserted);
+    t.anchor <- Option.map (fun anchor ->
+      t.boundaries.(at_or_after t.boundaries t.boundary_count (anchor + inserted)))
+      before_selection;
     t.recall <- None;
     t.draft_journal <- None;
-    record t ~start:0 ~removed:"" ~inserted:value ~before;
+    record ~before_selection t ~start:0 ~removed:"" ~inserted:value ~before;
     t.journal.grouping <- false;
     true)
 
@@ -475,12 +480,12 @@ let end_of_line t =
 
 let kill_between t start stop =
   if start <> stop then (
-    let before = t.cursor in
+    let before = t.cursor and before_selection = selection_snapshot t in
     let removed = String.sub t.text start (stop - start) in
     replace t ~start ~stop ~value:"" ~position:start;
     t.kill <- removed;
     t.journal.grouping <- false;
-    record t ~start ~removed ~inserted:"" ~before;
+    record ~before_selection t ~start ~removed ~inserted:"" ~before;
     t.journal.grouping <- false)
 
 let kill_to_end t =

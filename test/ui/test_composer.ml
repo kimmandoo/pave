@@ -266,6 +266,50 @@ let () =
   Pave.Composer.redo editor;
   assert (Pave.Composer.text editor = "Xz");
   Pave.Composer.clear editor;
+  Pave.Composer.select_left editor;
+  Pave.Composer.insert editor "a";
+  assert (Pave.Composer.selection editor = None);
+  Pave.Composer.insert editor "b";
+  assert (Pave.Composer.text editor = "ab");
+  Pave.Composer.select_right editor;
+  Pave.Composer.insert editor "c";
+  assert (Pave.Composer.selection editor = None);
+  Pave.Composer.insert editor "d";
+  assert (Pave.Composer.text editor = "abcd");
+  Pave.Composer.clear editor;
+  Pave.Composer.insert editor "abcdef\nx";
+  Pave.Composer.home editor;
+  for _ = 1 to 5 do Pave.Composer.right editor done;
+  assert (Pave.Composer.vertical ~columns:20 ~measure editor 1);
+  Pave.Composer.insert editor "y";
+  assert (Pave.Composer.vertical ~columns:20 ~measure editor (-1));
+  assert (Pave.Composer.cursor editor = 2);
+
+  Pave.Composer.clear editor;
+  Pave.Composer.insert editor "draft 👩‍💻";
+  Pave.Composer.select_left editor;
+  let selected = Pave.Composer.selection editor in
+  let prefix = "queued\n\n" in
+  assert (Pave.Composer.prepend editor prefix);
+  assert (Pave.Composer.selection editor =
+    Option.map (fun (start, stop) ->
+      start + String.length prefix, stop + String.length prefix) selected);
+  Pave.Composer.undo editor;
+  assert (Pave.Composer.text editor = "draft 👩‍💻");
+  assert (Pave.Composer.selection editor = selected);
+  Pave.Composer.redo editor;
+  assert (Pave.Composer.selection editor =
+    Option.map (fun (start, stop) ->
+      start + String.length prefix, stop + String.length prefix) selected);
+  Pave.Composer.clear editor;
+  Pave.Composer.insert editor "alpha beta";
+  for _ = 1 to 4 do Pave.Composer.select_left editor done;
+  let selected = Pave.Composer.selection editor in
+  Pave.Composer.kill_to_end editor;
+  Pave.Composer.undo editor;
+  assert (Pave.Composer.text editor = "alpha beta");
+  assert (Pave.Composer.selection editor = selected);
+  Pave.Composer.clear editor;
 
   Pave.Composer.insert editor "abc";
   Pave.Composer.home editor;

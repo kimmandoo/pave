@@ -115,8 +115,10 @@ let () =
   let submissions = ref [] in
   let received = ref [] in
   let fail_next = ref false in
+  let current_title = ref title in
   let record submission = received := submission :: !received in
-  let hub = Hub.create ~port:0 ~token ~session_id ~title
+  let hub = Hub.create ~port:0 ~token ~session_id
+      ~read_title:(fun () -> !current_title)
       ~read_entries:(fun () -> !entries)
       ~read_pending:(fun () -> !pending)
       ~submit:(fun submission ->
@@ -157,6 +159,11 @@ let () =
       check (json_member json "title" = `String title) "title";
       check (json_member json "pending" = `Int 2) "pending count";
       pending := 0;
+      current_title := "renamed live session";
+      let status, body = request ~port "/api/session" ~headers:auth in
+      check (status = 200) "renamed session status";
+      check (json_member (Yojson.Basic.from_string body) "title" =
+             `String "renamed live session") "session title must stay live";
 
       (* /api/entries returns injected entries and honors since *)
       let status, body = request ~port "/api/entries" ~headers:auth in
@@ -216,6 +223,27 @@ let () =
       let status, _ = request ~meth:"POST" ~port "/api/prompt"
           ~headers:auth ~body:"not json" in
       check (status = 400) "bad json must be 400";
+      List.iter (fun body ->
+        let status, _ = request ~meth:"POST" ~port "/api/prompt"
+            ~headers:auth ~body in
+        check (status = 400) "invalid or empty prompt JSON must be 400")
+        ["[]"; "null"; {|{"text":3}|}; {|{"text":""}|}; {|{"text":" \n\t"}|}];
+      let before = List.length !received in
+      let framing_body = {|{"text":"framing test"}|} in
+      let framing_length = String.length framing_body in
+      let status, _ = request ~meth:"POST" ~port "/api/prompt"
+          ~headers:(auth @ [
+            "content-length", string_of_int framing_length;
+            "Content-Length", string_of_int (framing_length + 10)])
+          ~body:framing_body in
+      check (status = 400) "conflicting content-length headers must be 400";
+      let status, _ = request ~port "/api/session" ~headers:(auth @ auth) in
+      check (status = 400) "duplicate CSRF headers must not authenticate";
+      let status, _ = request ~meth:"POST" ~port "/api/prompt"
+          ~headers:(auth @ ["content-length", Printf.sprintf "0x%x" framing_length])
+          ~body:framing_body in
+      check (status = 400) "hexadecimal HTTP content-length must be rejected";
+      check (List.length !received = before) "malformed framing must never submit";
       let status, _ = request ~meth:"POST" ~port "/api/entries"
           ~headers:auth ~body:"{}" in
       check (status = 405) "POST /api/entries must be 405";
@@ -272,5 +300,25 @@ let () =
           false
         with Unix.Unix_error _ -> true) in
   check refused "connection accepted after close";
+
+  (* A slow drip has activity within the idle timeout but must not hold a
+     connection past the absolute request deadline. *)
+  let drip_hub = Hub.create ~port:0 ~token ~session_id ~read_title:(fun () -> title)
+      ~read_entries:(fun () -> []) ~read_pending:(fun () -> 0)
+      ~submit:(fun _ -> Ok ()) () in
+  let fd = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
+  Fun.protect ~finally:(fun () -> Unix.close fd; Hub.close drip_hub) (fun () ->
+    Unix.connect fd (Unix.ADDR_INET (Unix.inet_addr_loopback, Hub.port drip_hub));
+    write_all fd (Bytes.of_string "GET /healthz HTTP/1.1\r\nx-drip: ");
+    let deadline = Unix.gettimeofday () +. Hub.request_deadline +. 1. in
+    let rec drip () =
+      let readable, _, _ = Unix.select [fd] [] [] 0.25 in
+      if readable <> [] then ()
+      else if Unix.gettimeofday () >= deadline then
+        fail "slow drip survived the absolute request deadline"
+      else (write_all fd (Bytes.of_string "a"); drip ()) in
+    drip ();
+    let response = read_all fd in
+    check (contains response "408") "slow drip must receive request timeout");
 
   print_endline "test_session_hub: ok"

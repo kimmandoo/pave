@@ -51,6 +51,27 @@ let () =
     [ `Key (`Arrow `Up, []); `Key (`ASCII 'C', [ `Ctrl ]) ] (drain d);
   feed d "\027x";
   check "Alt ASCII delivered" [ `Key (`ASCII 'x', [ `Meta ]) ] (drain d);
+  let d = Terminal_input.create_decoder () in
+  feed d "\027\xe3";
+  Terminal_input.flush_ascii d;
+  check "Alt UTF-8 prefix waits for its complete scalar" [] (drain d);
+  feed d "\x85";
+  Terminal_input.flush_ascii d;
+  check "Alt UTF-8 remains pending across terminal reads" [] (drain d);
+  feed d "\x90";
+  check "Alt Korean shortcut retains Meta rather than cancelling a modal"
+    [ `Key (`Uchar (Uchar.of_int 0x3150), [ `Meta ]) ] (drain d);
+  feed d "\027\xc3\xa9";
+  check "Alt non-Korean Unicode retains its modifier"
+    [ `Key (`Uchar (Uchar.of_int 0xe9), [ `Meta ]) ] (drain d);
+
+  let d = Terminal_input.create_decoder () in
+  feed d "\xe2\x82";
+  Terminal_input.finish_decoder d;
+  check "truncated UTF-8 at EOF is replaced"
+    [ unicode 0xfffd ] (drain d);
+
+  let d = Terminal_input.create_decoder () in
 
   feed d "\027\r\027\n";
   check "Alt+Enter control forms are preserved"

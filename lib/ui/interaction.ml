@@ -141,7 +141,7 @@ let commands = [
   command ~session_only:true "/loop" (Optional_text "GOAL") "Run a bounded review-only planning loop" A_loop;
   command ~session_only:true "/autoresearch" (Optional_text "QUESTION") "Run bounded read-only research" A_autoresearch;
   command ~session_only:true "/rule" (Optional_text "TEXT|clear") "Show, set, or clear a session interruption rule" A_rule;
-  command ~session_only:true "/publish" (Optional_text "[PORT [NAME]]|attach|stop NAME|list") "Expose a loopback port or this session's hub through a tunnel (portal, cloudflared, or ssh)" A_publish;
+  command ~session_only:true "/publish" (Optional_text "[PORT [NAME] [relay=HTTPS_ORIGIN]]|attach [NAME] [relay=HTTPS_ORIGIN]|stop NAME|list") "Publish an existing localhost web server through gosuda Portal (automatic or chosen prefix)" A_publish;
   command ~session_only:true "/hub" (Optional_text "start [PORT]|stop|status") "Expose this session on a loopback remote-control endpoint" A_hub;
   command "/memory" (Optional_text "list|get NAME|forget NAME|add NAME TEXT") "Inspect or update the project memory store (.pave/memory)" A_memory;
   command "/help" No_arguments "Show commands and keys" A_help;
@@ -191,12 +191,12 @@ let help ?(session = true) ?(interactive = true) ?(subagents = false)
   List.iter (fun item ->
     if item.group <> !last_group then (
       last_group := item.group;
-      lines := !lines @ [item.group ^ ":"]);
+      lines := (item.group ^ ":") :: !lines);
     let usage = usage item in
-    lines := !lines @ ["  " ^ item.name ^
-      (if usage = "" then "" else " " ^ usage) ^ " · " ^ item.summary])
+    lines := ("  " ^ item.name ^
+      (if usage = "" then "" else " " ^ usage) ^ " · " ^ item.summary) :: !lines)
     items;
-  !lines
+  List.rev !lines
 
 
 let is_whitespace_or_control char =
@@ -374,37 +374,34 @@ let parse ?(session = true) ?(interactive = true) ?(subagents = false)
         | A_retry, No_argument -> Retry
         | A_branch, Required_argument id -> Branch id
         | A_fork, Optional_argument text ->
-            (* until=STEP is a token; the remaining text is the path verbatim
-               so spaced journal paths keep working. *)
-            let parts text =
-              let length = String.length text in
-              let rec scan index =
-                if index >= length then []
-                else if is_whitespace_or_control text.[index] then
-                  scan (index + 1)
-                else
-                  let last = ref index in
-                  while !last + 1 < length &&
-                    not (is_whitespace_or_control text.[!last + 1]) do
-                    incr last
-                  done;
-                  String.sub text index (!last - index + 1) :: scan (!last + 1)
-              in scan 0 in
+            (* Remove only the option token, never reconstruct the path from
+               words: whitespace inside a filename is significant. *)
             let path, until = match text with
               | None -> None, None
               | Some text ->
-                  List.fold_left (fun (path, until) part ->
-                    if String.starts_with ~prefix:"until=" part then
-                      (match int_of_string_opt
-                         (String.sub part 6 (String.length part - 6)) with
-                       | Some step when step > 0 -> path, Some step
-                       | _ -> invalid_arg "until= expects a positive step number")
-                    else
-                      let path = match path with
-                        | None -> part
-                        | Some path -> path ^ " " ^ part in
-                      Some path, until)
-                    (None, None) (parts text) in
+                  let text = require_path "/fork" text in
+                  let length = String.length text in
+                  let rec tokens index found =
+                    if index >= length then found
+                    else if text.[index] = ' ' then tokens (index + 1) found
+                    else (
+                      let stop = ref index in
+                      while !stop < length && text.[!stop] <> ' ' do incr stop done;
+                      let part = String.sub text index (!stop - index) in
+                      let found = if String.starts_with ~prefix:"until=" part then (
+                        if found <> None then invalid_arg "/fork accepts only one until=STEP";
+                        match int_of_string_opt (String.sub part 6 (String.length part - 6)) with
+                        | Some step when step > 0 -> Some (index, !stop, step)
+                        | _ -> invalid_arg "until= expects a positive step number")
+                      else found in
+                      tokens !stop found) in
+                  (match tokens 0 None with
+                   | None -> Some text, None
+                   | Some (first, last, step) ->
+                       let before = String.trim (String.sub text 0 first) in
+                       let after = String.sub text last (length - last) in
+                       let path = String.trim (before ^ after) in
+                       (if path = "" then None else Some path), Some step) in
             let path = match path with
               | None -> None
               | Some path -> Some (require_path "/fork" path) in

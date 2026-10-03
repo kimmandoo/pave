@@ -148,7 +148,6 @@ let feed t bytes =
     t.failed <- true;
     raise error
 
-let events t = match t.parser with Some parser -> Sse.events parser | None -> 0
 let is_done t = t.finished && not t.failed && t.usage <> None
 let is_finished t = t.finished && not t.failed
 

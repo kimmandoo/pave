@@ -178,7 +178,7 @@ let queue_management_cases () =
 let remote_submission_case () =
   let module Runner = Pave.Turn_runner in
   let events = ref [] and cancelled = ref 0 in
-  let recorded = ref [] and finished = ref 0 in
+  let finished = ref 0 in
   let release_first = Atomic.make false in
   let owner = Thread.self () in
   let run ~cancel (submission : Runner.submission) =
@@ -198,9 +198,7 @@ let remote_submission_case () =
       | Runner.Turn_failed { error; _ } -> raise error
       | _ -> failwith "unexpected remote event")
     ~on_approve:(fun _ -> false)
-    ~on_queued:(fun _ -> ())
-    ~on_record:(fun (submission : Runner.submission) ->
-      recorded := submission.prompt :: !recorded) () in
+    ~on_queued:(fun _ -> ()) () in
   Fun.protect ~finally:(fun () -> Runner.close runner) (fun () ->
     let pump () =
       let readable, _, _ = Unix.select [Runner.fd runner] [] [] 3. in
@@ -222,8 +220,7 @@ let remote_submission_case () =
     Thread.join submitter;
     wait_finished 1;
     assert (List.rev !events = ["started:remote-first"; "completed"]);
-    assert (List.rev !recorded = ["remote-first"]);
-    events := []; recorded := [];
+    events := [];
     (* Remote submit while busy queues; remote cancel cancels the active turn. *)
     Runner.submit runner "first";
     drain_notice ();
@@ -231,6 +228,8 @@ let remote_submission_case () =
     let submitter = Thread.create (fun () ->
       Runner.submit runner "remote-second") () in
     Thread.join submitter;
+    assert (Runner.queued_count runner = 1);
+    Runner.drain runner;
     let deadline = Unix.gettimeofday () +. 3. in
     while Runner.queued_count runner = 0 do
       assert (Unix.gettimeofday () < deadline);
@@ -242,13 +241,147 @@ let remote_submission_case () =
     (* Cancel cancels the running turn; the queued submission then starts and
        finishes, so two more turns complete. *)
     wait_finished 3;
-    assert (List.mem "started:remote-second" !events);
-    assert (List.rev !recorded = ["first"; "remote-second"]))
+    assert (List.mem "started:remote-second" !events))
+
+let remote_cancel_boundary_case () =
+  let module Runner = Pave.Turn_runner in
+  let next_ready = Atomic.make false and release_next = Atomic.make false in
+  let next_cancel = ref (fun () -> false) and cancelled = ref 0 in
+  let runner = Runner.create
+    ~run:(fun ~cancel (submission : Runner.submission) ->
+      if submission.prompt = "next" then (
+        next_cancel := cancel;
+        Atomic.set next_ready true;
+        while not (Atomic.get release_next) && not (cancel ()) do
+          Thread.delay 0.001
+        done))
+    ~on_event:(function
+      | Runner.Turn_cancelled _ -> incr cancelled
+      | Runner.Turn_failed { error; _ } -> raise error
+      | _ -> ())
+    ~on_approve:(fun _ -> false) ~on_queued:(fun _ -> ()) () in
+  Fun.protect ~finally:(fun () ->
+    Atomic.set release_next true; Runner.close runner) (fun () ->
+    Runner.submit runner "source";
+    Runner.submit runner "next";
+    (* Only Finished can wake this pipe: the completion is already enqueued,
+       but the owner has not consumed it or started the next turn. *)
+    let ready, _, _ = Unix.select [Runner.fd runner] [] [] 3. in
+    assert (ready <> []);
+    let canceller = Thread.create (fun () -> Runner.cancel runner) () in
+    Thread.join canceller;
+    Runner.drain runner;
+    let deadline = Unix.gettimeofday () +. 3. in
+    while not (Atomic.get next_ready) do
+      assert (Unix.gettimeofday () < deadline);
+      Thread.delay 0.001
+    done;
+    assert (not ((!next_cancel) ()));
+    Atomic.set release_next true;
+    while Runner.busy runner do
+      let ready, _, _ = Unix.select [Runner.fd runner] [] [] 3. in
+      assert (ready <> []); Runner.drain runner
+    done;
+    assert (!cancelled = 0 && Runner.queued_count runner = 0))
+
+let approval_stop_cases () =
+  let module Runner = Pave.Turn_runner in
+  List.iter (fun tool ->
+    let runner_ref = ref None and denied = Atomic.make false in
+    let run ~cancel:_ (_ : Runner.submission) =
+      let runner = Option.get !runner_ref in
+      let approved = if tool then Runner.approve_tool runner {
+        Pave.Approval.tool_name = "write_file"; tier = Pave.Approval.Write;
+        trigger = Pave.Approval.File_access; impact = "Writes a file";
+        details = ["Path: denied.txt"]; reason = None }
+      else Runner.approve runner "touch denied.txt" in
+      Atomic.set denied (not approved) in
+    let runner = Runner.create ~run
+      ~on_event:(function
+        | Runner.Transcript_message _ ->
+            failwith "terminal interruption became an ordinary transcript error"
+        | _ -> ())
+      ~on_approve:(fun _ -> raise (Runner.Stop Exit))
+      ~on_approve_tool:(fun _ -> raise (Runner.Stop Exit))
+      ~on_queued:(fun _ -> ()) () in
+    runner_ref := Some runner;
+    Fun.protect ~finally:(fun () -> Runner.close runner) (fun () ->
+      Runner.submit runner "approval";
+      let ready, _, _ = Unix.select [Runner.fd runner] [] [] 3. in
+      assert (ready <> []);
+      (match Runner.drain runner with
+       | exception Exit -> ()
+       | _ -> failwith "terminal interruption did not escape approval");
+      let deadline = Unix.gettimeofday () +. 3. in
+      while not (Atomic.get denied) do
+        assert (Unix.gettimeofday () < deadline);
+        Thread.delay 0.001
+      done)) [false; true]
+
+let non_prompt_work_case () =
+  let module Runner = Pave.Turn_runner in
+  let events = ref [] and owner = Thread.self () in
+  let ready = Atomic.make false in
+  let runner = Runner.create
+    ~run:(fun ~cancel:_ (_ : Runner.submission) -> ())
+    ~on_event:(fun event ->
+      assert (Thread.self () = owner);
+      match event with
+      | Runner.Turn_started { submission; _ } ->
+          events := ("prompt:" ^ submission.prompt) :: !events
+      | Runner.Turn_cancelled _ -> events := "cancelled" :: !events
+      | Runner.Turn_completed _ -> events := "completed" :: !events
+      | Runner.Transcript_message { text; _ } -> events := text :: !events
+      | Runner.Turn_failed { error; _ } -> raise error
+      | _ -> ())
+    ~on_approve:(fun _ -> false) ~on_queued:(fun _ -> ()) () in
+  let pump_idle () =
+    while Runner.busy runner do
+      let ready, _, _ = Unix.select [Runner.fd runner] [] [] 3. in
+      assert (ready <> []); Runner.drain runner
+    done in
+  Fun.protect ~finally:(fun () -> Runner.close runner) (fun () ->
+    Runner.start_work runner ~run:(fun ~cancel ->
+      Atomic.set ready true;
+      while not (cancel ()) do Thread.delay 0.001 done;
+      raise Pave.Provider.Cancelled) ();
+    (match Runner.start_work runner ~run:(fun ~cancel:_ -> ()) () with
+     | exception Invalid_argument _ -> ()
+     | _ -> failwith "busy runner accepted overlapping work");
+    Runner.submit runner "queued";
+    Runner.cancel runner;
+    pump_idle ();
+    assert (List.rev !events = ["cancelled"; "prompt:queued"; "completed"]);
+    events := [];
+    Runner.start_work runner ~run:(fun ~cancel:_ ->
+      Runner.message runner "published") ();
+    pump_idle ();
+    assert (List.rev !events = ["published"; "completed"]);
+    events := [];
+    Atomic.set ready false;
+    Runner.start_work runner ~run:(fun ~cancel ->
+      Atomic.set ready true;
+      while not (cancel ()) do Thread.delay 0.001 done;
+      raise Pave.Provider.Cancelled) ();
+    let deadline = Unix.gettimeofday () +. 3. in
+    while not (Atomic.get ready) do
+      assert (Unix.gettimeofday () < deadline); Thread.delay 0.001
+    done;
+    Runner.submit runner "must-not-start";
+    Runner.close runner;
+    assert (List.rev !events = ["cancelled"]);
+    assert (Runner.queued_count runner = 0);
+    (match Runner.start_work runner ~run:(fun ~cancel:_ -> ()) () with
+     | exception Invalid_argument _ -> ()
+     | _ -> failwith "closed runner accepted work"))
 
 let () =
   shutdown_cases ();
   queue_management_cases ();
   remote_submission_case ();
+  remote_cancel_boundary_case ();
+  approval_stop_cases ();
+  non_prompt_work_case ();
   let events = ref [] in
   let event value = events := value :: !events in
   let release_late_events = Atomic.make false in

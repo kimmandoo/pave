@@ -1,5 +1,75 @@
 # Troubleshooting
 
+### [2026-10-03] concurrent parent/child requests closed each other's reused curl descriptors
+
+- **Context / Symptom:** An actual `task.model=light` child completed, but the continuing parent turn failed with `Unix.Unix_error(Unix.EBADF, "select", "")`. Deterministic ownership regressions failed with EBADF on read in shared curl and on fstat in Devin's independent binary executor and Apple's helper.
+- **Root Cause:** These executors closed request stdin/stdout after normal I/O, then closed the same integer descriptors again in finally. Another thread or callback could allocate those released numbers before final cleanup, so cleanup closed an unrelated live resource.
+- **Solution:** Tracked each request pipe's open ownership and released it at most once on normal return, error and cancellation in all three executors. Preserved request errors, no-replay policy, response validation and cancellation/reaping; no EBADF suppression or serialization workaround was added.
+- **Prevention / Reference:** Permanent regressions allocated caller-owned files after request-input EOF and required those descriptors to remain usable after cleanup. The actual parent/child CLI smoke exercised configured tiers, an explicit selector and inherit with separate endpoints and credentials.
+
+### [2026-10-03] remote prompts bypassed the active credential mask in TUI transcript echoes
+
+- **Context / Symptom:** An actual authenticated hub submission containing the active fixture API key produced masked recording/journal data but displayed the raw key in the TUI user transcript under `--mask-secrets`.
+- **Root Cause:** The runner's owner-thread Turn_started consumer echoed raw display_prompt before the worker resolved the provider and active mask; recording had already moved to the correct later boundary.
+- **Solution:** Kept immediate owner-thread activity, then queued a typed User_prompt from the credential-ready worker with masked display text. Only the UI consumer appended the submitted transcript row. Removed the obsolete raw on_record runner hook and its duplicate callback-copy assertions.
+- **Prevention / Reference:** Real hub → runner → TUI smoke asserted the active key was absent from the entire captured terminal output and recording, then exercised remote cancellation and public `/publish attach` CSRF enforcement. Local draft text remains visibly editable; it is not a secret-entry widget.
+
+### [2026-10-03] PTY verification stopped draining output during signal cleanup
+
+- **Context / Symptom:** A throwaway colored TUI SIGTERM smoke raised Python subprocess.TimeoutExpired while waiting for exit during an approval, although the same path exited with status 143 when terminal output was consumed.
+- **Root Cause:** The driver used blocking wait without draining the PTY; the final full-screen repaint filled the PTY output buffer. Independent per-read UTF-8 decoding also produced spurious replacement characters at chunk boundaries.
+- **Solution:** Drained the PTY while awaiting process exit and decoded terminal bytes incrementally. The program denied the pending effect, restored significant terminal modes and exited; no product timeout suppression or terminal workaround was added.
+- **Prevention / Reference:** Darwin PENDIN is a kernel-managed pending-reprint bit; normalize only that bit for restoration checks and compare every other terminal field unchanged. Always consume output during PTY teardown.
+
+### [2026-10-03] native smoke linking selected a virtual Digestif package
+
+- **Context / Symptom:** The standalone real Portal smoke failed native linking with `No implementation provided ... Digestif` despite the main Dune build working.
+- **Root Cause:** The installed root digestif findlib package was virtual; its META selected a concrete backend only through a backend package, whereas the scratch command requested the generic package directly.
+- **Solution:** Linked the throwaway executable with `ocamlfind ... -package digestif.c` and the built Pave library. No repository dependency or provider implementation changed.
+- **Prevention / Reference:** Inspect the installed META before reproducing Dune linkage manually; use its selected concrete backend rather than assuming the root package has a native archive.
+
+### [2026-10-03] gosuda Portal publishing used the wrong backend and identity lifecycle
+
+- **Context / Symptom:** `publish_web` silently selected Cloudflare/SSH instead of gosuda Portal, accepted invalid prefixes and could report a ready-looking URL with no listening local server. Actual Portal identity reuse could override a later `--name`.
+- **Root Cause:** The implementation treated unrelated tunnel products as interchangeable, omitted Portal's persistent `--identity-path`, and inferred readiness from URL text rather than the service-ready record and owned process state.
+- **Solution:** Required [gosuda portal-tunnel](https://github.com/gosuda/portal-tunnel), preflighted the existing loopback service, validated/generated DNS prefixes, stored a private identity per prefix, rejected mismatched saved names, used `--relays ORIGIN --discovery=false` only for an explicit pin, and waited for a complete matching readiness record. Cancellation/failure terminated the owned group; stopped names remained reusable.
+- **Prevention / Reference:** Real v2.6.0 CLI and public relay GETs exercised automatic and chosen prefixes, stop and identity-preserving republish. Model publication, attachment and stop each required separate consent, including yolo mode; no fallback or implicit installation remained.
+
+### [2026-10-03] completion replay and partial/native response handling violated the provider contract
+
+- **Context / Symptom:** A real HTTP 429 fixture received three completion requests; an unterminated SSE event emitted fabricated partial stdout before failing. Signed transcript repair, custom Anthropic replay and model-specific thinking/cache controls also disagreed with their wire contracts.
+- **Root Cause:** Generic transient retry policy replayed potentially accepted/billed completions; EOF promoted incomplete framing; generic transcript normalization modified signed native IDs, and provider-specific controls were generalized beyond supported models/routes.
+- **Solution:** Sent completion requests once, preserved transport causes, required complete SSE framing and consistent terminals, kept signed native state verbatim or rejected it, scoped replay by provider/route/model and custom endpoint digest, and used documented native thinking/cache controls. Missing Bedrock counts stayed unknown and absent AWS region failed closed.
+- **Prevention / Reference:** Compared the old and repaired actual CLI over loopback HTTP; retained behavioral transport, replay, framing and boundary regressions. The earlier fixture-only retry-delay workaround below was superseded, not retained as product behavior.
+
+### [2026-10-03] quoted command approvals could not become effective permanent grants
+
+- **Context / Symptom:** Reviewing `printf '%s' 'approved with spaces'` with Always did not reliably produce a matching later grant; a direct lexer probe returned no command segments for quoted or escaped commands.
+- **Root Cause:** Opening quote/backslash branches changed lexer state but did not continue scanning. Normalization also erased significant literal quoting/spacing, and some consumers offered persistence for masked or compound previews.
+- **Solution:** Continued lexing after quotes/escapes, preserved normalized literal command spelling, and applied the same single-segment unmasked run_command eligibility to TUI, line prompts and persistence. Ordinary per-tool grants and managed-shell grants could not waive explicit shell consent.
+- **Prevention / Reference:** Actual colored and NO_COLOR TUI reviews executed the quoted command, persisted its exact rule and ran it again without a second prompt; compound/quoted-operator and denial regressions covered the boundaries.
+
+### [2026-10-03] journal, hub, recording and memory consumers lost typed boundaries
+
+- **Context / Symptom:** Managed forks ignored `until`, branch copies retained sparse steps, hub polling missed off-branch entries or stale titles, partial HTTP reads could outlive the connection deadline, and `--record --mask-secrets` leaked the active fixture key. Ephemeral JSONL omitted step telemetry and memory names/context could be lost or elevated into system instructions.
+- **Root Cause:** Consumers used selected ancestry instead of append-only cursors, blocking I/O before deadline checks, raw runner admission hooks before mask resolution, separate writer/player bounds, and an unbudgeted memory summary index in the system role.
+- **Solution:** Forked one bounded snapshot with dense copied physical steps and legacy sparse-step read compatibility; synchronized journal metadata; enforced nonblocking absolute hub read/write deadlines and unambiguous framing; recorded after provider/mask resolution with fail-closed recorder I/O; emitted ephemeral stage events; kept a complete bounded memory-name index in escaped untrusted user task context with serialized private-file quotas.
+- **Prevention / Reference:** Retained actual TCP, concurrency, fork/reopen, recording/playback, role-boundary and quota regressions. CLI runtime smoke covered masked recording/replay, measured JSONL steps and cancellation deadline reporting.
+
+### [2026-10-03] successful restored tool cards and live transcript formatting were misclassified
+
+- **Context / Symptom:** A successful read whose file began `Error:` became a failed card after `/resume`; live diff text, nested fences, empty code lines, table pipes and late tool results could render differently from settled output. Narrow/resize geometry could expose hidden focus or lose the visible expansion anchor.
+- **Root Cause:** Replay guessed status from text despite typed lifecycle metadata, live and committed paths classified content differently, and logical row positions were used across wrapped resize/expansion.
+- **Solution:** Passed call-ID lifecycle outcomes into history restoration, shared diff/fence classification, preserved literal fenced/table text and blank lines, kept late results contiguous with the original card, and mapped wrapped-byte anchors through resize while deriving focus and consent from actual geometry. Kitty emitted native packets only for PNG.
+- **Prevention / Reference:** Real colored and NO_COLOR PTYs exercised resume, live/settled output, pickers, bracketed paste, 3-row viewports, locked/fitting approval and queue/cancel behavior; terminal-image protocol regressions covered supported/unsupported MIME boundaries.
+
+### [2026-10-03] approved Portal publication succeeded but rewind tracking failed
+
+- **Context / Symptom:** Real public Portal publication printed `Action started, but rewind tracking failed` with `unsupported non-reversible workspace effect`.
+- **Root Cause:** The tool producer emitted non-reversible effects for publish_web and mobile execution/inventory, but the rewind consumer's closed name set omitted publish_web, xcode_preflight, mobile_check and android_devices.
+- **Solution:** Registered those actual effects as non-reversible rather than suppressing the warning or inventing reversible snapshots.
+- **Prevention / Reference:** Persistence/reopen/rewind rejection regressions covered all four effect names; a second real model → approval → Portal → public localhost GET run completed without the tracking warning.
+
 ### [2026-10-03] `dup3`/`pipe2` weak symbols crash OCaml processes built against the macOS 27 SDK
 
 - **Context / Symptom:** After rebuilding the local `_opam` switch on macOS 25.x with Xcode's MacOSX 27 SDK, every test that spawned a managed process failed with `Pave.Workspace_process.Error("process launcher exited before establishing a session")`. A minimal `Unix.fork ()` + `Unix.dup2` child died with `SIGBUS` (wait status `sig 10`); `Unix.pipe ~cloexec:true` showed the same.

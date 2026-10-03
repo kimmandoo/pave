@@ -837,6 +837,21 @@ let () =
    | _ -> failwith "unknown credential_process policy was accepted");
   test_aws_credential_sources ();
   test_converse_stream_decoder ();
+  List.iter (fun frames ->
+    expect_invalid (fun () ->
+      let stream = Wire.create_converse_stream () in
+      List.iter (fun frame -> ignore (Wire.feed_converse_stream stream frame)) frames;
+      Wire.finish_converse_stream stream)) [
+    [bedrock_event "messageStart" (`Assoc ["role", `String "assistant"]);
+     bedrock_event "contentBlockDelta" (`Assoc ["contentBlockIndex", `Int 0;
+       "delta", `Assoc ["reasoningContent", `Assoc ["text", `String "signed thought"]]]);
+     bedrock_event "messageStop" (`Assoc ["stopReason", `String "end_turn"])];
+    [bedrock_event "messageStart" (`Assoc ["role", `String "assistant"]);
+     event_tool_start 0 "call" "lookup"; event_tool_delta 0 "{}"; event_block_stop 0;
+     bedrock_event "messageStop" (`Assoc ["stopReason", `String "end_turn"])];
+    [bedrock_event "messageStart" (`Assoc ["role", `String "assistant"]);
+     bedrock_event "messageStop" (`Assoc ["stopReason", `String "tool_use"])]
+  ];
   fixture ();
   converse_stream_fixture ();
   print_endline "bedrock converse wire: ok"

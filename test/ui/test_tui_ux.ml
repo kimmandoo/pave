@@ -12,6 +12,50 @@ let delta turn_id text =
   Tui.Agent_event (Pave.Turn_runner.Text_delta { turn_id; text })
 
 let () =
+  let reflow = Transcript_view.create () in
+  let paragraph = "abcdefghijklmnopqrstuvwx" in
+  Transcript_view.assistant reflow paragraph;
+  let before = Transcript_view.snapshot reflow ~columns:6 ~measure:Tui.measure_text in
+  let entry = Option.get (Array.find_opt (fun (entry : Transcript_view.entry) ->
+    entry.row.text = paragraph) before.entries) in
+  let after = Transcript_view.snapshot reflow ~columns:4 ~measure:Tui.measure_text in
+  let next = Option.get (Array.find_opt (fun (next : Transcript_view.entry) ->
+    next.source = entry.source) after.entries) in
+  expect "resize retains the visible position inside a wrapped transcript row"
+    (Tui.reflow_anchor before after (entry.start + 2) = Some (next.start + 3));
+  let bidi_draft = Pave.Composer.create () in
+  Pave.Composer.insert bidi_draft "a\226\128\174b";
+  let bidi_lines = Pave.Composer.layout ~columns:16 ~measure:Tui.measure_text
+    bidi_draft in
+  expect "composer caret measures the sanitized cells shown on screen"
+    (Pave.Composer.position ~measure:Tui.measure_text bidi_draft bidi_lines = (0, 3));
+  List.iter (fun rows -> List.iter (fun activity ->
+    List.iter (fun attachments -> List.iter (fun lines ->
+      let media, editor, body = Tui.editor_geometry ~rows ~activity
+        ~attachments ~modal:false ~lines in
+      expect "editor and activity remain within every supported small viewport"
+        (editor >= 1 && editor <= 4 && media >= 0 && body >= 0 &&
+         (rows < 6 || media + editor + body + activity + 4 = rows));
+      expect "compact terminals retain their single editable row"
+        (rows >= 6 || editor = 1 && media = 0))
+      [1; 2; 5]) [0; 1; 8]) [0; 1]) [3; 6; 8; 12];
+  expect "busy seven-row layout cannot focus a hidden hint list"
+    (Tui.editor_geometry ~rows:7 ~activity:1 ~attachments:0 ~modal:false
+       ~lines:1 = (0, 1, 1));
+  expect "media consumes hint space rather than granting invisible hint focus"
+    (Tui.editor_geometry ~rows:12 ~activity:0 ~attachments:8 ~modal:false
+       ~lines:1 = (6, 1, 1));
+  List.iter (fun width ->
+    let first = Tui.compact_model_label ~width ~provider:"openai" ~name:"same-model"
+    and second = Tui.compact_model_label ~width ~provider:"ollama" ~name:"same-model" in
+    expect "compact model identity still distinguishes its provider"
+      (first <> second && contains first "openai" && contains second "ollama" &&
+       Tui.measure_text first <= width && Tui.measure_text second <= width))
+    [16; 22; 34];
+  expect "a compound shell command cannot offer an ineffective permanent grant"
+    (not (Tui.persistent_command_grant "echo first && echo second") &&
+     not (Tui.persistent_command_grant "echo first | cat") &&
+     Tui.persistent_command_grant "printf '%s' 'a && b'");
   let mouse_event button =
     (`Mouse (`Press (`Scroll button), (0, 0), []) : Notty.Unescape.event) in
   expect "mouse-wheel up scrolls toward earlier transcript rows"
@@ -183,6 +227,34 @@ let () =
              (Transcript_view.layout screen.transcript ~columns:80
                ~measure:(fun text -> Notty.I.width
                  (Notty.I.string Notty.A.empty text))));
+         let failed = { call with id = "failed-read";
+           arguments = `Assoc ["path", `String "docs/unavailable.md"] } in
+         let assistant = { assistant with tool_calls = [call; failed] } in
+         Tui.show_history ~tool_outcomes:[call.id, false; failed.id, true] screen
+           [assistant; Pave.Protocol.tool_result call.id "Error: ordinary file content";
+            Pave.Protocol.tool_result failed.id "Permission refused"];
+         let restored = Transcript_view.layout screen.transcript ~columns:80
+           ~measure:Tui.measure_text in
+         expect "typed successful read replay does not infer failure from Error prefix"
+           (Array.exists (fun (row : Transcript_view.visual) ->
+             row.row.kind = Transcript_view.Tool &&
+             row.row.style = Transcript_view.Tool_summary) restored);
+         expect "typed failed read replay retains its failure without a text prefix"
+           (Array.exists (fun (row : Transcript_view.visual) ->
+             row.row.kind = Transcript_view.Error &&
+             contains row.text "Permission refused") restored);
+         let content = String.concat "\n"
+           (List.init 40 (fun index -> Printf.sprintf "Error: ordinary line %d" index)) in
+         Tui.show_history ~tool_outcomes:[call.id, false] screen
+           [{ assistant with tool_calls = [call] }; Pave.Protocol.tool_result call.id content];
+         screen.scroll <- max_int;
+         Tui.paint screen;
+         Tui.toggle_tool_detail screen;
+         expect "read detail expansion keeps the compact summary in view"
+           (let _, _, layout = Option.get screen.layout_cache in
+            let first = max 0 (layout.total - Tui.view_height screen - screen.scroll) in
+            let row = Transcript_view.visual_at layout first in
+            row.row.style = Transcript_view.Tool_summary);
          Thread.delay 0.8)
    | _ -> ());
   print_endline "TUI attachment, stream and diff rendering: ok"

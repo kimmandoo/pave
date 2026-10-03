@@ -116,7 +116,7 @@ let parse ?(allow_custom = false) text =
   check_unique_fields "setting" fields;
   let allowed = ["default_provider"; "default_model"; "default_api";
     "default_account_id"; "disable_shell"; "max_turns"; "tools";
-    "custom_providers"; "model_tiers"] in
+    "custom_providers"; "modelTiers"] in
   List.iter (fun (name, _) ->
     if not (List.mem name allowed) then
       invalid_arg ("unknown setting " ^ name);
@@ -151,23 +151,27 @@ let parse ?(allow_custom = false) text =
   (match Provider_catalog.create_registry custom_providers with
    | Ok _ -> ()
    | Error message -> invalid_arg message);
-  let model_tiers = match member "model_tiers" fields with
+  let model_tiers = match member "modelTiers" fields with
     | None -> []
     | Some (`Assoc tiers) ->
         check_unique_fields "model tier" tiers;
         if List.length tiers > 8 then
-          invalid_arg "model_tiers allows at most 8 entries";
+          invalid_arg "modelTiers allows at most 8 entries";
         List.map (fun (tier, selector) ->
-          if not (List.mem tier ["light"; "heavy"; "fastapply"]) then
-            invalid_arg "model_tiers keys must be light, heavy, or fastapply";
+          if tier = "inherit" || tier = "" || String.length tier > 48 ||
+             not (String.for_all (function
+               | 'a'..'z' | 'A'..'Z' | '0'..'9' | '_' | '-' -> true
+               | _ -> false) tier) then
+            invalid_arg "modelTiers keys must be bounded names other than inherit";
           match selector with
           | `String value when String.trim value <> "" &&
               String.length value <= 256 &&
-              not (String.exists (fun c -> Char.code c < 32) value) ->
+              not (String.exists (fun c ->
+                Char.code c < 32 || Char.code c = 127) value) ->
               tier, value
           | _ -> invalid_arg "model tier values must be nonempty selectors")
           tiers
-    | Some _ -> invalid_arg "model_tiers must be an object" in
+    | Some _ -> invalid_arg "modelTiers must be an object" in
   { default_provider; default_model; default_api; default_account_id;
     custom_providers; disable_shell;
     max_turns = positive_field "max_turns" fields;
@@ -317,7 +321,7 @@ let update_file ?(require_owner = false) ?(allow_custom = false) ~directory chan
           else ["custom_providers", `List
             (List.map Custom_provider.to_json updated.custom_providers)])
         @ (if updated.model_tiers = [] then []
-          else ["model_tiers", `Assoc
+          else ["modelTiers", `Assoc
             (List.map (fun (tier, selector) -> tier, `String selector)
               updated.model_tiers)]) in
       let text = Yojson.Basic.to_string (`Assoc fields) ^ "\n" in

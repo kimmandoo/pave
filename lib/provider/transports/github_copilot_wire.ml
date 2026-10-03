@@ -36,6 +36,9 @@ let headers ~endpoint:target ~model ~token ~messages =
   @ if List.exists (fun (message : Protocol.message) ->
       List.exists (fun (attachment : Protocol.attachment) ->
         Protocol.attachment_kind attachment.mime_type = Some Image_attachment)
-        message.attachments) messages
+        message.attachments ||
+      (message.role = "tool" &&
+       List.exists (function Protocol.Image _ -> true | Protocol.Text _ -> false)
+         (Protocol.content_blocks_of_tool_result message))) messages
     then [ "Copilot-Vision-Request: true" ]
     else []

@@ -55,6 +55,15 @@ let () =
     ignore (Pave.Custom_provider.parse_list
       (`List [Yojson.Basic.from_string valid_provider;
         Yojson.Basic.from_string valid_provider])));
+  let tier_json = {|{"modelTiers":{"light":"openai@responses/model-a","review":"anthropic@messages/model-b"}}|} in
+  let tiers = (Pave.Settings.parse tier_json).model_tiers in
+  assert (List.assoc "review" tiers = "anthropic@messages/model-b");
+  invalid "reserved inherit tier" (fun () ->
+    Pave.Settings.parse {|{"modelTiers":{"inherit":"openai@responses/model-a"}}|});
+  invalid "duplicate model tier" (fun () ->
+    Pave.Settings.parse {|{"modelTiers":{"light":"a","light":"b"}}|});
+  invalid "control-bearing model tier selector" (fun () ->
+    Pave.Settings.parse {|{"modelTiers":{"light":"openai@responses/model\u007f"}}|});
   let base = Filename.temp_file "pave-settings-" "" in
   Sys.remove base;
   Unix.mkdir base 0o700;
@@ -109,6 +118,9 @@ let () =
     assert (List.assoc "write_file" inherited.values.tool_approval =
       Pave.Approval.Deny);
     assert (List.length inherited.values.command_patterns = 1);
+    ignore (Pave.Settings.update_user (fun current ->
+      { current with model_tiers = tiers }));
+    assert ((Pave.Settings.load ~root:workspace).values.model_tiers = tiers);
     Unix.mkdir project_dir 0o700;
     let project_file = Filename.concat project_dir "settings.json" in
     let project_settings =
@@ -126,6 +138,11 @@ let () =
     assert (List.assoc "read_file" project.values.tool_approval =
       Pave.Approval.Prompt);
     assert (List.length project.values.command_patterns = 2);
+    ignore (Pave.Settings.update_project ~root:workspace (fun current ->
+      { current with model_tiers = ["light", "google@generateContent/model-c"] }));
+    let merged_tiers = (Pave.Settings.load ~root:workspace).values.model_tiers in
+    assert (List.assoc "light" merged_tiers = "google@generateContent/model-c");
+    assert (List.assoc "review" merged_tiers = "anthropic@messages/model-b");
     write project_file
       ("{\"default_provider\":\"openai\",\"custom_providers\":[" ^
         valid_provider ^ "]}");

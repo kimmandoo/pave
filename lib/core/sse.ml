@@ -5,9 +5,7 @@ type t = {
   mutable data_present : bool;
   mutable event_name : string option;
   mutable after_cr : bool;
-  mutable bom_checked : bool;
-  (* Count of events delivered to on_event; keep-alives do not increment it. *)
-  mutable dispatched : int;
+  mutable bom_bytes : int;
 }
 
 let max_event_bytes = 1_048_576
@@ -15,19 +13,16 @@ let invalid text = raise (Protocol.Invalid_response text)
 let create ~on_event =
   { on_event; line = Buffer.create 128; data = Buffer.create 512;
     data_present = false; event_name = None; after_cr = false;
-    bom_checked = false; dispatched = 0 }
+    bom_bytes = 0 }
 
 let dispatch t =
   (* An event with a `data:` field — even an empty value — is dispatchable;
      comment keep-alives set no fields and never reach the listener. *)
-  if t.data_present then (
-    t.on_event t.event_name (Buffer.contents t.data);
-    t.dispatched <- t.dispatched + 1);
+  if t.data_present then t.on_event t.event_name (Buffer.contents t.data);
   Buffer.clear t.data;
   t.data_present <- false;
   t.event_name <- None
 
-let events t = t.dispatched
 
 (* A complete line in a chunk needs no intermediate line/name/value strings.
    Only a line split across chunks is accumulated in [t.line]. *)
@@ -88,18 +83,24 @@ let rec feed_from t bytes offset length =
         feed_from t bytes (stop + 1) length))
 
 let feed t bytes =
-  (* Strip a UTF-8 byte-order mark once; a BOM would otherwise poison the
-     first field name and swallow the opening event. *)
-  if not t.bom_checked then (
-    t.bom_checked <- true;
-    let offset =
-      if String.length bytes >= 3 && bytes.[0] = '\xEF' &&
-         bytes.[1] = '\xBB' && bytes.[2] = '\xBF' then 3 else 0 in
-    feed_from t bytes offset (String.length bytes))
-  else feed_from t bytes 0 (String.length bytes)
+  let length = String.length bytes in
+  let rec prefix offset =
+    if t.bom_bytes = 3 then feed_from t bytes offset length
+    else if offset < length then (
+      let expected = match t.bom_bytes with
+        | 0 -> '\xEF' | 1 -> '\xBB' | _ -> '\xBF' in
+      if bytes.[offset] = expected then (
+        t.bom_bytes <- t.bom_bytes + 1;
+        prefix (offset + 1))
+      else (
+        (* A partial BOM was ordinary input, not a byte-order mark. *)
+        if t.bom_bytes >= 1 then Buffer.add_char t.line '\xEF';
+        if t.bom_bytes = 2 then Buffer.add_char t.line '\xBB';
+        t.bom_bytes <- 3;
+        feed_from t bytes offset length)) in
+  prefix 0
 
 let finish t =
-  (* Flush an unterminated tail line and a pending event: some services close
-     without a trailing blank line after their last data frame. *)
-  if Buffer.length t.line <> 0 then process_line t;
-  dispatch t
+  if (t.bom_bytes > 0 && t.bom_bytes < 3) ||
+     Buffer.length t.line <> 0 || t.data_present || t.event_name <> None then
+    invalid "incomplete SSE event at EOF"

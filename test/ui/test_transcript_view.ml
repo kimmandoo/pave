@@ -540,4 +540,142 @@ let () =
     (Array.exists (fun (entry : entry) -> entry.row.style = Tool_summary &&
        entry.row.kind = Tool) (snapshot literal_error ~columns:80 ~measure).entries &&
      heading_count literal_error Error = 0);
+  let live_patch = create () in
+  delta live_patch "```diff\n+**literal patch text**";
+  let patch_before = rendered live_patch 80 in
+  expect "an unterminated streamed diff line retains its marker and literal markup"
+    (Array.exists (fun (visual : visual) ->
+       visual.row.style = Diff_add && visual.text = "+**literal patch text**" &&
+       Array.for_all (fun (run : inline_run) -> run.style = Plain) visual.runs)
+       patch_before);
+  let patch_group = live_patch.next_group - 1 in
+  let patch_tool = start_tool live_patch "run_command" in
+  expect "typed tool starts flush the assistant segment under its original group"
+    (Array.exists (fun (row : row) ->
+       row.group = patch_group && row.kind = Assistant &&
+       row.style = Diff_add && row.text = "+**literal patch text**")
+       (Array.sub live_patch.rows 0 live_patch.count) &&
+     live_patch.live = "" && not live_patch.streaming);
+  tool_result ~group:patch_tool live_patch "run_command" "done";
+  delta live_patch "- ordinary list";
+  finish live_patch;
+  expect "assistant text after typed tools starts a fresh Markdown segment"
+    (Array.exists (fun (row : row) ->
+       row.kind = Assistant && row.group <> patch_group &&
+       row.style = List_item && row.text = "ordinary list")
+       (Array.sub live_patch.rows 0 live_patch.count));
+  let fence_lengths = create () in
+  assistant fence_lengths
+    "````markdown\n```ocaml\n\n- literal code\n```\n````\n~~~text\n+ literal too\n~~~\n- prose";
+  let fence_visuals = rendered fence_lengths 80 in
+  expect "long fences retain nested shorter fences and empty code rows"
+    (Array.exists (fun (visual : visual) ->
+       visual.row.style = Code && visual.text = "```ocaml") fence_visuals &&
+     Array.exists (fun (visual : visual) ->
+       visual.row.style = Code && visual.text = "") fence_visuals &&
+     Array.exists (fun (visual : visual) ->
+       visual.row.style = Code && visual.text = "- literal code") fence_visuals);
+  expect "tilde fences protect code prefixes and close before ordinary prose"
+    (Array.exists (fun (visual : visual) ->
+       visual.row.style = Code && visual.text = "+ literal too") fence_visuals &&
+     Array.exists (fun (visual : visual) ->
+       visual.row.style = List_item && visual.text = "prose") fence_visuals);
+  let ordered_cards = create () in
+  let card_a = start_tool ~target:"first" ordered_cards "run_command" in
+  let card_b = start_tool ~target:"second" ordered_cards "run_command" in
+  tool_note ordered_cards card_a "first call note";
+  tool_result ~group:card_b ordered_cards "run_command" "second output\nsecond detail";
+  tool_result ~group:card_a ordered_cards "run_command" "first output\nfirst detail";
+  let groups = Array.to_list (rendered ordered_cards 80)
+    |> List.filter (fun (visual : visual) -> visual.row.style <> Divider)
+    |> List.map (fun (visual : visual) -> visual.row.group) in
+  let rec contiguous seen previous = function
+    | [] -> true
+    | current :: rest when current = previous -> contiguous seen previous rest
+    | current :: rest ->
+        not (List.mem current seen) && contiguous (current :: seen) current rest in
+  expect "out-of-order outcomes and call notes remain within their own cards"
+    (contiguous [] 0 groups &&
+     List.hd groups = card_a && List.hd (List.rev groups) = card_b);
+  assistant ordered_cards "later answer";
+  let answer_source = ordered_cards.count - 1 in
+  expect "tool-detail action does not expand an offscreen unrelated card"
+    (toggle ordered_cards ~first:answer_source ~last:answer_source = None);
+  let count_reads = create () in
+  let read_lines = start_tool count_reads "read_file" in
+  tool_result ~group:read_lines count_reads "read_file" "one\ntwo\n";
+  let empty_read = start_tool count_reads "read_file" in
+  tool_result ~group:empty_read count_reads "read_file" "";
+  expect "file line counts do not invent a line from the final newline or empty file"
+    (has "read_file · 2 lines · collapsed" (lines count_reads 80) &&
+     has "read_file · 0 lines" (lines count_reads 80));
+  let clipped_unicode = create () in
+  let clipped = start_tool clipped_unicode "read_file" in
+  tool_result ~group:clipped clipped_unicode "read_file"
+    (String.make (max_line_bytes - 1) 'x' ^ "한 suffix");
+  ignore (toggle clipped_unicode ~first:0 ~last:(clipped_unicode.count - 1));
+  expect "tool line truncation never manufactures a replacement scalar at its byte cap"
+    (Array.for_all (fun (visual : visual) ->
+       Uutf.String.fold_utf_8 (fun safe _ -> function
+         | `Malformed _ -> false
+         | `Uchar scalar -> safe && Uchar.to_int scalar <> 0xfffd)
+         true visual.text)
+       (rendered clipped_unicode 80));
+  let settled_write = create () in
+  let write_id = start_write settled_write in
+  write_preview settled_write write_id
+    (Pave.Write_preview.of_values ~path:"draft.ml" ~content:"draft one\ndraft two")
+    "queued · not written";
+  tool_result ~group:write_id settled_write "write_file" "Wrote draft.ml";
+  finish_write settled_write write_id ~aborted:false ~is_error:false ~denied:false;
+  let write_collapsed = rendered settled_write 80 in
+  expect "settled write replaces its live draft tail with a compact result preview"
+    (has "Wrote draft.ml" (lines settled_write 80) &&
+     not (Array.exists (fun (visual : visual) -> visual.row.style = Code)
+       write_collapsed));
+  ignore (toggle settled_write ~first:0 ~last:(settled_write.count - 1));
+  expect "settled write draft content remains available on expansion"
+    (Array.exists (fun (visual : visual) ->
+       String.ends_with ~suffix:"draft two" visual.text)
+       (rendered settled_write 80));
+  let shrinking_draft = create () in
+  let shrinking_id = start_write shrinking_draft in
+  write_preview shrinking_draft shrinking_id
+    (Pave.Write_preview.of_values ~path:"shrink.ml" ~content:"one\ntwo\nthree")
+    "generating draft · not written";
+  write_preview shrinking_draft shrinking_id
+    (Pave.Write_preview.of_values ~path:"shrink.ml" ~content:"one")
+    "queued · not written";
+  expect "shorter validated drafts remove stale tail rows rather than leave padding"
+    (List.length (Hashtbl.find shrinking_draft.writes shrinking_id).code = 1 &&
+     Array.fold_left (fun count (visual : visual) ->
+       if visual.row.style = Code then count + 1 else count)
+       0 (rendered shrinking_draft 80) = 1);
+  let late_card = create () in
+  let late_id = start_tool late_card "run_command" in
+  for index = 1 to max_rows do
+    add_line late_card ~kind:Notice ~group:(group late_card)
+      ~provisional:false (string_of_int index)
+  done;
+  tool_result ~group:late_id late_card "run_command" "late preview\nlate detail";
+  ignore (toggle late_card ~first:0 ~last:(late_card.count - 1));
+  for index = 1 to 1000 do
+    add_line late_card ~kind:Notice ~group:(group late_card)
+      ~provisional:false (string_of_int index)
+  done;
+  expect "retention preserves expansion for a late-settled retained call"
+    (has "late detail" (lines late_card 80) && late_card.count <= max_rows);
+  let literal_pipes = create () in
+  assistant literal_pipes
+    "| `a|b` | escaped\\|name |\n| ----- | ------------- |\n| `echo a|b` | x\\|y |";
+  let pipe_rows = rendered literal_pipes 80 in
+  expect "Markdown tables preserve literal pipes inside inline code and escaped text"
+    (Array.exists (fun (visual : visual) ->
+       visual.row.style = Table_header && visual.text = "a|b | escaped|name")
+       pipe_rows &&
+     Array.exists (fun (visual : visual) ->
+       visual.row.style = Table_row && visual.text = "echo a|b | x|y" &&
+       Array.exists (fun (run : inline_run) ->
+         run.style = Inline_code && run.content = "echo a|b") visual.runs)
+       pipe_rows);
   print_endline "semantic transcript, cancellation, expansion and resize: ok"

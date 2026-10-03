@@ -168,16 +168,52 @@ let request ?(allow_compaction = false) ?(allow_prompt_caching = false)
       | "max" -> Some 65536
       | _ -> invalid_arg "unsupported thinking level" in
     match floor thinking with
-    | None -> Some (`Assoc ["type", `String "disabled"])
+    | None -> `Assoc ["type", `String "disabled"]
     | Some budget ->
-        let budget = min budget (max_tokens - 4000) in
-        if budget <= 0 then invalid_arg
-          "max_tokens too small for the requested thinking level"
-        else Some (`Assoc ["type", `String "enabled";
-          "budget_tokens", `Int budget]) in
-  let thinking_field = match thinking with
-    | None -> None
-    | Some level -> thinking_budget level in
+        let budget = min budget (max_tokens - 1) in
+        if budget < 1024 then invalid_arg
+          "max_tokens must exceed the minimum 1024-token thinking budget"
+        else `Assoc ["type", `String "enabled"; "budget_tokens", `Int budget] in
+  let matches name =
+    let length = String.length name in
+    model = name ||
+    (String.starts_with ~prefix:name model &&
+     ((String.length model = length + 7 &&
+       String.ends_with ~suffix:"-latest" model) ||
+      (String.length model = length + 9 &&
+       (model.[length] = '-' || model.[length] = '@') &&
+       let rec date index =
+         index = String.length model ||
+         (model.[index] >= '0' && model.[index] <= '9' && date (index + 1)) in
+       date (length + 1)))) in
+  let adaptive = thinking <> None && List.exists matches [
+    "claude-opus-4-7"; "claude-opus-4-8"; "claude-opus-5"; "claude-opus-5-5";
+    "claude-sonnet-5"; "claude-sonnet-5-5"; "claude-fable-5"; "claude-fable-5-1";
+    "claude-mythos-5"; "claude-mythos-5-1"; "claude-mythos-preview"] in
+  let manual = thinking <> None && not adaptive && List.exists matches [
+    "claude-3-7-sonnet"; "claude-opus-4"; "claude-opus-4-1";
+    "claude-opus-4-5"; "claude-opus-4-6"; "claude-sonnet-4";
+    "claude-sonnet-4-5"; "claude-sonnet-4-6"; "claude-haiku-4-5"] in
+  let thinking_fields = match thinking with
+    | None -> []
+    | Some "none" when adaptive ->
+        if List.exists matches ["claude-opus-5-5"; "claude-sonnet-5-5";
+            "claude-fable-5"; "claude-fable-5-1"; "claude-mythos-5";
+            "claude-mythos-5-1"; "claude-mythos-preview"] then
+          invalid_arg "selected Claude model cannot disable thinking";
+        ["thinking", `Assoc ["type", `String "disabled"]]
+    | Some level when adaptive ->
+        let effort = match level with
+          | "minimal" -> "low"
+          | "low" | "medium" | "high" | "xhigh" | "max" -> level
+          | _ -> invalid_arg "unsupported thinking level" in
+        if matches "claude-mythos-preview" && effort = "xhigh" then
+          invalid_arg "Claude Mythos Preview does not support xhigh effort";
+        ["thinking", `Assoc ["type", `String "adaptive"];
+         "output_config", `Assoc ["effort", `String effort]]
+    | Some level when manual ->
+        ["thinking", thinking_budget level]
+    | Some _ -> [] in
   let systems = ref [] in
   let wire = ref [] in
   let pending = ref [] in
@@ -265,78 +301,17 @@ let request ?(allow_compaction = false) ?(allow_prompt_caching = false)
   replay messages;
   let fields = [ "model", `String model; "max_tokens", `Int max_tokens;
                  "messages", `List (List.rev !wire) ] in
-  (* Prompt caching anchors on the stable head: the last tool definition and
-     the last system block. A top-level cache_control field is invalid, and
-     cache_control on a block requires the array form of `system`. *)
-  let cache = `Assoc [ "type", `String "ephemeral" ] in
-  let apply_cache block = match block with
-    | `Assoc fields when List.assoc_opt "cache_control" fields = None ->
-        `Assoc (fields @ [ "cache_control", cache ])
-    | other -> other in
   let fields = match List.rev !systems with
     | [] -> fields
-    | texts ->
-        if allow_prompt_caching then
-          match List.rev texts with
-          | last :: rest ->
-              fields @ [ "system", `List (List.rev (
-                apply_cache (text_block last) ::
-                List.map text_block rest)) ]
-          | [] -> fields
-        else fields @ [ "system", `String (String.concat "\n\n" texts) ] in
+    | texts -> fields @ [ "system", `String (String.concat "\n\n" texts) ] in
   let fields = match tools with
     | [] -> fields
-    | definitions ->
-        let converted = List.map tool_schema definitions in
-        let converted = if allow_prompt_caching then
-          match List.rev converted with
-          | last :: rest -> List.rev (apply_cache last :: rest)
-          | [] -> converted
-          else converted in
-        fields @ [ "tools", `List converted ] in
-  (* Rolling anchor on the newest message's last text-capable block: a
-     breakpoint there caches the entire preceding conversation, which is where
-     the reuse actually is. Generated reasoning and boundary blocks reject
-     cache_control, so the scan walks backward past them. *)
-  let fields = if not allow_prompt_caching then fields else
-    let markable = function
-      | `Assoc block ->
-          (match List.assoc_opt "type" block with
-           | Some (`String ("thinking" | "redacted_thinking" | "fallback"
-               | "tool_addition" | "tool_removal")) -> false
-           | _ -> List.assoc_opt "cache_control" block = None)
-      | _ -> false in
-    List.map (fun (key, value) ->
-      if key <> "messages" then key, value else
-      match value with
-      | `List messages ->
-          let mark content = match content with
-            | `String text -> `List [ apply_cache (text_block text) ]
-            | `List blocks ->
-                let rec last_markable = function
-                  | [] -> None
-                  | (`Assoc _ as block) :: earlier when markable block ->
-                      Some (List.rev (apply_cache block :: earlier))
-                  | _ :: earlier -> last_markable earlier in
-                (match last_markable (List.rev blocks) with
-                 | Some blocks -> `List blocks
-                 | None -> content)
-            | _ -> content in
-          let marked_last (msg : Yojson.Basic.t) = match msg with
-            | `Assoc fields ->
-                (match List.assoc_opt "content" fields with
-                 | Some _ ->
-                     `Assoc (List.map (fun (k, v) ->
-                       if k = "content" then k, mark v else k, v) fields)
-                 | None -> msg)
-            | _ -> msg in
-          key, `List (match List.rev messages with
-            | last :: rest -> List.rev (marked_last last :: rest)
-            | [] -> messages)
-      | _ -> key, value) fields in
-  let fields = match thinking_field with
-    | None -> fields
-    | Some value -> fields @ [ "thinking", value ] in
+    | definitions -> fields @ [ "tools", `List (List.map tool_schema definitions) ] in
+  (* Direct API-key requests use Anthropic's automatic rolling breakpoint. *)
+  let fields = if allow_prompt_caching then
+    fields @ [ "cache_control", `Assoc [ "type", `String "ephemeral" ] ]
+    else fields in
+  let fields = fields @ thinking_fields in
   `Assoc fields
 
 let compaction_request ?(allow_prompt_caching = false)
@@ -401,11 +376,11 @@ let parse_response json =
    | `String "end_turn" when tool_calls = [] -> ()
    | `String "tool_use" when tool_calls <> [] -> ()
    | `String ("end_turn" | "tool_use") -> invalid "stop_reason/content mismatch"
-   | `String ("pause_turn" | "stop_sequence") -> ()
+   | `String "stop_sequence" when tool_calls = [] -> ()
    | `String ("max_tokens" | "model_context_window_exceeded" as reason) ->
        Protocol.truncated ("stop_reason " ^ reason)
    | `String ("refusal" | "sensitive" as reason) -> invalid reason
-   | `String _ -> () (* New stop reasons ship server-side first; degrade to stop. *)
+   | `String reason -> invalid ("unsupported stop_reason: " ^ reason)
    | _ -> invalid "missing stop_reason");
   let content = match List.rev !texts with
     | [] -> None
@@ -416,26 +391,29 @@ let native_thinking_block block =
   | `String ("thinking" | "redacted_thinking") -> true
   | _ -> false
 
-let native_state_tag provider model = [
-  "provider", `String provider;
-  "route", `String "messages";
-  "model", `String model;
-]
+let native_state_tag ?endpoint_digest provider model =
+  [ "provider", `String provider;
+    "route", `String "messages";
+    "model", `String model ] @
+  (match endpoint_digest with
+   | None -> [] | Some digest -> ["endpoint_digest", `String digest])
 
-let parse_native_completion ~provider ~model json =
+let parse_native_completion ?endpoint_digest ~provider ~model json =
   let reply = parse_response json in
   match member "content" json with
   | `List blocks when List.exists native_thinking_block blocks ->
       { reply with provider_state = Some (`Assoc (
-          native_state_tag provider model @ ["content", `List blocks])) }
+          native_state_tag ?endpoint_digest provider model @ ["content", `List blocks])) }
   | _ -> reply
 
-let replay_native_content ~provider ~model (message : message) =
+let replay_native_content ?endpoint_digest ~provider ~model (message : message) =
   match message.provider_state with
   | Some (`Assoc fields)
     when List.for_all
       (fun (key, value) -> List.assoc_opt key fields = Some value)
-      (native_state_tag provider model) ->
+      (native_state_tag provider model) &&
+      List.assoc_opt "endpoint_digest" fields =
+        Option.map (fun digest -> `String digest) endpoint_digest ->
       (match List.assoc_opt "content" fields with
        | Some (`List blocks)
          when List.exists native_thinking_block blocks ->

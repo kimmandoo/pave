@@ -20,7 +20,7 @@ let account_label id = "Account ID: " ^ Printf.sprintf "%S" id
 let approval_mode_label = function
   | Pave.Approval.Ask_writes -> "Ask before writes and commands; reads automatic"
   | Pave.Approval.Ask_exec -> "Allow reads and writes; ask before commands"
-  | Pave.Approval.Auto_all -> "Automatic where permitted; command approval still required"
+  | Pave.Approval.Auto_all -> "Automatic where permitted; command policies and safety gates still apply"
 
 let approval_policy_label = function
   | Pave.Approval.Allow -> "Allow without routine prompts; safety gates still apply"
@@ -39,7 +39,7 @@ let approval_scope ~user directory =
       Pave.Settings.empty
 
 let approval_safety =
-  "run_command always needs approval · unsandboxed · explicit blocks win"
+  "Commands need approval unless a command rule allows them · unsandboxed · blocks win"
 
 let open_view screen ~root ~registry =
   let save change =
@@ -72,10 +72,14 @@ let open_view screen ~root ~registry =
        | None -> "20 (default)") in
     let approval_mode = "Tool approval default: " ^ mode_name values.approval_mode in
     let tool_approval = "Per-tool approval defaults" in
-    match Tui.choose screen ~title:"Project settings" ?initial_selected
+    let rows = ["provider", provider; "model", model; "api", api;
+      "account", account; "shell", shell; "turns", turns;
+      "approval", approval_mode; "tools", tool_approval] in
+    let selection = Option.bind initial_selected (fun key -> List.assoc_opt key rows) in
+    match Tui.choose screen ~title:"Project settings" ?initial_selected:selection
       ~intro:["Saved defaults apply on the next launch, not to active turns.";
         "This is not a one-time tool approval. Escape closes settings."]
-      ~choices:[provider; model; api; account; shell; turns; approval_mode; tool_approval] with
+      ~choices:(List.map snd rows) with
     | None -> ()
     | Some choice ->
         (if choice = provider then (
@@ -230,7 +234,7 @@ let open_view screen ~root ~registry =
                    | Some policy -> "User policy: " ^ approval_policy_label policy
                    | None -> "Global default: " ^ mode_name values.approval_mode in
                  let allow_label = if name = "run_command" then
-                   "Allow subject to mandatory per-command approval (unsandboxed)"
+                   "Allow subject to command policies and safety gates (unsandboxed)"
                    else approval_policy_label Pave.Approval.Allow in
                  let options = marked_options current_policy [
                    "Use inherited setting · " ^ inherited, None;
@@ -253,5 +257,6 @@ let open_view screen ~root ~registry =
                             | Some value -> policies @ [name, value] }));
                  tools ~selected_tool:name () in
            tools ()));
-        loop ~initial_selected:choice () in
+        let key, _ = List.find (fun (_, label) -> label = choice) rows in
+        loop ~initial_selected:key () in
   loop ()

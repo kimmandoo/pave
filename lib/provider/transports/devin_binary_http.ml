@@ -116,8 +116,13 @@ let run ?cancel ~timeouts ~max_bytes configuration =
     raise exn in
   List.iter close_fd [reader; output_write; errors];
   let waited = ref false in
+  let input_open = ref true and output_open = ref true in
+  let close_input () =
+    if !input_open then (input_open := false; close_fd writer) in
+  let close_output () =
+    if !output_open then (output_open := false; close_fd output_read) in
   Fun.protect ~finally:(fun () ->
-    close_fd writer; close_fd output_read;
+    close_input (); close_output ();
     if not !waited then (
       (try Unix.kill pid Sys.sigkill with Unix.Unix_error _ -> ());
       (try ignore (Unix.waitpid [] pid) with Unix.Unix_error _ -> ())))
@@ -140,7 +145,7 @@ let run ?cancel ~timeouts ~max_bytes configuration =
             if count = 0 then raise (Failed "curl did not accept its configuration");
             send (position + max 0 count)) in
       send 0;
-      close_fd writer;
+      close_input ();
       let received = Buffer.create (min max_bytes 8192) in
       (* curl appends exactly three status bytes. Retain only that suffix,
          including across one-byte reads; binary response bytes stay opaque. *)
@@ -168,7 +173,7 @@ let run ?cancel ~timeouts ~max_bytes configuration =
             Bytes.blit chunk body_bytes chunk 0 !held;
             receive ())) in
       receive ();
-      close_fd output_read;
+      close_output ();
       let rec await () =
         check_cancel ();
         match Unix.waitpid [Unix.WNOHANG] pid with

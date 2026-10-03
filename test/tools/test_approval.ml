@@ -56,6 +56,30 @@ let () =
     ((A.command_decision exact_rule "ls *.log").policy = Some A.Allow);
   expect "exact allow does not widen with *"
     ((A.command_decision exact_rule "ls keep.log").policy <> Some A.Allow);
+  let quoted = "printf '%s' 'a  b'" in
+  let quoted_rule = [{ A.match_text = A.normalize quoted;
+    policy = A.Allow; exact = true }] in
+  expect "quoted exact grant matches repeated execution"
+    ((A.command_decision quoted_rule quoted).policy = Some A.Allow);
+  expect "only unquoted separator whitespace is normalized"
+    ((A.command_decision quoted_rule "  printf   '%s'   'a  b'  ").policy =
+       Some A.Allow &&
+     (A.command_decision quoted_rule "printf '%s' 'a b'").policy <> Some A.Allow);
+  let unquoted_rule = [{ A.match_text = "echo a b"; policy = A.Allow;
+    exact = true }] in
+  expect "quotes cannot change an exact command's argument boundaries"
+    ((A.command_decision unquoted_rule "echo 'a b'").policy <> Some A.Allow);
+  expect "escaped argument whitespace remains literal"
+    (A.normalize "echo a\\  b" <> A.normalize "echo a\\ b");
+  expect "compound commands cannot reuse exact grants"
+    ((A.command_decision quoted_rule (quoted ^ "; touch marker")).policy <>
+       Some A.Allow);
+  expect "deny still takes precedence over an exact grant"
+    ((A.command_decision
+       ({ A.match_text = "printf *"; policy = A.Deny; exact = false } ::
+        quoted_rule) quoted).policy = Some A.Deny);
+  expect "managed shells never offer persistent ordinary-command grants"
+    (A.always_grantable "run_command" && not (A.always_grantable "start_shell"));
   expect "prompt pattern detects a later compound segment"
     ((A.command_decision prompt_rule "echo safe; rm file").policy = Some A.Prompt);
   expect "wildcards match without regex semantics"

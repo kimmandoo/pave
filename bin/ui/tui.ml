@@ -83,6 +83,7 @@ type terminal_event =
 type ui_event =
   | Terminal_event of terminal_event
   | Agent_event of Pave.Turn_runner.event
+  | User_prompt of { text : string; attachments : Pave.Protocol.attachment list }
   | Listing_event of listing_update
   | Approval_event of approval_request
   | Background_message of string
@@ -267,6 +268,9 @@ let set_agent_event_handler t handler =
 let publish_agent_event t event =
   enqueue_ui_event t (Agent_event event)
 
+let publish_prompt t ~attachments text =
+  enqueue_ui_event t (User_prompt { text; attachments })
+
 let post_message t message =
   enqueue_ui_event t (Background_message message)
 
@@ -298,7 +302,12 @@ let warning = if no_color then A.empty else A.(fg lightyellow)
 let error = if no_color then A.empty else A.(fg lightred)
 let selected_attr = if no_color then A.(st bold)
   else A.(fg black ++ bg lightcyan ++ st bold)
-let measure_text chunk = I.width (I.string text_attr chunk)
+let measure_text chunk =
+  (* Bidi controls render as spaces; measure the same cells without allocating
+     for ordinary ASCII or Korean input. *)
+  let chunk = if String.contains chunk '\226' || String.contains chunk '\216'
+    then Transcript_view.sanitize chunk else chunk in
+  I.width (I.string text_attr chunk)
 
 (* Measurement is fixed by this renderer; the general Composer API stays pure.
    Cursor movement does not change wrapping, and every edit installs a new string. *)
@@ -481,7 +490,8 @@ let styled_visual cols (visual : Transcript_view.visual) =
     | Transcript_view.Tool when heading -> success
     | _ -> attr in
   let prefix = if cols <= I.width (I.string attr prefix) then "" else prefix in
-  let body = if Array.length visual.runs = 0 then
+  let body = if heading && row.kind = Transcript_view.Tool ||
+      Array.length visual.runs = 0 then
     match row.kind with
     | Transcript_view.Tool when heading ->
         (* Tool identity stays prominent; its lifecycle suffix recedes. *)
@@ -630,6 +640,13 @@ let shorten_middle width text =
     let prefix_end = left 0 0 and suffix_start = right count 0 in
     String.sub text 0 prefix_end ^ "…" ^
     String.sub text suffix_start (String.length text - suffix_start)
+
+let compact_model_label ~width ~provider ~name =
+  if provider = "" || width < 6 then shorten_middle width name
+  else
+    let provider = shorten_middle (min 16 ((width - 3) / 2)) provider in
+    provider ^ " · " ^
+      shorten_middle (max 0 (width - measure_text provider - 3)) name
 
 (* Keep actionable hints whole; omit lower-priority items instead of clipping
    a key combination halfway through. Only the first item may need shortening. *)
@@ -875,7 +892,7 @@ let chooser_sections ~cols ~height chooser =
       (if height >= 10 then 2 else if height >= 6 then 1 else 0)) in
   let remaining = remaining - intro_height in
   let status_lines = match status_text with
-    | Some text -> wrap_chooser_text ~columns:(max 1 (cols - 4))
+    | Some text -> wrap_chooser_text ~columns:(max 1 (cols - 5))
         ~max_rows:(min remaining (if count > 0 then 1 else 3)) text
     | None -> [||] in
   let page = max 0 (height - 1 - intro_height - empty_height -
@@ -885,11 +902,12 @@ let chooser_sections ~cols ~height chooser =
 (* The last paint knows the real body height after the editor, activity and
    attachment rows; the fixed estimate only covers the first frame. *)
 let view_height t =
-  match t.body_cache with
-  | Some (_, height, _, _) when height > 0 -> height
-  | _ ->
-      let _, rows = Notty_unix.Term.size t.term in
-      max 1 (rows - 6)
+  let _, rows = Notty_unix.Term.size t.term in
+  if rows < 6 then
+    max 1 (rows - 2 - (if Option.is_some t.activity then 1 else 0))
+  else match t.body_cache with
+    | Some (_, height, _, _) when height > 0 -> height
+    | _ -> max 1 (rows - 6)
 
 (* Hint state belongs to the editor, never to the transcript or the modal chooser.
    A dismissed/inserted draft remains quiet until the user edits it again. *)
@@ -929,12 +947,24 @@ let hint_matches t =
   else t.hint_results
 
 
+let editor_geometry ~rows ~activity ~attachments ~modal ~lines =
+  let attachment_height =
+    if rows < 6 || modal then 0
+    else min attachments (max 0 (rows - 6 - activity)) in
+  let editor_space = max 1 (rows - 4 - activity - attachment_height) in
+  let editor_height = if modal then 1 else min 4 (min editor_space lines) in
+  let body_height = max 0 (rows - 4 - editor_height - activity - attachment_height) in
+  attachment_height, editor_height, body_height
+
 let hint_room t =
   let cols, rows = Notty_unix.Term.size t.term in
   let field_width = composer_field_width ~cols ~rows in
   let lines = editor_lines t field_width in
-  let height = min 4 (max 1 (min (rows - 4) (Array.length lines))) in
-  rows - 4 - height >= 2
+  let _, _, body_height = editor_geometry ~rows
+    ~activity:(if Option.is_some t.activity then 1 else 0)
+    ~attachments:(List.length t.pending_attachments) ~modal:false
+    ~lines:(Array.length lines) in
+  rows >= 6 && body_height >= 2
 
 let hints_visible t = hint_matches t <> [] && hint_room t
 let key_focus t =
@@ -1126,19 +1156,11 @@ let paint t =
   let editor_row, editor_col =
     Pave.Composer.position ~measure t.editor editor_lines in
   let activity_height = if Option.is_some t.activity then 1 else 0 in
-  let attachment_height =
-    if rows < 6 || Option.is_some t.chooser ||
-       Option.is_some (Pave.Composer.search_query t.editor) then 0
-    else min (List.length t.pending_attachments)
-      (max 0 (rows - 6 - activity_height)) in
-  let editor_space =
-    max 1 (rows - 4 - activity_height - attachment_height) in
-  let editor_height = match t.chooser, Pave.Composer.search_query t.editor with
-    | Some _, _ | None, Some _ -> 1
-    | None, None ->
-        min 4 (max 1 (min editor_space (Array.length editor_lines))) in
-  let body_height =
-    max 0 (rows - 4 - editor_height - activity_height - attachment_height) in
+  let attachment_height, editor_height, body_height = editor_geometry ~rows
+    ~activity:activity_height ~attachments:(List.length t.pending_attachments)
+    ~modal:(Option.is_some t.chooser ||
+      Option.is_some (Pave.Composer.search_query t.editor))
+    ~lines:(Array.length editor_lines) in
 
   let hints = if t.approval_view <> None then [] else hint_matches t in
   let hint_count = List.length hints in
@@ -1184,21 +1206,18 @@ let paint t =
       |> Array.of_list in
 
   let queued = if t.queue = 0 then "" else
-    Printf.sprintf " · %d queued" t.queue in
+    Printf.sprintf "%d queued" t.queue in
   let usage = match t.activity, t.usage_badge with
     | None, Some badge when cols >= 28 && cols >= 9 + String.length badge ->
         badge
     | _ -> "" in
   let attached = match t.pending_attachments with
     | [] -> ""
-    | names -> Printf.sprintf " · %d media attachment%s ready"
+    | names -> Printf.sprintf "%d media attachment%s ready"
         (List.length names) (if List.length names = 1 then "" else "s") in
 
-  let indicators = String.trim
-    (queued ^ (if queued <> "" && usage <> "" then " · " else "") ^ usage ^ attached) in
-  let indicators = if String.starts_with ~prefix:"· " indicators then
-      String.sub indicators 3 (String.length indicators - 3)
-    else indicators in
+  let indicators = String.concat " · "
+    (List.filter (( <> ) "") [queued; usage; attached]) in
   let indicators = if indicators = "" || cols < 18 then I.empty
     else I.string muted (shorten_width (max 8 (cols / 3)) indicators) in
   let identity_width = max 0 (cols - 2 - I.width indicators -
@@ -1218,8 +1237,12 @@ let paint t =
       let model_name = if model_name = "" then single_line model_id
         else model_name in
       let display_model width = shorten_middle width model_name in
+      let provider = match String.index_opt model_scope '@' with
+        | Some split -> String.sub model_scope 0 split
+        | None -> model_scope in
       let image =
-        if width < 22 then I.string accent (display_model width)
+        if width < 22 then I.string accent
+          (compact_model_label ~width ~provider ~name:model_name)
         else
           let badge = if width < 40 then "◆ "
             else if width < 54 then "◆ " ^ t.version ^ " · "
@@ -1241,14 +1264,12 @@ let paint t =
           let identity_space = max 0 (min (space / 3)
             (space - measure root - 20)) in
           (* Narrow headers keep the provider and drop only the route/account. *)
-          let provider = match String.index_opt model_scope '@' with
-            | Some split -> String.sub model_scope 0 split
-            | None -> model_scope in
           let detail, inline_provider = if model_scope = "" then "", ""
             else if width >= 66 && identity_space >= 12 then
               "  ·  " ^ shorten_middle (min 28 identity_space) model_scope, ""
-            else if space - measure root >= measure provider + 16 then
-              "", " · " ^ shorten_middle (min 16 (measure provider)) provider
+            else if space - measure root >= 6 then
+              "", " · " ^ shorten_middle
+                (min 16 ((space - measure root - 3) / 2)) provider
             else "", "" in
           let name_width = max 0 (space - measure root - measure detail -
             measure inline_provider) in
@@ -1273,7 +1294,9 @@ let paint t =
         t.layout_cache <- Some (cols, t.transcript.revision, layout);
         layout in
   let total = layout.total in
-  t.scroll <- min t.scroll (max 0 (total - body_height));
+  let transcript_height = if rows < 6 then
+    max 0 (rows - activity_height - 1 - editor_height) else body_height in
+  t.scroll <- min t.scroll (max 0 (total - transcript_height));
   let first = max 0 (total - body_height - t.scroll) in
   let last = min total (first + body_height) in
   let visible_first, visible_last =
@@ -1632,12 +1655,39 @@ let paint t =
   t.last_paint <- Unix.gettimeofday ();
   t.stream_pending <- false
 
+let reflow_anchor (before : Transcript_view.snapshot)
+    (after : Transcript_view.snapshot) first =
+  if first < 0 || first >= before.total then None
+  else
+    let visual = Transcript_view.visual_at before first in
+    let entry = Array.find_opt (fun (entry : Transcript_view.entry) ->
+      entry.source = visual.source) before.entries in
+    let next = Array.find_opt (fun (entry : Transcript_view.entry) ->
+      entry.source = visual.source) after.entries in
+    match entry, next with
+    | Some entry, Some next ->
+        let old_parts = Transcript_view.wrap_ranges ~columns:before.columns
+          ~measure:before.measure entry.row.text in
+        let offset = old_parts.(first - entry.start).start_byte in
+        let parts = Transcript_view.wrap_ranges ~columns:after.columns
+          ~measure:after.measure next.row.text in
+        let index = ref 0 in
+        Array.iteri (fun i (part : Transcript_view.wrapped_segment) ->
+          if part.start_byte <= offset then index := i) parts;
+        Some (next.start + !index)
+    | _ -> None
+
 let paint_resized t =
-  (match t.layout_cache, t.body_cache with
-  | Some (_, _, old_layout), Some (_, old_height, _, _)
+  let old_height = match t.previous, t.body_cache with
+    | Some screen, _ when Array.length screen < 6 ->
+        max 0 (Array.length screen - 2 -
+          (if Option.is_some t.activity then 1 else 0))
+    | _, Some (_, height, _, _) -> height
+    | _ -> 0 in
+  (match t.layout_cache with
+  | Some (_, _, old_layout)
     when t.scroll > 0 && old_height > 0 && old_layout.total > 0 ->
       let first = max 0 (old_layout.total - old_height - t.scroll) in
-      let old_entry = Transcript_view.visual_at old_layout first in
       let cols, rows = Notty_unix.Term.size t.term in
       let cols = max 1 cols and rows = max 1 rows in
       let measure = measure_text in
@@ -1646,20 +1696,18 @@ let paint_resized t =
         ~columns:content_cols ~measure in
       let field_width = composer_field_width ~cols ~rows in
       let activity_height = if Option.is_some t.activity then 1 else 0 in
-      let editor_space = max 1 (rows - 4 - activity_height) in
-      let editor_height = match t.chooser, Pave.Composer.search_query t.editor with
-        | Some _, _ | None, Some _ -> 1
-        | None, None ->
-            let editor_lines = editor_lines t field_width in
-            min 4 (max 1 (min editor_space (Array.length editor_lines))) in
-      let height = max 0 (rows - 4 - editor_height - activity_height) in
-      let anchor = ref None in
-      Array.iter (fun (entry : Transcript_view.entry) ->
-        if entry.source = old_entry.source then anchor := Some entry.start)
-        next.entries;
+      let editor_lines = editor_lines t field_width in
+      let _, editor_height, height = editor_geometry ~rows ~activity:activity_height
+        ~attachments:(List.length t.pending_attachments)
+        ~modal:(Option.is_some t.chooser ||
+          Option.is_some (Pave.Composer.search_query t.editor))
+        ~lines:(Array.length editor_lines) in
+      let height = if rows < 6 then max 0 (rows - activity_height - 1 - editor_height)
+        else height in
+      let anchor = reflow_anchor old_layout next first in
       Option.iter (fun position ->
         t.scroll <- max 0 (next.total - height - position))
-        !anchor;
+        anchor;
       t.layout_cache <- Some (cols, t.transcript.revision, next);
       t.revision <- t.revision + 1
   | _ -> ());
@@ -1817,15 +1865,17 @@ let show_terminal_image t ~enabled (image : Pave.Terminal_image.image) =
       if commands = [] then false
       else (
         suspend t (fun () ->
-          print_string "\027[2J\027[H";
-          List.iter print_string commands;
-          print_string "\r\nPress Return to return to Pave.";
-          flush stdout;
-          (try ignore (input_line stdin) with End_of_file -> ());
-          List.iter print_string
-            (Pave.Terminal_image.clear ~capability ~enabled);
-          print_string "\027[0m\r\n";
-          flush stdout);
+          Fun.protect (fun () ->
+            print_string "\027[2J\027[H";
+            List.iter print_string commands;
+            print_string "\r\nPress Return to return to Pave.";
+            flush stdout;
+            (try ignore (input_line stdin) with End_of_file -> ()))
+            ~finally:(fun () ->
+              List.iter print_string
+                (Pave.Terminal_image.clear ~capability ~enabled);
+              print_string "\027[0m\r\n";
+              flush stdout));
         true)
 
 let reset_status t =
@@ -1864,7 +1914,7 @@ let set_usage t = function
       t.usage_badge <- None;
       paint t
   | Some (tokens : Pave.Protocol.usage) ->
-      t.usage_badge <- Some (Printf.sprintf " · %d in/%d out"
+      t.usage_badge <- Some (Printf.sprintf "%d in/%d out"
         tokens.input_tokens tokens.output_tokens);
       paint t
 let set_attachments t attachments =
@@ -1888,11 +1938,14 @@ let prepend_prompt ?(paste_ranges = []) t text =
   else false
 
 
-let show_history t (messages : Pave.Protocol.message list) =
+let show_history ?(tool_outcomes = []) t (messages : Pave.Protocol.message list) =
   Hashtbl.clear t.tool_groups;
   Hashtbl.clear t.draft_groups;
   Hashtbl.clear t.draft_decoders;
   let names = Hashtbl.create 32 in
+  let outcomes = Hashtbl.create (List.length tool_outcomes) in
+  List.iter (fun (call_id, is_error) -> Hashtbl.replace outcomes call_id is_error)
+    tool_outcomes;
   Transcript_view.clear t.transcript;
   List.iter (fun (message : Pave.Protocol.message) ->
     match message.role with
@@ -1929,7 +1982,9 @@ let show_history t (messages : Pave.Protocol.message list) =
               (Pave.Protocol.display_content_blocks blocks)
           | None -> message.content in
         Option.iter (fun result ->
-          Transcript_view.tool_result ?group t.transcript name result;
+          let is_error = Option.bind message.tool_call_id
+            (Hashtbl.find_opt outcomes) in
+          Transcript_view.tool_result ?group ?is_error t.transcript name result;
           Option.iter (Hashtbl.remove names) message.tool_call_id)
           result
     | _ -> ()) messages;
@@ -2133,6 +2188,9 @@ let process_ui_event t = function
   | Agent_event event ->
       Option.iter (fun handler -> handler event) t.agent_event_handler;
       `Continue
+  | User_prompt { text; attachments } ->
+      sent ~attachments t text;
+      `Continue
   | Listing_event update ->
       (!listing_handler) t update;
       `Continue
@@ -2186,8 +2244,8 @@ let rec next_input ?wake_fd t =
           next_input ?wake_fd t)
 
 let toggle_tool_detail t =
-  let cols, rows = Notty_unix.Term.size t.term in
-  let cols = max 1 cols and rows = max 1 rows in
+  let cols, _ = Notty_unix.Term.size t.term in
+  let cols = max 1 cols in
   let measure = measure_text in
   let content_cols = if cols <= 4 then cols else cols - 4 in
   let layout = match t.layout_cache with
@@ -2195,9 +2253,7 @@ let toggle_tool_detail t =
       when width = cols && revision = t.transcript.revision -> layout
     | _ -> Transcript_view.snapshot t.transcript ~columns:content_cols ~measure in
   let visible = layout.total in
-  let height = match t.body_cache with
-    | Some (_, height, _, _) when height > 0 -> height
-    | _ -> max 1 (rows - 5) in
+  let height = view_height t in
   let first = max 0 (visible - height - t.scroll) in
   let last = min visible (first + height) in
   let source_first = if first < visible then
@@ -2216,7 +2272,7 @@ let toggle_tool_detail t =
       let target = ref None in
       Array.iter (fun (entry : Transcript_view.entry) ->
         if entry.row.group = group &&
-           entry.row.style = Transcript_view.Heading &&
+           List.mem entry.row.style [Transcript_view.Heading; Transcript_view.Tool_summary] &&
            !target = None then target := Some entry.start) expanded.entries;
       Option.iter (fun start ->
         t.scroll <- max 0 (expanded.total - height - start)) !target);
@@ -2668,7 +2724,7 @@ let choose ?(allow_custom = false) ?(intro = []) ?(plain = [])
       | `Wake ->
           Option.iter (fun callback -> callback ()) on_wake;
           loop ()
-      | `Resize _ -> paint t; loop ()
+      | `Resize _ -> paint_resized t; loop ()
       | `Paste `Start -> t.paste <- true; loop ()
       | `Paste `End -> t.paste <- false; paint t; loop ()
       | `Key _ as event ->
@@ -2897,13 +2953,21 @@ let decide t ~title ?(context = "") ?(body = "") ~options () =
 let deny_option = "n", "Deny", "Nothing runs · the model is told you declined"
 let allow_once_option = "y", "Allow once", "Runs this call only · later calls ask again"
 
-let confirm_command t command =
+let persistent_command_grant command =
+  match Pave.Approval.shell_segments command with
+  | Some [_] -> true
+  | _ -> false
+
+let confirm_command ?(always = true) t command =
+  let always = always && persistent_command_grant command in
   match confirm_review t ~title:"Run this shell command?"
     ~label:"run_command · exec tier · not sandboxed · runs as your user"
     ~body:command ~primary:max_int ~max_bytes:4096 ~wrap:false
-    ~options:[deny_option; allow_once_option;
-      "w", "Always allow this exact command",
-        "Remembers the literal command in your user settings and runs it without asking again"]
+    ~options:([deny_option; allow_once_option] @
+      (if always then
+        ["w", "Always allow this exact command",
+          "Remembers the literal command in your user settings and runs it without asking again"]
+       else []))
     ~too_large:"Shell command denied: too large to review on screen"
     ~unsafe_text:"Shell command denied: hidden/control text cannot be reviewed"
     ~status:(function
@@ -2916,7 +2980,7 @@ let confirm_command t command =
   | _ -> Pave.Approval.Allow_always
 
 let confirm t command =
-  confirm_command t command <> Pave.Approval.Deny_once
+  confirm_command ~always:false t command <> Pave.Approval.Deny_once
 
 (* Ask a question about the action, lead with exactly what will run, then
    explain its effect; the tier stays visible in plain words. *)
@@ -2945,13 +3009,15 @@ let approval_scope (request : Pave.Approval.request) =
     Pave.Approval.tier_name request.tier ^ " tier · " ^ trigger;
     consequence;
     (if Pave.Approval.session_grantable request.tool_name
-     then "you may allow it until exit" else "asks every call") ]
+     then "you may allow it until exit"
+     else if request.tool_name = "run_command" then "per-command approval"
+     else "asks every call") ]
 
 let approval_primary_detail detail =
   List.exists (fun prefix -> String.starts_with ~prefix detail)
     ["Command: "; "Query: "; "URL: "; "Path: "; "Label: "; "Task: "]
 
-let confirm_tool t (request : Pave.Approval.request) =
+let confirm_tool ?(always = true) t (request : Pave.Approval.request) =
   let shell = request.tool_name = "run_command" in
   let primary, others = List.partition approval_primary_detail request.details in
   let body = String.concat "\n" (primary @
@@ -2963,7 +3029,13 @@ let confirm_tool t (request : Pave.Approval.request) =
     String.starts_with ~prefix detail &&
     String.length detail - String.length prefix > 4096) request.details in
   let session = Pave.Approval.session_grantable request.tool_name in
-  let always = Pave.Approval.always_grantable request.tool_name in
+  let always = always && Pave.Approval.always_grantable request.tool_name &&
+    List.exists (fun detail ->
+      let prefix = "Command: " in
+      String.starts_with ~prefix detail &&
+      persistent_command_grant
+        (String.sub detail (String.length prefix)
+          (String.length detail - String.length prefix))) request.details in
   let options = [deny_option; allow_once_option] @
     (if always then
        ["w", "Always allow this exact command",
@@ -2986,6 +3058,7 @@ let confirm_tool t (request : Pave.Approval.request) =
       ~status:(function
         | 0 -> request.tool_name ^ " denied"
         | 1 -> request.tool_name ^ " allowed once"
+        | 2 when always -> request.tool_name ^ " allowed permanently"
         | _ -> request.tool_name ^ " allowed until exit")
     with
     | 0 -> Pave.Approval.Deny_once

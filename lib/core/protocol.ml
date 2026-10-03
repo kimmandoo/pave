@@ -426,14 +426,16 @@ let parse_completion json =
        | _ -> raise (Invalid_response "invalid refusal"));
       let msg = parse_message response in
       let finish = member "finish_reason" choice in
-      (* Some OpenAI-compatible hosts report tool-call turns as "stop", emit the
-         aliases "end"/"function_call"/"max_tokens", or send native uppercase
-         finish reasons (e.g. Gemini-fronting gateways). Normalize them all. *)
+      (* Normalize documented compatible spellings, but never turn a terminal
+         text-only outcome into permission to execute tool calls. *)
       let normalized = match finish with
         | `String reason -> String.lowercase_ascii reason
         | _ -> "" in
       (match normalized with
-      | "stop" | "end" | "tool_calls" | "function_call" -> msg
+      | "stop" | "end" when msg.tool_calls = [] -> msg
+      | "tool_calls" | "function_call" when msg.tool_calls <> [] -> msg
+      | "stop" | "end" | "tool_calls" | "function_call" ->
+          raise (Invalid_response "finish_reason/tool calls mismatch")
       | "length" | "max_tokens" -> truncated ("finish_reason " ^ normalized)
       | "error" | "insufficient_system_resource" ->
           raise (Invalid_response ("provider returned error finish_reason" ^
@@ -514,10 +516,11 @@ let completion_usage json =
    name), duplicate call ids, or results that never paired. Providers reject
    such transcripts and wedge the session in an error loop, so every request
    is sanitized first:
-     - drop tool calls with blank id/name, and the results they would have owned;
-     - rewrite a repeated call id to `id ^ "_dup" ^ n`, pairing its result;
+     - drop unsigned calls with blank id/name and their paired results;
+     - rewrite repeated unsigned call IDs, pairing their results;
+     - preserve native signed calls verbatim or reject an invalid turn;
      - a call never followed by a result gains a synthetic "No result provided";
-     - a result whose call id is missing or already paired is dropped. *)
+     - drop results whose call ID is absent or already paired in this turn. *)
 let sanitize_messages (messages : message list) : message list =
   let malformed (call : tool_call) =
     String.trim call.id = "" || String.trim call.name = "" in
@@ -535,6 +538,8 @@ let sanitize_messages (messages : message list) : message list =
           Queue.add bad queue; bad, call) msg.tool_calls in
         let kept = List.filter_map (fun (bad, call) ->
           if bad then None else Some call) calls in
+        if msg.provider_state <> None && kept <> msg.tool_calls then
+          raise (Invalid_response "cannot sanitize signed native tool calls");
         if kept = [] && (msg.content = None || msg.content = Some "") &&
            msg.provider_state = None then None
         else Some (if List.length kept = List.length calls then msg
@@ -574,16 +579,27 @@ let sanitize_messages (messages : message list) : message list =
            expected result never arrived, so a later real result belongs to
            this turn. Calls inside one turn must keep their queued order. *)
         Hashtbl.iter (fun _ queue -> Queue.clear queue) rename_map;
-        let calls = List.map (fun (call : tool_call) ->
-          match Hashtbl.find_opt seen call.id with
-          | None -> Hashtbl.add seen call.id 1; enqueue call.id None; call
-          | Some count ->
-              let id = fresh call.id count in
-              Hashtbl.replace seen call.id (count + 1);
-              Hashtbl.add seen id 1;
-              enqueue call.id (Some id);
-              { call with id }) msg.tool_calls in
-        if calls = msg.tool_calls then msg else { msg with tool_calls = calls }
+        if msg.provider_state <> None then (
+          (* Native replay binds the model-issued IDs to opaque state. *)
+          let ids = Hashtbl.create (List.length msg.tool_calls) in
+          List.iter (fun (call : tool_call) ->
+            if Hashtbl.mem ids call.id then
+              raise (Invalid_response "duplicate native tool call id");
+            Hashtbl.add ids call.id ();
+            Hashtbl.replace seen call.id 1;
+            enqueue call.id None) msg.tool_calls;
+          msg)
+        else
+          let calls = List.map (fun (call : tool_call) ->
+            match Hashtbl.find_opt seen call.id with
+            | None -> Hashtbl.add seen call.id 1; enqueue call.id None; call
+            | Some count ->
+                let id = fresh call.id count in
+                Hashtbl.replace seen call.id (count + 1);
+                Hashtbl.add seen id 1;
+                enqueue call.id (Some id);
+                { call with id }) msg.tool_calls in
+          if calls = msg.tool_calls then msg else { msg with tool_calls = calls }
     | "tool" ->
         (match msg.tool_call_id with
          | Some id ->
@@ -638,6 +654,7 @@ let sanitize_messages (messages : message list) : message list =
     match msg.role, msg.tool_call_id with
     | "assistant", _ ->
         flush ();
+        Hashtbl.reset resolved;
         if msg.tool_calls <> [] then (pending := msg.tool_calls; pending_at := index);
         Queue.add msg out
     | "tool", Some id ->
@@ -649,6 +666,7 @@ let sanitize_messages (messages : message list) : message list =
           flush ())
         else if not (Hashtbl.mem consumed (id, index)) then
           ()  (* orphan: call missing, already paired, or out of order *)
+    | "tool", None -> ()
     | _ ->
         flush ();
         Queue.add msg out) stage2;

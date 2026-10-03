@@ -317,29 +317,10 @@ let request ?(format = Standard) ?thinking ~model messages tools =
                 pending := List.filter (fun (original, _) -> original <> id) !pending;
                 emit (`Assoc ["type", `String "function_call_output";
                   "call_id", `String wire_id; "output", tool_result_output msg])
-            | None ->
-                (* Orphan result: fold into an assistant message rather than
-                   erroring — the API would 400 on an unpaired output. *)
-                let output = match tool_result_output msg with
-                  | `String text -> text
-                  | `List _ as list -> Yojson.Basic.to_string list in
-                let output = if String.length output > 16_000
-                  then String.sub output 0 16_000 ^ "\n...[truncated]"
-                  else output in
-                emit (`Assoc ["type", `String "message";
-                  "role", `String "assistant";
-                  "content", `String ("[Previous tool result; call_id=" ^ id ^
-                    "]: " ^ output)]))
+            | None -> invalid "unpaired or malformed tool result")
         | _ -> invalid "unpaired or malformed tool result")
     | _ -> invalid "unsupported transcript role") messages;
-  if !pending <> [] then
-    (* Missing outputs get a placeholder so the input grammar stays valid when
-       a turn was interrupted after the call streamed. *)
-    List.iter (fun (_, wire_id) ->
-      emit (`Assoc ["type", `String "function_call_output";
-        "call_id", `String wire_id;
-        "output", `String "[No tool output recorded: the tool call was interrupted before it produced a result.]"]))
-      (List.rev !pending);
+  if !pending <> [] then invalid "missing tool results";
   let input = List.rev !input in
   let input, fields = match format with
     | Standard ->

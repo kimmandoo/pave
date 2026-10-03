@@ -14,7 +14,7 @@ type row = {
   mutable runs : inline_run array;
   mutable provisional : bool;
   group : int;
-  detail : bool;
+  mutable detail : bool;
   preview : bool;
 }
 
@@ -53,9 +53,12 @@ type t = {
   mutable live : string;
   mutable streaming : bool;
   mutable fenced : bool;
+  mutable fence_marker : char;
+  mutable fence_length : int;
   mutable diff_fenced : bool;
   mutable diff_raw : bool;
   mutable table_active : bool;
+  mutable table_header : string option;
   mutable revision : int;
   mutable cached : snapshot option;
   mutable dirty : int;
@@ -71,7 +74,8 @@ let create () = { rows = [||]; count = 0; next_group = 1;
   expanded = Hashtbl.create 32; writes = Hashtbl.create 8;
   pending_tool = None; live = "";
   streaming = false; fenced = false; diff_fenced = false; diff_raw = false;
-  table_active = false; revision = 0;
+  fence_marker = '`'; fence_length = 3;
+  table_active = false; table_header = None; revision = 0;
   cached = None; dirty = 0 }
 
 let sanitize text =
@@ -109,12 +113,14 @@ let add t row =
     Array.blit t.rows removed t.rows 0 (t.count - removed);
     Array.fill t.rows (t.count - removed) removed blank;
     t.count <- t.count - removed;
-    (* Group IDs increase monotonically; trimming cannot retain an older ID. *)
-    let first = t.rows.(0).group in
+    let retained = Hashtbl.create 128 in
+    for index = 0 to t.count - 1 do
+      Hashtbl.replace retained t.rows.(index).group ()
+    done;
     Hashtbl.filter_map_inplace (fun id expanded ->
-      if id < first then None else Some expanded) t.expanded;
+      if Hashtbl.mem retained id then Some expanded else None) t.expanded;
     Hashtbl.filter_map_inplace (fun id card ->
-      if id < first then None else Some card) t.writes);
+      if Hashtbl.mem retained id then Some card else None) t.writes);
   if t.count = Array.length t.rows then (
     let grown = Array.make (min max_rows (max 128 (2 * t.count))) blank in
     Array.blit t.rows 0 grown 0 t.count;
@@ -203,7 +209,29 @@ let inline_markdown text =
 let table_cells text =
   if not (String.contains text '|') then None
   else
-    let cells = List.map String.trim (String.split_on_char '|' text) in
+    let cells = ref [] and cell = Buffer.create (String.length text) in
+    let code = ref 0 and index = ref 0 in
+    let push () =
+      cells := String.trim (Buffer.contents cell) :: !cells;
+      Buffer.clear cell in
+    while !index < String.length text do
+      let char = text.[!index] in
+      if char = '\\' && !code = 0 && !index + 1 < String.length text then (
+        Buffer.add_substring cell text !index 2;
+        index := !index + 2)
+      else if char = '`' then (
+        let stop = ref (!index + 1) in
+        while !stop < String.length text && text.[!stop] = '`' do incr stop done;
+        let length = !stop - !index in
+        if !code = 0 then code := length else if !code = length then code := 0;
+        Buffer.add_substring cell text !index length;
+        index := !stop)
+      else (
+        if char = '|' && !code = 0 then push () else Buffer.add_char cell char;
+        incr index)
+    done;
+    push ();
+    let cells = List.rev !cells in
     let cells = match cells with "" :: rest -> rest | _ -> cells in
     let cells = match List.rev cells with "" :: rest -> List.rev rest
       | _ -> cells in
@@ -248,6 +276,7 @@ let heading t ~kind ~group ~provisional text =
   t.diff_fenced <- false;
   t.diff_raw <- false;
   t.table_active <- false;
+  t.table_header <- None;
   add_line t ~kind ~group ~provisional ~style:Heading text
 
 let markdown_prefix line =
@@ -266,14 +295,35 @@ let markdown_prefix line =
     List_item, String.sub line 2 (length - 2)
   else Text, line
 
-let display_line ~fenced line =
-  if String.starts_with ~prefix:"```" line then
-    Code, (if fenced then "end code" else
-      let language = String.trim
-        (String.sub line 3 (String.length line - 3)) in
-      "code" ^ (if language = "" then "" else " · " ^ language))
-  else if fenced then Code, line
-  else markdown_prefix line
+type fence = Open_fence of char * int * string | Close_fence
+
+let fence_line t line =
+  let size = String.length line in
+  let rec indent index =
+    if index < size && index < 3 && line.[index] = ' ' then indent (index + 1)
+    else index in
+  let start = indent 0 in
+  if start = size || (line.[start] <> '`' && line.[start] <> '~') then None
+  else
+    let marker = line.[start] in
+    let stop = ref start in
+    while !stop < size && line.[!stop] = marker do incr stop done;
+    let count = !stop - start in
+    let info = String.trim (String.sub line !stop (size - !stop)) in
+    if t.fenced then
+      if marker = t.fence_marker && count >= t.fence_length && info = ""
+      then Some Close_fence else None
+    else if count >= 3 && (marker <> '`' || not (String.contains info '`')) then
+      Some (Open_fence (marker, count, info))
+    else None
+
+let display_line ~fence ~fenced line =
+  match fence with
+  | Some Close_fence -> Code, "end code"
+  | Some (Open_fence (_, _, language)) ->
+      Code, "code" ^ (if language = "" then "" else " · " ^ language)
+  | None when fenced -> Code, line
+  | None -> markdown_prefix line
 
 let diff_style line =
   let starts prefix = String.starts_with ~prefix line in
@@ -298,28 +348,39 @@ let is_diff_style = function
   | Diff_header | Diff_hunk | Diff_add | Diff_remove | Diff_context
   | Diff_meta -> true
   | _ -> false
-
-let content_line t ~kind ~group ~provisional ?(detail = false)
-    ?(start_diff = false) line =
-  let line = fit line in
-  let fence = String.starts_with ~prefix:"```" line in
-  let diff = not fence && (t.diff_fenced ||
+let classify_line t ?(start_diff = false) line =
+  let fence = fence_line t line in
+  let diff = Option.is_none fence && (t.diff_fenced ||
     (not t.fenced && (t.diff_raw || start_diff ||
       String.starts_with ~prefix:"diff --git " line))) in
   let diff_kind = if diff then diff_style line else None in
   let style, visible = match diff_kind with
     | Some style -> style, line
     | None when diff && t.diff_fenced -> Code, line
-    | None -> display_line ~fenced:t.fenced line in
-  if fence then (
-    if t.fenced then t.diff_fenced <- false
-    else t.diff_fenced <- String.equal
-      (String.lowercase_ascii (String.trim
-        (String.sub line 3 (String.length line - 3)))) "diff";
-    t.fenced <- not t.fenced;
-    t.diff_raw <- false)
-  else if not t.fenced then
-    t.diff_raw <- diff && Option.is_some diff_kind;
+    | None -> display_line ~fence ~fenced:t.fenced line in
+  style, visible, fence, diff_kind
+
+
+let content_line t ~kind ~group ~provisional ?(detail = false)
+    ?(start_diff = false) line =
+  let line = fit line in
+  let style, visible, fence, diff_kind = classify_line t ~start_diff line in
+  let table_header = t.table_header in
+  t.table_header <- None;
+  (match fence with
+  | Some (Open_fence (marker, length, language)) ->
+      t.fenced <- true;
+      t.fence_marker <- marker;
+      t.fence_length <- length;
+      t.diff_fenced <- String.equal (String.lowercase_ascii language) "diff";
+      t.diff_raw <- false
+  | Some Close_fence ->
+      t.fenced <- false;
+      t.diff_fenced <- false;
+      t.diff_raw <- false
+  | None when not t.fenced ->
+      t.diff_raw <- Option.is_some diff_kind
+  | None -> ());
   if style <> Text then (
     t.table_active <- false;
     add_line t ~kind ~group ~provisional ~detail
@@ -333,7 +394,7 @@ let content_line t ~kind ~group ~provisional ?(detail = false)
         (match previous with
          | Some (index, row) when row.kind = kind && row.group = group &&
              row.style = Text ->
-             (match table_cells row.text with
+             (match Option.bind table_header table_cells with
               | Some header when List.length header = List.length cells ->
                   set_row t index ~style:Table_header ~markdown:true
                     (table_row_text header);
@@ -353,11 +414,44 @@ let content_line t ~kind ~group ~provisional ?(detail = false)
     | Some cells when t.table_active ->
         add_line t ~kind ~group ~provisional ~detail ~markdown:true
           ~style:Table_row (table_row_text cells)
-    | _ ->
+    | cells ->
         t.table_active <- false;
+        t.table_header <- (if Option.is_some cells then Some line else None);
         add_line t ~kind ~group ~provisional ~detail ~markdown:true line
 
+let flush_live t =
+  if t.live <> "" then (
+    let id = if t.streaming then t.next_group - 1 else group t in
+    content_line t ~kind:Assistant ~group:id ~provisional:true t.live;
+    t.live <- "")
+
+let end_segment t =
+  flush_live t;
+  t.streaming <- false
+
+(* Results can settle out of provider order. Keep each call's rows next to its
+   title rather than attaching its outcome to the last call that started. *)
+let gather_group t id =
+  let first = ref t.count and last = ref (-1) and count = ref 0 in
+  for index = 0 to t.count - 1 do
+    if t.rows.(index).group = id then (
+      first := min !first index; last := index; incr count)
+  done;
+  if !count > 0 && !last - !first + 1 <> !count then (
+    let grouped = Array.make !count blank in
+    let target = ref !last and next = ref (!count - 1) in
+    for index = !last downto !first do
+      let row = t.rows.(index) in
+      if row.group = id then (
+        grouped.(!next) <- row; decr next)
+      else (
+        t.rows.(!target) <- row; decr target)
+    done;
+    Array.blit grouped 0 t.rows !first !count;
+    mark_dirty t !first)
+
 let add_block t kind title text =
+  end_segment t;
   let id = group t in
   heading t ~kind ~group:id ~provisional:false title;
   let text = sanitize text in
@@ -406,6 +500,7 @@ let excerpt_bytes limit text =
 (* A card names what the call acts on, so a denial or failure is readable
    without expanding it. *)
 let start_tool ?target t name =
+  end_segment t;
   let name = single_line name in
   let target = Option.map (fun value -> String.trim (single_line value)) target in
   let label = match name, target with
@@ -430,6 +525,7 @@ let write_label path =
     ~some:(fun path -> " · " ^ single_line path) path
 
 let start_write t =
+  end_segment t;
   let id = group t in
   heading t ~kind:Tool ~group:id ~provisional:false
     "write_file";
@@ -485,7 +581,17 @@ let write_preview t id (preview : Pave.Write_preview.snapshot) state =
             mark_dirty t !index);
           row :: update [] lines
       | rows, [] ->
-          List.iter (fun row -> set_text row "") rows; rows in
+          if rows <> [] then (
+            let kept = ref 0 in
+            for index = 0 to t.count - 1 do
+              let row = t.rows.(index) in
+              if not (List.exists (fun removed -> removed == row) rows) then (
+                t.rows.(!kept) <- row; incr kept)
+              else mark_dirty t index
+            done;
+            Array.fill t.rows !kept (t.count - !kept) blank;
+            t.count <- !kept);
+          [] in
     card.code <- update card.code preview.lines;
     dirty_write t id) (Hashtbl.find_opt t.writes id)
 
@@ -510,18 +616,23 @@ let tool_result ?group:existing ?(aborted = false) ?is_error t name result =
   t.diff_fenced <- false;
   t.diff_raw <- false;
   t.table_active <- false;
+  t.table_header <- None;
   let failed = Option.value
     ~default:(String.starts_with ~prefix:"Error:" result) is_error in
   let error = failed || aborted in
   let denied = failed && List.mem result denied_results in
   let outcome = if aborted then "aborted" else if denied then "denied by you · not run"
     else if failed then "failed" else "completed" in
-  let length = String.fold_left (fun count char ->
-    if char = '\n' then count + 1 else count) 1 result in
+  let length = if result = "" then 0 else
+    String.fold_left (fun count char ->
+      if char = '\n' then count + 1 else count)
+      (if result.[String.length result - 1] = '\n' then 0 else 1) result in
   let compact_read = name = "read_file" && not error in
   let write = Hashtbl.find_opt t.writes id in
   Option.iter (fun card ->
-    card.state.kind <- if error then Error else Tool) write;
+    card.state.kind <- if error then Error else Tool;
+    List.iter (fun (row : row) -> row.detail <- true) card.code;
+    dirty_write t id) write;
   for i = 0 to t.count - 1 do
     let row = t.rows.(i) in
     if row.group = id && row.kind = Tool && row.style = Heading then (
@@ -533,8 +644,9 @@ let tool_result ?group:existing ?(aborted = false) ?is_error t name result =
       if error then row.kind <- Error;
       if compact_read then (
         row.style <- Tool_summary;
-        set_text row (Printf.sprintf "%s · %d %s · collapsed"
-          label length (if length = 1 then "line" else "lines")))
+        set_text row (Printf.sprintf "%s · %d %s%s"
+          label length (if length = 1 then "line" else "lines")
+          (if length = 0 then "" else " · collapsed")))
       else set_text row label)
   done;
   if error then
@@ -546,7 +658,7 @@ let tool_result ?group:existing ?(aborted = false) ?is_error t name result =
   if not compact_read && Option.is_none write then
     add_line t ~kind:(if error then Error else Tool) ~group:id
       ~provisional:false ~style:Tool_state
-      (if length = 1 then outcome
+      (if length <= 1 then outcome
        else Printf.sprintf "%s · %d lines · collapsed" outcome length);
   (* The outcome row already says a denial happened; one line needs no preview. *)
   let position = ref 0 and previewed = ref denied in
@@ -565,9 +677,13 @@ let tool_result ?group:existing ?(aborted = false) ?is_error t name result =
     let stop = match String.index_from_opt result !position '\n' with
       | Some stop -> stop | None -> String.length result in
     let bytes = stop - !position in
-    let line = sanitize (String.sub result !position
-      (min bytes max_line_bytes)) in
-    let line = if bytes > max_line_bytes then fit (line ^ "…") else fit line in
+    let retained = ref (min bytes max_line_bytes) in
+    while !retained > 0 && !retained < bytes &&
+      Char.code result.[!position + !retained] land 0xc0 = 0x80 do
+      decr retained
+    done;
+    let line = sanitize (String.sub result !position !retained) in
+    let line = fit (line ^ (if bytes > !retained then "…" else "")) in
     let starts_diff = (not t.fenced || t.diff_fenced) &&
       (String.starts_with ~prefix:"diff --git " line ||
        (String.starts_with ~prefix:"--- " line &&
@@ -578,16 +694,11 @@ let tool_result ?group:existing ?(aborted = false) ?is_error t name result =
           set_row t index ~style:Diff_header ~markdown:false (excerpt line);
           status_preview := None
       | None -> ());
-    if not compact_read && (Option.is_none write || error) &&
+    if not compact_read &&
       not !previewed && String.trim line <> "" &&
-      not (String.starts_with ~prefix:"```" line) then (
+      Option.is_none (fence_line t line) then (
       previewed := true;
-      let style, preview =
-        if starts_diff || t.diff_raw || t.diff_fenced then
-          match diff_style line with
-          | Some style -> style, line
-          | None -> display_line ~fenced:t.fenced line
-        else display_line ~fenced:t.fenced line in
+      let style, preview, _, _ = classify_line t ~start_diff:starts_diff line in
       let index = t.count in
       add_line t ~kind:(if error then Error else Tool) ~group:id
         ~provisional:false ~preview:true ~style
@@ -605,21 +716,17 @@ let tool_result ?group:existing ?(aborted = false) ?is_error t name result =
         (length - max_tool_lines));
   t.fenced <- false;
   t.diff_fenced <- false;
-  t.diff_raw <- false
+  t.diff_raw <- false;
+  gather_group t id;
+  t.revision <- t.revision + 1
 
 (* Notices raised while a call runs belong to its card, not a separate block. *)
 let tool_note t group text =
-  if text <> "" then
+  if text <> "" then (
     add_line t ~kind:Tool ~group ~provisional:false ~style:Quote
-      (single_line text)
+      (single_line text);
+    gather_group t group)
 
-let flush_live t =
-  if t.live <> "" then (
-    let id = match t.streaming with
-      | true -> t.next_group - 1
-      | false -> group t in
-    content_line t ~kind:Assistant ~group:id ~provisional:true t.live;
-    t.live <- "")
 
 let event t text =
   (* A tool event terminates the current assistant segment, not its provisional
@@ -657,6 +764,7 @@ let finish t =
   t.diff_fenced <- false;
   t.diff_raw <- false;
   t.table_active <- false;
+  t.table_header <- None;
   while t.count > 0 &&
     (let row = t.rows.(t.count - 1) in
      row.kind = Assistant && row.provisional &&
@@ -689,6 +797,7 @@ let rollback t =
   t.diff_fenced <- false;
   t.diff_raw <- false;
   t.table_active <- false;
+  t.table_header <- None;
   let kept = ref 0 in
   for i = 0 to t.count - 1 do
     if not t.rows.(i).provisional then (
@@ -709,6 +818,7 @@ let clear t =
   t.diff_fenced <- false;
   t.diff_raw <- false;
   t.table_active <- false;
+  t.table_header <- None;
   Hashtbl.clear t.expanded;
   Hashtbl.clear t.writes;
   t.revision <- t.revision + 1
@@ -716,18 +826,23 @@ let clear t =
 let visible t row =
   let expanded = Option.value (Hashtbl.find_opt t.expanded row.group)
     ~default:false in
-  (row.style <> Code || row.text <> "") &&
   (not row.detail || expanded) && (not row.preview || not expanded)
 
 let expandable_style = function
   | Tool_state | Tool_summary -> true
   | _ -> false
 
-let toggle t ~first:_ ~last =
-  let chosen = ref None in
+let toggle t ~first ~last =
+  let expandable = Hashtbl.create 16 in
   for i = 0 to t.count - 1 do
     let row = t.rows.(i) in
-    if expandable_style row.style && i <= last then chosen := Some row.group
+    if row.detail then Hashtbl.replace expandable row.group ()
+  done;
+  let chosen = ref None in
+  for i = max 0 first to min last (t.count - 1) do
+    let row = t.rows.(i) in
+    if visible t row && row.style <> Divider &&
+      Hashtbl.mem expandable row.group then chosen := Some row.group
   done;
   match !chosen with
   | None -> None
@@ -889,7 +1004,7 @@ let snapshot t ~columns ~measure =
         if visible t row then push i row
       done;
       if t.live <> "" then (
-        let style, line = display_line ~fenced:t.fenced t.live in
+        let style, line, _, _ = classify_line t t.live in
         let style, line = if style <> Text then style, line
           else match table_cells line with
             | Some cells when table_separator cells ->
@@ -897,8 +1012,9 @@ let snapshot t ~columns ~measure =
             | Some cells when t.table_active ->
                 Table_row, table_row_text cells
             | _ -> Text, line in
-        let text, runs = if style = Code || style = Table_separator then
-          line, plain_runs line else inline_markdown line in
+        let text, runs =
+          if style = Code || style = Table_separator || is_diff_style style then
+            line, plain_runs line else inline_markdown line in
         push t.count { kind = Assistant; style; text; runs;
           provisional = true; group = t.next_group - 1; detail = false;
           preview = false });

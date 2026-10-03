@@ -295,24 +295,39 @@ let request ~model ?thinking messages tools =
     | [] -> fields
     | definitions -> fields @ [ "tools", `List [ `Assoc [
         "functionDeclarations", `List (List.map tool_schema definitions) ] ] ] in
+  let upstream_model = if String.starts_with ~prefix:"models/" model then
+      String.sub model 7 (String.length model - 7) else model in
   let fields = match thinking with
     | None -> fields
     | Some level ->
-        let thinking_config = match level with
-          | "none" -> `Assoc ["thinkingBudget", `Int 0]
-          | "minimal" -> `Assoc ["thinkingLevel", `String "MINIMAL";
-              "includeThoughts", `Bool true]
-          | "low" -> `Assoc ["thinkingLevel", `String "LOW";
-              "includeThoughts", `Bool true]
-          | "medium" -> `Assoc ["thinkingLevel", `String "MEDIUM";
-              "includeThoughts", `Bool true]
-          | "high" -> `Assoc ["thinkingLevel", `String "HIGH";
-              "includeThoughts", `Bool true]
-          | "xhigh" | "max" -> `Assoc ["thinkingLevel", `String "HIGH";
-              "includeThoughts", `Bool true]
+        let requested = match level with
+          | "none" -> 0 | "minimal" -> 1024 | "low" -> 2048
+          | "medium" -> 8192 | "high" -> 16384
+          | "xhigh" | "max" -> 32768
           | _ -> invalid_arg "unsupported thinking level" in
-        fields @ ["generationConfig", `Assoc
-          ["thinkingConfig", thinking_config]] in
+        let thinking_config =
+          if String.starts_with ~prefix:"gemini-2.5-" upstream_model then (
+            let pro = String.starts_with ~prefix:"gemini-2.5-pro" upstream_model in
+            if pro && requested = 0 then
+              invalid_arg "Gemini 2.5 Pro cannot disable thinking";
+            let ceiling = if pro then 32768 else 24576 in
+            Some (`Assoc ["thinkingBudget", `Int (min ceiling requested)]))
+          else if String.starts_with ~prefix:"gemini-3" upstream_model then (
+            if requested = 0 then
+              invalid_arg "Gemini 3 cannot disable thinking";
+            if String.starts_with ~prefix:"gemini-3-pro" upstream_model &&
+               (level = "minimal" || level = "medium") then
+              invalid_arg "Gemini 3 Pro supports only low or high thinking";
+            let native_level = match level with
+              | "minimal" -> "MINIMAL" | "low" -> "LOW"
+              | "medium" -> "MEDIUM" | _ -> "HIGH" in
+            Some (`Assoc ["thinkingLevel", `String native_level]))
+          else None in
+        (match thinking_config with
+         | None -> fields
+         | Some config ->
+             fields @ ["generationConfig", `Assoc
+               ["thinkingConfig", config]]) in
   `Assoc fields
 
 let parse_candidate ~model candidate =
@@ -350,5 +365,5 @@ let parse_completion ~model json =
    | `Assoc _ as feedback when field "blockReason" feedback <> `Null -> invalid "prompt blocked"
    | _ -> ());
   match field "candidates" json with
-  | `List (candidate :: _) -> parse_candidate ~model candidate
-  | _ -> invalid "missing candidates"
+  | `List [candidate] -> parse_candidate ~model candidate
+  | _ -> invalid "missing or ambiguous candidates"

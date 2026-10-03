@@ -153,6 +153,21 @@ let () =
     let provider : Pave.Provider.config = { api = Pave.Provider.Openai_completions;
       endpoint = Printf.sprintf "http://127.0.0.1:%d/chat/completions" port;
       api_key = "mock"; model = "mock" } in
+    let stages = ref [] in
+    let stage_agent = Pave.Agent.create ~provider ~root ~system:"stage boundaries"
+      ~secret_mask:(Pave.Secret_mask.create ["stage-secret"])
+      ~on_stage:(fun stage -> stages := stage :: !stages)
+      ~on_event:(fun _ -> ()) () in
+    let detail = String.make 510 'a' ^ "한글 stage-secret" in
+    Pave.Agent.emit_stage stage_agent "model" ~since:(Unix.gettimeofday ())
+      ~detail ();
+    (match !stages with
+     | [{ Pave.Agent.detail = Some retained; elapsed_ms; _ }] ->
+         assert (String.length retained <= 512);
+         assert (Pave.Session_attachment.valid_utf8 retained);
+         assert (String.ends_with ~suffix:"…" retained);
+         assert (elapsed_ms >= 0)
+     | _ -> failwith "bounded stage diagnostic disappeared");
     let events = ref [] and deltas = ref [] and tool_events = ref [] in
     let outcome_order = ref [] in
     let agent = Pave.Agent.create ~provider ~root ~system:"inspect the mobile repo"
@@ -291,8 +306,8 @@ let () =
          assert (List.exists (function
            | Pave.Agent.Tool_aborted {
                call_id = "shell-wait";
-               side_effects_may_have_occurred = true; _
-             } -> true
+               side_effects_may_have_occurred = true; elapsed_ms = Some elapsed_ms; _
+             } -> elapsed_ms >= 0
            | _ -> false) tail);
          assert (not (List.exists (function
            | Pave.Agent.Tool_settled { call_id = "shell-wait"; _ } -> true

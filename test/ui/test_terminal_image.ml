@@ -73,6 +73,16 @@ let () =
            String.length "\027_Gm=0;" + 4 + 2
      | _ -> false);
 
+  let jpeg = { mime_type = "image/jpeg"; data = base64 "\255\216\255x" } in
+  let webp = { mime_type = "image/webp"; data = base64 "RIFFxxxxWEBPx" } in
+  List.iter (fun image ->
+    expect "Kitty never labels JPEG or WebP bytes as PNG"
+      (encode_image ~capability:(Supported Kitty) ~enabled:true image = []);
+    expect "iTerm2 retains its native JPEG and WebP display support"
+      (match encode_image ~capability:(Supported ITerm2) ~enabled:true image with
+       | [line] -> String.ends_with ~suffix:(image.data ^ "\007") line
+       | _ -> false)) [jpeg; webp];
+
   expect_invalid "MIME/magic mismatch"
     (fun () -> encode_image ~capability:(Supported Kitty) ~enabled:true
       { mime_type = "image/jpeg"; data = small.data });

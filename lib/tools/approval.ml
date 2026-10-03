@@ -53,14 +53,23 @@ let string_of_policy = function
 
 let normalize text =
   let output = Buffer.create (String.length text) in
-  let pending_space = ref false in
+  let pending_space = ref false and quote = ref None and escaped = ref false in
   String.iter (fun character ->
-    if character = ' ' || character = '\t' || character = '\n' || character = '\r' then
+    let literal = !quote <> None || !escaped in
+    if not literal &&
+       (character = ' ' || character = '\t' || character = '\n' || character = '\r') then
       pending_space := Buffer.length output > 0
     else (
       if !pending_space then Buffer.add_char output ' ';
       pending_space := false;
-      Buffer.add_char output character)) text;
+      Buffer.add_char output character);
+    if !escaped then escaped := false
+    else match !quote, character with
+      | Some '\'', '\'' | Some '"', '"' -> quote := None
+      | Some '\'', _ -> ()
+      | _, '\\' -> escaped := true
+      | None, ('\'' | '"' as character) -> quote := Some character
+      | _ -> ()) text;
   Buffer.contents output
 
 let glob_matches pattern text =
@@ -120,8 +129,8 @@ let shell_segments command =
           scan (index + 1)
       | _ ->
           (match character with
-           | '\'' | '"' -> quote := Some character
-           | '\\' -> escaped := true
+           | '\'' | '"' -> quote := Some character; scan (index + 1)
+           | '\\' -> escaped := true; scan (index + 1)
            | ';' | '&' | '|' | '\n' | '(' | ')' ->
                push ();
                if index + 1 < String.length command &&
@@ -138,10 +147,10 @@ let command_rule_matches command segments rule =
   match rule.policy with
   | Allow ->
       (match segments with
-       | [segment] when rule.exact ->
-           (* Persisted grants are exact-command rules: match the normalized
-              segment literally so `*` never widens a grant. *)
-           pattern = normalize segment
+       | [_] when rule.exact ->
+           (* Segment parsing is only the compound-command guard. Compare the
+              original spelling, retaining quotes and escaped whitespace. *)
+           pattern = normalize command
        | [segment] -> glob_matches pattern segment
        | _ -> false)
   | Prompt ->
@@ -222,8 +231,7 @@ let session_grantable tool_name =
 
 (* Only an exact, fully reviewed shell command may be remembered across runs;
    the persisted rule matches the literal normalized command text. *)
-let always_grantable tool_name =
-  List.mem tool_name ["run_command"; "start_shell"]
+let always_grantable tool_name = tool_name = "run_command"
 
 let trigger_name = function
   | Tool_call -> "tool call"

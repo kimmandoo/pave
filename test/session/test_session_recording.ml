@@ -114,6 +114,52 @@ let oversize_rejected () =
      | None -> failwith "oversize line silently ended stream");
     close_in ic)
 
+let playback_data_bound () =
+  let frame data =
+    Yojson.Basic.to_string (`Assoc [
+      "seq", `Int 1; "at_ms", `Int 0; "direction", `String "input";
+      "kind", `String "k"; "data", data]) ^ "\n" in
+  let reject text =
+    match R.frames_of_string text with
+    | exception Invalid_argument _ -> ()
+    | _ -> failwith "playback accepted data larger than the writer's limit" in
+  let oversize = frame (`String (String.make (R.max_data_bytes - 1) 'x')) in
+  assert (String.length oversize < R.max_line_bytes);
+  reject oversize;
+  let boundary = frame (`String (String.make (R.max_data_bytes - 2) 'x')) in
+  assert (List.length (R.frames_of_string boundary) = 1);
+  with_temp_file "playback-data.jsonl" (fun path ->
+    let out = open_out_bin path in
+    output_string out oversize; close_out out;
+    let input = open_in_bin path in
+    Fun.protect ~finally:(fun () -> close_in input) (fun () ->
+      match R.next (R.open_player input) with
+      | exception Invalid_argument _ -> ()
+      | _ -> failwith "channel playback accepted oversized data"))
+
+let writer_frame_bound () =
+  with_temp_file "frame-count.jsonl" (fun path ->
+    let recorder = R.create_recorder (open_out_bin path) in
+    Fun.protect ~finally:(fun () -> R.close_recorder recorder) (fun () ->
+      recorder.R.seq <- R.max_frames;
+      (match R.record recorder ~direction:`Input ~kind:"k" `Null with
+       | exception Invalid_argument _ -> ()
+       | _ -> failwith "writer produced an unplayable over-quota frame");
+      assert ((Unix.stat path).Unix.st_size = 0)))
+
+let failed_write_stops_stream () =
+  with_temp_file "failed-write.jsonl" (fun path ->
+    close_out (open_out_bin path);
+    let fd = Unix.openfile path [Unix.O_RDONLY] 0 in
+    let recorder = R.create_recorder (Unix.out_channel_of_descr fd) in
+    Fun.protect ~finally:(fun () -> R.close_recorder recorder) (fun () ->
+      (match R.record recorder ~direction:`Output ~kind:"k" `Null with
+       | exception (Sys_error _ | Unix.Unix_error _) -> ()
+       | _ -> failwith "writing to a read-only recording channel unexpectedly succeeded");
+      (match R.record recorder ~direction:`Output ~kind:"k" `Null with
+       | exception Invalid_argument _ -> ()
+       | _ -> failwith "recorder reused a stream after a failed frame write")))
+
 let record_after_close_raises () =
   with_temp_file "closed.jsonl" (fun path ->
     let oc = open_out_bin path in
@@ -175,6 +221,9 @@ let () =
   first_frame_timestamps ();
   malformed_line_rejected ();
   oversize_rejected ();
+  playback_data_bound ();
+  writer_frame_bound ();
+  failed_write_stops_stream ();
   record_after_close_raises ();
   invalid_kind_rejected ();
   replay_drains_in_order ();

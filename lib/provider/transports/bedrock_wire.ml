@@ -191,12 +191,7 @@ let parse_response (json : Yojson.Basic.t) =
            block surviving only as text would 400 the next request. *)
         if member "reasoningContent" other <> `Null then
           invalid "reasoning content cannot be preserved across Converse turns"
-        else if member "guardrailContent" other = `Null &&
-           member "image" other = `Null && member "document" other = `Null &&
-           member "video" other = `Null &&
-           member "citationsContent" other = `Null &&
-           member "searchResultContent" other = `Null then
-          invalid "unsupported content block"
+        else invalid "unsupported content block"
     | _ -> invalid "malformed content block") blocks;
   let calls = List.rev !calls in
   let ids = List.map (fun (call : tool_call) -> call.id) calls in
@@ -223,8 +218,11 @@ let usage json =
       let count key = match member key reported with
         | `Int value when value >= 0 -> Some value
         | _ -> None in
-      let input_tokens = Option.value ~default:0 (count "inputTokens") in
-      let output_tokens = Option.value ~default:0 (count "outputTokens") in
+      let input_tokens = match count "inputTokens" with
+        | Some value -> value | None -> -1 in
+      let output_tokens = match count "outputTokens" with
+        | Some value -> value | None -> -1 in
+      if input_tokens < 0 || output_tokens < 0 then None else
       Some { input_tokens; output_tokens;
         cached_input_tokens = count "cacheReadInputTokens";
         cache_creation_input_tokens = count "cacheWriteInputTokens";
@@ -242,9 +240,6 @@ type converse_stream_event =
 type stream_block =
   | Text_block of int
   | Tool_block of int * string * string * Buffer.t
-  (* Members we don't consume (reasoningContent, images, toolResult echoes)
-     still occupy an index; stop events must match without misrouting. *)
-  | Ignored_block of int
 
 type converse_stream = {
   frames : Aws_event_stream.decoder;
@@ -365,9 +360,7 @@ let decode_converse_event stream frame =
        | `Assoc ["text", _] | `Assoc [] | `Null ->
            stream.active_block <- Some (Text_block index);
            []
-       | _ ->
-           stream.active_block <- Some (Ignored_block index);
-           [])
+       | _ -> invalid "unsupported ConverseStream content block start")
   | "contentBlockDelta" ->
       if not stream.message_started || stream.message_stopped <> None then
         invalid "unexpected ConverseStream content delta";
@@ -393,7 +386,7 @@ let decode_converse_event stream frame =
                      call_id = Some id; name; fragment });
                 []
             | _ -> invalid "mismatched ConverseStream tool input block")
-       | _ -> []) (* reasoningContent and other delta members we don't consume *)
+       | _ -> invalid "unsupported ConverseStream content delta")
   | "contentBlockStop" ->
       if not stream.message_started || stream.message_stopped <> None then
         invalid "unexpected ConverseStream content block stop";
@@ -410,9 +403,6 @@ let decode_converse_event stream frame =
            if List.mem id stream.tool_ids then invalid "duplicate ConverseStream tool use ID";
            stream.tool_ids <- id :: stream.tool_ids;
            [Tool_call { id; name; arguments }]
-       | Some (Ignored_block active) when active = index ->
-           stream.active_block <- None;
-           []
        | _ -> invalid "mismatched ConverseStream content block stop")
   | "messageStop" ->
       if not stream.message_started || stream.message_stopped <> None ||
@@ -420,7 +410,8 @@ let decode_converse_event stream frame =
       let reason = required_string "stopReason" value in
       if String.length reason > 64 then invalid "invalid ConverseStream stop reason";
       (match reason with
-       | "end_turn" | "stop_sequence" | "tool_use" -> ()
+       | "end_turn" | "stop_sequence" when stream.tool_ids = [] -> ()
+       | "tool_use" when stream.tool_ids <> [] -> ()
        | "max_tokens" | "model_context_window_exceeded" ->
            truncated ("stop reason " ^ reason)
        | _ -> invalid ("provider stop reason: " ^ reason));

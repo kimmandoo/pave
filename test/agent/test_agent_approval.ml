@@ -229,6 +229,17 @@ let () =
        | None -> false);
     expect "rejected shell command has no side effect"
       (not (Sys.file_exists (Filename.concat root "mandatory-prompt.txt")));
+    let exact_prompts = ref 0 in
+    let exact_command = "touch 'exact grant.txt'" in
+    ignore (with_agent ~root ~name:"run_command"
+      ~arguments:(`Assoc ["command", `String exact_command])
+      ~allow_shell:true ~approval_mode:A.Ask_writes ~tool_approval:[]
+      ~command_patterns:[{ A.match_text = A.normalize exact_command;
+        policy = A.Allow; exact = true }]
+      ~approve_tool:(fun _ -> incr exact_prompts; false) ());
+    expect "a repeated quoted exact command reuses the recorded grant"
+      (!exact_prompts = 0 &&
+       Sys.file_exists (Filename.concat root "exact grant.txt"));
     let shell_effects = ref [] and shell_events = ref [] in
     let _, events = with_agent ~root ~name:"run_command"
       ~arguments:(`Assoc ["command", `String "touch approved-shell.txt"])
@@ -269,6 +280,49 @@ let () =
         Pave.Tools.close_session_context process_context;
         Pave.Workspace_process.close_manager process_manager)
       (fun () ->
+        let tunnel_id = Pave.Workspace_portal.job_id "stop-consent" in
+        Pave.Workspace_process.start process_manager ~id:tunnel_id
+          ~cwd:(Some root) ~program:"/bin/sleep" ~arguments:["60"] ();
+        let tunnel_running () =
+          List.exists (fun (job : Pave.Workspace_process.job_summary) ->
+            job.id = tunnel_id && job.status = Pave.Workspace_process.Running)
+            (Pave.Workspace_process.jobs process_manager) in
+        let stop_args = `Assoc ["action", `String "stop";
+          "name", `String "stop-consent"] in
+        let stop_prompts = ref 0 in
+        ignore (with_agent ~root ~name:"publish_web" ~arguments:stop_args
+          ~allow_shell:false ~approval_mode:A.Auto_all ~tool_approval:[]
+          ~command_patterns:[] ~workspace_context:process_context
+          ~approve_tool:(fun _ -> incr stop_prompts; false) ());
+        expect "Portal stop asks even in yolo and denial retains the tunnel"
+          (!stop_prompts = 1 && tunnel_running ());
+        (match Pave.Tools.prepare ~context:process_context ~root
+          ~name:"publish_web" ~args:stop_args () with
+         | Error _ -> ()
+         | Ok execute ->
+             expect "direct Portal stop needs explicit approval"
+               (match execute () with Error _ -> true | Ok _ -> false));
+        expect "unapproved direct Portal stop retained its process" (tunnel_running ());
+        stop_prompts := 0;
+        ignore (with_agent ~root ~name:"publish_web" ~arguments:stop_args
+          ~allow_shell:false ~approval_mode:A.Auto_all ~tool_approval:[]
+          ~command_patterns:[] ~workspace_context:process_context
+          ~approve_tool:(fun _ -> incr stop_prompts; true) ());
+        expect "approved Portal stop terminates only its owned tunnel"
+          (!stop_prompts = 1 && not (tunnel_running ()));
+        let managed_shell_prompts = ref 0 in
+        let managed_command = "touch managed-unapproved.txt" in
+        ignore (with_agent ~root ~name:"start_shell"
+          ~arguments:(`Assoc ["id", `String "unapproved-shell";
+            "command", `String managed_command])
+          ~allow_shell:true ~approval_mode:A.Auto_all ~tool_approval:[]
+          ~command_patterns:[{ A.match_text = managed_command;
+            policy = A.Allow; exact = true }]
+          ~workspace_context:process_context
+          ~approve_tool:(fun _ -> incr managed_shell_prompts; false) ());
+        expect "ordinary command grants cannot start managed shells"
+          (!managed_shell_prompts = 1 &&
+           not (Sys.file_exists (Filename.concat root "managed-unapproved.txt")));
         let _, process_events = with_agent ~root ~name:"start_process"
           ~arguments:(`Assoc [
             "id", `String "approved-process";
@@ -342,6 +396,32 @@ let () =
       (List.exists (String.starts_with ~prefix:
         "[task] Started read-only child job 0123456789abcdef0123456789abcdef")
         task_events);
+    let model_prompts = ref 0 and model_calls = ref 0 in
+    ignore (with_agent ~root ~name:"task"
+      ~arguments:(`Assoc ["label", `String "model review";
+        "task", `String "inspect"; "model", `String "review-tier"])
+      ~allow_shell:false ~approval_mode:A.Auto_all ~tool_approval:[]
+      ~command_patterns:[]
+      ~approve_tool:(fun request ->
+        incr model_prompts;
+        expect "task approval includes the requested model"
+          (List.mem "Model: review-tier" request.details);
+        true)
+      ~delegate_task:(fun ~cancel:_ ~label:_ ~task:_ ~model ->
+        expect "task preserves a custom model tier" (model = Some "review-tier");
+        incr model_calls; "model-job") ());
+    expect "model-selected task requests one approval and one delegation"
+      (!model_prompts = 1 && !model_calls = 1);
+    ignore (with_agent ~root ~name:"task"
+      ~arguments:(`Assoc ["label", `String "empty model";
+        "task", `String "inspect"; "model", `String ""])
+      ~allow_shell:false ~approval_mode:A.Auto_all ~tool_approval:[]
+      ~command_patterns:[]
+      ~approve_tool:(fun _ -> incr model_prompts; true)
+      ~delegate_task:(fun ~cancel:_ ~label:_ ~task:_ ~model:_ ->
+        incr model_calls; "invalid-model-job") ());
+    expect "empty model names fail before approval or delegation"
+      (!model_prompts = 1 && !model_calls = 1);
     let invalid_task_calls = ref 0 and invalid_task_prompts = ref 0 in
     ignore (with_agent ~root ~name:"task"
       ~arguments:(`Assoc ["label", `String "review"; "task", `String "inspect";

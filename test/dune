@@ -133,7 +133,7 @@
 (test
  (name test_session_journal)
  (modules test_session_journal)
- (libraries pave unix yojson))
+ (libraries pave unix yojson threads))
 
 (test
  (name test_session_hub)
@@ -704,6 +704,11 @@
 (test
  (name test_provider_retry)
  (modules test_provider_retry)
+ (libraries pave unix yojson))
+
+(test
+ (name test_provider_dated_regressions)
+ (modules test_provider_dated_regressions)
  (libraries pave unix yojson))
 
 (test
