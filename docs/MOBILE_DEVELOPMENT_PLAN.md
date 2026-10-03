@@ -1,6 +1,6 @@
 # Mobile development specialization plan
 
-**Status:** M01–M24, AS01, AO01 and UI01 completed. The remaining five core mobile capabilities are being delivered end-to-end in the active `task.md` work; letter-suffixed acceptance here records completed foundation work only.
+**Status:** M01–M24, AS01, AO01, UI01 and BR01 completed. The remaining four core mobile capabilities are being delivered end-to-end in the active `task.md` work; letter-suffixed acceptance here records completed foundation work only.
 
 **M08 acceptance:** An opt-in manual macOS arm64 Xcode 27 run generated a disposable project, called the separately approved `xcode_preflight` scheme, destination and build phases, and reported `Xcode build: exit 0` for a discovered iOS Simulator UUID with signing disabled. Xcode 27 uses `Destinations compatible/incompatible with ...` headings; the parser now supports them alongside the older `Available/Ineligible destinations` headings. A simulator placeholder, physical device and incompatible UUID cannot become a build destination. No simulator was booted or app deployed; CI still runs only fake-Xcode safety regressions and never installs xcodegen or runs a real simulator build.
 
@@ -17,6 +17,7 @@
 **AO01 acceptance:** On `emulator-5554`, one individually approved app-session screenshot returned a PNG image block, and a separate approval returned a bounded XML-derived accessibility tree while the disposable app was running; the same run then stopped the app and the AndroidJUnitRunner passed. PNG size/dimensions, accessibility bytes/nodes, parser entities and malformed trees have fixture regressions. iOS Simulator screenshot capture has a separate `simctl` implementation; accessibility-tree capture is explicitly unavailable through the approved built-in system tools and is not represented as a successful tree.
 
 **UI01 acceptance:** `mobile_control` requires a running Android app and a separately approved exact command. Tap/swipe coordinates are bounded by the last validated screenshot and become stale after one action; text is limited and shell-quoted; unsupported iOS simulator input fails explicitly. The opt-in real `emulator-5554` run tapped the accessible disposable fixture button and observed the counter change from `count:0` to `count:1` through a new approved accessibility capture. Boundary, reserved-text, denial and stale-observation regressions cover safe failure paths.
+**BR01 acceptance:** `mobile_scenario` stores private versioned records under `.pave/mobile-scenarios`, bound to exact app/device identity. Replays require explicit start, one approved UI step, then a distinct approved fresh accessibility capture and exact assertion; the first failed action/observation/assertion stops the run without retry. On `emulator-5554`, the opt-in fixture replay tapped once and verified `count:2`, persisted completion, and separately passed AndroidJUnitRunner. Replay and accessibility verification currently support Android only.
 
 ## Baseline and boundaries
 

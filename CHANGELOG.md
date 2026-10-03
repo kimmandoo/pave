@@ -7,6 +7,8 @@
 - feat(mobile): added separately approved Android UI tap, swipe, text and back actions bound to a recent validated screenshot with stale-coordinate invalidation.
 - test(mobile): tapped the disposable app's accessibility-identified Increment button on `emulator-5554` and verified its fresh accessibility state changed from `count:0` to `count:1`.
 - fix(mobile): ignored Gradle 9.6.1 problems-report and deprecation metadata outside task rows during offline task discovery.
+- feat(mobile): added private, app/device-bound Android bug scenarios with explicit one-step replay and freshly captured accessibility assertions that persist and stop at first failure.
+- test(mobile): replayed one approved action on `emulator-5554`, captured a separately approved accessibility tree, verified `count:2` and persisted scenario completion.
 - fix(tools): preserved configured Java and Android SDK runtime paths for managed mobile-toolchain subprocesses without inheriting provider credentials.
 
 

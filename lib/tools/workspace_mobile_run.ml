@@ -16,6 +16,7 @@ type session = {
   scheme : string option;
   variant : string option;
   activity : string option;
+  mutable screen_size : (int * int) option;
   mutable state : state;
 }
 
@@ -137,7 +138,7 @@ let select manager ~root ~subroot ~platform ~device ~app_id:bundle ~app_path
     manager.next_id <- manager.next_id + 1;
     let id = Printf.sprintf "mobile-%d" manager.next_id in
     let session = { id; root; subroot; platform; device; app_id = bundle;
-      app_path; scheme; variant; activity; state = Selected } in
+      app_path; scheme; variant; activity; state = Selected; screen_size = None } in
     Hashtbl.add manager.sessions id session;
     session)
 
@@ -197,8 +198,8 @@ let execute manager ~approved ~run ~action ~id =
   let output = run ~root:session.root ~command in
   with_lock manager (fun () ->
     let current = lookup manager id in
-    if current != session then fail "mobile session changed during device action";
-    current.state <- state_after action);
+    current.state <- state_after action;
+    current.screen_size <- None);
   output
 let mark_built manager ~id =
   with_lock manager (fun () ->
@@ -207,7 +208,20 @@ let mark_built manager ~id =
       ~platform:session.platform session.app_path);
     if session.state = Running then fail "cannot rebuild a running mobile app";
     session.state <- Built;
+    session.screen_size <- None;
     session)
+
+let set_screen_size manager ~id ~width ~height =
+  if width <= 0 || height <= 0 then fail "mobile screenshot dimensions must be positive";
+  with_lock manager (fun () ->
+    let session = lookup manager id in
+    if session.state <> Running then fail "screen dimensions require a running mobile session";
+    session.screen_size <- Some (width, height))
+
+let clear_screen_size manager ~id =
+  with_lock manager (fun () ->
+    let session = lookup manager id in
+    session.screen_size <- None)
 
 let render session =
   Printf.sprintf "%s · %s · %s · app %s · device %s · %s · artifact %s%s%s%s"

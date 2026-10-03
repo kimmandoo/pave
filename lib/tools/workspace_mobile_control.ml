@@ -17,16 +17,18 @@ let command (session : Workspace_mobile_run.session) ~screen_size action =
     fail "mobile UI control requires a running app session";
   if session.platform <> Workspace_mobile_run.Android then
     fail "mobile UI control is currently available only for Android sessions";
-  let width, height = match screen_size with
+  let observed_size () = match screen_size with
     | Some (width, height) when width > 0 && height > 0 -> width, height
     | Some _ -> fail "observed mobile screen dimensions are invalid"
     | None -> fail "capture a screenshot of the running session before coordinate-based UI control" in
   let remote = match action with
     | Tap { x; y } ->
+        let width, height = observed_size () in
         check_coordinate ~label:"x" ~extent:width x;
         check_coordinate ~label:"y" ~extent:height y;
         Printf.sprintf "input tap %d %d" x y
     | Swipe { x1; y1; x2; y2; duration_ms } ->
+        let width, height = observed_size () in
         check_coordinate ~label:"start x" ~extent:width x1;
         check_coordinate ~label:"start y" ~extent:height y1;
         check_coordinate ~label:"end x" ~extent:width x2;

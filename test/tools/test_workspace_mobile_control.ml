@@ -24,6 +24,9 @@ let () =
     adb ^ " shell " ^ Filename.quote "input swipe 1 2 3 4 600");
   expect "back command" (Control.command app ~screen_size:size Control.Back =
     adb ^ " shell " ^ Filename.quote "input keyevent KEYCODE_BACK");
+  expect "Back does not need coordinate dimensions"
+    (String.ends_with ~suffix:(Filename.quote "input keyevent KEYCODE_BACK")
+      (Control.command app ~screen_size:None Control.Back));
   let injection = "a'; touch /tmp/pwned; echo '" in
   let text_command = Control.command app ~screen_size:size (Control.Text injection) in
   let encoded = String.concat "%s" (String.split_on_char ' ' injection) in

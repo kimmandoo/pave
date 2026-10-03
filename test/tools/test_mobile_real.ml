@@ -241,6 +241,13 @@ public final class SmokeTest {
                 "timeout_seconds", `Int 60] @ extra in
               approve "mobile_control" (`Assoc fields);
               call "mobile_control" fields in
+            let scenario action extra =
+              let fields = ["action", `String action;
+                "name", `String "counter";
+                "session_id", `String "mobile-1"] @ extra in
+              if not (List.mem action ["list"; "status"]) then
+                approve "mobile_scenario" (`Assoc fields);
+              call "mobile_scenario" fields in
             let accessibility_nodes tree =
               let json = Yojson.Basic.from_string tree in
               Yojson.Basic.Util.(json |> member "nodes" |> to_list) in
@@ -309,6 +316,28 @@ public final class SmokeTest {
               failwith ("Android tap did not change the accessible fixture state: " ^ after_tree);
             print_endline ("real Android UI control on " ^ serial ^
               ": tapped the accessible Increment button and verified count:1");
+            (match observe "screenshot" with
+             | [Pave.Protocol.Text summary;
+                Pave.Protocol.Image { mime_type = "image/png"; data }] ->
+                 expect "scenario screenshot metadata" "\"status\":\"available\"" summary;
+                 expect "scenario screenshot payload" "iVBOR" data
+             | _ -> failwith "scenario screenshot did not return an image block");
+            let steps = `List [`Assoc [
+              "action", `String "tap"; "x", `Int tap_x; "y", `Int tap_y;
+              "expected_field", `String "description";
+              "expected_value", `String "count:2"]] in
+            expect "persisted scenario save" "Saved mobile scenario counter"
+              (scenario "save" ["steps", steps]);
+            expect "scenario replay start" "Started explicit replay"
+              (scenario "start" []);
+            expect "one approved scenario step" "Scenario step completed"
+              (scenario "step" []);
+            expect "scenario verification" "all assertions passed"
+              (scenario "verify" []);
+            expect "persisted scenario completion" "all assertions passed"
+              (scenario "status" []);
+            print_endline ("real Android bug scenario on " ^ serial ^
+              ": persisted, replayed one approved action and verified count:2");
             expect "Android session stop" "Mobile stop completed"
               (run_session "stop" []);
             print_endline ("real Android app session on " ^ serial ^

@@ -64,15 +64,10 @@
 ## P2 — Mobile completion and focused existing-product improvements
 
 M01–M24 are satisfied prerequisites. The remaining mobile core capabilities are delivered end-to-end here; their active acceptance contracts live in the [mobile plan](docs/MOBILE_DEVELOPMENT_PLAN.md).
-AS01, AO01 and UI01 have been completed with session-bound approved app lifecycles, bounded screen observation, and verified Android UI controls; only the remaining five core capabilities are open.
+AS01, AO01, UI01 and BR01 have been completed with session-bound approved app lifecycles, bounded screen observation, verified Android UI controls and persisted, separately approved app/device-bound scenario replay; four core capabilities remain open.
 
 
 
-- [ ] **BR01 — Persist and replay mobile bug scenarios**
-  **Deliver:** private, versioned scenario records of exact app/device identity, steps and assertions, with explicit replay.
-  **Accept:** a saved deterministic scenario replays the same steps and reports the first failed assertion; mismatched app/device identity, missing records and cancelled actions stop replay without implicit retries.
-  **Depends:** UI01.
-  **Gate:** disposable deterministic mobile fixture.
 
 - [ ] **LD01 — Diagnose mobile runtime logs and crashes**
   **Deliver:** bounded Android logcat/ANR and iOS crash/dSYM-or-mapping evidence tied to the selected app/session.

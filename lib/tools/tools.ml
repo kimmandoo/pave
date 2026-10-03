@@ -2354,6 +2354,246 @@ let mobile_control_tool ~approved ?cancel ?on_progress ~context ~root args =
   Printf.sprintf "Mobile %s completed for %s; capture a fresh screenshot and accessibility tree to verify the resulting UI state."
     action id
 
+let mobile_scenario_tool ~approved ?cancel ?on_progress ~context ~root args =
+  let root = Workspace_path.root_path root in
+  check_session_context context;
+  let action = required_string "action" args in
+  let name = if action = "list" then optional_string "name" "" args
+    else required_string "name" args in
+  let needs_approval = not (List.mem action ["list"; "status"]) in
+  if needs_approval && not approved then
+    fail "mobile scenario mutation or replay requires explicit interactive approval";
+  let selected_session () =
+    let id = required_string "session_id" args in
+    let session = Workspace_mobile_run.get context.mobile_run_manager id in
+    if session.root <> root then fail "mobile app session belongs to a different workspace root";
+    if session.state <> Workspace_mobile_run.Running then
+      fail "mobile scenario operations require a running app session";
+    session in
+  let require_identity (record : Workspace_mobile_scenario.record) session =
+    if not (Workspace_mobile_scenario.same_identity record.identity
+        (Workspace_mobile_scenario.identity_of_session session)) then
+      fail "mobile scenario app/device identity does not match the selected running session" in
+  match action with
+  | "list" ->
+      let records = Workspace_mobile_scenario.list ~root in
+      Yojson.Basic.to_string (`Assoc [
+        "scenarios", `List (List.map (fun record ->
+          `Assoc ["name", `String record.Workspace_mobile_scenario.name;
+            "app_id", `String record.Workspace_mobile_scenario.identity.app_id;
+            "device", `String record.Workspace_mobile_scenario.identity.device;
+            "phase", `String (Workspace_mobile_scenario.phase_name record.Workspace_mobile_scenario.phase);
+            "detail", `String (Workspace_mobile_scenario.phase_detail record.Workspace_mobile_scenario.phase)])
+          records)])
+  | "status" ->
+      let record = Workspace_mobile_scenario.load ~root name in
+      Workspace_mobile_scenario.render record
+  | "save" ->
+      let session = selected_session () in
+      let steps = match field "steps" args with
+        | `List steps -> List.map Workspace_mobile_scenario.step_of_json steps
+        | _ -> fail "mobile scenario steps must be an array" in
+      let record = Workspace_mobile_scenario.save ~root ~name ~session steps in
+      Printf.sprintf "Saved mobile scenario %s for %s on %s (%d steps)."
+        name record.Workspace_mobile_scenario.identity.app_id
+          record.Workspace_mobile_scenario.identity.device
+          (List.length record.Workspace_mobile_scenario.steps)
+  | "start" ->
+      let record = Workspace_mobile_scenario.load ~root name in
+      let session = selected_session () in
+      require_identity record session;
+      Workspace_mobile_scenario.reset record;
+      Workspace_mobile_scenario.update ~root record;
+      "Started explicit replay of mobile scenario " ^ name ^ "; next: " ^
+      Workspace_mobile_scenario.phase_detail record.Workspace_mobile_scenario.phase
+  | "step" ->
+      let record = Workspace_mobile_scenario.load ~root name in
+      let session = selected_session () in
+      require_identity record session;
+      let step = Workspace_mobile_scenario.current_step record in
+      let command = Workspace_mobile_control.command session
+        ~screen_size:session.screen_size step.action in
+      Workspace_mobile_run.clear_screen_size context.mobile_run_manager
+        ~id:session.id;
+      let result = try
+        Workspace_process.run_shell ?cancel ?on_progress
+          ~timeout_seconds:(optional_int "timeout_seconds" 30
+            ~minimum:1 ~maximum:120 args)
+          ~output_limit:Workspace_mobile_observe.max_screenshot_bytes
+          ~cwd:(Some root) ~command ()
+      with exn ->
+        Workspace_mobile_scenario.mark_failed record "device action was cancelled or failed";
+        Workspace_mobile_scenario.update ~root record;
+        raise exn in
+      let outcome = match result.termination with
+        | Workspace_process.Exited 0 when not result.truncated -> None
+        | Workspace_process.Exited code -> Some (Printf.sprintf "exit %d" code)
+        | Workspace_process.Signaled signal -> Some (Printf.sprintf "signal %d" signal)
+        | Workspace_process.Timed_out -> Some "timed out"
+        | Workspace_process.Cancelled -> Some "cancelled" in
+      (match outcome with
+       | Some reason ->
+           Workspace_mobile_scenario.mark_failed record ("device action " ^ reason);
+           Workspace_mobile_scenario.update ~root record;
+           fail ("Mobile scenario " ^ name ^ " stopped at " ^
+             Workspace_mobile_scenario.phase_detail record.Workspace_mobile_scenario.phase ^ "\n" ^ result.output)
+       | None -> ());
+      Workspace_mobile_scenario.mark_awaiting record;
+      Workspace_mobile_scenario.update ~root record;
+      let assertion = List.nth record.Workspace_mobile_scenario.steps
+        (match record.Workspace_mobile_scenario.phase with Workspace_mobile_scenario.Awaiting index -> index | _ -> assert false) in
+      "Scenario step completed; call action=verify for a separately approved fresh accessibility observation. Expected " ^
+      Workspace_mobile_scenario.assertion_field_name assertion.assertion_field ^
+      "=" ^ assertion.expected
+  | "verify" ->
+      let record = Workspace_mobile_scenario.load ~root name in
+      let session = selected_session () in
+      require_identity record session;
+      let index = match record.Workspace_mobile_scenario.phase with
+        | Workspace_mobile_scenario.Awaiting index -> index
+        | _ -> fail "mobile scenario has no step awaiting an accessibility assertion" in
+      let step = List.nth record.Workspace_mobile_scenario.steps index in
+      let command = Workspace_mobile_observe.command "accessibility" session in
+      let result = try
+        Workspace_process.run_shell ?cancel ?on_progress
+          ~timeout_seconds:(optional_int "timeout_seconds" 30
+            ~minimum:1 ~maximum:120 args)
+          ~output_limit:Workspace_mobile_observe.max_accessibility_bytes
+          ~cwd:(Some root) ~command ()
+      with exn ->
+        Workspace_mobile_scenario.mark_failed record "accessibility observation was cancelled or failed";
+        Workspace_mobile_scenario.update ~root record;
+        raise exn in
+      let outcome = match result.termination with
+        | Workspace_process.Exited 0 when not result.truncated -> None
+        | Workspace_process.Exited code -> Some (Printf.sprintf "exit %d" code)
+        | Workspace_process.Signaled signal -> Some (Printf.sprintf "signal %d" signal)
+        | Workspace_process.Timed_out -> Some "timed out"
+        | Workspace_process.Cancelled -> Some "cancelled" in
+      (match outcome with
+       | Some reason ->
+           Workspace_mobile_scenario.mark_failed record ("accessibility observation " ^ reason);
+           Workspace_mobile_scenario.update ~root record;
+           fail ("Mobile scenario stopped before its first assertion: " ^
+             Workspace_mobile_scenario.phase_detail record.Workspace_mobile_scenario.phase ^
+             (if result.truncated then " (observation truncated)" else "") ^
+             "\n" ^ result.output)
+       | None -> ());
+      let observed_tree = try
+        Workspace_mobile_observe.parse_accessibility result.output
+        |> Workspace_mobile_observe.accessibility_json
+      with Workspace_mobile_observe.Error message ->
+        Workspace_mobile_scenario.mark_failed record ("invalid accessibility observation: " ^ message);
+        Workspace_mobile_scenario.update ~root record;
+        fail ("Mobile scenario stopped before its first assertion: " ^ message) in
+      let verified =
+        try Workspace_mobile_scenario.verify_tree step observed_tree
+        with Workspace_mobile_scenario.Error message ->
+          Workspace_mobile_scenario.mark_failed record ("invalid observation: " ^ message);
+          Workspace_mobile_scenario.update ~root record;
+          fail ("Mobile scenario stopped before its first assertion: " ^ message) in
+      if not verified then (
+        Workspace_mobile_scenario.mark_failed record ("expected " ^
+          Workspace_mobile_scenario.assertion_field_name step.assertion_field ^
+          "=" ^ step.expected);
+        Workspace_mobile_scenario.update ~root record;
+        fail ("Mobile scenario stopped at first failed assertion: " ^
+          Workspace_mobile_scenario.phase_detail record.Workspace_mobile_scenario.phase));
+      Workspace_mobile_scenario.advance record;
+      Workspace_mobile_scenario.update ~root record;
+      "Verified scenario step " ^ string_of_int (index + 1) ^ "; assertion " ^
+      Workspace_mobile_scenario.assertion_field_name step.assertion_field ^
+      "=" ^ step.expected ^ "; " ^
+      Workspace_mobile_scenario.phase_detail record.Workspace_mobile_scenario.phase
+  | "delete" ->
+      Workspace_mobile_scenario.delete ~root name;
+      "Deleted mobile scenario " ^ name
+  | _ -> fail "mobile scenario action must be list, save, status, start, step, verify or delete"
+
+let mobile_scenario_preview ~context ~root args =
+  let root = Workspace_path.root_path root in
+  let action = required_string "action" args in
+  let name = if action = "list" then optional_string "name" "" args
+    else required_string "name" args in
+  if action <> "list" then Workspace_mobile_scenario.check_name name;
+  let path = Filename.concat root (".pave/mobile-scenarios/" ^ name ^ ".json") in
+  let session () =
+    let session = Workspace_mobile_run.get context.mobile_run_manager
+      (required_string "session_id" args) in
+    if session.root <> root then fail "mobile app session belongs to a different workspace root";
+    if session.state <> Workspace_mobile_run.Running then
+      fail "mobile scenario operations require a running app session";
+    session in
+  match action with
+  | "list" ->
+      ("Lists saved mobile scenarios from the caller-private workspace store.",
+       ["Store: " ^ Printf.sprintf "%S" (Filename.dirname path)])
+  | "status" ->
+      let record = Workspace_mobile_scenario.load ~root name in
+      ("Reads a saved mobile scenario and its persistent replay state.",
+       ["Scenario: " ^ Workspace_mobile_scenario.render record;
+        "Record: " ^ Printf.sprintf "%S" path])
+  | "save" ->
+      let selected = session () in
+      let steps = match field "steps" args with
+        | `List values -> List.map Workspace_mobile_scenario.step_of_json values
+        | _ -> fail "mobile scenario steps must be an array" in
+      List.iter (fun step -> ignore (Workspace_mobile_control.command selected
+        ~screen_size:selected.screen_size step.Workspace_mobile_scenario.action)) steps;
+      ("Persists an exact app/device-bound bug scenario and accessibility assertions.",
+       ["Store: " ^ Printf.sprintf "%S" path;
+        "App/device: " ^ selected.app_id ^ " · " ^ selected.device;
+        Printf.sprintf "Steps: %d" (List.length steps);
+        "Permissions: private scenario directory and 0600 JSON record"])
+  | "start" ->
+      let record = Workspace_mobile_scenario.load ~root name in
+      let selected = session () in
+      if not (Workspace_mobile_scenario.same_identity record.Workspace_mobile_scenario.identity
+          (Workspace_mobile_scenario.identity_of_session selected)) then
+        fail "mobile scenario app/device identity does not match the selected running session";
+      ("Starts a new explicit replay; prior failed/complete progress is retained until this approval.",
+       ["Scenario: " ^ name ^ " · app/device: " ^ selected.app_id ^ " · " ^ selected.device;
+        "Record: " ^ Printf.sprintf "%S" path])
+  | "step" ->
+      let record = Workspace_mobile_scenario.load ~root name in
+      let selected = session () in
+      if not (Workspace_mobile_scenario.same_identity record.Workspace_mobile_scenario.identity
+          (Workspace_mobile_scenario.identity_of_session selected)) then
+        fail "mobile scenario app/device identity does not match the selected running session";
+      let step = Workspace_mobile_scenario.current_step record in
+      let command = Workspace_mobile_control.command selected
+        ~screen_size:selected.screen_size step.action in
+      ("Performs exactly the next stored UI action on its bound device; no implicit retry. The result awaits a separately approved accessibility observation and assertion.",
+       ["Working directory: " ^ Printf.sprintf "%S" selected.root;
+        "Scenario: " ^ name ^ " · " ^ Workspace_mobile_scenario.phase_detail record.Workspace_mobile_scenario.phase;
+        "App/device: " ^ selected.app_id ^ " · " ^ selected.device;
+        "Assertion: " ^ Workspace_mobile_scenario.assertion_field_name step.assertion_field ^
+          "=" ^ step.expected;
+        "Exact command: " ^ command])
+  | "verify" ->
+      let record = Workspace_mobile_scenario.load ~root name in
+      let selected = session () in
+      if not (Workspace_mobile_scenario.same_identity record.Workspace_mobile_scenario.identity
+          (Workspace_mobile_scenario.identity_of_session selected)) then
+        fail "mobile scenario app/device identity does not match the selected running session";
+      let index = match record.Workspace_mobile_scenario.phase with
+        | Workspace_mobile_scenario.Awaiting index -> index
+        | _ -> fail "mobile scenario has no step awaiting an accessibility assertion" in
+      let step = List.nth record.Workspace_mobile_scenario.steps index in
+      let command = Workspace_mobile_observe.command "accessibility" selected in
+      ("Captures a fresh accessibility tree from the bound app and persists the exact pending assertion result.",
+       ["Scenario step: " ^ string_of_int (index + 1);
+        "Expected: " ^ Workspace_mobile_scenario.assertion_field_name step.assertion_field ^
+          "=" ^ step.expected;
+        "App/device: " ^ selected.app_id ^ " · " ^ selected.device;
+        "Exact command: " ^ command;
+        Printf.sprintf "Maximum captured output: %d bytes."
+          Workspace_mobile_observe.max_accessibility_bytes])
+  | "delete" ->
+      ("Deletes one caller-private saved mobile scenario.",
+       ["Record: " ^ Printf.sprintf "%S" path])
+  | _ -> fail "mobile scenario action must be list, save, status, start, step, verify or delete"
+
 let mobile_session_preview ~context ~root args =
   match optional_string "action" "" args with
   | "build" ->
@@ -3367,7 +3607,7 @@ let repository_security_scan ?cancel root args =
 let is_shell_tool = function
   | "run_command" | "start_process" | "start_shell" | "xcode_preflight"
   | "mobile_check" | "android_devices" | "mobile_session"
-  | "mobile_observe" | "mobile_control" -> true
+  | "mobile_observe" | "mobile_control" | "mobile_scenario" -> true
   | _ -> false
 
 
@@ -3386,6 +3626,8 @@ let requires_explicit_approval ~name ~args =
   | "mobile_session" ->
       List.mem (optional_string "action" "" args)
         ["build"; "install"; "launch"; "stop"]
+  | "mobile_scenario" ->
+      not (List.mem (optional_string "action" "" args) ["list"; "status"])
   | "lsp" -> optional_string "action" "" args = "apply_preview"
   | "dap" ->
       (match field "action" args with
@@ -3421,6 +3663,8 @@ let non_reversible_tool ~name ~args =
   | "mobile_session" ->
       List.mem (optional_string "action" "" args)
         ["build"; "install"; "launch"; "stop"]
+  | "mobile_scenario" ->
+      not (List.mem (optional_string "action" "" args) ["list"; "status"])
   | "workspace_eval" -> optional_string "action" "run" args = "run"
   | "dap" ->
       (match field "action" args with
@@ -3595,6 +3839,29 @@ let definitions = [
      "text", bounded_string_field "Text to enter (maximum 512 bytes)" 512;
      "timeout_seconds", integer_field "Device action deadline (default 30 seconds)" 1 120]
     ["action"; "session_id"];
+
+  schema "mobile_scenario" "Save, explicitly replay one step at a time, and verify Android bug scenarios. Records are private, versioned, bound to exact app/device identity and contain accessibility assertions. Each device step, observation and persisted transition is separately approved; failures stop without implicit retries."
+    ["action", enum_string_field "Scenario operation" ["list"; "save"; "status"; "start"; "step"; "verify"; "delete"];
+     "name", bounded_string_field "Scenario identifier [a-z][a-z0-9_-]{0,47}" 48;
+     "session_id", string_field "Exact running app session ID";
+     "steps", `Assoc ["type", `String "array";
+       "maxItems", `Int Workspace_mobile_scenario.max_steps;
+       "description", `String "Ordered UI actions and expected accessibility values";
+       "items", object_field [
+         "action", enum_string_field "Tap, swipe, text or Back" ["tap"; "swipe"; "text"; "back"];
+         "x", integer_field "Tap x coordinate" 0 max_int;
+         "y", integer_field "Tap y coordinate" 0 max_int;
+         "x1", integer_field "Swipe start x" 0 max_int;
+         "y1", integer_field "Swipe start y" 0 max_int;
+         "x2", integer_field "Swipe end x" 0 max_int;
+         "y2", integer_field "Swipe end y" 0 max_int;
+         "duration_ms", integer_field "Swipe duration (default 500 milliseconds)" 1 10_000;
+         "text", bounded_string_field "Text input (maximum 512 bytes)" 512;
+         "expected_field", enum_string_field "Exact accessibility field to assert" ["role"; "text"; "description"; "identifier"];
+         "expected_value", bounded_string_field "Expected exact value (maximum 1024 bytes)" 1024]
+         ["action"; "expected_field"; "expected_value"]];
+     "timeout_seconds", integer_field "Per-step device or accessibility observation deadline (default 30 seconds)" 1 120]
+    ["action"];
 
   schema "read_file" "Read bounded workspace files, directories, documents, archives, notebooks, SQLite, owned artifacts, managed worktrees, or public HTTPS URLs. HTTPS fetches send no credentials and require approval."
     ["path", string_field "Workspace-relative path or supported local://, artifact://, worktree://, or HTTPS source";
@@ -3797,6 +4064,11 @@ let approval_decision ~command_patterns ~name ~args =
            not (optional_bool "terminate_debuggee" false args) -> tier Approval.Read
        | _ -> tier Approval.Exec)
   | "mobile_observe" -> tier Approval.Read
+  | "mobile_scenario" ->
+      (match optional_string "action" "" args with
+       | "list" | "status" -> tier Approval.Read
+       | "step" -> tier Approval.Exec
+       | _ -> tier Approval.Write)
   | "browser" ->
       (match field "action" args with
        | `String ("observe" | "list_tools" | "close") -> tier Approval.Read
@@ -4180,6 +4452,9 @@ let approval_request ?cancel ?context ~root ~name ~args (decision : Approval.dec
           "Device: " ^ session.device ^ " · app: " ^ session.app_id;
           "Exact command: " ^ command;
           "A successful action invalidates the screenshot coordinate reference. Capture a new screenshot and accessibility tree to verify the UI transition."])
+    | "mobile_scenario" ->
+        let context = require_session_context context in
+        mobile_scenario_preview ~context ~root:base_root args
     | "run_command" ->
         "Runs /bin/sh as your user from the workspace root. It is not sandboxed and may access or modify files outside the workspace or use the network.",
         ["Working directory: " ^ Printf.sprintf "%S" base_root;
@@ -4627,7 +4902,7 @@ let session_tool_names = [
   "lsp_start"; "lsp"; "workspace_eval";
   "ssh_open"; "ssh_close"; "ssh_read"; "ssh_write"; "ssh_command";
   "dap_start"; "dap"; "xcode_preflight"; "mobile_check"; "android_devices";
-  "mobile_session"; "mobile_observe"; "mobile_control"; "browser"; "publish_web"
+  "mobile_session"; "mobile_observe"; "mobile_control"; "mobile_scenario"; "browser"; "publish_web"
 ]
 
 let path_tool_names = [
@@ -4647,6 +4922,7 @@ let error_message = function
   | Workspace_xcode.Error message | Workspace_swiftpm_focus.Error message
   | Workspace_gradle_focus.Error message | Workspace_flutter_focus.Error message
   | Workspace_mobile_control.Error message
+  | Workspace_mobile_scenario.Error message
   | Workspace_android_devices.Error message
   | Workspace_mobile_observe.Error message
   | Workspace_browser.Error message | Workspace_portal.Error message ->
@@ -4726,6 +5002,9 @@ let prepare ?cancel ?context ~root ~name ~args () =
                 ~context:(require_session_context context) ~root args)
           | "mobile_control" ->
               Ok [Protocol.Text (mobile_control_tool ~approved ?cancel ?on_progress
+                ~context:(require_session_context context) ~root args)]
+          | "mobile_scenario" ->
+              Ok [Protocol.Text (mobile_scenario_tool ~approved ?cancel ?on_progress
                 ~context:(require_session_context context) ~root args)]
           | "publish_web" -> Ok (publish_web_tool ~approved ?cancel ?context args)
           | "memory" -> Ok [Protocol.Text (Yojson.Basic.to_string
