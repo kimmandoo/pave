@@ -1,6 +1,6 @@
 # Mobile development specialization plan
 
-**Status:** M01–M24, AS01 and AO01 completed. The remaining six core mobile capabilities are being delivered end-to-end in the active `task.md` work; letter-suffixed acceptance here records completed foundation work only.
+**Status:** M01–M24, AS01, AO01 and UI01 completed. The remaining five core mobile capabilities are being delivered end-to-end in the active `task.md` work; letter-suffixed acceptance here records completed foundation work only.
 
 **M08 acceptance:** An opt-in manual macOS arm64 Xcode 27 run generated a disposable project, called the separately approved `xcode_preflight` scheme, destination and build phases, and reported `Xcode build: exit 0` for a discovered iOS Simulator UUID with signing disabled. Xcode 27 uses `Destinations compatible/incompatible with ...` headings; the parser now supports them alongside the older `Available/Ineligible destinations` headings. A simulator placeholder, physical device and incompatible UUID cannot become a build destination. No simulator was booted or app deployed; CI still runs only fake-Xcode safety regressions and never installs xcodegen or runs a real simulator build.
 
@@ -15,6 +15,8 @@
 **App-session acceptance:** `mobile_session` validates selected app/device data against the current approved Android emulator or iOS scheme/simulator inventory. It previews and separately approves a session-bound Android Gradle assemble task or non-signing iOS Simulator build, then install/launch/stop commands; state advances only after successful complete output and expected artifact existence. An exact package-scoped Android activity component is optional for launchers that do not resolve from the package intent. `test_tools` checks selection, denial without device invocation, failed-build state preservation, Android serial binding and lifecycle approval details. The real Android disposable app was built, installed, launched by its selected component, stopped, then separately exercised by one AndroidJUnitRunner test on `emulator-5554`; `/mobile` exposes the private session chooser and headless listing.
 
 **AO01 acceptance:** On `emulator-5554`, one individually approved app-session screenshot returned a PNG image block, and a separate approval returned a bounded XML-derived accessibility tree while the disposable app was running; the same run then stopped the app and the AndroidJUnitRunner passed. PNG size/dimensions, accessibility bytes/nodes, parser entities and malformed trees have fixture regressions. iOS Simulator screenshot capture has a separate `simctl` implementation; accessibility-tree capture is explicitly unavailable through the approved built-in system tools and is not represented as a successful tree.
+
+**UI01 acceptance:** `mobile_control` requires a running Android app and a separately approved exact command. Tap/swipe coordinates are bounded by the last validated screenshot and become stale after one action; text is limited and shell-quoted; unsupported iOS simulator input fails explicitly. The opt-in real `emulator-5554` run tapped the accessible disposable fixture button and observed the counter change from `count:0` to `count:1` through a new approved accessibility capture. Boundary, reserved-text, denial and stale-observation regressions cover safe failure paths.
 
 ## Baseline and boundaries
 

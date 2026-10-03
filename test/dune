@@ -76,6 +76,11 @@
  (libraries pave unix yojson))
 
 (test
+ (name test_workspace_mobile_control)
+ (modules test_workspace_mobile_control)
+ (libraries pave unix yojson))
+
+(test
  (name test_agent)
  (modules test_agent)
  (libraries pave unix yojson))

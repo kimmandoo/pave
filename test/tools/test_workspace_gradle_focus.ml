@@ -33,8 +33,19 @@ let sample =
   "Rules\n-----\nPattern: clean<TaskName>: Cleans a task.\n\n" ^
   "BUILD SUCCESSFUL in 1s\n1 actionable task: 1 executed\n"
 
+
+let modern_sample =
+  let suffix = "BUILD SUCCESSFUL in 1s\n1 actionable task: 1 executed\n" in
+  String.sub sample 0 (String.length sample - String.length suffix) ^
+  "[Incubating] Problems report is available at: file:///tmp/gradle/problems-report.html\n" ^
+  "Deprecated Gradle features were used in this build, making it incompatible with Gradle 10.\n" ^
+  "You can use '--warning-mode all' to show the individual deprecation warnings and determine if they come from your own scripts or plugins.\n" ^
+  "For more on this, please refer to https://docs.gradle.org/9.6.1/userguide/command_line_interface.html#sec:command_line_warnings\n" ^
+  suffix
 let () =
   let found = Gradle.tasks sample in
+  expect "ignore Gradle 9.6 task-list metadata outside task rows"
+    (Gradle.tasks modern_sample = found);
   expect "root and qualified tasks, not headings or Gradle rule patterns"
     (found = [":app:assembleDebug"; ":assembleDebug"; ":lib:check";
               ":tasks"; ":wrapper"]);

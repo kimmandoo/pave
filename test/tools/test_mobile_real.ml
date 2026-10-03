@@ -117,7 +117,30 @@ dependencies {
             mkdir (Filename.concat root "app/src/main/java/dev/pave");
             mkdir (Filename.concat root "app/src/main/java/dev/pave/mobilefixture");
             create (Filename.concat root "app/src/main/java/dev/pave/mobilefixture/SmokeActivity.java")
-              "package dev.pave.mobilefixture;\npublic final class SmokeActivity extends android.app.Activity {}\n";
+              {|package dev.pave.mobilefixture;
+public final class SmokeActivity extends android.app.Activity {
+  private int count = 0;
+  private android.widget.TextView counter;
+  @Override public void onCreate(android.os.Bundle state) {
+    super.onCreate(state);
+    android.widget.LinearLayout layout = new android.widget.LinearLayout(this);
+    layout.setOrientation(android.widget.LinearLayout.VERTICAL);
+    counter = new android.widget.TextView(this);
+    counter.setContentDescription("count:0");
+    layout.addView(counter);
+    android.widget.Button button = new android.widget.Button(this);
+    button.setText("Increment");
+    button.setContentDescription("Increment");
+    button.setOnClickListener(view -> {
+      count++;
+      counter.setText("Counter " + count);
+      counter.setContentDescription("count:" + count);
+    });
+    layout.addView(button);
+    setContentView(layout);
+  }
+}
+|};
             mkdir (Filename.concat root "app/src/androidTest");
             create (Filename.concat root "app/src/main/AndroidManifest.xml")
               {|<manifest xmlns:android="http://schemas.android.com/apk/res/android"><application android:label="Pave Fixture"><activity android:name=".SmokeActivity" android:exported="true"><intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter></activity></application></manifest>|};
@@ -212,6 +235,17 @@ public final class SmokeTest {
                 ~name:"mobile_observe" ~args:(`Assoc fields) () with
               | Ok blocks -> blocks
               | Error message -> failwith ("Android " ^ action ^ ": " ^ message) in
+            let control action extra =
+              let fields = ["action", `String action;
+                "session_id", `String "mobile-1";
+                "timeout_seconds", `Int 60] @ extra in
+              approve "mobile_control" (`Assoc fields);
+              call "mobile_control" fields in
+            let accessibility_nodes tree =
+              let json = Yojson.Basic.from_string tree in
+              Yojson.Basic.Util.(json |> member "nodes" |> to_list) in
+            let node_string node field =
+              Yojson.Basic.Util.(node |> member field |> to_string) in
             expect "Android session build" "Mobile build completed"
               (run_session "build" ["task", `String ":app:assembleDebug"]);
             let build_test = run_mobile [
@@ -243,13 +277,38 @@ public final class SmokeTest {
                  expect "Android screenshot metadata" "\"status\":\"available\"" summary;
                  expect "Android screenshot payload" "iVBOR" data
              | _ -> failwith "Android screenshot did not return an image block");
-            (match observe "accessibility" with
-             | [Pave.Protocol.Text tree] ->
-                 expect "Android accessibility tree" "\"status\":\"available\"" tree;
-                 expect "Android accessibility nodes" "\"node_count\":" tree
-             | _ -> failwith "Android accessibility capture returned unexpected blocks");
-            print_endline ("real Android screen observation on " ^ serial ^
-              ": PNG image and bounded accessibility tree");
+            let before_tree = match observe "accessibility" with
+              | [Pave.Protocol.Text tree] ->
+                  expect "Android accessibility tree" "\"status\":\"available\"" tree;
+                  expect "Android accessibility nodes" "\"node_count\":" tree;
+                  tree
+              | _ -> failwith "Android accessibility capture returned unexpected blocks" in
+            let nodes = accessibility_nodes before_tree in
+            if not (List.exists (fun node ->
+                node_string node "description" = "count:0") nodes) then
+              failwith ("Android fixture did not expose its initial state: " ^ before_tree);
+            let button = match List.find_opt (fun node ->
+                node_string node "text" = "Increment") nodes with
+              | Some node -> node
+              | None -> failwith ("Android fixture button missing from accessibility tree: " ^
+                  before_tree) in
+            let x1, y1, x2, y2 =
+              try Scanf.sscanf (node_string button "bounds") "[%d,%d][%d,%d]"
+                (fun x1 y1 x2 y2 -> x1, y1, x2, y2)
+              with _ -> failwith "Android fixture button bounds were malformed" in
+            if x2 <= x1 || y2 <= y1 then failwith "Android fixture button has empty bounds";
+            let tap_x = x1 + (x2 - x1) / 2 and tap_y = y1 + (y2 - y1) / 2 in
+            expect "Android tap control" "Mobile tap completed"
+              (control "tap" ["x", `Int tap_x; "y", `Int tap_y]);
+            let after_tree = match observe "accessibility" with
+              | [Pave.Protocol.Text tree] -> tree
+              | _ -> failwith "Android post-tap accessibility capture returned unexpected blocks" in
+            if not (List.exists (fun node ->
+                node_string node "description" = "count:1")
+                (accessibility_nodes after_tree)) then
+              failwith ("Android tap did not change the accessible fixture state: " ^ after_tree);
+            print_endline ("real Android UI control on " ^ serial ^
+              ": tapped the accessible Increment button and verified count:1");
             expect "Android session stop" "Mobile stop completed"
               (run_session "stop" []);
             print_endline ("real Android app session on " ^ serial ^

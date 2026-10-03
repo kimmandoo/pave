@@ -7,6 +7,20 @@
 - **Solution:** Preserved `JAVA_HOME`, `ANDROID_HOME`, `ANDROID_SDK_ROOT` and `ANDROID_USER_HOME` in managed subprocesses while keeping provider credentials filtered. Kept the fixture offline by aligning its AndroidX transitive versions to cached artifacts, built the app and instrumentation APK in separately approved Gradle actions, then separately approved APK installs and `am instrument` on the selected emulator. The real AndroidJUnitRunner reported one passed test; no network fetch or implicit boot was performed.
 - **Prevention / Reference:** Check SDK/JDK variables in the same filtered environment as Gradle. When AGP's connected-test host artifacts are absent offline, report that exact gate; a separately approved build/install/`am instrument` can establish real instrumentation only if its runner output confirms the test pass.
 
+
+### [2026-10-03] Android acceptance lacked a system Gradle executable
+
+- **Context / Symptom:** The approved real-device acceptance failed task discovery with `/bin/sh: gradle: command not found`; no device action had run.
+- **Root Cause:** This workstation had Gradle 9.6.1 cached under `~/.gradle/wrapper/dists/`, but no system `gradle` command on the inherited `PATH`. The product intentionally invokes installed system Gradle offline rather than a project wrapper.
+- **Solution:** Prepended the existing cached distribution's `bin` directory to the opt-in acceptance runner's `PATH`. The real Android run then completed using `gradle --offline`; no wrapper, SDK, dependency or network installation was added.
+- **Prevention / Reference:** Check `command -v gradle` in the same environment as the private Pave session; a cached wrapper distribution is not automatically a system executable.
+
+### [2026-10-03] Gradle 9.6 task discovery treated status metadata as task rows
+
+- **Context / Symptom:** Gradle 9.6.1 task discovery rejected `[Incubating] Problems report is available at: ...` and the standard deprecation summary as malformed task rows.
+- **Root Cause:** The output parser remained in the task section until `BUILD SUCCESSFUL`, although this Gradle version emits report/deprecation metadata between the task listing and that footer.
+- **Solution:** Ignored only the known Gradle task-rule and problems/deprecation metadata prefixes; malformed task rows and incomplete output still fail closed. A focused regression includes all four Gradle 9.6 metadata lines, and the real Android session/control/instrumentation run passed after the parser change.
+- **Prevention / Reference:** Keep Gradle output parsing anchored to qualified task rows and explicitly whitelist only known non-task metadata rather than relaxing malformed-row validation.
 ### [2026-10-03] disposable Xcode test target defaulted above the selected simulator runtime
 
 - **Context / Symptom:** The approved Xcode test failed before running because the disposable test target required iOS Simulator 27.0 while the selected iPad (A16) ran iOS Simulator 26.5.

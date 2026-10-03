@@ -4,6 +4,9 @@
 - feat(mobile): added session-bound approved Android/iOS builds, device install/launch/stop previews, validated Android activity selection, stateful sessions, and the `/mobile` session dashboard.
 - test(mobile): verified real Android app-session build/install/component-launch/stop and AndroidJUnitRunner on `emulator-5554`, plus Xcode Simulator XCTest; signing and implicit SDK/dependency installation remained disabled.
 - feat(mobile): added separately approved PNG screen capture and bounded Android accessibility trees as image/structured tool results with explicit unsupported-platform reporting.
+- feat(mobile): added separately approved Android UI tap, swipe, text and back actions bound to a recent validated screenshot with stale-coordinate invalidation.
+- test(mobile): tapped the disposable app's accessibility-identified Increment button on `emulator-5554` and verified its fresh accessibility state changed from `count:0` to `count:1`.
+- fix(mobile): ignored Gradle 9.6.1 problems-report and deprecation metadata outside task rows during offline task discovery.
 - fix(tools): preserved configured Java and Android SDK runtime paths for managed mobile-toolchain subprocesses without inheriting provider credentials.
 
 

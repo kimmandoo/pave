@@ -64,14 +64,9 @@
 ## P2 — Mobile completion and focused existing-product improvements
 
 M01–M24 are satisfied prerequisites. The remaining mobile core capabilities are delivered end-to-end here; their active acceptance contracts live in the [mobile plan](docs/MOBILE_DEVELOPMENT_PLAN.md).
-AS01 and AO01 have been completed with session-bound approved app lifecycles and bounded screen observation; only the remaining six core capabilities are open.
+AS01, AO01 and UI01 have been completed with session-bound approved app lifecycles, bounded screen observation, and verified Android UI controls; only the remaining five core capabilities are open.
 
 
-- [ ] **UI01 — Control and verify mobile UI**
-  **Deliver:** approved tap, swipe, text input and back actions bound to the selected device, with a post-action observation.
-  **Accept:** the real emulator fixture changes from a known pre-state to the expected accessible state; denial, out-of-bounds coordinates and failed commands do not claim a transition.
-  **Depends:** AO01.
-  **Gate:** interactive disposable app on an approved emulator/simulator.
 
 - [ ] **BR01 — Persist and replay mobile bug scenarios**
   **Deliver:** private, versioned scenario records of exact app/device identity, steps and assertions, with explicit replay.

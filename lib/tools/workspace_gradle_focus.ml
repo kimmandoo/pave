@@ -166,6 +166,18 @@ let command ~root ~subroot ~action ~task ~serial =
   | Workspace_path.Error message -> fail message
   | Unix.Unix_error (error, _, _) -> fail ("Gradle settings unavailable: " ^ Unix.error_message error)
 
+let task_listing_metadata_prefixes = [
+  "Pattern: ";
+  "[Incubating] Problems report is available at:";
+  "Deprecated Gradle features were used in this build, making it incompatible with Gradle ";
+  "You can use '--warning-mode all' to show the individual deprecation warnings";
+  "For more on this, please refer to https://docs.gradle.org/";
+]
+
+let is_task_listing_metadata line =
+  List.exists (fun prefix -> String.starts_with ~prefix line)
+    task_listing_metadata_prefixes
+
 let tasks output =
   if String.length output > output_limit || output = "" ||
      output.[String.length output - 1] <> '\n' ||
@@ -199,13 +211,13 @@ let tasks output =
           | underline :: _ when line <> "" && dash_line (String.trim underline) &&
               not (dash_line line) -> section := line <> "Rules"
           | _ when !section && line <> "" && not (dash_line line) &&
-                   not (String.starts_with ~prefix:"Pattern: " line) ->
+                   not (is_task_listing_metadata line) ->
               let name = match String.index_opt line ' ' with
                 | None -> line
                 | Some index ->
                     let suffix = String.sub line index (String.length line - index) in
                     if not (String.starts_with ~prefix:" - " suffix) then
-                      fail "Gradle task listing contains a malformed row";
+                      fail (Printf.sprintf "Gradle task listing contains a malformed row: %S" line);
                     String.sub line 0 index in
               let name = if String.starts_with ~prefix:":" name then name
                 else ":" ^ name in

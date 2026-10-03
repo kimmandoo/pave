@@ -2286,6 +2286,8 @@ let mobile_observe_tool ~approved ?cancel ?on_progress ~context ~root args =
   match action with
   | "screenshot" ->
       let screenshot = Workspace_mobile_observe.validate_png result.output in
+      Workspace_mobile_run.set_screen_size context.mobile_run_manager ~id
+        ~width:screenshot.width ~height:screenshot.height;
       [Protocol.Text (Yojson.Basic.to_string (`Assoc [
          "session_id", `String id;
          "status", `String "available";
@@ -2299,6 +2301,58 @@ let mobile_observe_tool ~approved ?cancel ?on_progress ~context ~root args =
       let nodes = Workspace_mobile_observe.parse_accessibility result.output in
       [Protocol.Text (Workspace_mobile_observe.accessibility_json nodes)]
   | _ -> fail "mobile observation action must be screenshot or accessibility"
+
+let mobile_control_action action args =
+  let integer name minimum maximum =
+    match field name args with
+    | `Int value when value >= minimum && value <= maximum -> value
+    | _ -> fail (Printf.sprintf "mobile %s requires %s between %d and %d"
+        action name minimum maximum) in
+  match action with
+  | "tap" ->
+      Workspace_mobile_control.Tap {
+        x = integer "x" 0 max_int; y = integer "y" 0 max_int }
+  | "swipe" ->
+      Workspace_mobile_control.Swipe {
+        x1 = integer "x1" 0 max_int; y1 = integer "y1" 0 max_int;
+        x2 = integer "x2" 0 max_int; y2 = integer "y2" 0 max_int;
+        duration_ms = optional_int "duration_ms" 500 ~minimum:1 ~maximum:10_000 args }
+  | "text" ->
+      Workspace_mobile_control.Text (required_string "text" args)
+  | "back" -> Workspace_mobile_control.Back
+  | _ -> fail "mobile control action must be tap, swipe, text or back"
+
+let mobile_control_tool ~approved ?cancel ?on_progress ~context ~root args =
+  if not approved then fail "mobile UI control requires explicit interactive approval";
+  let root = Workspace_path.root_path root in
+  check_session_context context;
+  let id = required_string "session_id" args in
+  let session = Workspace_mobile_run.get context.mobile_run_manager id in
+  if session.Workspace_mobile_run.root <> root then
+    fail "mobile app session belongs to a different workspace root";
+  let action = required_string "action" args in
+  let command = Workspace_mobile_control.command session
+    ~screen_size:session.screen_size (mobile_control_action action args) in
+  Workspace_mobile_run.clear_screen_size context.mobile_run_manager ~id;
+  let timeout_seconds = optional_int "timeout_seconds" 30
+    ~minimum:1 ~maximum:120 args in
+  let result = Workspace_process.run_shell ?cancel ?on_progress
+    ~timeout_seconds ~output_limit:Workspace_mobile_observe.max_screenshot_bytes
+    ~cwd:(Some root) ~command () in
+  let outcome = match result.termination with
+    | Workspace_process.Exited 0 when not result.truncated -> None
+    | Workspace_process.Exited code -> Some (Printf.sprintf "exit %d" code)
+    | Workspace_process.Signaled signal -> Some (Printf.sprintf "signal %d" signal)
+    | Workspace_process.Timed_out -> Some "timed out"
+    | Workspace_process.Cancelled -> raise Cancelled in
+  (match outcome with
+   | Some reason ->
+       fail ("Mobile " ^ action ^ " failed: " ^ reason ^
+         (if result.truncated then " (output truncated)" else "") ^
+         "\n" ^ result.output)
+   | None -> ());
+  Printf.sprintf "Mobile %s completed for %s; capture a fresh screenshot and accessibility tree to verify the resulting UI state."
+    action id
 
 let mobile_session_preview ~context ~root args =
   match optional_string "action" "" args with
@@ -3313,7 +3367,7 @@ let repository_security_scan ?cancel root args =
 let is_shell_tool = function
   | "run_command" | "start_process" | "start_shell" | "xcode_preflight"
   | "mobile_check" | "android_devices" | "mobile_session"
-  | "mobile_observe" -> true
+  | "mobile_observe" | "mobile_control" -> true
   | _ -> false
 
 
@@ -3321,6 +3375,7 @@ let requires_explicit_approval ~name ~args =
   match name with
   | "run_command" | "start_process" | "start_shell" | "xcode_preflight"
   | "mobile_check" | "android_devices"
+  | "mobile_observe" | "mobile_control" -> true
   | "process_stdin" | "process_close_stdin" | "process_kill"
   | "worktree_create" | "worktree_commit" | "worktree_remove"
   | "web_search" | "web_fetch" | "image_ocr"
@@ -3331,7 +3386,6 @@ let requires_explicit_approval ~name ~args =
   | "mobile_session" ->
       List.mem (optional_string "action" "" args)
         ["build"; "install"; "launch"; "stop"]
-  | "mobile_observe" -> true
   | "lsp" -> optional_string "action" "" args = "apply_preview"
   | "dap" ->
       (match field "action" args with
@@ -3528,6 +3582,20 @@ let definitions = [
      "timeout_seconds", integer_field "Device read deadline (default 30 seconds)" 1 120]
     ["action"; "session_id"];
 
+  schema "mobile_control" "Perform one explicit tap, swipe, text input or Back action on the selected running Android app. Coordinate actions require a recent screenshot and stay within its captured dimensions; each action invalidates that observation and requires fresh screenshot/accessibility verification."
+    ["action", enum_string_field "One UI action" ["tap"; "swipe"; "text"; "back"];
+     "session_id", string_field "Running mobile app session ID";
+     "x", integer_field "Tap x coordinate in the most recent screenshot" 0 max_int;
+     "y", integer_field "Tap y coordinate in the most recent screenshot" 0 max_int;
+     "x1", integer_field "Swipe starting x coordinate" 0 max_int;
+     "y1", integer_field "Swipe starting y coordinate" 0 max_int;
+     "x2", integer_field "Swipe ending x coordinate" 0 max_int;
+     "y2", integer_field "Swipe ending y coordinate" 0 max_int;
+     "duration_ms", integer_field "Swipe duration (default 500 milliseconds)" 1 10_000;
+     "text", bounded_string_field "Text to enter (maximum 512 bytes)" 512;
+     "timeout_seconds", integer_field "Device action deadline (default 30 seconds)" 1 120]
+    ["action"; "session_id"];
+
   schema "read_file" "Read bounded workspace files, directories, documents, archives, notebooks, SQLite, owned artifacts, managed worktrees, or public HTTPS URLs. HTTPS fetches send no credentials and require approval."
     ["path", string_field "Workspace-relative path or supported local://, artifact://, worktree://, or HTTPS source";
      "offset", integer_field "Byte offset for ordinary local text files (default 0; do not combine with a line other than 1)" 0 max_int;
@@ -3702,7 +3770,7 @@ let available_for ~allow_shell ~enabled =
 let execution_mode = function
   | "mobile_project" | "read_file" | "workspace_snapshot"
   | "list_files" | "glob" | "search" | "grep" | "fuzzy_file_search"
-  | "mobile_observe" | "token_count" | "repository_security_scan" ->
+  | "token_count" | "repository_security_scan" ->
       Tool_scheduler.Shared
   | _ -> Tool_scheduler.Exclusive
 
@@ -4098,6 +4166,20 @@ let approval_request ?cancel ?context ~root ~name ~args (decision : Approval.dec
           "Exact command: " ^ command;
           Printf.sprintf "Maximum captured output: %d bytes."
             Workspace_mobile_observe.max_screenshot_bytes])
+    | "mobile_control" ->
+        let context = require_session_context context in
+        let session = Workspace_mobile_run.get context.mobile_run_manager
+          (required_string "session_id" args) in
+        if session.root <> base_root then
+          fail "mobile app session belongs to a different workspace root";
+        let command = Workspace_mobile_control.command session
+          ~screen_size:session.screen_size
+          (mobile_control_action (required_string "action" args) args) in
+        ("Performs one device-side UI state change; screen coordinates are bounded by the last screenshot. Device content may be private.",
+         ["Working directory: " ^ Printf.sprintf "%S" session.root;
+          "Device: " ^ session.device ^ " · app: " ^ session.app_id;
+          "Exact command: " ^ command;
+          "A successful action invalidates the screenshot coordinate reference. Capture a new screenshot and accessibility tree to verify the UI transition."])
     | "run_command" ->
         "Runs /bin/sh as your user from the workspace root. It is not sandboxed and may access or modify files outside the workspace or use the network.",
         ["Working directory: " ^ Printf.sprintf "%S" base_root;
@@ -4545,7 +4627,7 @@ let session_tool_names = [
   "lsp_start"; "lsp"; "workspace_eval";
   "ssh_open"; "ssh_close"; "ssh_read"; "ssh_write"; "ssh_command";
   "dap_start"; "dap"; "xcode_preflight"; "mobile_check"; "android_devices";
-  "mobile_session"; "mobile_observe"; "browser"; "publish_web"
+  "mobile_session"; "mobile_observe"; "mobile_control"; "browser"; "publish_web"
 ]
 
 let path_tool_names = [
@@ -4564,7 +4646,7 @@ let error_message = function
   | Workspace_ssh.Error message | Native_tokenizer.Error message
   | Workspace_xcode.Error message | Workspace_swiftpm_focus.Error message
   | Workspace_gradle_focus.Error message | Workspace_flutter_focus.Error message
-  | Workspace_node_scripts.Error message | Workspace_flutter_channels.Error message
+  | Workspace_mobile_control.Error message
   | Workspace_android_devices.Error message
   | Workspace_mobile_observe.Error message
   | Workspace_browser.Error message | Workspace_portal.Error message ->
@@ -4642,6 +4724,9 @@ let prepare ?cancel ?context ~root ~name ~args () =
           | "mobile_observe" ->
               Ok (mobile_observe_tool ~approved ?cancel ?on_progress
                 ~context:(require_session_context context) ~root args)
+          | "mobile_control" ->
+              Ok [Protocol.Text (mobile_control_tool ~approved ?cancel ?on_progress
+                ~context:(require_session_context context) ~root args)]
           | "publish_web" -> Ok (publish_web_tool ~approved ?cancel ?context args)
           | "memory" -> Ok [Protocol.Text (Yojson.Basic.to_string
               (try memory_tool ~approved ~root args

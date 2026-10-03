@@ -1874,6 +1874,44 @@ esac
         Pave.Workspace_path.read_bounded
           (Filename.concat root "mobile-session-adb.log") 65_536 =
             adb_before_observation);
+      Pave.Workspace_mobile_run.set_screen_size tool_context.mobile_run_manager
+        ~id:"mobile-1" ~width:1080 ~height:2400;
+      let control_args = `Assoc [
+        "action", `String "tap"; "session_id", `String "mobile-1";
+        "x", `Int 200; "y", `Int 300] in
+      let control_preview = Pave.Tools.approval_request ~context:tool_context
+        ~root ~name:"mobile_control" ~args:control_args
+        (Pave.Tools.approval_decision ~command_patterns:[]
+          ~name:"mobile_control" ~args:control_args) in
+      assert (Pave.Tools.is_shell_tool "mobile_control" &&
+        Pave.Tools.requires_explicit_approval ~name:"mobile_control"
+          ~args:control_args &&
+        contains (String.concat "\n" control_preview.details)
+          "adb -s 'emulator-5554' shell 'input tap 200 300'" &&
+        contains (execute_text ~root ~context:tool_context ~approved:false
+          ~name:"mobile_control" ~args:control_args ())
+          "explicit interactive approval" &&
+        Pave.Workspace_path.read_bounded
+          (Filename.concat root "mobile-session-adb.log") 65_536 =
+            adb_before_observation);
+      let control_result = execute_text ~root ~context:tool_context ~approved:true
+        ~name:"mobile_control" ~args:control_args () in
+      if not (contains control_result "capture a fresh screenshot and accessibility tree") then
+        failwith ("mobile control result: " ^ control_result);
+      let adb_after_control = Pave.Workspace_path.read_bounded
+        (Filename.concat root "mobile-session-adb.log") 65_536 in
+      if not (contains adb_after_control "shell input tap 200 300") then
+        failwith ("mobile control did not invoke the selected emulator: " ^ adb_after_control);
+      let stale_preview_rejected =
+        try
+          ignore (Pave.Tools.approval_request ~context:tool_context ~root
+            ~name:"mobile_control" ~args:control_args
+            (Pave.Tools.approval_decision ~command_patterns:[]
+              ~name:"mobile_control" ~args:control_args));
+          false
+        with Pave.Workspace_mobile_control.Error message ->
+          contains message "capture a screenshot" in
+      assert stale_preview_rejected;
       assert (contains (session "stop" mobile_action true)
         "Mobile stop completed" &&
         contains (session "status" ["session_id", `String "mobile-1"] false)
