@@ -2,10 +2,10 @@
 
 ### [2026-10-04] Portal slash approval hid its numeric port
 
-- **Context / Symptom:** The actual `/publish <port> <name>` approval screen showed `Local service: 127.0.0.1:(missing)` despite a valid active loopback listener. On this workstation, a separate real `/publish <port>` attempt also reported `gosuda portal-tunnel CLI not found`; `portal` was absent from `PATH` and `PAVE_PORTAL` was unset.
-- **Root Cause:** Approval preview rendering read only JSON strings, but `publish_web` passes its schema-defined port as an integer. The missing executable is a separate documented runtime prerequisite, not a slash-command dispatch failure.
-- **Solution:** The preview formatter now renders integer fields as decimal text, with a `test_tools` regression asserting `127.0.0.1:3000`. An isolated PTY run then approved publication through a local fake Portal, observed its matching ready URL, and stopped the owned process. To use real Portal publishing, install the official `portal` CLI and make it visible on Pave's `PATH`, or set `PAVE_PORTAL` to its absolute executable path; no automatic install or fallback tunnel is used.
-- **Prevention / Reference:** Review numeric effect targets in the exact approval details; see [`docs/USAGE.md`](USAGE.md).
+- **Context / Symptom:** The actual `/publish <port> <name>` approval screen showed `Local service: 127.0.0.1:(missing)` despite a valid active loopback listener. A separate real `/publish <port>` attempt also reported `gosuda portal-tunnel CLI not found` because `portal` was absent from `PATH` and `PAVE_PORTAL` was unset.
+- **Root Cause:** Approval preview rendering read only JSON strings, but `publish_web` passes its schema-defined port as an integer. Portal was also treated as a mandatory manually installed prerequisite.
+- **Solution:** The preview formatter now renders integer fields as decimal text. When Portal is missing, publication approval discloses automatic official-release download, SHA-256 verification and private installation; setup runs only after approval and does not edit shell profiles. A disposable PTY run verified the approval/publish/stop path, while a focused installer regression verified the published file mode and rejected a bad checksum.
+- **Prevention / Reference:** Review both the requested local port and any Portal setup effect in approval details; see [`docs/USAGE.md`](USAGE.md).
 
 ### [2026-10-03] macOS `sips` could not write screenshot conversions
 

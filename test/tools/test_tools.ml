@@ -337,6 +337,24 @@ let () =
        "name", `String "my-preview"] Pave.Approval.Exec in
     assert (List.mem "Local service: 127.0.0.1:3000"
         portal_publish_request.details);
+    let setup_env = function
+      | "HOME" -> Some root
+      | "XDG_STATE_HOME" -> Some (Filename.concat root "portal-state")
+      | "PATH" -> Some (Filename.concat root "portal-empty")
+      | _ -> None in
+    let setup_args = `Assoc [
+      "action", `String "publish"; "port", `Int 3000;
+      "name", `String "setup-preview"] in
+    let setup_request = Pave.Tools.approval_request ~env:setup_env ~root
+      ~name:"publish_web" ~args:setup_args
+      (Pave.Tools.approval_decision ~command_patterns:[] ~name:"publish_web"
+        ~args:setup_args) in
+    assert (List.exists (fun detail ->
+      contains detail "official latest gosuda/portal-tunnel release" &&
+      contains detail "SHA-256 sidecar" &&
+      contains detail "portal-state/pave/portal/bin/portal")
+      setup_request.details);
+    assert (not (Sys.file_exists (Filename.concat root "portal-state")));
     let search_secret = "approval-secret-must-not-render" in
     let previous_search_key = Sys.getenv_opt "BRAVE_SEARCH_API_KEY" in
     Unix.putenv "BRAVE_SEARCH_API_KEY" search_secret;

@@ -124,8 +124,15 @@ let test_absent_server_and_backend () = with_dir (fun dir ->
   Unix.mkdir fallbacks 0o700;
   ignore (script fallbacks "cloudflared" "exit 0\n");
   ignore (script fallbacks "ssh" "exit 0\n");
-  let missing key = if key = "PATH" then Some fallbacks else None in
-  rejected (fun () -> Portal.detect_portal ~env:missing ()))
+  let missing key = match key with
+    | "PATH" -> Some fallbacks
+    | "HOME" -> Some dir
+    | "XDG_STATE_HOME" -> Some (Filename.concat dir "state")
+    | _ -> None in
+  assert (Portal.setup_required ~env:missing ());
+  assert (Portal.detect_portal ~env:missing () =
+    Filename.concat dir "state/pave/portal/bin/portal")
+)
 
 let test_relay_validation () =
   assert (Portal.https_origin "https://relay.example:8443/" = "https://relay.example:8443");
@@ -133,8 +140,73 @@ let test_relay_validation () =
     ["http://relay.example"; "https://user@relay.example"; "https://relay.example/path";
      "https://relay.example?token=secret"; "https://relay.example:0"; "https://-bad.example"]
 
+let managed_env root key =
+  match key with
+  | "HOME" -> Some root
+  | "XDG_STATE_HOME" -> Some (Filename.concat root "state")
+  | "PATH" -> Some (Filename.concat root "empty-path")
+  | _ -> None
+
+let test_automatic_setup_and_publish () = with_dir (fun dir ->
+  let executable = script dir "downloaded-portal"
+    "echo '{ \"message\": \"service ready at https://auto.relay.example\", \"public_url\": \"https://auto.relay.example\" }'\nwhile true; do sleep 1; done\n" in
+  let contents = let ic = open_in_bin executable in
+    Fun.protect ~finally:(fun () -> close_in ic)
+      (fun () -> really_input_string ic (in_channel_length ic)) in
+  let os, arch = Portal.platform_asset () in
+  let asset = "portal-" ^ os ^ "-" ^ arch in
+  let checksum = Digestif.SHA256.(to_hex (digest_string contents)) ^
+    "  " ^ asset ^ "\n" in
+  let transfer = {
+    Portal.fetch_text = (fun ~url ~max_bytes ->
+      assert (url = "https://github.com/gosuda/portal-tunnel/releases/latest/download/" ^ asset ^ ".sha256");
+      assert (max_bytes = 1024);
+      checksum);
+    download_file = (fun ~url ~path ~max_bytes ->
+      assert (url = "https://github.com/gosuda/portal-tunnel/releases/latest/download/" ^ asset);
+      assert (max_bytes = 50_000_000);
+      let oc = open_out_bin path in
+      output_string oc contents;
+      close_out oc)
+  } in
+  let env = managed_env dir in
+  let installed = Portal.detect_portal ~env () in
+  assert (Portal.setup_required ~env ());
+  assert (Option.is_some (Portal.setup_description ~env ()));
+  with_listener (fun port -> with_manager (fun manager ->
+    let published = Portal.publish ~env ~transfer manager ~id:"portal:auto"
+      ~port ~name:"auto" in
+    assert (field "url" published = `String "https://auto.relay.example");
+    assert (Sys.file_exists installed);
+    let stat = Unix.lstat installed in
+    assert (stat.Unix.st_kind = Unix.S_REG && stat.Unix.st_perm land 0o777 = 0o700);
+    assert (not (Portal.setup_required ~env ()));
+    ignore (Portal.stop manager ~id:"portal:auto"))))
+
+let test_automatic_setup_rejects_bad_checksum () = with_dir (fun dir ->
+  let executable = script dir "downloaded-portal" "exit 0\n" in
+  let contents = let ic = open_in_bin executable in
+    Fun.protect ~finally:(fun () -> close_in ic)
+      (fun () -> really_input_string ic (in_channel_length ic)) in
+  let os, arch = Portal.platform_asset () in
+  let asset = "portal-" ^ os ^ "-" ^ arch in
+  let transfer = {
+    Portal.fetch_text = (fun ~url:_ ~max_bytes:_ ->
+      String.make 64 '0' ^ "  " ^ asset ^ "\n");
+    download_file = (fun ~url:_ ~path ~max_bytes:_ ->
+      let oc = open_out_bin path in output_string oc contents; close_out oc)
+  } in
+  let env = managed_env dir in
+  let installed = Portal.detect_portal ~env () in
+  with_listener (fun port -> with_manager (fun manager ->
+    rejected (fun () -> Portal.publish ~env ~transfer manager ~id:"portal:auto"
+      ~port ~name:"auto");
+    assert (not (Sys.file_exists installed));
+    assert (Process.jobs manager = []))))
+
 let () =
   test_dns_boundaries (); test_ready_records (); test_identity_safety ();
   test_prefixes_and_lifecycle (); test_failed_start_and_cleanup ();
   test_absent_server_and_backend (); test_relay_validation ();
+  test_automatic_setup_and_publish (); test_automatic_setup_rejects_bad_checksum ();
   print_endline "workspace_portal: ok"

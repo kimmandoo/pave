@@ -1,17 +1,16 @@
 # Work checkpoint
 
 
-## Current session — Portal slash-publish review
+## Current session — automatic Portal setup for web publication
 
 - **Date:** 2026-10-04.
-- **User report:** Portal publication through the slash command did not work.
-- **Starting state:** Clean `main` at `c06099f chore(release): record v0.1.81 publication`.
-- **Diagnosis and repair:** The real `/publish <port> <name>` approval screen rendered `127.0.0.1:(missing)` although `publish_web` supplied the schema-defined integer port. `Tools.approval_request` displayed only JSON strings. Updated the formatter to render integers and added a behavior regression requiring the actual requested port in the approval details.
-- **Runtime boundary:** This host has no `portal` on `PATH` and `PAVE_PORTAL` is unset. An actual TUI `/publish <port>` invocation reached Portal preflight and displayed the explicit `gosuda portal-tunnel CLI not found` diagnostic. No public tunnel was started. With an isolated local fake Portal and local listener, the actual TUI slash path showed the corrected port, required approval, reported the matching ready URL, and `/publish stop` stopped the owned process.
-- **Changed files:** `lib/tools/tools.ml`, `test/tools/test_tools.ml`, `CHANGELOG.md`, `docs/TROUBLESHOOTING.md`, and this checkpoint. `docs/USAGE.md` already documented the mandatory external Portal CLI and `PAVE_PORTAL` setup.
-- **Verification:** `opam exec -- dune build @install test/test_tools.exe test/test_interaction.exe && opam exec -- dune exec test/test_tools.exe && opam exec -- dune exec test/test_interaction.exe` passed. Full `opam exec -- dune build @install && opam exec -- dune runtest --force -j 1 && opam lint pave.opam` passed; optional `test_browser_live` skipped because `CHROME_BIN` and `SMOKE_URL` were unset. `python3 /tmp/pave-portal-slash-success.py` passed the approval/publish/stop PTY path; the separate no-CLI PTY reproduced the host prerequisite error.
-- **Main CI:** Run `37132338348` passed for commit `12913709b996810c4c9869f030b17b0607deb745`; all four OCaml/platform jobs passed.
-- **Exact next action / blocker:** To verify a real public tunnel, install the official Portal CLI on Pave's `PATH` or set `PAVE_PORTAL` to its absolute path, then explicitly approve `/publish`; this host has no CLI, so no public exposure was attempted.
+- **User request:** Automatically set up Portal when `publish_web` is used without an available CLI.
+- **Starting state:** Clean `main` at `f48a075 chore(docs): record Portal publish verification`.
+- **Implementation:** Existing `PAVE_PORTAL` and PATH executables retain precedence. Otherwise, approved publish/attach downloads the official macOS/Linux Portal release and SHA-256 sidecar over HTTPS, bounds the transfer, verifies the digest, and atomically installs a private executable under `${XDG_STATE_HOME:-~/.local/state}/pave/portal/bin/portal`. It does not run the shell installer or edit profiles. Setup is disclosed in approval details and starts only after approval.
+- **Acceptance evidence:** `test_workspace_portal` installs and runs a checksummed local fixture through the actual publish lifecycle, verifies private executable mode, and rejects a bad checksum without starting a tunnel. `test_tools` verifies the approval preview includes the source/checksum/install path without creating state. An actual Pave TUI `/publish 38765 auto-preview` preview showed the exact local port and setup target; declining left the managed CLI absent and started no tunnel.
+- **Changed files:** `lib/tools/workspace_portal.ml`, `lib/tools/tools.ml`, `test/tools/test_workspace_portal.ml`, `test/tools/test_tools.ml`, `docs/DESIGN_RULES.md`, `docs/USAGE.md`, `docs/TROUBLESHOOTING.md`, `CHANGELOG.md`, and this checkpoint.
+- **Verification:** Focused Portal/tool/interaction tests passed. After correcting one brittle preview-wording assertion, full `opam exec -- dune build @install && opam exec -- dune runtest --force -j 1 && opam lint pave.opam` passed. The final actual Pave TUI preview showed `127.0.0.1:38765` and the setup destination; declining reported no tunnel and left only session state, with no installed CLI. A disposable official `portal-darwin-arm64` download matched its official SHA-256 sidecar and identified as Mach-O arm64.
+- **Exact next action / blocker:** Commit and push the verified implementation and checkpoint. No real Portal installation into user state or public tunnel was attempted.
 
 ## Current session — mobile dashboard UX review and v0.1.81 release
 

@@ -2,6 +2,7 @@
 
 ## 2026-10-04
 - fix(tui): displayed the numeric localhost port in Portal publish approval previews instead of incorrectly showing `(missing)`, so reviewers can confirm the service target.
+- feat(portal): automatically downloaded and SHA-256-verified the official Portal CLI into private user state when an approved publication had no configured executable.
 
 ## 2026-10-03
 - feat(mobile): added session-bound approved Android/iOS builds, device install/launch/stop previews, validated Android activity selection, stateful sessions, and the `/mobile` session dashboard.

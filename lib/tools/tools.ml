@@ -4406,7 +4406,7 @@ let definitions = [
      "text", `Assoc ["type", `String "string"; "maxLength", `Int 32768;
        "description", `String "UTF-8 note body for put"]]
     ["action"];
-  schema "publish_web" "Publish an already-running localhost web server through gosuda/portal-tunnel relays. publish starts a session-owned portal expose process; name is an optional hostname prefix (random when omitted). stop ends one tunnel; list inspects owned tunnels; attach publishes the session hub. No other tunnel service is used. The local server and tunnel must remain running; the hostname is publicly relay-listed."
+  schema "publish_web" "Publish an already-running localhost web server through gosuda/portal-tunnel relays. publish starts a session-owned portal expose process; name is an optional hostname prefix (random when omitted). If Portal is unavailable, the official CLI is downloaded, SHA-256-verified, and installed privately after publication approval. stop ends one tunnel; list inspects owned tunnels; attach publishes the session hub. No other tunnel service is used. The local server and tunnel must remain running; the hostname is publicly relay-listed."
     ["action", enum_string_field "Tunnel operation" ["publish"; "stop"; "list"; "attach"];
      "port", integer_field "Loopback port to publish (required for publish)" 1 65535;
      "name", bounded_string_field "Lowercase DNS hostname prefix; randomly generated when omitted; required for stop" 63;
@@ -4623,7 +4623,8 @@ let ast_edit ~approved ~sensitive_review ?cancel ?context root args =
       path preview.result_sha256 preview.changed)
 
 
-let approval_request ?cancel ?context ~root ~name ~args (decision : Approval.decision) =
+let approval_request ?cancel ?context ?(env = Sys.getenv_opt)
+    ~root ~name ~args (decision : Approval.decision) =
   let base_root = root in
   let preview_root, preview_args =
     if List.mem name ["workspace_snapshot"; "write_file"; "edit_file";
@@ -4737,7 +4738,8 @@ let approval_request ?cancel ?context ~root ~name ~args (decision : Approval.dec
                 (match value "name" "" args with
                  | "" -> "randomly generated" | name -> name);
               "Relay: " ^ value "relay" "Portal public discovery" args;
-              "Process: portal expose (PAVE_PORTAL or PATH); private identity outside the workspace"]
+              "Process: portal expose (PAVE_PORTAL or PATH); private identity outside the workspace"] @
+             Option.to_list (Workspace_portal.setup_description ~env ())
          | "stop" ->
              "Stops only the named session-owned Portal tunnel.",
              ["Prefix: " ^ value "name" "(missing)" args]

@@ -9,26 +9,187 @@ let executable_path path =
       (Unix.access path [Unix.X_OK]; true)
   with Unix.Unix_error _ -> false
 
-let detect_portal ?(env = Sys.getenv_opt) () =
+let state_home ?(env = Sys.getenv_opt) () =
+  match env "XDG_STATE_HOME" with
+  | Some path when path <> "" && not (Filename.is_relative path) -> path
+  | _ ->
+      (match env "HOME" with
+       | Some path when path <> "" && not (Filename.is_relative path) ->
+           Filename.concat path ".local/state"
+       | _ -> fail "HOME or absolute XDG_STATE_HOME is required for Portal setup")
+
+let managed_portal_path ?(env = Sys.getenv_opt) () =
+  Filename.concat (Filename.concat (Filename.concat (state_home ~env ())
+    "pave/portal") "bin") "portal"
+
+type portal_resolution = Existing of string | Managed of string
+
+let resolve_portal ?(env = Sys.getenv_opt) () =
   (match env tunnels_variable with
    | Some value when String.lowercase_ascii (String.trim value) = "off" ->
        fail "PAVE_TUNNELS=off disables Portal publishing"
    | _ -> ());
   match env portal_variable with
   | Some path when path <> "" && not (Filename.is_relative path) &&
-                   executable_path path -> path
+                   executable_path path -> Existing path
   | Some _ -> fail "PAVE_PORTAL must name an absolute executable portal CLI"
   | None ->
       let dirs = Option.fold ~none:[] ~some:(String.split_on_char ':')
         (env "PATH") in
-      match List.find_map (fun dir ->
+      (match List.find_map (fun dir ->
         if dir = "" || Filename.is_relative dir then None else
         let path = Filename.concat dir "portal" in
         if executable_path path then Some path else None) dirs with
-      | Some path -> path
-      | None -> fail
-          "gosuda portal-tunnel CLI not found; install https://github.com/gosuda/portal-tunnel or set PAVE_PORTAL (no other tunnel service is used)"
+       | Some path -> Existing path
+       | None -> Managed (managed_portal_path ~env ()))
 
+let detect_portal ?(env = Sys.getenv_opt) () =
+  match resolve_portal ~env () with Existing path | Managed path -> path
+
+let private_executable path =
+  try
+    let stat = Unix.lstat path in
+    stat.Unix.st_kind = Unix.S_REG &&
+    stat.Unix.st_uid = Unix.geteuid () && stat.Unix.st_nlink = 1 &&
+    stat.Unix.st_perm land 0o077 = 0 && stat.Unix.st_perm land 0o100 <> 0
+  with Unix.Unix_error _ -> false
+
+let setup_required ?(env = Sys.getenv_opt) () =
+  match resolve_portal ~env () with
+  | Existing _ -> false
+  | Managed path -> not (private_executable path)
+
+let setup_description ?(env = Sys.getenv_opt) () =
+  match resolve_portal ~env () with
+  | Existing _ -> None
+  | Managed path when private_executable path -> None
+  | Managed path ->
+      Some ("Portal setup after this approval: download the official latest gosuda/portal-tunnel release over HTTPS, verify its SHA-256 sidecar, then install privately at " ^ path)
+
+type transfer = {
+  fetch_text : url:string -> max_bytes:int -> string;
+  download_file : url:string -> path:string -> max_bytes:int -> unit;
+}
+
+let run_curl ?cancel ~max_bytes arguments =
+  let result = Workspace_process.run ?cancel ~timeout_seconds:180
+      ~output_limit:(min max_bytes 8192) ~inherit_environment:false
+      ~program:"/usr/bin/curl"
+      ~arguments:(["-q"; "--silent"; "--show-error"; "--fail"; "--location";
+        "--max-redirs"; "5"; "--proto"; "=https"; "--proto-redir"; "=https";
+        "--connect-timeout"; "10"; "--max-time"; "180"; "--max-filesize";
+        string_of_int max_bytes; "--globoff"; "--noproxy"; "*";
+        "--netrc-file"; "/dev/null"] @ arguments) () in
+  match result.Workspace_process.termination with
+  | Workspace_process.Exited 0 when not result.truncated -> result.output
+  | Workspace_process.Exited 0 -> fail "Portal download exceeded its output limit"
+  | Workspace_process.Exited code ->
+      fail (Printf.sprintf "Portal download failed (curl exited %d): %s"
+        code (String.trim result.output))
+  | Workspace_process.Signaled _ ->
+      fail ("Portal download failed: " ^ String.trim result.output)
+  | _ -> fail ("Portal download did not complete: " ^ String.trim result.output)
+
+let default_transfer ?cancel () = {
+  fetch_text = (fun ~url ~max_bytes ->
+    run_curl ?cancel ~max_bytes ["--output"; "-"; url]);
+  download_file = (fun ~url ~path ~max_bytes ->
+    ignore (run_curl ?cancel ~max_bytes ["--output"; path; url]));
+}
+
+let platform_asset () =
+  if Sys.os_type <> "Unix" then
+    fail "automatic Portal setup supports macOS and Linux only";
+  let result = Workspace_process.run ~timeout_seconds:5 ~output_limit:128
+      ~inherit_environment:false ~program:"/usr/bin/uname" ~arguments:["-sm"] () in
+  (match result.Workspace_process.termination with
+   | Workspace_process.Exited 0 -> ()
+   | _ -> fail "could not determine the Portal release platform");
+  let os, arch = match String.split_on_char ' ' (String.trim result.output)
+      |> List.filter (( <> ) "") with
+    | [os; arch] -> String.lowercase_ascii os, String.lowercase_ascii arch
+    | _ -> fail "could not determine the Portal release platform" in
+  let os = match os with
+    | "darwin" -> "darwin"
+    | "linux" -> "linux"
+    | _ -> fail "automatic Portal setup supports macOS and Linux only" in
+  let arch = match arch with
+    | "x86_64" | "amd64" -> "amd64"
+    | "arm64" | "aarch64" -> "arm64"
+    | _ -> fail ("unsupported Portal release architecture: " ^ arch) in
+  os, arch
+
+let checksum_payload asset payload =
+  let fields = String.split_on_char '\n' payload
+    |> List.map String.trim |> List.filter (( <> ) "")
+    |> List.concat_map (String.split_on_char ' ')
+    |> List.filter (( <> ) "") in
+  match fields with
+  | [digest; filename] when filename = asset && String.length digest = 64 &&
+      String.for_all (function '0'..'9' | 'a'..'f' | 'A'..'F' -> true | _ -> false)
+        digest -> String.lowercase_ascii digest
+  | _ -> fail "Portal release returned an invalid SHA-256 sidecar"
+
+let file_sha256 path =
+  let program, arguments =
+    if Sys.file_exists "/usr/bin/sha256sum" then
+      "/usr/bin/sha256sum", [path]
+    else if Sys.file_exists "/usr/bin/shasum" then
+      "/usr/bin/shasum", ["-a"; "256"; path]
+    else fail "Portal setup needs sha256sum (Linux) or shasum (macOS)" in
+  let result = Workspace_process.run ~timeout_seconds:20 ~output_limit:4096
+      ~inherit_environment:false ~program ~arguments () in
+  match result.Workspace_process.termination with
+  | Workspace_process.Exited 0 ->
+      (match String.split_on_char ' ' (String.trim result.output)
+          |> List.filter (( <> ) "") with
+       | digest :: _ when String.length digest = 64 -> String.lowercase_ascii digest
+       | _ -> fail "could not parse the Portal binary SHA-256 digest")
+  | _ -> fail "could not calculate the Portal binary SHA-256 digest"
+
+let install_portal ?cancel ?transfer path =
+  let os, arch = platform_asset () in
+  let asset = "portal-" ^ os ^ "-" ^ arch in
+  let base = "https://github.com/gosuda/portal-tunnel/releases/latest/download/" in
+  let transfer = Option.value transfer ~default:(default_transfer ?cancel ()) in
+  let directory = Filename.dirname path in
+  Session_store.ensure_directory (Filename.dirname directory);
+  Session_store.ensure_directory directory;
+  let temporary = Filename.concat directory (".portal-" ^ Session.fresh_id () ^ ".tmp") in
+  let fd = Unix.openfile temporary
+      [Unix.O_WRONLY; Unix.O_CREAT; Unix.O_EXCL; Unix.O_CLOEXEC] 0o600 in
+  Unix.close fd;
+  Fun.protect ~finally:(fun () ->
+    try Unix.unlink temporary with Unix.Unix_error _ -> ()) (fun () ->
+      let expected = checksum_payload asset
+        (transfer.fetch_text ~url:(base ^ asset ^ ".sha256") ~max_bytes:1024) in
+      transfer.download_file ~url:(base ^ asset) ~path:temporary
+        ~max_bytes:50_000_000;
+      Workspace_process.check_wait_cancel cancel;
+      let stat = Unix.lstat temporary in
+      if stat.Unix.st_kind <> Unix.S_REG || stat.Unix.st_uid <> Unix.geteuid () ||
+         stat.Unix.st_nlink <> 1 || stat.Unix.st_size < 1 ||
+         stat.Unix.st_size > 50_000_000 then
+        fail "Portal release binary has invalid file metadata";
+      if file_sha256 temporary <> expected then
+        fail "Portal release binary failed SHA-256 verification";
+      Unix.chmod temporary 0o700;
+      (match Unix.lstat path with
+       | _ -> if not (private_executable path) then
+           fail "managed Portal executable exists but is not a private owned executable"
+       | exception Unix.Unix_error (Unix.ENOENT, _, _) -> ());
+      if not (private_executable path) then Unix.rename temporary path;
+      if not (private_executable path) then
+        fail "Portal installation did not publish a private executable")
+
+let ensure_portal ?cancel ?transfer ?(env = Sys.getenv_opt) () =
+  match resolve_portal ~env () with
+  | Existing path -> path
+  | Managed path ->
+      if private_executable path then path
+      else (
+        install_portal ?cancel ?transfer path;
+        path)
 let publish_name name =
   let length = String.length name in
   let alnum = function 'a'..'z' | '0'..'9' -> true | _ -> false in
@@ -131,13 +292,12 @@ let portal_arguments ~port ~name ~identity ?relay () =
   (match relay with None -> [] | Some relay ->
     ["--relays"; https_origin relay; "--discovery=false"])
 
-let publish ?cancel ?(env = Sys.getenv_opt) ?state_dir ?relay
+let publish ?cancel ?transfer ?(env = Sys.getenv_opt) ?state_dir ?relay
     manager ~id ~port ~name =
   if port < 1 || port > 65535 then
     fail "publish requires a loopback port between 1 and 65535";
   let name = publish_name name in
   if id <> job_id name then fail "tunnel ID must match its prefix";
-  let executable = detect_portal ~env () in
   let relay = Option.map https_origin relay in
   Workspace_process.check_wait_cancel cancel;
   if not (Workspace_process.port_accepting port) then
@@ -145,6 +305,7 @@ let publish ?cancel ?(env = Sys.getenv_opt) ?state_dir ?relay
   if not (Workspace_process.release_finished manager ~id) then
     fail ("tunnel " ^ name ^ " is already running; stop it first");
   let identity = identity_path ~env ?state_dir ~name () in
+  let executable = ensure_portal ?cancel ?transfer ~env () in
   let arguments = portal_arguments ~port ~name ~identity ?relay () in
   Workspace_process.start manager ~id ~cwd:(Some (Filename.dirname identity))
     ~environment:["NO_COLOR", "1"] ~program:executable ~arguments ();
