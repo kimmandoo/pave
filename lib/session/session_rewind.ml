@@ -58,7 +58,7 @@ let non_reversible_tool_name = function
   | "ssh_open" | "ssh_read" | "ssh_write" | "ssh_command"
   | "web_search" | "web_fetch" | "clipboard_write"
   | "publish_web" | "xcode_preflight" | "mobile_check" | "mobile_verify"
-  | "android_devices"
+  | "mobile_visual" | "android_devices"
   | "write_file" | "edit_file" | "apply_edits" | "ast_edit" -> true
   | _ -> false
 

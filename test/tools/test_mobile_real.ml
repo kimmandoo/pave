@@ -235,6 +235,22 @@ public final class SmokeTest {
                 ~name:"mobile_observe" ~args:(`Assoc fields) () with
               | Ok blocks -> blocks
               | Error message -> failwith ("Android " ^ action ^ ": " ^ message) in
+            let visual action =
+              let fields = [
+                "action", `String action;
+                "session_id", `String "mobile-1";
+                "name", `String "counter-home";
+                "os", `String "Android emulator";
+                "locale", `String "en-US";
+                "theme", `String "light";
+                "dynamic_regions", `List [];
+                "timeout_seconds", `Int 60] in
+              approve "mobile_visual" (`Assoc fields);
+              match Pave.Tools.execute ~root ~context ~approved:true
+                ~name:"mobile_visual" ~args:(`Assoc fields) () with
+              | Ok blocks -> blocks
+              | Error message -> failwith ("Android screenshot visual " ^
+                  action ^ ": " ^ message) in
             let control action extra =
               let fields = ["action", `String action;
                 "session_id", `String "mobile-1";
@@ -321,6 +337,13 @@ public final class SmokeTest {
                  expect "Android screenshot metadata" "\"status\":\"available\"" summary;
                  expect "Android screenshot payload" "iVBOR" data
              | _ -> failwith "Android screenshot did not return an image block");
+            (match visual "save" with
+             | [Pave.Protocol.Text summary;
+                Pave.Protocol.Image { mime_type = "image/png"; data }] ->
+                 expect "Android screenshot baseline saved"
+                   "\"status\":\"baseline_saved\"" summary;
+                 expect "Android visual baseline image" "iVBOR" data
+             | _ -> failwith "Android screenshot baseline returned unexpected blocks");
             let before_tree = match observe "accessibility" with
               | [Pave.Protocol.Text tree] ->
                   expect "Android accessibility tree" "\"status\":\"available\"" tree;
@@ -351,6 +374,18 @@ public final class SmokeTest {
                 node_string node "description" = "count:1")
                 (accessibility_nodes after_tree)) then
               failwith ("Android tap did not change the accessible fixture state: " ^ after_tree);
+            (match visual "compare" with
+             | [Pave.Protocol.Text summary;
+                Pave.Protocol.Image { mime_type = "image/png"; data }] ->
+                 let result = Yojson.Basic.from_string summary in
+                 let status = Yojson.Basic.Util.(result |> member "status" |> to_string) in
+                 let changed = Yojson.Basic.Util.(result |> member "differing_pixels" |> to_int) in
+                 if status <> "different" || changed <= 0 then
+                   failwith ("Android screenshot comparison missed UI change: " ^ summary);
+                 expect "Android comparison screenshot image" "iVBOR" data
+             | _ -> failwith "Android screenshot comparison returned unexpected blocks");
+            print_endline ("real Android visual regression on " ^ serial ^
+              ": saved the count:0 baseline and detected changed pixels after tap");
             print_endline ("real Android UI control on " ^ serial ^
               ": tapped the accessible Increment button and verified count:1");
             (match observe "screenshot" with

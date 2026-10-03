@@ -64,7 +64,7 @@
 ## P2 — Mobile completion and focused existing-product improvements
 
 M01–M24 are satisfied prerequisites. The remaining mobile core capabilities are delivered end-to-end here; their active acceptance contracts live in the [mobile plan](docs/MOBILE_DEVELOPMENT_PLAN.md).
-AS01, AO01, UI01, BR01, LD01 and FV01 are completed with session-bound app lifecycles, bounded screen observation, verified UI controls, persisted replay, approved runtime diagnostics and snapshot-bound build/test verification; two core capabilities remain open.
+AS01, AO01, UI01, BR01, LD01, FV01 and VR01 are completed with session-bound app lifecycles, bounded screen observation, verified UI controls, persisted replay, approved runtime diagnostics, snapshot-bound verification and screenshot regression comparison; MD01 remains open.
 
 
 
@@ -75,9 +75,9 @@ AS01, AO01, UI01, BR01, LD01 and FV01 are completed with session-bound app lifec
   **Accept:** a deliberate Java defect failed with a checked source location on `emulator-5554`, then a guarded repair passed `mobile_verify` through the same app session's approved Android build; AndroidJUnitRunner passed one test separately. Deterministic regressions refuse stale snapshots, failed builds/tests, zero tests, concurrent source mutation and incomplete output.
   **Depends:** AS01.
   **Gate:** installed platform toolchain and disposable project.
-- [ ] **VR01 — Compare mobile screenshot regressions**
+- [x] **VR01 — Compare mobile screenshot regressions**
   **Deliver:** save and compare bounded screenshots with exact device, OS, locale, theme and declared dynamic-region metadata.
-  **Accept:** unchanged captures compare equal and a controlled pixel change is reported outside masked dynamic regions; mismatched metadata or incomplete captures are not compared as valid baselines.
+  **Accept:** the live Android emulator baseline captured `count:0`; an approved tap changed pixels and the approved compare reported them; deterministic regressions rejected metadata mismatch, incomplete captures and invalid masks.
   **Depends:** AO01.
   **Gate:** deterministic simulator/emulator screen.
 

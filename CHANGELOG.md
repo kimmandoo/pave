@@ -15,6 +15,8 @@
 - feat(mobile): added `mobile_verify`, which binds guarded pre/post source snapshots to separately approved focused build/test commands for the selected app session and refuses stale, changed, failed, zero-test, timed-out/cancelled or truncated runs.
 - test(mobile): added deterministic disposable Android fixture coverage for defect-fails/repair-passes verification, checked source diagnostics, stale snapshots, build/test failures, zero tests, mutation during execution, truncated output and rejected caller-supplied pass metadata.
 - test(mobile): reproduced a Java compile failure with a guarded edit on `emulator-5554`, surfaced its checked source location, and verified the restored edit with an approved session-bound Android build; AndroidJUnitRunner passed one test.
+- feat(mobile): added private screenshot baselines and approved app-session pixel comparison, binding exact device/environment metadata and dynamic masks while rejecting incomplete or mismatched captures.
+- test(mobile): saved a real Android `count:0` screenshot baseline and detected changed pixels after a separately approved tap; ImageIO, mask, metadata, corruption, permission and symlink regressions passed.
 
 
 - fix(portal): replaced Cloudflare/SSH substitutions with gosuda Portal relay publishing for an already-listening localhost server, generated or accepted DNS prefixes, isolated persistent private identities by prefix, pinned optional HTTPS relays, required complete matching readiness, and cleaned up cancelled/failed owned tunnels; kept model publish/attach/stop explicitly approval-gated even in yolo mode.

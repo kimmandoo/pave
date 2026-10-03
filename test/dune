@@ -765,3 +765,8 @@
  (name test_project_memory)
  (modules test_project_memory)
  (libraries pave unix yojson))
+
+(test
+ (name test_workspace_mobile_visual)
+ (modules test_workspace_mobile_visual)
+ (libraries pave unix yojson))

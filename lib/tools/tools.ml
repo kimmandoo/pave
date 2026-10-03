@@ -2541,6 +2541,130 @@ let mobile_diagnostics_tool ~approved ?cancel ?on_progress ~context ~root args =
     ~output:result.output ~truncated:result.truncated in
   [Protocol.Text report]
 
+let mobile_visual_regions args =
+  match field "dynamic_regions" args with
+  | `List regions when List.length regions <= 1024 ->
+      List.map (function
+        | `Assoc fields ->
+            let keys = List.map fst fields |> List.sort String.compare in
+            if keys <> ["height"; "width"; "x"; "y"] then
+              fail "each dynamic region must contain exactly x, y, width and height";
+            let integer key =
+              match List.assoc_opt key fields with
+              | Some (`Int value) -> value
+              | _ -> fail ("dynamic region " ^ key ^ " must be an integer") in
+            { Workspace_mobile_visual.x = integer "x";
+              y = integer "y"; width = integer "width";
+              height = integer "height" }
+        | _ -> fail "each dynamic region must be an object") regions
+  | `List _ -> fail "too many dynamic regions"
+  | _ -> fail "dynamic_regions must be an array"
+
+let mobile_visual_request ~context ~root args =
+  let id = required_string "session_id" args in
+  let session = Workspace_mobile_run.get context.mobile_run_manager id in
+  if session.root <> root then
+    fail "mobile app session belongs to a different workspace root";
+  if session.state <> Workspace_mobile_run.Running then
+    fail "screenshot comparison requires a running app session";
+  let action = required_string "action" args in
+  if action <> "save" && action <> "compare" then
+    fail "mobile visual action must be save or compare";
+  let name = required_string "name" args in
+  (try Workspace_mobile_visual.validate_key name with
+   | Workspace_mobile_visual.Error message -> fail message);
+  let os = required_string "os" args
+  and locale = required_string "locale" args
+  and theme = required_string "theme" args in
+  let masks = mobile_visual_regions args in
+  let command = Workspace_mobile_observe.command "screenshot" session in
+  session, action, name, os, locale, theme, masks, command
+
+let mobile_visual_preview ~context ~root args =
+  let session, action, name, os, locale, theme, masks, command =
+    mobile_visual_request ~context ~root args in
+  (if action = "save" then
+     "Captures one screenshot and writes a private pixel-comparison baseline."
+   else "Captures one screenshot and compares pixels outside the stored dynamic regions."),
+  ["Session/app/device: " ^ session.id ^ " · " ^ session.app_id ^
+     " · " ^ session.device;
+   "Baseline: " ^ name ^ " · action: " ^ action;
+   "Operator-declared OS/locale/theme: " ^ os ^ " · " ^ locale ^ " · " ^ theme;
+   Printf.sprintf "Dynamic regions: %d" (List.length masks);
+   "Working directory: " ^ Printf.sprintf "%S" session.root;
+   "Exact command: " ^ command;
+   Printf.sprintf "Maximum screenshot: %d bytes."
+     Workspace_mobile_observe.max_screenshot_bytes]
+
+let mobile_visual_tool ~approved ?cancel ?on_progress ~context ~root args =
+  if not approved then
+    fail "mobile screenshot comparison requires explicit interactive approval";
+  let root = Workspace_path.root_path root in
+  check_session_context context;
+  let session, action, name, os, locale, theme, masks, command =
+    mobile_visual_request ~context ~root args in
+  let result = Workspace_process.run_shell ?cancel ?on_progress
+    ~timeout_seconds:(optional_int "timeout_seconds" 30 ~minimum:1
+      ~maximum:120 args)
+    ~output_limit:Workspace_mobile_observe.max_screenshot_bytes
+    ~cwd:(Some root) ~command () in
+  (match result.termination with
+   | Workspace_process.Exited 0 when not result.truncated -> ()
+   | Workspace_process.Exited code ->
+       fail (Printf.sprintf "mobile screenshot failed (exit %d)%s"
+         code (if result.truncated then "; output truncated" else ""))
+   | Workspace_process.Signaled signal ->
+       fail (Printf.sprintf "mobile screenshot failed (signal %d)" signal)
+   | Workspace_process.Timed_out -> fail "mobile screenshot timed out"
+   | Workspace_process.Cancelled -> raise Cancelled);
+  let screenshot = try Workspace_mobile_observe.validate_png result.output
+    with Workspace_mobile_observe.Error message -> fail message in
+  Workspace_mobile_run.set_screen_size context.mobile_run_manager
+    ~id:session.id ~width:screenshot.width ~height:screenshot.height;
+  let metadata = {
+    Workspace_mobile_visual.app = session.app_id;
+    platform = Workspace_mobile_run.platform_name session.platform;
+    device = session.device; os; locale; theme;
+    width = screenshot.width; height = screenshot.height; masks
+  } in
+  let capture = {
+    Workspace_mobile_visual.png = screenshot.png;
+    complete = not result.truncated; metadata
+  } in
+  let output = try
+    if action = "save" then (
+      Workspace_mobile_visual.save ~workspace:root ~name capture;
+      Yojson.Basic.to_string (`Assoc [
+        "session_id", `String session.id;
+        "app_id", `String session.app_id;
+        "device", `String session.device;
+        "baseline", `String name;
+        "status", `String "baseline_saved";
+        "environment_metadata", `String "operator_declared";
+        "width", `Int screenshot.width; "height", `Int screenshot.height;
+        "dynamic_regions", `Int (List.length masks)]))
+    else
+      let difference =
+        Workspace_mobile_visual.compare ~workspace:root ~name capture in
+      let first = match difference.first_difference with
+        | None -> `Null
+        | Some (x, y) -> `Assoc ["x", `Int x; "y", `Int y] in
+      Yojson.Basic.to_string (`Assoc [
+        "session_id", `String session.id;
+        "app_id", `String session.app_id;
+        "device", `String session.device;
+        "baseline", `String name;
+        "status", `String (if difference.equal then "equal" else "different");
+        "differing_pixels", `Int difference.differing_pixels;
+        "first_difference", first;
+        "environment_metadata", `String "operator_declared";
+        "width", `Int screenshot.width; "height", `Int screenshot.height;
+        "dynamic_regions", `Int (List.length masks)])
+  with Workspace_mobile_visual.Error message -> fail message in
+  [Protocol.Text output;
+   Protocol.Image { mime_type = "image/png";
+     data = Workspace_mobile_observe.base64_encode screenshot.png }]
+
 let mobile_control_action action args =
   let integer name minimum maximum =
     match field name args with
@@ -3847,15 +3971,14 @@ let is_shell_tool = function
   | "run_command" | "start_process" | "start_shell" | "xcode_preflight"
   | "mobile_check" | "android_devices" | "mobile_session" | "mobile_verify"
   | "mobile_observe" | "mobile_control" | "mobile_scenario"
-  | "mobile_diagnostics" -> true
+  | "mobile_diagnostics" | "mobile_visual" -> true
   | _ -> false
 
 
 let requires_explicit_approval ~name ~args =
   match name with
-  | "run_command" | "start_process" | "start_shell" | "xcode_preflight"
-  | "mobile_check" | "android_devices" | "mobile_verify"
-  | "mobile_observe" | "mobile_control" | "mobile_diagnostics" -> true
+  | "xcode_preflight" | "mobile_check" | "android_devices" | "mobile_verify"
+  | "mobile_visual" | "mobile_observe" | "mobile_control" | "mobile_diagnostics" -> true
   | "process_stdin" | "process_close_stdin" | "process_kill"
   | "worktree_create" | "worktree_commit" | "worktree_remove"
   | "web_search" | "web_fetch" | "image_ocr"
@@ -3895,7 +4018,6 @@ let non_reversible_tool ~name ~args =
   match name with
   | "run_command" | "start_process" | "start_shell" | "xcode_preflight"
   | "mobile_check" | "android_devices" | "mobile_verify"
-  | "process_stdin" | "process_close_stdin" | "process_kill"
   | "worktree_create" | "worktree_commit" | "worktree_remove"
   | "lsp_start" | "dap_start" | "ssh_open" | "ssh_read"
   | "ssh_write" | "ssh_command" | "web_search" | "web_fetch"
@@ -3905,6 +4027,8 @@ let non_reversible_tool ~name ~args =
         ["build"; "install"; "launch"; "stop"]
   | "mobile_scenario" ->
       not (List.mem (optional_string "action" "" args) ["list"; "status"])
+  | "mobile_visual" ->
+      optional_string "action" "" args = "save"
   | "workspace_eval" -> optional_string "action" "run" args = "run"
   | "dap" ->
       (match field "action" args with
@@ -4080,6 +4204,24 @@ let definitions = [
      "session_id", string_field "Selected built mobile app session ID";
      "timeout_seconds", integer_field "Capture deadline (default 30 seconds)" 1 120]
     ["action"; "session_id"];
+  schema "mobile_visual" "Save a bounded screenshot as a private pixel baseline or compare a fresh capture against one. Metadata binds exact app/platform/device plus operator-declared OS/locale/theme and exact dynamic-region masks. Pixel differences outside masks are counted; incomplete images and any metadata mismatch are rejected."
+    ["action", enum_string_field "Save or compare a screenshot baseline" ["save"; "compare"];
+     "session_id", string_field "Exact running mobile app session";
+     "name", bounded_string_field "Baseline name [A-Za-z0-9_-]{1,80}" 80;
+     "os", bounded_string_field "Operator-declared OS/runtime version" 512;
+     "locale", bounded_string_field "Operator-declared device locale" 512;
+     "theme", bounded_string_field "Operator-declared light/dark or theme identifier" 512;
+     "dynamic_regions", `Assoc ["type", `String "array";
+       "maxItems", `Int 1024;
+       "description", `String "Exact screenshot rectangles ignored during pixel comparison";
+       "items", object_field [
+         "x", integer_field "Left pixel coordinate" 0 max_int;
+         "y", integer_field "Top pixel coordinate" 0 max_int;
+         "width", integer_field "Region width" 1 max_int;
+         "height", integer_field "Region height" 1 max_int]
+         ["x"; "y"; "width"; "height"]];
+     "timeout_seconds", integer_field "Screenshot deadline (default 30 seconds)" 1 120]
+    ["action"; "session_id"; "name"; "os"; "locale"; "theme"; "dynamic_regions"];
 
 
   schema "mobile_control" "Perform one explicit tap, swipe, text input or Back action on the selected running Android app. Coordinate actions require a recent screenshot and stay within its captured dimensions; each action invalidates that observation and requires fresh screenshot/accessibility verification."
@@ -4321,6 +4463,9 @@ let approval_decision ~command_patterns ~name ~args =
        | _ -> tier Approval.Exec)
   | "mobile_observe" -> tier Approval.Read
   | "mobile_diagnostics" -> tier Approval.Read
+  | "mobile_visual" when optional_string "action" "" args = "save" ->
+      tier Approval.Write
+  | "mobile_visual" -> tier Approval.Read
   | "mobile_scenario" ->
       (match optional_string "action" "" args with
        | "list" | "status" -> tier Approval.Read
@@ -4730,6 +4875,9 @@ let approval_request ?cancel ?context ~root ~name ~args (decision : Approval.dec
           "Exact command: " ^ command;
           Printf.sprintf "Maximum captured output: %d bytes."
             Workspace_mobile_diagnostics.max_output_bytes])
+    | "mobile_visual" ->
+        let context = require_session_context context in
+        mobile_visual_preview ~context ~root:base_root args
     | "mobile_control" ->
         let context = require_session_context context in
         let session = Workspace_mobile_run.get context.mobile_run_manager
@@ -5195,7 +5343,7 @@ let session_tool_names = [
   "ssh_open"; "ssh_close"; "ssh_read"; "ssh_write"; "ssh_command";
   "dap_start"; "dap"; "xcode_preflight"; "mobile_check"; "android_devices";
   "mobile_session"; "mobile_verify"; "mobile_observe"; "mobile_diagnostics";
-  "mobile_control"; "mobile_scenario"; "browser"; "publish_web"
+  "mobile_visual"; "mobile_control"; "mobile_scenario"; "browser"; "publish_web"
 ]
 
 let path_tool_names = [
@@ -5217,6 +5365,7 @@ let error_message = function
   | Workspace_mobile_control.Error message
   | Workspace_mobile_scenario.Error message
   | Workspace_mobile_diagnostics.Error message
+  | Workspace_mobile_visual.Error message
   | Workspace_android_devices.Error message
   | Workspace_mobile_observe.Error message
   | Workspace_browser.Error message | Workspace_portal.Error message ->
@@ -5296,6 +5445,9 @@ let prepare ?cancel ?context ~root ~name ~args () =
                 ~context:(require_session_context context) ~root args)
           | "mobile_diagnostics" ->
               Ok (mobile_diagnostics_tool ~approved ?cancel ?on_progress
+                ~context:(require_session_context context) ~root args)
+          | "mobile_visual" ->
+              Ok (mobile_visual_tool ~approved ?cancel ?on_progress
                 ~context:(require_session_context context) ~root args)
           | "mobile_control" ->
               Ok [Protocol.Text (mobile_control_tool ~approved ?cancel ?on_progress

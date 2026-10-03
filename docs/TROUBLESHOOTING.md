@@ -1,5 +1,12 @@
 # Troubleshooting
 
+### [2026-10-03] macOS `sips` could not write screenshot conversions
+
+- **Context / Symptom:** `/usr/bin/sips -s format bmp ... --out ...` reported `Error 13` and `Unable to write image to file` for a valid 1×1 PNG, despite readable input, writable temporary directories and successful `sips -g pixelWidth -g pixelHeight`.
+- **Root Cause:** The failure was in `sips`'s conversion-output path on this host; changing `--out`/`-o` and `TMPDIR` did not resolve it. Pixel dimensions alone did not provide the required decoded RGBA data.
+- **Solution:** Replaced the converter with a fixed inline Swift/ImageIO decoder that reads only the bounded captured PNG and writes a temporary RGBA buffer for the existing pixel comparator. The real Android screenshot baseline and changed-screen comparison passed.
+- **Prevention / Reference:** Keep the decoder source fixed in the tool, call the system Swift runtime directly without a shell, and reject a failed/short decoded buffer; do not treat `sips` metadata output as pixel decoding.
+
 ### [2026-10-03] Android crash diagnostics included normal process exits
 
 - **Context / Symptom:** The first approved crash-buffer read returned no selected-app record after a fixture launch, and `dumpsys activity exit-info` included prior `USER REQUESTED` and `PACKAGE UPDATED` exits. Treating that history as a crash would have produced false evidence.
