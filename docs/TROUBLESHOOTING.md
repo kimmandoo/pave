@@ -1,5 +1,12 @@
 # Troubleshooting
 
+### [2026-10-03] Android crash diagnostics included normal process exits
+
+- **Context / Symptom:** The first approved crash-buffer read returned no selected-app record after a fixture launch, and `dumpsys activity exit-info` included prior `USER REQUESTED` and `PACKAGE UPDATED` exits. Treating that history as a crash would have produced false evidence.
+- **Root Cause:** The initial fixture launch did not establish a crash, and ActivityManager's package history intentionally includes every exit reason; its actual crash record used numeric `reason=4 (APP CRASH(EXCEPTION))`, not a generic `reason=CRASH` label.
+- **Solution:** Triggered a deliberate process crash with a separately approved `adb shell am crash <package>`, queried the exact selected package's exit history, and retained only Android `CRASH`/`CRASH_NATIVE` reason codes. The real emulator smoke returned the selected package's `reason=4` record; normal exits are excluded.
+- **Prevention / Reference:** Do not count arbitrary process-exit history as a crash. Validate platform reason codes and require a fixture trigger whose resulting crash record is observed.
+
 ### [2026-10-03] approved Android builds lost the configured toolchain and offline test-host dependencies
 
 - **Context / Symptom:** Approved Gradle task discovery first failed with `Unable to locate a Java Runtime`; the selected Android instrumentation build then reported that `ANDROID_HOME`/`sdk.dir` was missing. After forwarding runtime/SDK paths, `connectedDebugAndroidTest` built APKs but failed because the AGP 9.1.1 test-host artifact `com.android.tools.utp:android-test-plugin-host-additional-test-output:32.1.1` and some AndroidX transitive versions were not cached in offline mode.

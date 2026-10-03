@@ -1853,6 +1853,26 @@ esac
         "Mobile launch completed" &&
         contains (session "status" ["session_id", `String "mobile-1"] false)
           "android · running");
+      let diagnostics_args = `Assoc [
+        "action", `String "logs"; "session_id", `String "mobile-1"] in
+      let diagnostics_preview = Pave.Tools.approval_request
+        ~context:tool_context ~root ~name:"mobile_diagnostics"
+        ~args:diagnostics_args
+        (Pave.Tools.approval_decision ~command_patterns:[]
+          ~name:"mobile_diagnostics" ~args:diagnostics_args) in
+      let before_diagnostics = Pave.Workspace_path.read_bounded
+        (Filename.concat root "mobile-session-adb.log") 65_536 in
+      assert (Pave.Tools.is_shell_tool "mobile_diagnostics" &&
+        Pave.Tools.requires_explicit_approval ~name:"mobile_diagnostics"
+          ~args:diagnostics_args &&
+        contains (String.concat "\n" diagnostics_preview.details)
+          "pidof -s" &&
+        contains (execute_text ~root ~context:tool_context ~approved:false
+          ~name:"mobile_diagnostics" ~args:diagnostics_args ())
+          "explicit interactive approval" &&
+        Pave.Workspace_path.read_bounded
+          (Filename.concat root "mobile-session-adb.log") 65_536 =
+            before_diagnostics);
       let observation_args = `Assoc [
         "action", `String "screenshot";
         "session_id", `String "mobile-1"] in

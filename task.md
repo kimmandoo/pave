@@ -64,16 +64,11 @@
 ## P2 — Mobile completion and focused existing-product improvements
 
 M01–M24 are satisfied prerequisites. The remaining mobile core capabilities are delivered end-to-end here; their active acceptance contracts live in the [mobile plan](docs/MOBILE_DEVELOPMENT_PLAN.md).
-AS01, AO01, UI01 and BR01 have been completed with session-bound approved app lifecycles, bounded screen observation, verified Android UI controls and persisted, separately approved app/device-bound scenario replay; four core capabilities remain open.
+AS01, AO01, UI01, BR01 and LD01 have been completed with session-bound app lifecycles, bounded screen observation, verified UI controls, persisted replay and approved runtime diagnostics; three core capabilities remain open.
 
 
 
 
-- [ ] **LD01 — Diagnose mobile runtime logs and crashes**
-  **Deliver:** bounded Android logcat/ANR and iOS crash/dSYM-or-mapping evidence tied to the selected app/session.
-  **Accept:** fixture crashes and ANR evidence identify the owning app and useful source/symbol location when verified; truncated, foreign, malformed or unsymbolicated evidence remains explicitly incomplete.
-  **Depends:** AS01.
-  **Gate:** disposable platform runtime and available local symbols.
 
 - [ ] **FV01 — Verify edits against a real mobile build**
   **Deliver:** connect the guarded source edit snapshot to focused build/test results and source-linked diagnostics for the same app session.

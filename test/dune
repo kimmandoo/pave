@@ -84,6 +84,11 @@
  (name test_workspace_mobile_scenario)
  (modules test_workspace_mobile_scenario)
  (libraries pave unix yojson))
+(test
+ (name test_workspace_mobile_diagnostics)
+ (modules test_workspace_mobile_diagnostics)
+ (libraries pave unix yojson))
+
 
 (test
  (name test_agent)

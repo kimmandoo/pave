@@ -9,6 +9,8 @@
 - fix(mobile): ignored Gradle 9.6.1 problems-report and deprecation metadata outside task rows during offline task discovery.
 - feat(mobile): added private, app/device-bound Android bug scenarios with explicit one-step replay and freshly captured accessibility assertions that persist and stop at first failure.
 - test(mobile): replayed one approved action on `emulator-5554`, captured a separately approved accessibility tree, verified `count:2` and persisted scenario completion.
+- feat(mobile): added explicitly approved, bounded app-session runtime logs, Android crash/ANR evidence and iOS Simulator crash-log excerpts, with checked mapping/dSYM presence and no claimed automatic symbolication.
+- test(mobile): captured app-PID logs and a real `reason=4` Android process crash on `emulator-5554`; verified app-scoped reports, stack-frame filtering, normal-exit rejection, truncation and mapping/dSYM detection.
 - fix(tools): preserved configured Java and Android SDK runtime paths for managed mobile-toolchain subprocesses without inheriting provider credentials.
 
 

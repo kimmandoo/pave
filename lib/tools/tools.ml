@@ -2302,6 +2302,38 @@ let mobile_observe_tool ~approved ?cancel ?on_progress ~context ~root args =
       [Protocol.Text (Workspace_mobile_observe.accessibility_json nodes)]
   | _ -> fail "mobile observation action must be screenshot or accessibility"
 
+let mobile_diagnostics_tool ~approved ?cancel ?on_progress ~context ~root args =
+  if not approved then fail "mobile runtime diagnostics require explicit interactive approval";
+  let root = Workspace_path.root_path root in
+  check_session_context context;
+  let id = required_string "session_id" args in
+  let session = Workspace_mobile_run.get context.mobile_run_manager id in
+  if session.root <> root then
+    fail "mobile app session belongs to a different workspace root";
+  if session.state = Workspace_mobile_run.Selected then
+    fail "mobile runtime diagnostics require an app that has been built";
+  let action = required_string "action" args in
+  if action = "logs" && session.state <> Workspace_mobile_run.Running then
+    fail "selected-app log capture requires a running app session";
+  let command = Workspace_mobile_diagnostics.command action session in
+  let result = Workspace_process.run_shell ?cancel ?on_progress
+    ~timeout_seconds:(optional_int "timeout_seconds" 30 ~minimum:1 ~maximum:120 args)
+    ~output_limit:Workspace_mobile_diagnostics.max_output_bytes
+    ~cwd:(Some root) ~command () in
+  (match result.termination with
+   | Workspace_process.Exited 0 -> ()
+   | Workspace_process.Exited code ->
+       fail (Printf.sprintf "Mobile %s diagnostics failed (exit %d)%s\\n%s"
+         action code (if result.truncated then ", output truncated" else "") result.output)
+   | Workspace_process.Signaled signal ->
+       fail (Printf.sprintf "Mobile %s diagnostics failed (signal %d)" action signal)
+   | Workspace_process.Timed_out ->
+       fail ("Mobile " ^ action ^ " diagnostics timed out")
+   | Workspace_process.Cancelled -> raise Cancelled);
+  let report = Workspace_mobile_diagnostics.result ~action session
+    ~output:result.output ~truncated:result.truncated in
+  [Protocol.Text report]
+
 let mobile_control_action action args =
   let integer name minimum maximum =
     match field name args with
@@ -3607,7 +3639,8 @@ let repository_security_scan ?cancel root args =
 let is_shell_tool = function
   | "run_command" | "start_process" | "start_shell" | "xcode_preflight"
   | "mobile_check" | "android_devices" | "mobile_session"
-  | "mobile_observe" | "mobile_control" | "mobile_scenario" -> true
+  | "mobile_observe" | "mobile_control" | "mobile_scenario"
+  | "mobile_diagnostics" -> true
   | _ -> false
 
 
@@ -3615,7 +3648,7 @@ let requires_explicit_approval ~name ~args =
   match name with
   | "run_command" | "start_process" | "start_shell" | "xcode_preflight"
   | "mobile_check" | "android_devices"
-  | "mobile_observe" | "mobile_control" -> true
+  | "mobile_observe" | "mobile_control" | "mobile_diagnostics" -> true
   | "process_stdin" | "process_close_stdin" | "process_kill"
   | "worktree_create" | "worktree_commit" | "worktree_remove"
   | "web_search" | "web_fetch" | "image_ocr"
@@ -3825,6 +3858,12 @@ let definitions = [
      "session_id", string_field "Running mobile app session ID";
      "timeout_seconds", integer_field "Device read deadline (default 30 seconds)" 1 120]
     ["action"; "session_id"];
+  schema "mobile_diagnostics" "Read bounded runtime logs, Android crash-buffer or last-ANR evidence, and selected iOS Simulator process/crash logs. Every capture requires exact explicit approval. Reports preserve truncation and identify local mapping/dSYM artifacts without claiming automatic symbolication."
+    ["action", enum_string_field "Diagnostic capture" ["logs"; "crashes"; "anr"];
+     "session_id", string_field "Selected built mobile app session ID";
+     "timeout_seconds", integer_field "Capture deadline (default 30 seconds)" 1 120]
+    ["action"; "session_id"];
+
 
   schema "mobile_control" "Perform one explicit tap, swipe, text input or Back action on the selected running Android app. Coordinate actions require a recent screenshot and stay within its captured dimensions; each action invalidates that observation and requires fresh screenshot/accessibility verification."
     ["action", enum_string_field "One UI action" ["tap"; "swipe"; "text"; "back"];
@@ -4064,6 +4103,7 @@ let approval_decision ~command_patterns ~name ~args =
            not (optional_bool "terminate_debuggee" false args) -> tier Approval.Read
        | _ -> tier Approval.Exec)
   | "mobile_observe" -> tier Approval.Read
+  | "mobile_diagnostics" -> tier Approval.Read
   | "mobile_scenario" ->
       (match optional_string "action" "" args with
        | "list" | "status" -> tier Approval.Read
@@ -4438,6 +4478,20 @@ let approval_request ?cancel ?context ~root ~name ~args (decision : Approval.dec
           "Exact command: " ^ command;
           Printf.sprintf "Maximum captured output: %d bytes."
             Workspace_mobile_observe.max_screenshot_bytes])
+    | "mobile_diagnostics" ->
+        let context = require_session_context context in
+        let session = Workspace_mobile_run.get context.mobile_run_manager
+          (required_string "session_id" args) in
+        if session.root <> base_root then
+          fail "mobile app session belongs to a different workspace root";
+        let action = required_string "action" args in
+        let command = Workspace_mobile_diagnostics.command action session in
+        ("Reads bounded app-scoped runtime logs, Android package-specific process-exit/last-ANR evidence, or iOS Simulator process/crash logs. The exact command and private-data risk are shown before approval. Local mapping/dSYM files are reported only when present and are never applied automatically.",
+         ["Working directory: " ^ Printf.sprintf "%S" session.root;
+          "Session/app/device: " ^ session.id ^ " · " ^ session.app_id ^ " · " ^ session.device;
+          "Exact command: " ^ command;
+          Printf.sprintf "Maximum captured output: %d bytes."
+            Workspace_mobile_diagnostics.max_output_bytes])
     | "mobile_control" ->
         let context = require_session_context context in
         let session = Workspace_mobile_run.get context.mobile_run_manager
@@ -4902,7 +4956,8 @@ let session_tool_names = [
   "lsp_start"; "lsp"; "workspace_eval";
   "ssh_open"; "ssh_close"; "ssh_read"; "ssh_write"; "ssh_command";
   "dap_start"; "dap"; "xcode_preflight"; "mobile_check"; "android_devices";
-  "mobile_session"; "mobile_observe"; "mobile_control"; "mobile_scenario"; "browser"; "publish_web"
+  "mobile_session"; "mobile_observe"; "mobile_diagnostics"; "mobile_control";
+  "mobile_scenario"; "browser"; "publish_web"
 ]
 
 let path_tool_names = [
@@ -4923,6 +4978,7 @@ let error_message = function
   | Workspace_gradle_focus.Error message | Workspace_flutter_focus.Error message
   | Workspace_mobile_control.Error message
   | Workspace_mobile_scenario.Error message
+  | Workspace_mobile_diagnostics.Error message
   | Workspace_android_devices.Error message
   | Workspace_mobile_observe.Error message
   | Workspace_browser.Error message | Workspace_portal.Error message ->
@@ -4999,6 +5055,9 @@ let prepare ?cancel ?context ~root ~name ~args () =
           | "browser" -> Ok (browser_tool ~approved ?cancel ?context args)
           | "mobile_observe" ->
               Ok (mobile_observe_tool ~approved ?cancel ?on_progress
+                ~context:(require_session_context context) ~root args)
+          | "mobile_diagnostics" ->
+              Ok (mobile_diagnostics_tool ~approved ?cancel ?on_progress
                 ~context:(require_session_context context) ~root args)
           | "mobile_control" ->
               Ok [Protocol.Text (mobile_control_tool ~approved ?cancel ?on_progress

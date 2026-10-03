@@ -248,6 +248,12 @@ public final class SmokeTest {
               if not (List.mem action ["list"; "status"]) then
                 approve "mobile_scenario" (`Assoc fields);
               call "mobile_scenario" fields in
+            let diagnostics action =
+              let fields = ["action", `String action;
+                "session_id", `String "mobile-1";
+                "timeout_seconds", `Int 60] in
+              approve "mobile_diagnostics" (`Assoc fields);
+              call "mobile_diagnostics" fields in
             let accessibility_nodes tree =
               let json = Yojson.Basic.from_string tree in
               Yojson.Basic.Util.(json |> member "nodes" |> to_list) in
@@ -278,6 +284,8 @@ public final class SmokeTest {
               String.concat "\n" relevant);
             expect "Android session launch" "Mobile launch completed"
               (run_session "launch" []);
+            let live_logs = diagnostics "logs" in
+            expect "app-scoped runtime logs" "\"app_id\":\"dev.pave.mobilefixture\"" live_logs;
             (match observe "screenshot" with
              | [Pave.Protocol.Text summary;
                 Pave.Protocol.Image { mime_type = "image/png"; data }] ->
@@ -338,6 +346,17 @@ public final class SmokeTest {
               (scenario "status" []);
             print_endline ("real Android bug scenario on " ^ serial ^
               ": persisted, replayed one approved action and verified count:2");
+            let crash_launch = "adb -s " ^ Filename.quote serial ^
+              " shell am crash dev.pave.mobilefixture" in
+            ignore (run_shell crash_launch);
+            let crash_report = diagnostics "crashes" in
+            expect "selected app crash evidence" "\"app_id\":\"dev.pave.mobilefixture\""
+              crash_report;
+            expect "selected package exit evidence" "\"status\":\"evidence_available\""
+              crash_report;
+            expect "Android crash reason" "reason=4" crash_report;
+            print_endline ("real Android crash evidence on " ^ serial ^
+              ": selected package and process-exit record");
             expect "Android session stop" "Mobile stop completed"
               (run_session "stop" []);
             print_endline ("real Android app session on " ^ serial ^

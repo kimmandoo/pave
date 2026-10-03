@@ -1,6 +1,6 @@
 # Mobile development specialization plan
 
-**Status:** M01–M24, AS01, AO01, UI01 and BR01 completed. The remaining four core mobile capabilities are being delivered end-to-end in the active `task.md` work; letter-suffixed acceptance here records completed foundation work only.
+**Status:** M01–M24, AS01, AO01, UI01, BR01 and LD01 completed. The remaining three core mobile capabilities are being delivered end-to-end in the active `task.md` work; letter-suffixed acceptance here records completed foundation work only.
 
 **M08 acceptance:** An opt-in manual macOS arm64 Xcode 27 run generated a disposable project, called the separately approved `xcode_preflight` scheme, destination and build phases, and reported `Xcode build: exit 0` for a discovered iOS Simulator UUID with signing disabled. Xcode 27 uses `Destinations compatible/incompatible with ...` headings; the parser now supports them alongside the older `Available/Ineligible destinations` headings. A simulator placeholder, physical device and incompatible UUID cannot become a build destination. No simulator was booted or app deployed; CI still runs only fake-Xcode safety regressions and never installs xcodegen or runs a real simulator build.
 
@@ -18,6 +18,8 @@
 
 **UI01 acceptance:** `mobile_control` requires a running Android app and a separately approved exact command. Tap/swipe coordinates are bounded by the last validated screenshot and become stale after one action; text is limited and shell-quoted; unsupported iOS simulator input fails explicitly. The opt-in real `emulator-5554` run tapped the accessible disposable fixture button and observed the counter change from `count:0` to `count:1` through a new approved accessibility capture. Boundary, reserved-text, denial and stale-observation regressions cover safe failure paths.
 **BR01 acceptance:** `mobile_scenario` stores private versioned records under `.pave/mobile-scenarios`, bound to exact app/device identity. Replays require explicit start, one approved UI step, then a distinct approved fresh accessibility capture and exact assertion; the first failed action/observation/assertion stops the run without retry. On `emulator-5554`, the opt-in fixture replay tapped once and verified `count:2`, persisted completion, and separately passed AndroidJUnitRunner. Replay and accessibility verification currently support Android only.
+
+**LD01 acceptance:** `mobile_diagnostics` requires one explicit approval per bounded capture and binds commands to the selected app/session. Android log capture uses the running app PID; crashes read only the selected package's process-exit history and retain only crash/native-crash reasons; ANR parsing filters last-ANR evidence to that package. The real `emulator-5554` fixture emitted `reason=4 (APP CRASH(EXCEPTION))` after an individually approved `am crash`, and the approved tool returned its app-bound process-exit record; AndroidJUnitRunner still passed. Parser regressions verify exact source-frame retention, foreign/prefix-collision exclusion, normal-exit rejection and truncation. Android `mapping.txt` and iOS dSYM DWARF evidence are reported only when the expected local regular file exists; symbolication is never claimed. iOS Simulator commands and dSYM discovery have deterministic coverage, but no live iOS crash/log capture was run for this slice.
 
 ## Baseline and boundaries
 
