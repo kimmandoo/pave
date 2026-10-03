@@ -203,6 +203,15 @@ public final class SmokeTest {
                 "timeout_seconds", `Int 300] @ extra in
               approve "mobile_session" (`Assoc fields);
               call "mobile_session" fields in
+            let observe action =
+              let fields = ["action", `String action;
+                "session_id", `String "mobile-1";
+                "timeout_seconds", `Int 60] in
+              approve "mobile_observe" (`Assoc fields);
+              match Pave.Tools.execute ~root ~context ~approved:true
+                ~name:"mobile_observe" ~args:(`Assoc fields) () with
+              | Ok blocks -> blocks
+              | Error message -> failwith ("Android " ^ action ^ ": " ^ message) in
             expect "Android session build" "Mobile build completed"
               (run_session "build" ["task", `String ":app:assembleDebug"]);
             let build_test = run_mobile [
@@ -228,6 +237,19 @@ public final class SmokeTest {
               String.concat "\n" relevant);
             expect "Android session launch" "Mobile launch completed"
               (run_session "launch" []);
+            (match observe "screenshot" with
+             | [Pave.Protocol.Text summary;
+                Pave.Protocol.Image { mime_type = "image/png"; data }] ->
+                 expect "Android screenshot metadata" "\"status\":\"available\"" summary;
+                 expect "Android screenshot payload" "iVBOR" data
+             | _ -> failwith "Android screenshot did not return an image block");
+            (match observe "accessibility" with
+             | [Pave.Protocol.Text tree] ->
+                 expect "Android accessibility tree" "\"status\":\"available\"" tree;
+                 expect "Android accessibility nodes" "\"node_count\":" tree
+             | _ -> failwith "Android accessibility capture returned unexpected blocks");
+            print_endline ("real Android screen observation on " ^ serial ^
+              ": PNG image and bounded accessibility tree");
             expect "Android session stop" "Mobile stop completed"
               (run_session "stop" []);
             print_endline ("real Android app session on " ^ serial ^

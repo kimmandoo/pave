@@ -64,12 +64,8 @@
 ## P2 — Mobile completion and focused existing-product improvements
 
 M01–M24 are satisfied prerequisites. The remaining mobile core capabilities are delivered end-to-end here; their active acceptance contracts live in the [mobile plan](docs/MOBILE_DEVELOPMENT_PLAN.md).
+AS01 and AO01 have been completed with session-bound approved app lifecycles and bounded screen observation; only the remaining six core capabilities are open.
 
-- [ ] **AO01 — Observe a selected mobile screen**
-  **Deliver:** capture a bounded screenshot and accessibility tree from the selected app/device session.
-  **Accept:** image bytes are returned as an image block and tree nodes preserve text, role, bounds and accessibility identifiers; denied, malformed, oversized or stale-session observations yield no false state.
-  **Depends:** AS01.
-  **Gate:** selected running Android emulator or compatible iOS Simulator.
 
 - [ ] **UI01 — Control and verify mobile UI**
   **Deliver:** approved tap, swipe, text input and back actions bound to the selected device, with a post-action observation.

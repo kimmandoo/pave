@@ -3,6 +3,7 @@
 ## 2026-10-03
 - feat(mobile): added session-bound approved Android/iOS builds, device install/launch/stop previews, validated Android activity selection, stateful sessions, and the `/mobile` session dashboard.
 - test(mobile): verified real Android app-session build/install/component-launch/stop and AndroidJUnitRunner on `emulator-5554`, plus Xcode Simulator XCTest; signing and implicit SDK/dependency installation remained disabled.
+- feat(mobile): added separately approved PNG screen capture and bounded Android accessibility trees as image/structured tool results with explicit unsupported-platform reporting.
 - fix(tools): preserved configured Java and Android SDK runtime paths for managed mobile-toolchain subprocesses without inheriting provider credentials.
 
 

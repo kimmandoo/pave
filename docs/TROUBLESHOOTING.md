@@ -414,6 +414,13 @@
 - **Solution:** Classified sanitized unified-diff headers, hunks, changes, context and metadata in the existing transcript path; kept the literal `+`/`-` markers, reset raw diff state at boundaries and preferred file headers in collapsed command previews. Tinted diff rows in the TUI while retaining monochrome gutters. Focused tests and colored/`NO_COLOR` PTY paints displayed both an expanded raw diff and a fenced assistant diff.
 - **Prevention / Reference:** Keep ordinary Markdown lists and non-diff code fences as controls; verify wrapped, streamed and collapsed/expanded diff rows through `test_transcript_view` and the opt-in `PAVE_REAL_DIFF_TUI=1` PTY smoke.
 
+### [2026-10-03] Android UIAutomator dump returned no XML over `/dev/tty`
+
+- **Context / Symptom:** The approved `uiautomator dump /dev/tty` command exited without returning any `<node>` records to Pave's non-PTY process capture, so accessibility parsing correctly refused an empty tree.
+- **Root Cause:** UIAutomator's `/dev/tty` destination did not map to the captured ADB shell output stream.
+- **Solution:** Dumped to a session-unique file in `/data/local/tmp`, copied its bounded XML to the captured stream, and removed the temporary file in the same separately approved command. The real emulator then returned a parsed accessibility tree; the cleanup runs after success or dump/cat failure.
+- **Prevention / Reference:** Keep the path unique to the private app session, never expose a broader device filesystem, and do not return a successful empty tree.
+
 ### [2026-10-03] Android package launcher intent failed despite a registered activity
 
 - **Context / Symptom:** On the selected disposable Android emulator, `am start -W -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -p dev.pave.mobilefixture` exited 1 with `Activity not started, unable to resolve Intent`. An individually approved `dumpsys package dev.pave.mobilefixture` showed the installed exported `.SmokeActivity` with both MAIN and LAUNCHER declarations.

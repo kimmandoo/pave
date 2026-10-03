@@ -65,9 +65,14 @@
  (modules test_mobile_real)
  (libraries pave unix yojson))
 
-(test
+ (test
  (name test_workspace_mobile_run)
  (modules test_workspace_mobile_run)
+ (libraries pave unix yojson))
+
+(test
+ (name test_workspace_mobile_observe)
+ (modules test_workspace_mobile_observe)
  (libraries pave unix yojson))
 
 (test

@@ -1853,6 +1853,27 @@ esac
         "Mobile launch completed" &&
         contains (session "status" ["session_id", `String "mobile-1"] false)
           "android · running");
+      let observation_args = `Assoc [
+        "action", `String "screenshot";
+        "session_id", `String "mobile-1"] in
+      let observation_preview = Pave.Tools.approval_request
+        ~context:tool_context ~root ~name:"mobile_observe"
+        ~args:observation_args
+        (Pave.Tools.approval_decision ~command_patterns:[]
+          ~name:"mobile_observe" ~args:observation_args) in
+      let adb_before_observation = Pave.Workspace_path.read_bounded
+        (Filename.concat root "mobile-session-adb.log") 65_536 in
+      assert (Pave.Tools.is_shell_tool "mobile_observe" &&
+        Pave.Tools.requires_explicit_approval ~name:"mobile_observe"
+          ~args:observation_args &&
+        contains (String.concat "\n" observation_preview.details)
+          "adb -s 'emulator-5554' exec-out screencap -p" &&
+        contains (execute_text ~root ~context:tool_context ~approved:false
+          ~name:"mobile_observe" ~args:observation_args ())
+          "explicit interactive approval" &&
+        Pave.Workspace_path.read_bounded
+          (Filename.concat root "mobile-session-adb.log") 65_536 =
+            adb_before_observation);
       assert (contains (session "stop" mobile_action true)
         "Mobile stop completed" &&
         contains (session "status" ["session_id", `String "mobile-1"] false)

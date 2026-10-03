@@ -2254,6 +2254,52 @@ let mobile_session ~approved ?cancel ?on_progress ?context root args =
       "Mobile " ^ action ^ " completed for " ^ id ^ ".\n" ^ output
   | _ -> fail "mobile session action must be list, select, status, install, launch or stop"
 
+let mobile_observe_tool ~approved ?cancel ?on_progress ~context ~root args =
+  if not approved then fail "mobile screen observation requires explicit interactive approval";
+  let root = Workspace_path.root_path root in
+  check_session_context context;
+  let id = required_string "session_id" args in
+  let session = Workspace_mobile_run.get context.mobile_run_manager id in
+  if session.Workspace_mobile_run.root <> root then
+    fail "mobile app session belongs to a different workspace root";
+  if session.state <> Workspace_mobile_run.Running then
+    fail "mobile screen observation requires a running app session";
+  let action = required_string "action" args in
+  let command = Workspace_mobile_observe.command action session in
+  let timeout_seconds = optional_int "timeout_seconds" 30
+    ~minimum:1 ~maximum:120 args in
+  let result = Workspace_process.run_shell ?cancel ?on_progress
+    ~timeout_seconds ~output_limit:Workspace_mobile_observe.max_screenshot_bytes
+    ~cwd:(Some root) ~command () in
+  let status = match result.termination with
+    | Workspace_process.Exited 0 when not result.truncated -> None
+    | Workspace_process.Exited code -> Some (Printf.sprintf "exit %d" code)
+    | Workspace_process.Signaled signal -> Some (Printf.sprintf "signal %d" signal)
+    | Workspace_process.Timed_out -> Some "timed out"
+    | Workspace_process.Cancelled -> raise Cancelled in
+  (match status with
+   | Some reason ->
+       fail ("Mobile " ^ action ^ " failed: " ^ reason ^
+         (if result.truncated then " (output truncated)" else "") ^
+         "\n" ^ result.output)
+   | None -> ());
+  match action with
+  | "screenshot" ->
+      let screenshot = Workspace_mobile_observe.validate_png result.output in
+      [Protocol.Text (Yojson.Basic.to_string (`Assoc [
+         "session_id", `String id;
+         "status", `String "available";
+         "mime_type", `String "image/png";
+         "width", `Int screenshot.width;
+         "height", `Int screenshot.height;
+         "bytes", `Int (String.length screenshot.png)]));
+       Protocol.Image { mime_type = "image/png";
+         data = Workspace_mobile_observe.base64_encode screenshot.png }]
+  | "accessibility" ->
+      let nodes = Workspace_mobile_observe.parse_accessibility result.output in
+      [Protocol.Text (Workspace_mobile_observe.accessibility_json nodes)]
+  | _ -> fail "mobile observation action must be screenshot or accessibility"
+
 let mobile_session_preview ~context ~root args =
   match optional_string "action" "" args with
   | "build" ->
@@ -3266,7 +3312,8 @@ let repository_security_scan ?cancel root args =
 
 let is_shell_tool = function
   | "run_command" | "start_process" | "start_shell" | "xcode_preflight"
-  | "mobile_check" | "android_devices" | "mobile_session" -> true
+  | "mobile_check" | "android_devices" | "mobile_session"
+  | "mobile_observe" -> true
   | _ -> false
 
 
@@ -3284,6 +3331,7 @@ let requires_explicit_approval ~name ~args =
   | "mobile_session" ->
       List.mem (optional_string "action" "" args)
         ["build"; "install"; "launch"; "stop"]
+  | "mobile_observe" -> true
   | "lsp" -> optional_string "action" "" args = "apply_preview"
   | "dap" ->
       (match field "action" args with
@@ -3474,6 +3522,11 @@ let definitions = [
      "task", string_field "Exact discovered Gradle assemble task for the selected variant";
      "timeout_seconds", integer_field "Per-command deadline (default 120 seconds)" 1 300]
     ["action"];
+  schema "mobile_observe" "Capture a bounded screenshot or accessibility tree from a running app in the selected private mobile session. Each device read has an exact explicit approval; Android accessibility output is untrusted and iOS accessibility-tree capture is unavailable."
+    ["action", enum_string_field "Read one selected-screen representation" ["screenshot"; "accessibility"];
+     "session_id", string_field "Running mobile app session ID";
+     "timeout_seconds", integer_field "Device read deadline (default 30 seconds)" 1 120]
+    ["action"; "session_id"];
 
   schema "read_file" "Read bounded workspace files, directories, documents, archives, notebooks, SQLite, owned artifacts, managed worktrees, or public HTTPS URLs. HTTPS fetches send no credentials and require approval."
     ["path", string_field "Workspace-relative path or supported local://, artifact://, worktree://, or HTTPS source";
@@ -3649,7 +3702,7 @@ let available_for ~allow_shell ~enabled =
 let execution_mode = function
   | "mobile_project" | "read_file" | "workspace_snapshot"
   | "list_files" | "glob" | "search" | "grep" | "fuzzy_file_search"
-  | "token_count" | "repository_security_scan" ->
+  | "mobile_observe" | "token_count" | "repository_security_scan" ->
       Tool_scheduler.Shared
   | _ -> Tool_scheduler.Exclusive
 
@@ -3675,6 +3728,7 @@ let approval_decision ~command_patterns ~name ~args =
        | `String "disconnect" when
            not (optional_bool "terminate_debuggee" false args) -> tier Approval.Read
        | _ -> tier Approval.Exec)
+  | "mobile_observe" -> tier Approval.Read
   | "browser" ->
       (match field "action" args with
        | `String ("observe" | "list_tools" | "close") -> tier Approval.Read
@@ -4028,6 +4082,22 @@ let approval_request ?cancel ?context ~root ~name ~args (decision : Approval.dec
     | "mobile_session" ->
         let context = require_session_context context in
         mobile_session_preview ~context ~root:base_root args
+    | "mobile_observe" ->
+        let context = require_session_context context in
+        let session = Workspace_mobile_run.get context.mobile_run_manager
+          (required_string "session_id" args) in
+        if session.root <> base_root then
+          fail "mobile app session belongs to a different workspace root";
+        if session.state <> Workspace_mobile_run.Running then
+          fail "mobile screen observation requires a running app session";
+        let command = Workspace_mobile_observe.command
+          (required_string "action" args) session in
+        ("Reads screen pixels or accessibility content from the selected app; output is untrusted and may contain private user data.",
+         ["Working directory: " ^ Printf.sprintf "%S" session.root;
+          "Device: " ^ session.device ^ " · app: " ^ session.app_id;
+          "Exact command: " ^ command;
+          Printf.sprintf "Maximum captured output: %d bytes."
+            Workspace_mobile_observe.max_screenshot_bytes])
     | "run_command" ->
         "Runs /bin/sh as your user from the workspace root. It is not sandboxed and may access or modify files outside the workspace or use the network.",
         ["Working directory: " ^ Printf.sprintf "%S" base_root;
@@ -4475,7 +4545,7 @@ let session_tool_names = [
   "lsp_start"; "lsp"; "workspace_eval";
   "ssh_open"; "ssh_close"; "ssh_read"; "ssh_write"; "ssh_command";
   "dap_start"; "dap"; "xcode_preflight"; "mobile_check"; "android_devices";
-  "mobile_session"; "browser"; "publish_web"
+  "mobile_session"; "mobile_observe"; "browser"; "publish_web"
 ]
 
 let path_tool_names = [
@@ -4496,6 +4566,7 @@ let error_message = function
   | Workspace_gradle_focus.Error message | Workspace_flutter_focus.Error message
   | Workspace_node_scripts.Error message | Workspace_flutter_channels.Error message
   | Workspace_android_devices.Error message
+  | Workspace_mobile_observe.Error message
   | Workspace_browser.Error message | Workspace_portal.Error message ->
       "Error: " ^ message
   | Workspace_dap.Cancelled -> "Error: DAP operation cancelled"
@@ -4568,6 +4639,9 @@ let prepare ?cancel ?context ~root ~name ~args () =
       try
         let result = match name with
           | "browser" -> Ok (browser_tool ~approved ?cancel ?context args)
+          | "mobile_observe" ->
+              Ok (mobile_observe_tool ~approved ?cancel ?on_progress
+                ~context:(require_session_context context) ~root args)
           | "publish_web" -> Ok (publish_web_tool ~approved ?cancel ?context args)
           | "memory" -> Ok [Protocol.Text (Yojson.Basic.to_string
               (try memory_tool ~approved ~root args
