@@ -4,7 +4,7 @@
 ## Current session — mobile dashboard UX review and v0.1.81 release
 
 - **Date:** 2026-10-03.
-- **Active task:** Completed the `/mobile` UX audit and verification; prepare the v0.1.81 release after the pushed main-branch CI passes.
+- **Active task:** Completed the `/mobile` UX audit, local and GitHub verification, and public v0.1.81 release.
 - **Starting state:** Clean `main` at `5310726 feat(mobile): complete interactive dashboard`, aligned with `origin/main`; GitHub's latest published release was `v0.1.80`.
 - **UX findings and changes:** `Tui.chooser_sections` displays at most two intro lines, so the dashboard's former four-line introduction hid approval/cancellation guidance. Replaced it with two concise state-specific lines. `/mobile` now explains the private saved-session prerequisite and `/new`/`--session`; its command description exposes that prerequisite. Session rows sort by descending numeric ID (`mobile-12` before `mobile-2`) and preselect the newest existing session, avoiding a fresh assistant workflow when reopening the dashboard.
 - **Changed files:** `bin/main.ml`, `lib/tools/workspace_mobile_run.ml`, `lib/ui/interaction.ml`, `test/tools/test_workspace_mobile_run.ml`, `CHANGELOG.md`, `docs/DESIGN_RULES.md`, `docs/USAGE.md`, and this checkpoint.
@@ -12,7 +12,9 @@
 - **Full verification:** `opam exec -- dune build @install && opam exec -- dune exec test/test_apple_foundation_models.exe && opam exec -- dune runtest --force -j 1 && opam lint pave.opam` passed. The optional `test_browser_live` was skipped because `CHROME_BIN` and `SMOKE_URL` were not configured.
 - **Final comparator recheck:** Replaced allocating numeric-suffix parsing with allocation-free length/lexicographic ordering for generated numeric session IDs; `opam exec -- dune build @install && opam exec -- dune exec test/test_workspace_mobile_run.exe && opam lint pave.opam` passed afterward.
 - **Limits:** The previous mobile acceptance's AGP connected-test host dependency remains unavailable offline; its separately approved AndroidJUnitRunner test passed. This UX pass changed no strategy defaults or strategy selection.
-- **Exact next action / blockers:** Commit and push the UX review. Wait for all four main CI matrix jobs to pass, then tag `v0.1.81` and verify the release workflow, five published assets, archive checksums and packaged CLI. No local implementation or test blocker remains.
+- **Main CI:** Run `37127331495` passed on commit `a8f8880e942653c6baa6b094d17ad85d0d1c16dc`; all four OCaml/platform jobs passed.
+- **Release:** Workflow `37128016376` passed all four native test/build/package-smoke jobs and published `v0.1.81` at `2026-10-03T14:14:54Z`. Verified the public release is not a draft and has exactly five assets: four Linux/macOS x86_64/ARM64 archives plus `SHA256SUMS`. Downloaded all assets and verified every checksum. Extracted the `darwin-arm64` package, confirmed its exact members and executable bit, then ran `--help` and `--providers` successfully; the Apple provider was listed.
+- **Exact next action / blockers:** No blockers or continuation actions; the UX changes and v0.1.81 publication are complete.
 
 ## Current session — mobile core completion (MD01)
 
