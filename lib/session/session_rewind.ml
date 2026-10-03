@@ -57,7 +57,8 @@ let non_reversible_tool_name = function
   | "workspace_eval" | "lsp_start" | "dap_start" | "dap" | "browser"
   | "ssh_open" | "ssh_read" | "ssh_write" | "ssh_command"
   | "web_search" | "web_fetch" | "clipboard_write"
-  | "publish_web" | "xcode_preflight" | "mobile_check" | "android_devices"
+  | "publish_web" | "xcode_preflight" | "mobile_check" | "mobile_verify"
+  | "android_devices"
   | "write_file" | "edit_file" | "apply_edits" | "ast_edit" -> true
   | _ -> false
 

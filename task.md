@@ -64,18 +64,17 @@
 ## P2 — Mobile completion and focused existing-product improvements
 
 M01–M24 are satisfied prerequisites. The remaining mobile core capabilities are delivered end-to-end here; their active acceptance contracts live in the [mobile plan](docs/MOBILE_DEVELOPMENT_PLAN.md).
-AS01, AO01, UI01, BR01 and LD01 have been completed with session-bound app lifecycles, bounded screen observation, verified UI controls, persisted replay and approved runtime diagnostics; three core capabilities remain open.
+AS01, AO01, UI01, BR01, LD01 and FV01 are completed with session-bound app lifecycles, bounded screen observation, verified UI controls, persisted replay, approved runtime diagnostics and snapshot-bound build/test verification; two core capabilities remain open.
 
 
 
 
 
-- [ ] **FV01 — Verify edits against a real mobile build**
-  **Deliver:** connect the guarded source edit snapshot to focused build/test results and source-linked diagnostics for the same app session.
-  **Accept:** one deliberate fixture defect fails before repair and passes afterward; stale snapshots, build failures and incomplete output cannot be reported as verified.
+- [x] **FV01 — Verify edits against a real mobile build**
+  **Deliver:** connected guarded source snapshots to focused build/test results and source-linked diagnostics for the same selected app session with `mobile_verify`.
+  **Accept:** a deliberate Java defect failed with a checked source location on `emulator-5554`, then a guarded repair passed `mobile_verify` through the same app session's approved Android build; AndroidJUnitRunner passed one test separately. Deterministic regressions refuse stale snapshots, failed builds/tests, zero tests, concurrent source mutation and incomplete output.
   **Depends:** AS01.
   **Gate:** installed platform toolchain and disposable project.
-
 - [ ] **VR01 — Compare mobile screenshot regressions**
   **Deliver:** save and compare bounded screenshots with exact device, OS, locale, theme and declared dynamic-region metadata.
   **Accept:** unchanged captures compare equal and a controlled pixel change is reported outside masked dynamic regions; mismatched metadata or incomplete captures are not compared as valid baselines.

@@ -1636,7 +1636,7 @@ printf '%s\n' 'Test Suite Selected tests passed. Executed 0 tests, with 0 failur
       create "focus/bin/gradle" {|#!/bin/sh
 case " $* " in
   *" tasks --all "*) printf '%s\n' "Tasks runnable from root project 'Fixture'" '------------------------------------------------------------' 'Build tasks' '-----------' 'app:assembleDebug - selected variant' 'app:connectedDebugAndroidTest - selected instrumented test' '' 'BUILD SUCCESSFUL in 1s' ;;
-  *" :app:connectedDebugAndroidTest "*) if [ -n "$ANDROID_SERIAL" ]; then printf '%s\n' "instrumented-test-ok $ANDROID_SERIAL"; else printf '%s\n' 'instrumented ran without a serial'; exit 3; fi ;;
+  *" :app:connectedDebugAndroidTest "*) if [ -n "$ANDROID_SERIAL" ]; then if [ -f truncate-output ]; then head -c 70000 /dev/zero; printf '%s\n' '1 tests completed'; elif [ -f zero-tests ]; then printf '%s\n' '0 tests completed'; elif [ -f timeout-output ] || [ -f cancel-output ]; then sleep 2; printf '%s\n' '1 tests completed'; elif [ -f mutate-source ]; then printf '%s\n' 'fun main() = changed()' > app/src/Main.kt; printf '%s\n' '1 tests completed'; elif grep -q 'missing()' app/src/Main.kt; then printf '%s\n' '1 tests completed, 1 failed' 'e: app/src/Main.kt: (1, 14): Unresolved reference'; exit 8; else printf '%s\n' "instrumented-test-ok $ANDROID_SERIAL" '1 tests completed'; fi; else printf '%s\n' 'instrumented ran without a serial'; exit 3; fi ;;
   *" :app:assembleDebug "*) printf '%s\n' 'e: app/src/Main.kt: (1, 14): Unresolved reference' 'other/Other.kt:1:2: error: unrelated' 'selected variant failed'; exit 7 ;;
   *) exit 9 ;;
 esac
@@ -1702,6 +1702,9 @@ esac
         not (contains devices "private-serial") &&
         not (contains devices "private-offline") &&
         not (contains devices "Ready emulators: emulator-5556"));
+      (* Restore the source after the deliberate Gradle compilation failure;
+         later instrumentation cases start from a passing fixture. *)
+      create "focus/gradle/app/src/Main.kt" "fun main() = 1\n";
       (* M20a: only the selected ready emulator receives the approved task. *)
       assert (contains (mobile "gradle" "tasks" "focus/gradle" [] true)
         ":app:connectedDebugAndroidTest");
@@ -1729,11 +1732,12 @@ esac
         not (contains no_serial "instrumented-test-ok") &&
         not (contains no_serial "without a serial"));
       let ready_run = instrumented (serial "emulator-5554") in
-      assert (contains ready_run "Mobile gradle instrumented: exit 0" &&
-        contains ready_run
-          "selected task :app:connectedDebugAndroidTest on emulator-5554" &&
-        contains ready_run "instrumented-test-ok emulator-5554" &&
-        not (contains ready_run "without a serial"));
+      if not (contains ready_run "Mobile gradle instrumented: exit 0" &&
+          contains ready_run
+            "selected task :app:connectedDebugAndroidTest on emulator-5554" &&
+          contains ready_run "instrumented-test-ok emulator-5554" &&
+          not (contains ready_run "without a serial"))
+      then failwith ("ready instrumented run:\n" ^ ready_run);
       let offline_run = instrumented (serial "emulator-5556") in
       assert (contains offline_run "emulator-5556 is offline" &&
         not (contains offline_run "instrumented-test-ok"));
@@ -1807,6 +1811,129 @@ esac
           contains selected_session "device emulator-5554" &&
           contains selected_session "activity dev.pave.fixture/.MainActivity")
       then failwith ("mobile selection output:\n" ^ selected_session);
+      let verify ?cancel ?(approved = true) action fields =
+        execute_text ?cancel ~root ~context:tool_context ~approved
+          ~name:"mobile_verify" ~args:(`Assoc
+            (("action", `String action) :: ("session_id", `String "mobile-1") ::
+             fields)) () in
+      let source_path = "focus/gradle/app/src/Main.kt" in
+      create source_path "fun main() = Unit\n";
+      let before_edit = Pave.Workspace_edit.read_snapshot ~root
+        ~path:source_path in
+      let guarded_change contents =
+        let current = Pave.Workspace_edit.read_snapshot ~root
+          ~path:source_path in
+        let result = execute_text ~root ~context:tool_context ~approved:true
+          ~name:"apply_edits" ~args:(`Assoc [
+            "path", `String source_path;
+            "expected_sha256", `String current.sha256;
+            "hunks", `List [`Assoc [
+              "old_text", `String current.contents;
+              "new_text", `String contents]]]) () in
+        assert (not (contains result "Error:"));
+        Pave.Workspace_edit.read_snapshot ~root ~path:source_path in
+      let defective = guarded_change "fun main() = missing()\n" in
+      let verify_fields ?(timeout_seconds = 10) snapshot = [
+        "source_path", `String source_path;
+        "before_sha256", `String before_edit.sha256;
+        "after_sha256", `String snapshot.Pave.Workspace_edit.sha256;
+        "target", `String ":app:connectedDebugAndroidTest";
+        "timeout_seconds", `Int timeout_seconds] in
+      let denied_verify = verify ~approved:false "test" (verify_fields defective) in
+      if not (Pave.Tools.is_shell_tool "mobile_verify" &&
+          Pave.Tools.requires_explicit_approval ~name:"mobile_verify"
+            ~args:(`Assoc ["action", `String "test"]) &&
+          contains denied_verify "explicit interactive approval")
+      then failwith ("verification approval gate:\n" ^ denied_verify);
+      let preview_args = `Assoc
+        (("action", `String "test") :: ("session_id", `String "mobile-1") ::
+         verify_fields defective) in
+      let verify_preview = Pave.Tools.approval_request
+        ~context:tool_context ~root ~name:"mobile_verify" ~args:preview_args
+        (Pave.Tools.approval_decision ~command_patterns:[]
+          ~name:"mobile_verify" ~args:preview_args) in
+      assert (contains (String.concat "\n" verify_preview.details)
+        "ANDROID_SERIAL='emulator-5554' gradle --offline ':app:connectedDebugAndroidTest'");
+      let failing_verify = verify "test" (verify_fields defective) in
+      assert (contains failing_verify "did not complete successfully" &&
+        contains failing_verify "exit 8" &&
+        contains failing_verify
+          "Checked Kotlin/Java errors:\nfocus/gradle/app/src/Main.kt:1:14" &&
+        not (contains failing_verify "VERIFIED"));
+      let repaired = guarded_change "fun main() = 1\n" in
+      let verified = verify "test" (verify_fields repaired) in
+      assert (contains verified "VERIFIED test for mobile-1" &&
+        contains verified repaired.sha256 &&
+        contains verified "instrumented-test-ok emulator-5554");
+      let stale_fields = verify_fields defective in
+      assert (contains (verify "test" stale_fields)
+        "changed since the supplied post-edit snapshot");
+      create "focus/gradle/truncate-output" "";
+      let truncated = verify "test" (verify_fields repaired) in
+      assert (contains truncated "did not complete successfully" &&
+        not (contains truncated "VERIFIED"));
+      Sys.remove (Filename.concat root "focus/gradle/truncate-output");
+      files := List.filter (( <> ) (Filename.concat root
+        "focus/gradle/truncate-output")) !files;
+      create "focus/gradle/zero-tests" "";
+      let zero_tests = verify "test" (verify_fields repaired) in
+      assert (contains zero_tests "did not complete successfully" &&
+        not (contains zero_tests "VERIFIED"));
+      Sys.remove (Filename.concat root "focus/gradle/zero-tests");
+      files := List.filter (( <> ) (Filename.concat root
+        "focus/gradle/zero-tests")) !files;
+      create "focus/gradle/timeout-output" "";
+      let timed_out = verify "test"
+        (verify_fields ~timeout_seconds:1 repaired) in
+      assert (contains timed_out "did not complete successfully" &&
+        contains timed_out "timed out" &&
+        not (contains timed_out "VERIFIED"));
+      Sys.remove (Filename.concat root "focus/gradle/timeout-output");
+      files := List.filter (( <> ) (Filename.concat root
+        "focus/gradle/timeout-output")) !files;
+      create "focus/gradle/cancel-output" "";
+      let cancelled =
+        try
+          ignore (verify ~cancel:(fun () -> true) "test"
+            (verify_fields repaired));
+          false
+        with Pave.Tools.Cancelled -> true in
+      assert cancelled;
+      Sys.remove (Filename.concat root "focus/gradle/cancel-output");
+      files := List.filter (( <> ) (Filename.concat root
+        "focus/gradle/cancel-output")) !files;
+      let untrusted = `Assoc [
+        "action", `String "test"; "session_id", `String "mobile-1";
+        "source_path", `String source_path;
+        "before_sha256", `String before_edit.sha256;
+        "after_sha256", `String repaired.sha256;
+        "verified", `Bool true] in
+      assert (contains (execute_text ~root ~context:tool_context
+        ~name:"mobile_verify" ~args:untrusted ()) "unexpected argument");
+      let fabricated_pre_hash = ("before_sha256", `String (String.make 64 'f')) ::
+        List.remove_assoc "before_sha256" (verify_fields repaired) in
+      assert (contains (verify "test" fabricated_pre_hash)
+        "not bound to a guarded apply_edits change");
+      create "focus/gradle/mutate-source" "";
+      let changed_during_run = verify "test" (verify_fields repaired) in
+      assert (contains changed_during_run
+        "source changed while the mobile command was running" &&
+        not (contains changed_during_run "VERIFIED"));
+      Sys.remove (Filename.concat root "focus/gradle/mutate-source");
+      files := List.filter (( <> ) (Filename.concat root
+        "focus/gradle/mutate-source")) !files;
+      let build_before = Pave.Workspace_edit.read_snapshot ~root
+        ~path:source_path in
+      let current = guarded_change "fun main() = 2\n" in
+      let failed_build = verify "build"
+        ["source_path", `String source_path;
+         "before_sha256", `String build_before.sha256;
+         "after_sha256", `String current.sha256;
+         "task", `String ":app:assembleDebug";
+         "timeout_seconds", `Int 10] in
+      assert (contains failed_build "did not complete successfully" &&
+        contains failed_build "exit 7" &&
+        not (contains failed_build "VERIFIED"));
       let mobile_action =
         ["session_id", `String "mobile-1";
          "timeout_seconds", `Int 10] in

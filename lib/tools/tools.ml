@@ -24,6 +24,8 @@ type android_inventory = {
   devices : Workspace_android_devices.device list;
 }
 
+type guarded_edit_evidence = { before_sha256 : string; after_sha256 : string }
+
 type session_context = {
   owner : string;
   process_manager : Workspace_process.manager;
@@ -44,6 +46,7 @@ type session_context = {
   mutable mobile_discovery : mobile_discovery option;
   mutable android_inventory : android_inventory option;
   mobile_run_manager : Workspace_mobile_run.manager;
+  guarded_edit_evidence : (string, guarded_edit_evidence) Hashtbl.t;
   record_file_change : path:string -> before:string -> after:string -> unit;
   mutable closed : bool;
 }
@@ -53,6 +56,12 @@ type file_location = {
   path : string;
   worktree_id : string option;
 }
+let guarded_evidence_key ~root ~path =
+  let absolute = try Workspace_path.regular_path root path
+    with Workspace_path.Error message -> raise (Tool_error message) in
+  root ^ "\000" ^ absolute
+
+let max_guarded_edit_evidence = 256
 
 let starts_with text prefix =
   String.length text >= String.length prefix &&
@@ -108,18 +117,19 @@ let create_session_context ?lsp_manager ?hub_port ~owner ~root ~process_manager 
     mobile_lock = Mutex.create (); mobile_discovery = None;
     android_inventory = None;
     mobile_run_manager = Workspace_mobile_run.create_manager ();
+    guarded_edit_evidence = Hashtbl.create 16;
     record_file_change; closed = false }
 
 let close_session_context context =
   if not context.closed then (
     context.closed <- true;
-    context.dap_granted_effect := None;
     Mutex.lock context.xcode_lock;
     context.xcode_discovery <- None;
     Mutex.unlock context.xcode_lock;
     Mutex.lock context.mobile_lock;
     context.mobile_discovery <- None;
     context.android_inventory <- None;
+    Hashtbl.clear context.guarded_edit_evidence;
     Mutex.unlock context.mobile_lock;
     let ignore_failure action = try action () with _ -> () in
     ignore_failure (fun () -> Workspace_lsp.close_manager context.lsp_manager);
@@ -2194,7 +2204,8 @@ let includes text fragment =
     (String.sub text offset fragment_length = fragment || search (offset + 1)) in
   search 0
 
-let mobile_session_build ~approved ?cancel ?on_progress ~context ~root args =
+let mobile_session_build ~approved ?cancel ?on_progress ?(mark_built = true)
+    ~context ~root args =
   if not approved then
     fail "mobile app build requires explicit interactive approval";
   let id = required_string "session_id" args in
@@ -2210,8 +2221,204 @@ let mobile_session_build ~approved ?cancel ?on_progress ~context ~root args =
   if not (String.starts_with ~prefix:success output) ||
      includes output "incomplete result" then
     fail ("Mobile app build did not complete successfully:\n" ^ output);
-  ignore (Workspace_mobile_run.mark_built context.mobile_run_manager ~id);
+  if mark_built then
+    ignore (Workspace_mobile_run.mark_built context.mobile_run_manager ~id);
   "Mobile build completed for " ^ id ^ ".\n" ^ output
+
+let valid_sha256 value =
+  String.length value = 64 &&
+  String.for_all (function '0'..'9' | 'a'..'f' -> true | _ -> false) value
+
+let mobile_verify_source ~context ~root args =
+  let path = required_string "source_path" args in
+  let before = required_string "before_sha256" args
+  and after = required_string "after_sha256" args in
+  if not (valid_sha256 before && valid_sha256 after) then
+    fail "source snapshot hashes must be lowercase SHA-256 values";
+  let snapshot = try Workspace_edit.read_snapshot ~root ~path
+    with Workspace_edit.Error message -> fail message in
+  let evidence_key = guarded_evidence_key ~root ~path in
+  Mutex.lock context.mobile_lock;
+  let evidence = Fun.protect ~finally:(fun () ->
+      Mutex.unlock context.mobile_lock) (fun () ->
+    Hashtbl.find_opt context.guarded_edit_evidence evidence_key) in
+  if snapshot.sha256 <> after then
+    fail "edited source changed since the supplied post-edit snapshot";
+  (match evidence with
+   | Some evidence when evidence.before_sha256 = before &&
+                        evidence.after_sha256 = after -> ()
+   | _ -> fail "source hashes are not bound to a guarded apply_edits change in this session");
+  path, before, after
+
+let mobile_verify_android_task session args =
+  let artifact = session.Workspace_mobile_run.app_path in
+  let subroot = session.subroot in
+  let prefix = if subroot = "." then "" else subroot ^ "/" in
+  if not (String.starts_with ~prefix artifact) then
+    fail "Android app artifact is outside the selected Gradle project";
+  let project_artifact =
+    String.sub artifact (String.length prefix)
+      (String.length artifact - String.length prefix) in
+  let components = String.split_on_char '/' project_artifact in
+  let rec module_parts prefix = function
+    | "build" :: _ when prefix <> [] -> List.rev prefix
+    | part :: rest -> module_parts (part :: prefix) rest
+    | [] -> fail "Android app artifact must be inside a module build directory" in
+  let module_name = String.concat ":" (module_parts [] components) in
+  let task = required_string "target" args in
+  if not (String.starts_with ~prefix:(":" ^ module_name ^ ":") task) then
+    fail "Android test task must belong to the selected app artifact's Gradle module";
+  task
+
+
+let mobile_test_executed output =
+  let text = String.lowercase_ascii output in
+  let has fragment = includes text fragment in
+  let positive_count_before marker =
+    let rec find from =
+      match Str.search_forward (Str.regexp_string marker) text from with
+      | position ->
+          let rec digits index =
+            if index >= 0 then match text.[index] with
+              | '0'..'9' -> digits (index - 1)
+              | _ -> index + 1
+            else 0 in
+          let first = digits (position - 1) in
+          if first < position &&
+             (try int_of_string (String.sub text first (position - first)) > 0
+              with _ -> false)
+          then true
+          else find (position + String.length marker)
+      | exception Not_found -> false in
+    find 0 in
+  let positive_count_after marker =
+    let rec find from =
+      match Str.search_forward (Str.regexp_string marker) text from with
+      | position ->
+          let first = position + String.length marker in
+          let rec skip index =
+            if index < String.length text && text.[index] = ' ' then skip (index + 1)
+            else index in
+          let first = skip first in
+          let rec digits index =
+            if index < String.length text then match text.[index] with
+              | '0'..'9' -> digits (index + 1)
+              | _ -> index
+            else index in
+          let stop = digits first in
+          if stop > first &&
+             (try int_of_string (String.sub text first (stop - first)) > 0
+              with _ -> false)
+          then true
+          else find (position + String.length marker)
+      | exception Not_found -> false in
+    find 0 in
+  not (has "0 tests" || has "zero tests" || has "executed 0" ||
+       has "tests run: 0" || has "no tests found" || has "no matching tests" ||
+       has "no-source") &&
+  (List.exists positive_count_before
+     [" test"; " tests completed"; " tests passed"] ||
+   List.exists positive_count_after ["tests run:"; "tests found:"])
+
+let mobile_verify_preview ~context ~root args =
+  let session = Workspace_mobile_run.get context.mobile_run_manager
+    (required_string "session_id" args) in
+  if session.root <> root then
+    fail "mobile app session belongs to a different workspace root";
+  let path, before, after = mobile_verify_source ~context ~root args in
+  let action = required_string "action" args in
+  let command, cwd =
+    match action, session.platform with
+    | "build", _ ->
+        let _stack, _build_args, command, cwd, _ =
+          mobile_session_build_request ~context ~root:session.root session args in
+        command, cwd
+    | "test", Workspace_mobile_run.Ios ->
+        let test_args = `Assoc [
+          "action", `String "test"; "subroot", `String session.subroot;
+          "scheme", `String (Option.value ~default:"" session.scheme);
+          "destination", `String session.device;
+          "timeout_seconds", `Int (optional_int "timeout_seconds" 120
+            ~minimum:1 ~maximum:300 args)] in
+        xcode_command test_args,
+        Filename.dirname (Workspace_path.checked_path root session.subroot)
+    | "test", Workspace_mobile_run.Android ->
+        let test_args = `Assoc [
+          "stack", `String "gradle"; "action", `String "instrumented";
+          "subroot", `String session.subroot;
+          "target", `String (mobile_verify_android_task session args);
+          "serial", `String session.device;
+          "timeout_seconds", `Int (optional_int "timeout_seconds" 120
+            ~minimum:1 ~maximum:300 args)] in
+        mobile_command ~root:session.root test_args
+    | _ -> fail "mobile verification action must be build or test" in
+  "Runs only the selected app-session's focused " ^ action ^
+  " command after rechecking the exact edited source snapshot.",
+  ["Session/app/device: " ^ session.id ^ " · " ^ session.app_id ^
+      " · " ^ session.device;
+   "Project: " ^ session.subroot;
+   "Source: " ^ Printf.sprintf "%S" path;
+   "Pre-edit SHA-256: " ^ before;
+   "Post-edit SHA-256: " ^ after;
+   "Working directory: " ^ Printf.sprintf "%S" cwd;
+   "Exact command: " ^ command]
+
+let mobile_verify ~approved ?cancel ?on_progress ~context ~root args =
+  if not approved then
+    fail "mobile source verification requires explicit interactive approval";
+  let root = Workspace_path.root_path root in
+  let session = Workspace_mobile_run.get context.mobile_run_manager
+    (required_string "session_id" args) in
+  if session.root <> root then
+    fail "mobile app session belongs to a different workspace root";
+  let path, _before, expected =
+    mobile_verify_source ~context ~root args in
+  let action = required_string "action" args in
+  let output, success_prefix = match action with
+    | "build" ->
+        mobile_session_build ~approved ?cancel ?on_progress ~mark_built:false
+          ~context ~root args, "Mobile build completed for " ^ session.id ^ "."
+    | "test" ->
+        (match session.platform with
+         | Workspace_mobile_run.Ios ->
+             let test_args = `Assoc [
+               "action", `String "test"; "subroot", `String session.subroot;
+               "scheme", `String (Option.value ~default:"" session.scheme);
+               "destination", `String session.device;
+               "timeout_seconds", `Int (optional_int "timeout_seconds" 120
+                 ~minimum:1 ~maximum:300 args)] in
+             let result = xcode_preflight ~approved ?cancel ?on_progress
+               ~context session.root test_args in
+             result, "Xcode test: exit 0 (scheme "
+               ^ Option.value ~default:"" session.scheme ^ ")"
+         | Workspace_mobile_run.Android ->
+             let test_args = `Assoc [
+               "stack", `String "gradle"; "action", `String "instrumented";
+               "subroot", `String session.subroot;
+               "target", `String (mobile_verify_android_task session args);
+               "serial", `String session.device;
+               "timeout_seconds", `Int (optional_int "timeout_seconds" 120
+                 ~minimum:1 ~maximum:300 args)] in
+             mobile_check ~approved ?cancel ?on_progress ~context
+               session.root test_args,
+             "Mobile gradle instrumented: exit 0")
+    | _ -> fail "mobile verification action must be build or test" in
+  if not (String.starts_with ~prefix:success_prefix output) ||
+     includes output "incomplete result" ||
+     (action = "test" && not (mobile_test_executed output)) then
+    fail ("Mobile source verification did not complete successfully for " ^
+      session.id ^ " (" ^ session.app_id ^ " on " ^ session.device ^
+      "):\n" ^ output);
+  let current = try Workspace_edit.read_snapshot ~root ~path
+    with Workspace_edit.Error message -> fail message in
+  if current.sha256 <> expected then
+    fail "edited source changed while the mobile command was running";
+  if action = "build" then
+    ignore (Workspace_mobile_run.mark_built context.mobile_run_manager
+      ~id:session.id);
+  "VERIFIED " ^ action ^ " for " ^ session.id ^ " (" ^ session.app_id ^
+  " on " ^ session.device ^ "), source " ^ path ^ " at SHA-256 " ^
+  expected ^ ".\n" ^ output
 
 
 let mobile_session ~approved ?cancel ?on_progress ?context root args =
@@ -3638,7 +3845,7 @@ let repository_security_scan ?cancel root args =
 
 let is_shell_tool = function
   | "run_command" | "start_process" | "start_shell" | "xcode_preflight"
-  | "mobile_check" | "android_devices" | "mobile_session"
+  | "mobile_check" | "android_devices" | "mobile_session" | "mobile_verify"
   | "mobile_observe" | "mobile_control" | "mobile_scenario"
   | "mobile_diagnostics" -> true
   | _ -> false
@@ -3647,7 +3854,7 @@ let is_shell_tool = function
 let requires_explicit_approval ~name ~args =
   match name with
   | "run_command" | "start_process" | "start_shell" | "xcode_preflight"
-  | "mobile_check" | "android_devices"
+  | "mobile_check" | "android_devices" | "mobile_verify"
   | "mobile_observe" | "mobile_control" | "mobile_diagnostics" -> true
   | "process_stdin" | "process_close_stdin" | "process_kill"
   | "worktree_create" | "worktree_commit" | "worktree_remove"
@@ -3687,7 +3894,7 @@ let requires_explicit_approval ~name ~args =
 let non_reversible_tool ~name ~args =
   match name with
   | "run_command" | "start_process" | "start_shell" | "xcode_preflight"
-  | "mobile_check" | "android_devices"
+  | "mobile_check" | "android_devices" | "mobile_verify"
   | "process_stdin" | "process_close_stdin" | "process_kill"
   | "worktree_create" | "worktree_commit" | "worktree_remove"
   | "lsp_start" | "dap_start" | "ssh_open" | "ssh_read"
@@ -3853,6 +4060,16 @@ let definitions = [
      "task", string_field "Exact discovered Gradle assemble task for the selected variant";
      "timeout_seconds", integer_field "Per-command deadline (default 120 seconds)" 1 300]
     ["action"];
+  schema "mobile_verify" "Verify an edited workspace source snapshot against one focused build or nonempty test result for the exact selected mobile app session. Source hashes are checked before and after execution; each command requires explicit approval."
+    ["action", enum_string_field "Focused verification command" ["build"; "test"];
+     "session_id", string_field "Exact selected mobile app session";
+     "source_path", bounded_string_field "Workspace-relative edited source path" 4096;
+     "before_sha256", bounded_string_field "Pre-edit source SHA-256" 64;
+     "after_sha256", bounded_string_field "Post-edit snapshot SHA-256" 64;
+     "task", bounded_string_field "Exact Android assemble task; required for Android build" 512;
+     "target", bounded_string_field "Android discovered instrumentation task; required for Android test" 512;
+     "timeout_seconds", integer_field "Per-command deadline (default 120 seconds)" 1 300]
+    ["action"; "session_id"; "source_path"; "before_sha256"; "after_sha256"];
   schema "mobile_observe" "Capture a bounded screenshot or accessibility tree from a running app in the selected private mobile session. Each device read has an exact explicit approval; Android accessibility output is untrusted and iOS accessibility-tree capture is unavailable."
     ["action", enum_string_field "Read one selected-screen representation" ["screenshot"; "accessibility"];
      "session_id", string_field "Running mobile app session ID";
@@ -4180,9 +4397,27 @@ let apply_edits ~approved ~sensitive_review ?cancel ?context root args =
     with Workspace_edit.Error message -> fail message in
   ignore (require_sensitive_review ~approved ~sensitive_review ~root
     [proposed_of_prepared prepared]);
+  let preview = prepared.preview in
   (try Workspace_edit.write_prepared prepared
    with Workspace_edit.Error message -> fail message);
-  let preview = prepared.Workspace_edit.preview in
+  Option.iter (fun context ->
+    if preview.changed then (
+      let evidence_key = guarded_evidence_key ~root ~path in
+      Mutex.lock context.mobile_lock;
+      Fun.protect ~finally:(fun () ->
+        Mutex.unlock context.mobile_lock) (fun () ->
+          let before_sha256 = match Hashtbl.find_opt
+              context.guarded_edit_evidence evidence_key with
+            | Some previous when previous.after_sha256 = prepared.before.sha256 ->
+                previous.before_sha256
+            | _ -> prepared.before.sha256 in
+          if not (Hashtbl.mem context.guarded_edit_evidence evidence_key) &&
+             Hashtbl.length context.guarded_edit_evidence >=
+               max_guarded_edit_evidence then
+            Hashtbl.clear context.guarded_edit_evidence;
+          Hashtbl.replace context.guarded_edit_evidence evidence_key
+            { before_sha256; after_sha256 = preview.result_sha256 })))
+    context;
   Printf.sprintf "%s %s; SHA-256: %s"
     (if preview.changed then "Applied" else "No changes to")
     path preview.result_sha256
@@ -4459,6 +4694,9 @@ let approval_request ?cancel ?context ~root ~name ~args (decision : Approval.dec
             "ADB may start its local server and access your configured ADB identity. Physical serials are withheld; offline and unauthorized transports are not ready."
           else
             "Reads locally configured AVD names; no SDK or system image is installed, and no emulator is booted.")]
+    | "mobile_verify" ->
+        let context = require_session_context context in
+        mobile_verify_preview ~context ~root:base_root args
     | "mobile_session" ->
         let context = require_session_context context in
         mobile_session_preview ~context ~root:base_root args
@@ -4956,8 +5194,8 @@ let session_tool_names = [
   "lsp_start"; "lsp"; "workspace_eval";
   "ssh_open"; "ssh_close"; "ssh_read"; "ssh_write"; "ssh_command";
   "dap_start"; "dap"; "xcode_preflight"; "mobile_check"; "android_devices";
-  "mobile_session"; "mobile_observe"; "mobile_diagnostics"; "mobile_control";
-  "mobile_scenario"; "browser"; "publish_web"
+  "mobile_session"; "mobile_verify"; "mobile_observe"; "mobile_diagnostics";
+  "mobile_control"; "mobile_scenario"; "browser"; "publish_web"
 ]
 
 let path_tool_names = [
@@ -5090,6 +5328,9 @@ let prepare ?cancel ?context ~root ~name ~args () =
               android_devices ~approved ?cancel ?on_progress ?context root args
           | "mobile_session" ->
               mobile_session ~approved ?cancel ?on_progress ?context root args
+          | "mobile_verify" ->
+              mobile_verify ~approved ?cancel ?on_progress
+                ~context:(require_session_context context) ~root args
           | "start_process" -> start_process ~approved ?cancel ?context root args
           | "start_shell" -> start_shell ~approved ?cancel ?context root args
           | "process_list" -> process_list ?context root args

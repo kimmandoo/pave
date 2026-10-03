@@ -254,6 +254,35 @@ public final class SmokeTest {
                 "timeout_seconds", `Int 60] in
               approve "mobile_diagnostics" (`Assoc fields);
               call "mobile_diagnostics" fields in
+            let edit_source from_text to_text =
+              let source_path =
+                "app/src/main/java/dev/pave/mobilefixture/SmokeActivity.java" in
+              let snapshot = Pave.Workspace_edit.read_snapshot ~root
+                ~path:source_path in
+              if not (contains snapshot.contents from_text) then
+                failwith "mobile verification source hunk was not present";
+              let fields = [
+                "path", `String source_path;
+                "expected_sha256", `String snapshot.sha256;
+                "hunks", `List [`Assoc [
+                  "old_text", `String from_text;
+                  "new_text", `String to_text]]] in
+              approve "apply_edits" (`Assoc fields);
+              let result = call "apply_edits" fields in
+              expect "guarded fixture edit" "Applied" result;
+              Pave.Workspace_edit.read_snapshot ~root ~path:source_path in
+            let verify_source action before_sha256 snapshot =
+              let fields = [
+                "action", `String action;
+                "session_id", `String "mobile-1";
+                "source_path", `String
+                  "app/src/main/java/dev/pave/mobilefixture/SmokeActivity.java";
+                "before_sha256", `String before_sha256;
+                "after_sha256", `String snapshot.Pave.Workspace_edit.sha256;
+                "task", `String ":app:assembleDebug";
+                "timeout_seconds", `Int 300] in
+              approve "mobile_verify" (`Assoc fields);
+              call "mobile_verify" fields in
             let accessibility_nodes tree =
               let json = Yojson.Basic.from_string tree in
               Yojson.Basic.Util.(json |> member "nodes" |> to_list) in
@@ -361,6 +390,25 @@ public final class SmokeTest {
               (run_session "stop" []);
             print_endline ("real Android app session on " ^ serial ^
               ": built, installed, launched and stopped");
+            let original_source =
+              Pave.Workspace_edit.read_snapshot ~root
+                ~path:"app/src/main/java/dev/pave/mobilefixture/SmokeActivity.java" in
+            let defective = edit_source "button.setText(\"Increment\");"
+              "button.setText(missingSymbol);" in
+            let rejected = verify_source "build" original_source.sha256 defective in
+            expect "real edited-source failure" "did not complete successfully"
+              rejected;
+            expect "source-linked Android compiler diagnostic"
+              "SmokeActivity.java:" rejected;
+            if contains rejected "VERIFIED" then
+              failwith ("defective Android source was verified: " ^ rejected);
+            let repaired = edit_source "button.setText(missingSymbol);"
+              "button.setText(\"Increment\");" in
+            let verified = verify_source "build" original_source.sha256 repaired in
+            expect "real repaired-source verification" "VERIFIED build" verified;
+            expect "real focused Android build result" "BUILD SUCCESSFUL" verified;
+            print_endline ("real Android edit verification on " ^ serial ^
+              ": deliberate Java defect failed with a source diagnostic; guarded repair passed focused build");
             if not (Sys.file_exists test_apk) then
               failwith ("expected test APK missing: " ^ test_apk);
             let installed_test = run_shell ("adb -s " ^ Filename.quote serial ^
