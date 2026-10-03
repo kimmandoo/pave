@@ -11,9 +11,10 @@ let fail message = raise (Error message)
       trycloudflare.com subdomain; the requested name is not used).
    3. localhost.run over ssh: PAVE_SSH pin, else the conventional
       /usr/bin/ssh from workspace_ssh.ml, else `ssh` on PATH
-      (anonymous localhost.run relays assign their own *.lhr.life or
-      *.localhost.run subdomain; the requested name is best-effort and
-      usually ignored without an authenticated account).
+      (anonymous localhost.run relays assign their own *.lhr.life
+      subdomain and the requested name is ignored; as of 2026-10 the
+      nokey banner only advertises *.lhr.life URLs — *.localhost.run is
+      reserved for their admin/docs hosts and is never a tunnel URL).
    A pin that is set but unusable fails loudly instead of falling through.
    PAVE_TUNNELS=off disables every backend. *)
 type backend = Portal | Cloudflared | Localhost_run
@@ -134,8 +135,8 @@ let cloudflared_arguments ~port ~name:_ =
   ["tunnel"; "--url"; "http://127.0.0.1:" ^ string_of_int port;
    "--no-autoupdate"]
 
-(* Anonymous localhost.run does not honor a requested hostname; it emits the
-   assigned https://LABEL.lhr.life (or .localhost.run) URL on its own. *)
+(* Anonymous localhost.run ignores the requested name; it emits the
+   assigned https://LABEL.lhr.life URL on its own. *)
 let localhost_run_arguments ~port ~name:_ ~known_hosts =
   ["-NT"; "-R"; "80:127.0.0.1:" ^ string_of_int port;
    "-o"; "BatchMode=yes";
@@ -206,10 +207,10 @@ let host_suffix_url output suffix =
 
 let cloudflared_url output = host_suffix_url output ".trycloudflare.com"
 
-let localhost_run_url output =
-  match host_suffix_url output ".lhr.life" with
-  | Some _ as url -> url
-  | None -> host_suffix_url output ".localhost.run"
+(* Anonymous relays only ever advertise an *.lhr.life URL. The ssh banner
+   also links reserved hosts under *.localhost.run (admin console, docs);
+   matching those would report a false "published" for a dead tunnel. *)
+let localhost_run_url output = host_suffix_url output ".lhr.life"
 
 let backend_url backend output =
   match backend with
@@ -220,8 +221,7 @@ let backend_url backend output =
 let ready_regex = function
   | Portal -> "service ready at \\|\"public_url\""
   | Cloudflared -> "https://[a-z0-9-]+\\.trycloudflare\\.com"
-  | Localhost_run ->
-      "https://[a-z0-9-]+\\(\\.lhr\\.life\\|\\.localhost\\.run\\)"
+  | Localhost_run -> "https://[a-z0-9-]+\\.lhr\\.life"
 
 (* The leftmost DNS label of the emitted URL is the name the relay actually
    advertised; it may differ from the requested name. *)

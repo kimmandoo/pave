@@ -10,6 +10,7 @@
 - fix(extensions): a manifest missing a required field fails with `missing manifest field` instead of a raw `Not_found`; the `did you mean` suggestion list only proposes commands that are actually available in the current session.
 - chore(release): published v0.1.80 for Linux and macOS on x86_64 and ARM64 after a full green CI matrix and verified the release archive checksums, the embedded `v0.1.80` version, the installer's latest-release discovery and `update --check` reporting `Pave v0.1.80 is up to date.`
 - fix(session): a connection the hub accepted but had not yet registered when `close()` ran is now torn down silently instead of answered with a 503, so a half-open client can no longer observe bytes after close; `test_session_hub` also tolerates `SIGPIPE`/`EPIPE` on its client writes.
+- fix(tools): `publish_web` on the ssh/`localhost.run` backend no longer reports a false "published" — the welcome banner's `admin.localhost.run`/`docs` links were being mistaken for the assigned tunnel URL; only `*.lhr.life` hosts now satisfy readiness and URL extraction, so a dead relay surfaces as a timeout instead of a bogus URL. Verified end-to-end: cloudflared quick tunnel served a local port publicly, and the ssh path fails with `localhost.run did not publish a public URL`.
 
 ## 2026-10-02
 

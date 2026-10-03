@@ -143,17 +143,23 @@ let test_backend_url_parsing () =
     Connect to http://localhost.run:8080\n\
     abc123def.lhr.life tunneled with tls termination, https://abc123def.lhr.life\n" in
   assert (Portal.localhost_run_url lhr = Some "https://abc123def.lhr.life");
+  (* The welcome banner links reserved *.localhost.run hosts (admin console,
+     docs); only an *.lhr.life host is a real assigned relay URL. *)
   assert (Portal.localhost_run_url
-    "tunneled at https://zz99.localhost.run\n" =
-      Some "https://zz99.localhost.run");
+    "Welcome to localhost.run! go to https://admin.localhost.run/" = None);
+  assert (Portal.localhost_run_url
+    "tunneled at https://zz99.localhost.run\n" = None);
   assert (Portal.localhost_run_url "https://lhr.life itself" = None);
   assert (Portal.localhost_run_url "nothing" = None);
+
   (* Readiness regexes match the URL shapes each backend emits. *)
   let matches regex text =
     match Str.search_forward (Str.regexp regex) text 0 with
     | _ -> true
     | exception Not_found -> false in
   assert (matches (Portal.ready_regex Portal.Cloudflared) cf_log);
+  assert (not (matches (Portal.ready_regex Portal.Localhost_run)
+    "go to https://admin.localhost.run/"));
   assert (matches (Portal.ready_regex Portal.Localhost_run) lhr);
   assert (matches (Portal.ready_regex Portal.Portal)
     "INF service ready at https://x.relay");
