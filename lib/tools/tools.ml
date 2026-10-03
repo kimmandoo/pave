@@ -4631,7 +4631,9 @@ let approval_request ?cancel ?context ~root ~name ~args (decision : Approval.dec
       resolve_path_arguments ?cancel ?context ~root args
     else root, args in
   let value name fallback args = match Protocol.member name args with
-    | `String text -> text | _ -> fallback in
+    | `String text -> text
+    | `Int number -> string_of_int number
+    | _ -> fallback in
   let quoted name fallback args = Printf.sprintf "%S" (value name fallback args) in
   let cwd_detail () =
     let cwd = process_cwd ?cancel ?context ~root:base_root args in

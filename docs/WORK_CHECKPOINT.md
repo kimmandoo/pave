@@ -1,6 +1,17 @@
 # Work checkpoint
 
 
+## Current session — Portal slash-publish review
+
+- **Date:** 2026-10-04.
+- **User report:** Portal publication through the slash command did not work.
+- **Starting state:** Clean `main` at `c06099f chore(release): record v0.1.81 publication`.
+- **Diagnosis and repair:** The real `/publish <port> <name>` approval screen rendered `127.0.0.1:(missing)` although `publish_web` supplied the schema-defined integer port. `Tools.approval_request` displayed only JSON strings. Updated the formatter to render integers and added a behavior regression requiring the actual requested port in the approval details.
+- **Runtime boundary:** This host has no `portal` on `PATH` and `PAVE_PORTAL` is unset. An actual TUI `/publish <port>` invocation reached Portal preflight and displayed the explicit `gosuda portal-tunnel CLI not found` diagnostic. No public tunnel was started. With an isolated local fake Portal and local listener, the actual TUI slash path showed the corrected port, required approval, reported the matching ready URL, and `/publish stop` stopped the owned process.
+- **Changed files:** `lib/tools/tools.ml`, `test/tools/test_tools.ml`, `CHANGELOG.md`, `docs/TROUBLESHOOTING.md`, and this checkpoint. `docs/USAGE.md` already documented the mandatory external Portal CLI and `PAVE_PORTAL` setup.
+- **Verification:** `opam exec -- dune build @install test/test_tools.exe test/test_interaction.exe && opam exec -- dune exec test/test_tools.exe && opam exec -- dune exec test/test_interaction.exe` passed. Full `opam exec -- dune build @install && opam exec -- dune runtest --force -j 1 && opam lint pave.opam` passed; optional `test_browser_live` skipped because `CHROME_BIN` and `SMOKE_URL` were unset. `python3 /tmp/pave-portal-slash-success.py` passed the approval/publish/stop PTY path; the separate no-CLI PTY reproduced the host prerequisite error.
+- **Exact next action / blocker:** Commit and push the fix. A real public Portal smoke remains blocked until the official CLI is installed or `PAVE_PORTAL` points to it in Pave's launch environment; no public exposure was authorized during diagnosis.
+
 ## Current session — mobile dashboard UX review and v0.1.81 release
 
 - **Date:** 2026-10-03.

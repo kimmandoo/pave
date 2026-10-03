@@ -332,6 +332,11 @@ let () =
       let request = Pave.Tools.approval_request ?context ~root ~name ~args decision in
       assert (request.impact <> "");
       request in
+    let portal_publish_request = approval_case "publish_web"
+      ["action", `String "publish"; "port", `Int 3000;
+       "name", `String "my-preview"] Pave.Approval.Exec in
+    assert (List.mem "Local service: 127.0.0.1:3000"
+        portal_publish_request.details);
     let search_secret = "approval-secret-must-not-render" in
     let previous_search_key = Sys.getenv_opt "BRAVE_SEARCH_API_KEY" in
     Unix.putenv "BRAVE_SEARCH_API_KEY" search_secret;

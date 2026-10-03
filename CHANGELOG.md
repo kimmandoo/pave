@@ -1,5 +1,8 @@
 # Changelog
 
+## 2026-10-04
+- fix(tui): displayed the numeric localhost port in Portal publish approval previews instead of incorrectly showing `(missing)`, so reviewers can confirm the service target.
+
 ## 2026-10-03
 - feat(mobile): added session-bound approved Android/iOS builds, device install/launch/stop previews, validated Android activity selection, stateful sessions, and the `/mobile` session dashboard.
 - test(mobile): verified real Android app-session build/install/component-launch/stop and AndroidJUnitRunner on `emulator-5554`, plus Xcode Simulator XCTest; signing and implicit SDK/dependency installation remained disabled.
