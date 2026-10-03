@@ -87,6 +87,7 @@ let create ~provider ~root ~system ?workspace_context
     ?approve_tool ?on_usage ?on_phase ?on_tool_event ?on_stage ?on_workspace_effect
     ?(on_change = fun _ -> ())
     ?(on_delta = fun _ -> ()) ~on_event () =
+  let root = Workspace_path.root_path root in
   let redact = match secret_mask with
     | Some mask -> Secret_mask.redact mask
     | None -> Fun.id in

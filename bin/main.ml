@@ -3115,21 +3115,98 @@ let () =
           emit_lines (if jobs = [] then ["No session-owned jobs."]
             else "Session jobs:" :: List.map format_job jobs) in
     let mobile_dashboard () = match !journal with
-      | None -> notify "Error: mobile sessions require a private saved session"
+      | None -> notify "Error: mobile workflows require a private saved session"
       | Some session ->
           let context = tool_context session in
-          let rows = Pave.Workspace_mobile_run.sessions
-              context.Pave.Tools.mobile_run_manager
-            |> List.map Pave.Workspace_mobile_run.render in
+          let sessions = Pave.Workspace_mobile_run.sessions
+              context.Pave.Tools.mobile_run_manager in
+          let rows = List.map Pave.Workspace_mobile_run.render sessions in
+          let launch prompt = match !ui, !runner with
+            | Some screen, Some active ->
+                if Pave.Turn_runner.busy active then
+                  notify "Mobile dashboard actions cannot be queued during an active turn."
+                else (
+                  Pave.Turn_runner.submit active prompt;
+                  Tui.alert screen "Mobile workflow submitted; tool effects still require separate approval.")
+            | _ -> notify "Mobile workflow requires the interactive session runner." in
+          let session_prompt action id detail =
+            let target = Printf.sprintf "Use only the existing selected app session ID %S. Do not switch to another session/device." id in
+            match action with
+            | "Observe app" ->
+                target ^ " Capture a fresh mobile screenshot with mobile_observe and report the observed app state. Do not perform a device action."
+            | "Control app" ->
+                target ^ " User intent: " ^ detail ^
+                "\nCapture fresh screenshot/accessibility evidence first, then perform only the single requested UI action with mobile_control. If the request is unclear, ask before acting. Report settled state from a fresh observation; never treat the input command alone as proof."
+            | "Replay bug scenario" ->
+                target ^ " Help the user select an exact saved mobile_scenario for this app/device, inspect its status, and replay only after the user has specified the scenario. Every replay start, step, and verification remains separately approved; report the final persisted status."
+            | "Read runtime diagnostics" ->
+                target ^ " Ask which mobile_diagnostics capture is wanted when unspecified. Run only that exact bounded capture and summarize its evidence without claiming unsupported symbolication or a crash from normal exit records."
+            | "Verify guarded edit" ->
+                target ^ " Use mobile_verify only for a source snapshot chain evidenced by guarded apply_edits in this private session. Ask for any missing source/task choice; never invent hashes or pass metadata. Report the actual verification result."
+            | "Save screenshot baseline" ->
+                target ^ " Save a mobile_visual baseline only after the user confirms the exact baseline name, operator-declared OS/locale/theme and dynamic-region masks. Do not guess environment metadata."
+            | "Compare screenshot baseline" ->
+                target ^ " Compare with mobile_visual only after the user supplies an exact baseline name and matching operator-declared OS/locale/theme and dynamic-region masks. Report changed-pixel count and screenshot."
+            | _ -> assert false in
+          let start_workflow action id =
+            if action = "Control app" then
+              (match !ui with
+               | None -> ()
+               | Some screen ->
+                   (match Tui.choose ~allow_custom:true
+                      ~intro:["Describe the one UI action to perform.";
+                        "Escape cancels without submitting or changing app state."]
+                      screen ~title:"Mobile · UI action intent" ~choices:[] with
+                    | Some intent when String.trim intent <> "" ->
+                        launch (session_prompt action id (String.trim intent))
+                    | Some _ -> notify "Mobile control requires a nonempty intent."
+                    | None -> ()))
+            else launch (session_prompt action id "") in
           (match !ui with
-           | Some screen ->
-               ignore (Tui.choose ~intro:[
-                 "Selected app, scheme, variant, device and lifecycle state."
-               ] ~empty_message:"No mobile app sessions. Use mobile_session to select one."
-                 screen ~title:"Mobile app sessions" ~choices:rows)
            | None ->
-               emit_lines (if rows = [] then ["No mobile app sessions."]
-                 else "Mobile app sessions:" :: rows)) in
+               emit_lines (if rows = [] then
+                 ["No mobile app sessions.";
+                  "Use an interactive private session and /mobile to start a mobile workflow."]
+                 else "Mobile app sessions · /mobile opens actions:" :: rows)
+           | Some screen ->
+               let choices = "Create or select app session" :: rows in
+               let selected = Tui.choose ~intro:[
+                 "Session lifecycle and live results are shown here.";
+                 "Every device/shell action still needs its own explicit approval.";
+                 "Escape cancels without changing the session or composer draft."]
+                 ~empty_message:"No app sessions yet; create or select one."
+                 screen ~title:"Mobile dashboard" ~choices in
+               match selected with
+               | None -> ()
+               | Some "Create or select app session" ->
+                   launch ("Inspect this workspace with mobile_project, then help me " ^
+                     "select or create one exact mobile app session. Show candidate evidence " ^
+                     "and ask me to choose when ambiguous. Use approved device/scheme " ^
+                     "inventories; do not boot, install, launch, build or test without the " ^
+                     "existing tool's separate explicit approval. Do not invent app IDs, " ^
+                     "artifact paths, schemes, variants or device identities.")
+               | Some row ->
+                   (match List.find_opt (fun (mobile : Pave.Workspace_mobile_run.session) ->
+                       Pave.Workspace_mobile_run.render mobile = row) sessions with
+                    | None -> notify "The selected mobile session is no longer available; reopen /mobile."
+                    | Some mobile ->
+                        let actions = [
+                          "Observe app";
+                          "Control app";
+                          "Replay bug scenario";
+                          "Read runtime diagnostics";
+                          "Verify guarded edit";
+                          "Save screenshot baseline";
+                          "Compare screenshot baseline";
+                          "Back"] in
+                        let action = Tui.choose ~intro:[row;
+                          "Results appear in the transcript; reopen /mobile to refresh lifecycle state."]
+                          screen ~title:("Mobile · " ^ mobile.id) ~choices:actions in
+                        match action with
+                        | Some action when List.mem action actions &&
+                            action <> "Back" ->
+                            start_workflow action mobile.id
+                        | _ -> ())) in
     let show_job manager id =
       match Pave.Session_jobs.find manager ~id with
       | None -> notify "Error: no such job in the active session"

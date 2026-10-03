@@ -17,6 +17,10 @@
 - test(mobile): reproduced a Java compile failure with a guarded edit on `emulator-5554`, surfaced its checked source location, and verified the restored edit with an approved session-bound Android build; AndroidJUnitRunner passed one test.
 - feat(mobile): added private screenshot baselines and approved app-session pixel comparison, binding exact device/environment metadata and dynamic masks while rejecting incomplete or mismatched captures.
 - test(mobile): saved a real Android `count:0` screenshot baseline and detected changed pixels after a separately approved tap; ImageIO, mask, metadata, corruption, permission and symlink regressions passed.
+- feat(tui): completed `/mobile` with exact session/device/lifecycle rows and observation, control, scenario, diagnostics, verification and screenshot workflows routed through the standard Agent approval path.
+- fix(session): registered `mobile_session` and `mobile_scenario` as supported non-reversible effects so completed device actions no longer failed rewind bookkeeping.
+- test(tui): exercised `/mobile` through a real PTY, including session creation, approved observation/control, settled-state refresh, and canceled control intent without another request or session change.
+- fix(agent): canonicalized workspace roots on agent creation and required explicit approval for managed process starts, preventing macOS temporary-path aliases from rejecting writes and permissive modes from launching a process without consent.
 
 
 - fix(portal): replaced Cloudflare/SSH substitutions with gosuda Portal relay publishing for an already-listening localhost server, generated or accepted DNS prefixes, isolated persistent private identities by prefix, pinned optional HTTPS relays, required complete matching readiness, and cleaned up cancelled/failed owned tunnels; kept model publish/attach/stop explicitly approval-gated even in yolo mode.

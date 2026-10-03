@@ -1,5 +1,19 @@
 # Work checkpoint
 
+
+## Current session — mobile core completion (MD01)
+
+- **Date:** 2026-10-03.
+- **Active task:** Completed the remaining mobile core capability, MD01, and verified the full mobile workflow before pushing the accumulated mobile branch.
+- **Starting state:** `main` at `6a99110 feat(mobile): compare screenshot regressions`, eight commits ahead of `origin/main`. The current request's mobile dashboard work was uncommitted; no unrelated working-tree changes were present.
+- **MD01 implementation:** `/mobile` lists exact private app-session lifecycle rows, selects or creates sessions, and exposes observation, intent-driven control, scenario replay, runtime diagnostics, guarded verification, and screenshot baseline workflows. Every selected workflow enters the regular `Turn_runner`/Agent route; actions retain their own approval. Escape from the entered-but-unsent control intent produced no additional provider request and left the running session visible.
+- **Integration repairs found by live acceptance/full-suite verification:** Registered mobile session/scenario effects in the independent non-reversible rewind allowlist, preventing failed bookkeeping after device effects had completed. Canonicalized the workspace root once in `Agent.create`, resolving macOS `/var/folders` versus `/private/var/folders` containment mismatches during write approval previews. Added `start_process` to explicit approval classification after `test_agent_approval` showed `Auto_all` executed it with zero approval prompts.
+- **Mobile runtime proof:** `python3 /tmp/pave-mobile-dashboard-pty.py` passed against the real `emulator-5554`: the PTY created/selected `mobile-1`, completed separately approved Android task/device inventory and build/install/launch, captured an approved screenshot, separately approved an accessibility-guided tap, verified `count:1`, reopened `/mobile` showing `running`, then canceled a new control intent with the provider request count unchanged at 14 and no state change. The driver reported no rewind-tracking failure. VR01's real approved baseline/capture/changed-pixel comparison had already passed on the same emulator.
+- **Final verification:** `opam exec -- dune build @install && opam exec -- dune exec test/test_apple_foundation_models.exe && opam exec -- dune runtest --force -j 1 && opam lint pave.opam` passed. The full suite included session rewind, Agent write-preview, scoped-rule, approval-policy and mobile visual regressions. The optional `test_browser_live` reported its configured skip because `CHROME_BIN` and `SMOKE_URL` were absent.
+- **Changed files:** `bin/main.ml`, `lib/agent/agent.ml`, `lib/session/session_rewind.ml`, `lib/tools/tools.ml`, `test/session/test_session_rewind.ml`, `CHANGELOG.md`, `docs/DESIGN_RULES.md`, `docs/MOBILE_DEVELOPMENT_PLAN.md`, `docs/TROUBLESHOOTING.md`, `docs/USAGE.md`, `task.md`, and this checkpoint.
+- **Limits:** Connected Gradle `connectedDebugAndroidTest` could not run offline because AGP's UTP test-host dependency was not cached; the independently approved AndroidJUnitRunner on the selected emulator passed one instrumentation test. No strategy/default/selection code changed, so no backtest applied.
+- **Exact next action / blockers:** Commit this checkpoint with the completed session changes and push `main` with the eight earlier unpushed commits plus this completion commit. No implementation or verification blocker remains.
+
 ## Current session — Portal-only publishing and October 2–3 implementation/TUI repair
 
 - **Date:** 2026-10-03

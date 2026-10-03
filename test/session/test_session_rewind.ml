@@ -108,7 +108,8 @@ let () =
       "workspace_eval"; "lsp_start"; "dap_start"; "dap";
       "ssh_open"; "ssh_read"; "ssh_write"; "ssh_command";
       "web_search"; "web_fetch"; "clipboard_write";
-      "publish_web"; "xcode_preflight"; "mobile_check"; "android_devices";
+      "publish_web"; "xcode_preflight"; "mobile_check"; "mobile_session";
+      "mobile_scenario"; "mobile_verify"; "mobile_visual"; "android_devices";
       "write_file"; "edit_file"; "apply_edits"; "ast_edit"
     ] in
     List.iter (fun tool_name ->

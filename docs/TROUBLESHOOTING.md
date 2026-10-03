@@ -7,6 +7,27 @@
 - **Solution:** Replaced the converter with a fixed inline Swift/ImageIO decoder that reads only the bounded captured PNG and writes a temporary RGBA buffer for the existing pixel comparator. The real Android screenshot baseline and changed-screen comparison passed.
 - **Prevention / Reference:** Keep the decoder source fixed in the tool, call the system Swift runtime directly without a shell, and reject a failed/short decoded buffer; do not treat `sips` metadata output as pixel decoding.
 
+### [2026-10-03] mobile effects failed rewind bookkeeping after execution
+
+- **Context / Symptom:** The real TUI mobile workflow successfully installed and launched the selected Android app, but each `mobile_session` effect also emitted `Action started, but rewind tracking failed; treat it as non-reversible` with `Session_rewind.Error("unsupported non-reversible workspace effect")`.
+- **Root Cause:** The workspace tool classifier correctly marked mobile session lifecycle and scenario effects non-reversible, but the rewind manager's independent allowlist omitted `mobile_session` and `mobile_scenario`. Device/project effects cannot be restored, so the manager rejected their required audit record after the command had already run.
+- **Solution:** Added both tool names to the rewind manager's non-reversible allowlist and permanent regression list. The effects remain explicitly reported as non-reversible; they are never falsely treated as rewindable.
+- **Prevention / Reference:** Keep `Session_rewind.non_reversible_tool_name` aligned with `Tools.non_reversible_tool` and cover each effect-bearing tool name in the rewind regression.
+
+### [2026-10-03] macOS temporary workspace aliases failed checked write previews
+
+- **Context / Symptom:** `test_agent_write_preview` and `test_scoped_rules` rejected ordinary writes under `/var/folders/...` with `path escapes workspace`; the canonical parent was `/private/var/folders/...`. The approval-preview failure prevented the write from running.
+- **Root Cause:** `Agent.create` retained the caller's aliased root while checked workspace paths compared it with a `realpath`-resolved parent.
+- **Solution:** Canonicalized the workspace root once when creating the agent. Both real-path fixture tests then passed.
+- **Prevention / Reference:** Store the canonical root at the owner boundary; rerun the write-preview and scoped-rules integration tests on macOS temporary directories.
+
+### [2026-10-03] permissive approval mode launched managed processes without consent
+
+- **Context / Symptom:** `test_agent_approval` observed `start_process` execute with `prompts=0` in `Auto_all`, despite the design rule requiring per-start approval.
+- **Root Cause:** `start_process` was classified as non-reversible but omitted from `Tools.requires_explicit_approval`; permissive tier resolution therefore bypassed the approval callback.
+- **Solution:** Added `start_process` to the explicit-approval classification; its invocation now requires the existing interactive per-call approval.
+- **Prevention / Reference:** Keep every managed external-effect tool in the explicit-approval policy and verify the `test_agent_approval` process-start scenario.
+
 ### [2026-10-03] Android crash diagnostics included normal process exits
 
 - **Context / Symptom:** The first approved crash-buffer read returned no selected-app record after a fixture launch, and `dumpsys activity exit-info` included prior `USER REQUESTED` and `PACKAGE UPDATED` exits. Treating that history as a crash would have produced false evidence.

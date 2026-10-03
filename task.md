@@ -64,28 +64,7 @@
 ## P2 — Mobile completion and focused existing-product improvements
 
 M01–M24 are satisfied prerequisites. The remaining mobile core capabilities are delivered end-to-end here; their active acceptance contracts live in the [mobile plan](docs/MOBILE_DEVELOPMENT_PLAN.md).
-AS01, AO01, UI01, BR01, LD01, FV01 and VR01 are completed with session-bound app lifecycles, bounded screen observation, verified UI controls, persisted replay, approved runtime diagnostics, snapshot-bound verification and screenshot regression comparison; MD01 remains open.
-
-
-
-
-
-- [x] **FV01 — Verify edits against a real mobile build**
-  **Deliver:** connected guarded source snapshots to focused build/test results and source-linked diagnostics for the same selected app session with `mobile_verify`.
-  **Accept:** a deliberate Java defect failed with a checked source location on `emulator-5554`, then a guarded repair passed `mobile_verify` through the same app session's approved Android build; AndroidJUnitRunner passed one test separately. Deterministic regressions refuse stale snapshots, failed builds/tests, zero tests, concurrent source mutation and incomplete output.
-  **Depends:** AS01.
-  **Gate:** installed platform toolchain and disposable project.
-- [x] **VR01 — Compare mobile screenshot regressions**
-  **Deliver:** save and compare bounded screenshots with exact device, OS, locale, theme and declared dynamic-region metadata.
-  **Accept:** the live Android emulator baseline captured `count:0`; an approved tap changed pixels and the approved compare reported them; deterministic regressions rejected metadata mismatch, incomplete captures and invalid masks.
-  **Depends:** AO01.
-  **Gate:** deterministic simulator/emulator screen.
-
-- [ ] **MD01 — Complete the mobile TUI dashboard**
-  **Deliver:** expose selected sessions, live observation, approved controls, scenario replay, diagnostics and verification/visual results in the TUI.
-  **Accept:** a real PTY creates/selects a session, observes it, performs a separately approved action and shows its settled state; cancellation preserves session/draft state and never grants effects.
-  **Depends:** AO01, UI01, BR01, LD01, FV01, VR01.
-  **Gate:** interactive PTY and selected disposable emulator/simulator.
+AS01, AO01, UI01, BR01, LD01, FV01, VR01 and MD01 are complete, delivering session-bound app lifecycles, bounded observation, verified controls, persisted replay, approved diagnostics, guarded verification, screenshot comparison and TUI workflows.
 
 - [ ] **PG02 — Diagnose reserved-slot permission failures**
   **Evidence:** [Singularity reserved route](lib/provider/transports/singularity_tech_api.ml) lacks slot-specific classification; [HTTP errors](lib/provider/provider.ml) already have generic permission handling. **Deliver:** distinguish documented inactive-reservation denial from a bad key on this exact route only.

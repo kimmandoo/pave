@@ -3977,7 +3977,7 @@ let is_shell_tool = function
 
 let requires_explicit_approval ~name ~args =
   match name with
-  | "xcode_preflight" | "mobile_check" | "android_devices" | "mobile_verify"
+  | "start_process" | "xcode_preflight" | "mobile_check" | "android_devices" | "mobile_verify"
   | "mobile_visual" | "mobile_observe" | "mobile_control" | "mobile_diagnostics" -> true
   | "process_stdin" | "process_close_stdin" | "process_kill"
   | "worktree_create" | "worktree_commit" | "worktree_remove"
