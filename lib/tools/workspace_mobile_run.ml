@@ -112,6 +112,8 @@ let select manager ~root ~subroot ~platform ~device ~app_id:bundle ~app_path
   if platform = Ios && not scheme_ready then
     fail "selected iOS scheme and simulator are not in the current approved discovery inventory";
   let bundle = app_id platform bundle in
+  let root =
+    try Workspace_path.root_path root with Workspace_path.Error message -> fail message in
   let _artifact = artifact_path ~must_exist:false ~root ~platform app_path in
   let scheme = if platform = Ios then (
     let value = Option.value ~default:"" scheme in

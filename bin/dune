@@ -6,7 +6,7 @@
 
 (rule
  (target embedded_installer.ml)
- (deps ../install.sh (env_var PAVE_RELEASE_VERSION))
+(deps ../install.sh (env_var PAVE_RELEASE_VERSION) (env_var PAVE_TEST_RELEASE_BASE_URL))
  (action (run %{exe:embed_installer.exe} %{dep:../install.sh} %{target})))
 
 (executable

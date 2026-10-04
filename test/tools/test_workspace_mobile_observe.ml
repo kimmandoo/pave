@@ -34,14 +34,15 @@ let () =
   rejects "non-PNG bytes" (fun () -> Observe.validate_png "not an image");
   rejects "zero PNG width" (fun () -> Observe.validate_png (png 0 3));
   rejects "oversized PNG dimensions" (fun () -> Observe.validate_png (png 16_385 1));
-  let xml = "<?xml version='1.0'?><hierarchy rotation='0'><node class='android.widget.FrameLayout' text='' bounds='[0,0][100,100]' enabled='true'><node class=\"android.widget.Button\" text=\"Go &amp; now&#10;green\" resource-id=\"dev.example:id/go\" content-desc=\"Continue\" bounds=\"[2,3][40,20]\" clickable=\"true\" enabled=\"true\" selected=\"false\" /></node></hierarchy>" in
+  let xml = "<?xml version='1.0'?><hierarchy rotation='0'><node class='android.widget.FrameLayout' package='dev.example' text='' bounds='[0,0][100,100]' enabled='true'><node class=\"android.widget.Button\" package=\"dev.example\" text=\"Go &amp; now&#10;green\" resource-id=\"dev.example:id/go\" content-desc=\"Continue\" bounds=\"[2,3][40,20]\" clickable=\"true\" enabled=\"true\" selected=\"false\" /></node></hierarchy>" in
   let nodes = Observe.parse_accessibility xml in
   expect "accessibility parent and depth"
     (List.length nodes = 2 && (List.nth nodes 0).parent = None &&
      (List.nth nodes 1).parent = Some 0 && (List.nth nodes 1).depth = 1);
   let button = List.nth nodes 1 in
-  expect "accessibility labels and role decoded"
-    (button.role = "android.widget.Button" && button.text = "Go & now\ngreen" &&
+  expect "accessibility labels, package and role decoded"
+    (button.role = "android.widget.Button" && button.package = "dev.example" &&
+     button.text = "Go & now\ngreen" &&
      button.description = "Continue" && button.identifier = "dev.example:id/go" &&
      button.bounds = "[2,3][40,20]" && button.clickable && button.enabled &&
      not button.selected);

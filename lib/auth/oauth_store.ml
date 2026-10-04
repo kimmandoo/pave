@@ -400,8 +400,37 @@ let read_store path =
    locks belong to the process rather than the individual descriptor. *)
 let domain_paths = Domain.DLS.new_key (fun () -> ref [])
 let process_mutex = Mutex.create ()
+let lock_wait_timeout_seconds = 35.
 
-let with_lock ~path f = guard (fun () ->
+let check_wait ?deadline cancel =
+  if cancel () then fail "OAuth credential lock acquisition cancelled";
+  match deadline with
+  | Some deadline when not (Float.is_finite deadline) ->
+      fail "invalid OAuth credential lock deadline"
+  | Some deadline when Unix.gettimeofday () >= deadline ->
+      fail "OAuth credential lock acquisition timed out"
+  | _ -> ()
+
+let wait_step ?deadline cancel =
+  check_wait ?deadline cancel;
+  let duration = match deadline with
+    | None -> 0.02
+    | Some deadline -> min 0.02 (max 0. (deadline -. Unix.gettimeofday ())) in
+  ignore (Unix.select [] [] [] duration)
+
+let acquire_process_mutex ?deadline cancel =
+  let rec acquire () =
+    check_wait ?deadline cancel;
+    if Mutex.try_lock process_mutex then true
+    else (wait_step ?deadline cancel; acquire ()) in
+  acquire ()
+
+let with_lock ?(cancel = fun () -> false) ?deadline ~path f =
+  let deadline = match deadline with
+    | Some deadline -> Some deadline
+    | None -> Some (Unix.gettimeofday () +. lock_wait_timeout_seconds) in
+  guard (fun () ->
+  check_wait ?deadline cancel;
   if Filename.is_relative path || Filename.basename path = "."
      || Filename.basename path = ".." then
     fail "OAuth credential path must name a file under an absolute directory";
@@ -409,8 +438,9 @@ let with_lock ~path f = guard (fun () ->
   if !active <> [] && not (List.mem path !active) then
     fail "Nested OAuth credential locks must use the same path";
   if List.mem path !active then f () else (
-    Mutex.lock process_mutex;
+    ignore (acquire_process_mutex ?deadline cancel);
     Fun.protect ~finally:(fun () -> Mutex.unlock process_mutex) (fun () ->
+      check_wait ?deadline cancel;
       ensure_directory (Filename.dirname path);
       let lock_path = path ^ ".lock" in
       let fd = match regular_file lock_path with
@@ -421,9 +451,16 @@ let with_lock ~path f = guard (fun () ->
                  open_checked lock_path [Unix.O_RDWR]) in
       Fun.protect ~finally:(fun () -> Unix.close fd) (fun () ->
         Unix.fchmod fd 0o600;
-        Unix.lockf fd Unix.F_LOCK 0;
+        let rec acquire_file () =
+          check_wait ?deadline cancel;
+          try Unix.lockf fd Unix.F_TLOCK 0
+          with Unix.Unix_error ((Unix.EACCES | Unix.EAGAIN), _, _) ->
+            wait_step ?deadline cancel;
+            acquire_file () in
+        acquire_file ();
         Fun.protect ~finally:(fun () -> Unix.lockf fd Unix.F_ULOCK 0)
           (fun () ->
+            check_wait ?deadline cancel;
             let current = regular_file lock_path in
             let locked = Unix.fstat fd in
             if (match current with

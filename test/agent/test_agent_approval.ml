@@ -148,7 +148,10 @@ let () =
         incr prompt_calls;
         captured := Some request;
         false) () in
-    expect "write request was prompted and rejected" (!prompt_calls = 1);
+    expect
+      (Printf.sprintf "write request was prompted and rejected (calls=%d, events=%s)"
+         !prompt_calls (String.concat " | " events))
+      (!prompt_calls = 1);
     expect "rejected write has no side effect"
       (not (Sys.file_exists (Filename.concat root "blocked.txt")));
     expect "approval preview names tool, tier, impact and path"

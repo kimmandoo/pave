@@ -770,3 +770,52 @@
  (name test_workspace_mobile_visual)
  (modules test_workspace_mobile_visual)
  (libraries pave unix yojson))
+(test
+ (name test_workspace_mobile_accessibility_audit)
+ (modules test_workspace_mobile_accessibility_audit)
+ (libraries pave unix yojson threads))
+
+(test
+ (name test_workspace_mobile_app_lifecycle)
+ (modules test_workspace_mobile_app_lifecycle)
+ (libraries pave unix yojson threads))
+
+(test
+ (name test_workspace_mobile_device_lifecycle)
+ (modules test_workspace_mobile_device_lifecycle)
+ (libraries pave unix yojson threads))
+
+(test
+ (name test_workspace_mobile_environment)
+ (modules test_workspace_mobile_environment)
+ (libraries pave unix yojson threads))
+
+(test
+ (name test_workspace_mobile_performance)
+ (modules test_workspace_mobile_performance)
+ (libraries pave unix yojson threads))
+
+(test
+ (name test_workspace_mobile_report)
+ (modules test_workspace_mobile_report)
+ (libraries pave unix yojson threads))
+
+(test
+ (name test_workspace_mobile_symbolication_mx12_mx13)
+ (modules test_workspace_mobile_symbolication_mx12_mx13)
+ (libraries pave unix yojson threads))
+
+(test
+ (name test_workspace_mobile_visual_portable)
+ (modules test_workspace_mobile_visual_portable)
+ (libraries pave unix yojson threads))
+
+(test
+ (name test_workspace_flutter_integration_focus)
+ (modules test_workspace_flutter_integration_focus)
+ (libraries pave unix yojson threads))
+
+(test
+ (name test_workspace_node_server)
+ (modules test_workspace_node_server)
+ (libraries pave unix yojson threads))

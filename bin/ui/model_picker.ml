@@ -54,7 +54,8 @@ let credential ?registry ?route_name ?account_id
                      ~descriptor ~route ~endpoint:route.endpoint () in
                    match authentication, resolve with
                    | Pave.Provider.OAuth, Some resolve ->
-                       let (credential : Pave.Provider.credentials) = resolve () in
+                       let (credential : Pave.Provider.credentials) =
+                         resolve ?cancel:(Some (fun () -> false)) () in
                        Some (Pave.Model_discovery.OAuth {
                          service; access = credential.access;
                          account_id = credential.account_id;
@@ -75,7 +76,8 @@ let credential ?registry ?route_name ?account_id
                    if authentication = Pave.Provider.Api_key && key <> "" then
                      Some (Pave.Model_discovery.Api_key key)
                    else Option.map (fun resolve ->
-                     let (credential : Pave.Provider.credentials) = resolve () in
+                     let (credential : Pave.Provider.credentials) =
+                       resolve ?cancel:(Some (fun () -> false)) () in
                      Pave.Model_discovery.Account_api_key {
                        key = credential.access;
                        account_id = Some account.selection_id }) resolve)) in

@@ -75,7 +75,8 @@ let payload ~carry groups =
   Buffer.add_string buffer "]}";
   Buffer.contents buffer
 
-let summarize ~provider ~authentication ?resolve_credential ?thinking ?cancel
+let summarize ~provider ~authentication ?resolve_credential
+    ?resolve_credential_cancel ?thinking ?cancel
     ?max_output_tokens ~window_tokens messages ~on_usage =
   let reserve_tokens =
     Context_budget.output_reserve ?max_output_tokens window_tokens in
@@ -99,8 +100,9 @@ let summarize ~provider ~authentication ?resolve_credential ?thinking ?cancel
          failwith "one complete conversation turn exceeds the bounded compaction input; no compaction was saved"
      | Context_budget.Within_budget | Context_budget.Media_unmeasured -> ());
 
-    let reply = Provider.complete ~authentication ?resolve_credential ?thinking
-      ?cancel ~on_usage provider [instruction; user] [] in
+    let reply = Provider.complete ~authentication ?resolve_credential
+      ?resolve_credential_cancel ?thinking ?cancel
+      ~on_usage provider [instruction; user] [] in
     Provider.check_cancel cancel;
     match reply.content, reply.tool_calls with
     | Some summary, [] when String.trim summary <> "" &&

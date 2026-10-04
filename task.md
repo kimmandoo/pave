@@ -9,9 +9,9 @@ This is the single active backlog. It separates source-confirmed remaining work 
 | Area | Implemented baseline | Remaining boundary |
 | --- | --- | --- |
 | Mobile project understanding | Swift/Xcode/SwiftPM, Android Gradle, Flutter, RN/Expo inventory; focused separately approved checks; checked source diagnostics; sensitive mobile-config review | Dynamic build/config evidence is not inferred; dependencies/toolchains are not installed implicitly |
-| Mobile app sessions | Private selected app/device identity; build/install/launch/stop; `/mobile` dashboard; emulator/simulator inventory and tests | No physical devices or automatic device boot; Flutter/RN device workflows are not equivalent to native app-session support |
+| Mobile app sessions | Private selected app/device identity; build/install/launch/stop; `/mobile` dashboard; emulator/simulator inventory and tests; separately approved owned AVD/Simulator boot, readiness, cancellation and shutdown are implemented | No physical devices or runtime/image downloads; real disposable-device acceptance requires separate approval; Flutter/RN device workflows are not equivalent to native app-session support |
 | Observe/control/replay | Android screenshots/accessibility, tap/swipe/text/back and persisted one-step scenarios; iOS screenshots | iOS accessibility/control/replay remains unavailable |
-| Diagnostics and verification | App-scoped logs/crashes/Android ANR, guarded-source verification, strict masked screenshot baselines | Symbol-file presence is not symbolication; PNG comparison currently requires macOS Swift/ImageIO |
+| Diagnostics and verification | App-scoped logs/crashes/Android ANR, guarded-source verification, strict masked screenshot baselines | Symbol-file presence is not symbolication; visual decoding uses a bounded in-tree PNG implementation, but native Linux packaging remains unverified |
 | Web previews | `publish_web` and `/publish`, per-prefix private identities, official Portal auto-setup after approval | Local app server must already listen; no alternate tunnel, automatic public exposure or shell-profile modification |
 | General agent tools | Guarded file edits, LSP/DAP, approved owned processes/eval/network/browser tools, local plugins/MCP, read-only child jobs, journal/branch/compaction, redacted one-shot JSONL | Do not schedule these entire subsystems as new features; only residual cards below |
 
@@ -28,49 +28,49 @@ M01–M24, AS01, AO01, UI01, mobile BR01/LD01, FV01, VR01 and MD01 are completed
 
 ## P0 — Source-confirmed safety and reliability
 
-- [ ] **AU01 — Cancel in-turn credential refresh**
-  **Evidence:** [refresh transport](lib/auth/oauth_flow.ml) blocks on read/wait; [credential resolution](bin/cli_auth.ml) has no turn-cancellation parameter. **Deliver:** propagate cancellation through refresh and reap its owned subprocess; define the outcome of ambiguous remote token rotation without automatic retry.
+- [x] **AU01 — Cancel in-turn credential refresh**
+  **Evidence:** [OAuth transport](lib/auth/oauth_flow.ml) propagates turn cancellation through curl and reaps the owned subprocess; [credential resolution](bin/cli_auth.ml) passes the turn cancellation token. `test_oauth_flow` verifies account/grant binding on rotation, zero transport calls for pre-cancel, one in-flight ambiguous attempt without exposing the rotated token, and child-process reaping. `test_provider_http` verifies cancellation during credential resolution sends no inference request. **Deliver:** propagate cancellation through refresh and reap its owned subprocess; define the outcome of ambiguous remote token rotation without automatic retry.
   **Accept:** one successful refresh retains account/grant binding; cancelling a stalled refresh promptly releases ownership and sends zero inference requests, without logging tokens.
   **Depends:** none.
-  **Gate:** none; controlled token endpoint.
+  **Gate:** none; controlled transport, owned-child and loopback inference fixtures.
 
-- [ ] **AU02 — Bound credential-lock acquisition**
-  **Evidence:** [store locking](lib/auth/oauth_store.ml) uses blocking mutex/file locks. **Deliver:** interruptible, deadline-bounded acquisition while retaining nested locking and atomic refresh guarantees.
+- [x] **AU02 — Bound credential-lock acquisition**
+  **Evidence:** [store locking](lib/auth/oauth_store.ml) now supports interruptible, deadline-bounded nested locking. `test_oauth_store` verifies four concurrent writers serialize 48 updates, cancelled/expired waiters do not enter the critical section, a cancelled waiter does not release another process's lock, and nested locking succeeds. **Deliver:** interruptible, deadline-bounded acquisition while retaining nested locking and atomic refresh guarantees.
   **Accept:** two processes serialize updates without losing accounts; a cancelled/expired waiter exits without refreshing, unlocking another holder or replacing credentials.
   **Depends:** AU01.
   **Gate:** none.
 
-- [ ] **WK07 — Report recoverable partial LSP application**
-  **Evidence:** [apply_edit_preview](lib/tools/workspace_lsp.ml) prechecks then writes sequentially, with per-file callbacks but no structured partial result. **Deliver:** reproduce a later-target failure and expose exact applied/unchanged targets plus existing guarded recovery records; do not claim whole-batch atomicity.
+- [x] **WK07 — Report recoverable partial LSP application**
+  **Evidence:** [apply_edit_preview](lib/tools/workspace_lsp.ml) reports structured per-target outcomes and guarded recovery callbacks. `test_workspace_lsp` forces a later-target conflict after one write, verifies exact applied/unchanged paths, preserves the concurrent user edit, and records only the successful write. **Deliver:** reproduce a later-target failure and expose exact applied/unchanged targets plus existing guarded recovery records; do not claim whole-batch atomicity.
   **Accept:** two successful files record once; a forced second-write failure reports the first change, preserves later concurrent user edits and permits only hash-checked, approved recovery.
   **Depends:** none.
   **Gate:** none; controlled filesystem fault, not user files.
 
-- [ ] **PL04a — Bound queued prompt admission**
+- [x] **PL04a — Bound queued prompt admission**
   **Evidence:** [follow-up/steering queues](lib/ui/turn_runner.ml) admit submissions without aggregate item/byte limits. **Deliver:** bounded admission counting retained prompts and attachments, including dequeue/reinsert handling.
   **Accept:** a held-turn PTY preserves queue order; overflow retains the draft/attachments, drops no accepted work and does not cancel the active turn for rejected steering.
   **Depends:** none.
   **Gate:** none; local streaming fixture.
 
-- [ ] **PL04b — Bound event backlog and terminal starvation**
-  **Evidence:** [runner notices](lib/ui/turn_runner.ml) and [UI queue](bin/ui/tui.ml) have unbounded aggregate admission; delta batching already exists. **Deliver:** first measure sustained-stream latency/retention, then enforce a documented queue capacity and per-pump fairness bound.
-  **Accept:** a sustained-stream PTY keeps ordered output and one settlement within the recorded input/resize latency bound; saturated cancellation/shutdown cannot deadlock producers or lose tool outcomes.
+- [x] **PL04b — Bound event backlog and terminal starvation**
+  **Evidence:** [runner notices](lib/ui/turn_runner.ml) and [UI queue](bin/ui/tui.ml) each cap at 4,096 events / 4 MiB, reserve 256 events / 1 MiB for terminal and input work, and yield after 128 pumped events. **Deliver:** measured sustained-stream retention and enforce these documented capacities/fairness limits.
+  **Accept:** a sustained-stream PTY keeps ordered output and one settlement within the recorded ≤3 s input/resize latency bound; saturated cancellation/shutdown cannot deadlock producers or lose tool outcomes.
   **Depends:** none.
-  **Gate:** none; starvation magnitude is diagnostic, not yet reproduced.
+  **Gate:** none; a controlled 12,000-event loopback stream observed a 40.5 ms resize-plus-input response on macOS arm64.
 
-- [ ] **PL06 — Bound installer asset transfers**
-  **Evidence:** [fetch](install.sh) has no connect/total deadline or byte cap. **Deliver:** distinct manifest/archive transfer budgets used by standalone install and the embedded updater, retaining HTTPS/checksum/executable-last publication.
+- [x] **PL06 — Bound installer asset transfers**
+  **Evidence:** [standalone installer](install.sh) and the embedded updater use 1 MiB manifest / 512 MiB archive caps with 10 s connect and 180 s total deadlines. **Deliver:** distinct manifest/archive transfer budgets used by standalone install and the embedded updater, retaining HTTPS/checksum/executable-last publication.
   **Accept:** valid controlled assets install; stalled/oversized transfers fail within bounds, preserve the previous executable hash and remove staging files. Download caps do not imply an extracted-size cap.
   **Depends:** none.
-  **Gate:** none; disposable install directories.
+  **Gate:** none; stalled and oversized local HTTPS fixture transfers preserved the prior install and removed staging.
 
 - [ ] **PL03a — Enforce complete packaged dependency policy**
-  **Evidence:** [release dependency check](.github/workflows/release.yml) rejects libzstd specifically, not every forbidden library. **Deliver:** target-specific allowed-system-library checks for executable/helper artifacts on the four current targets.
-  **Accept:** extracted artifacts launch without toolchain runtime paths; a deliberately linked non-system library other than zstd and a missing dependency both fail packaging with clear diagnostics.
+  **Evidence:** The [release workflow](.github/workflows/release.yml) checks every extracted artifact and the macOS helper with [native target dependency rules](test/distribution/check_release_dependencies.sh), then launches packaged binaries. Native linked non-system and missing-dependency fixtures passed against the macOS arm64 main binary. **Deliver:** target-specific allowed-system-library checks for executable/helper artifacts on the four current targets.
+  **Accept:** extracted artifacts launch without toolchain runtime paths; a deliberately linked non-system dependency and a missing dependency both fail packaging with clear diagnostics.
   **Depends:** none.
-  **Gate:** native current-target CI runners; no current broken artifact is asserted.
+  **Gate:** Native four-target release-runner acceptance is still required. This macOS 25.6 host lacks the helper's FoundationModels framework, so local helper validation awaits the macOS 26 runner.
 
-- [ ] **PL07 — Automate installed updater transactions in CI**
+- [x] **PL07 — Automate installed updater transactions in CI**
   **Evidence:** [release smoke](.github/workflows/release.yml) extracts/runs binaries, but does not exercise an installed updater transaction. **Deliver:** a disposable controlled-release harness for actual install/check/update/uninstall, invoked by CI.
   **Accept:** custom-directory upgrade preserves unrelated files and user state; corrupt checksum, link/unexpected archive member, invalid marker and failed publication preserve the executable. Verify metadata state on partial publication; inherited destination/version overrides cannot redirect update.
   **Depends:** PL06.
@@ -111,10 +111,10 @@ Prioritize platform gaps (MX01–MX04), accessibility/visual review (MX05–MX08
   **Gate:** Current approved Android tree; runtime capture still asks separately.
 
 - [ ] **MX06 — Portable visual comparison on Linux**
-  **Evidence:** [lib/tools/workspace_mobile_visual.ml](lib/tools/workspace_mobile_visual.ml) — PNG decoding currently depends on macOS Swift/ImageIO. **Deliver:** Provide a bounded maintained decoder usable on supported Linux packages, with dependency/license review, retaining current masks and metadata checks.
+  **Evidence:** [lib/tools/workspace_mobile_visual.ml](lib/tools/workspace_mobile_visual.ml) now uses bounded in-tree PNG decoding instead of macOS Swift/ImageIO; decoder suitability review and native Linux package smoke are incomplete. **Deliver:** provide a bounded maintained decoder usable on supported Linux packages, with dependency/license review, retaining current masks and metadata checks.
   **Accept:** The same PNG pairs compare identically on macOS/Linux; malformed/oversized images fail without changing baselines, and packaged decoder runs on native targets.
   **Depends:** none.
-  **Gate:** Reviewed decoder dependency and native Linux package smoke.
+  **Gate:** Maintained-decoder/license review and native Linux package smoke; no Linux artifact acceptance is claimed.
 
 - [ ] **MX07 — Reviewable visual regression reports**
   **Evidence:** [lib/tools/workspace_mobile_visual.ml](lib/tools/workspace_mobile_visual.ml) — Current comparison reports exact masked pixel differences, not a review report. **Deliver:** Return bounded baseline/current/difference artifacts with differing regions and explicit operator-selected tolerance; version comparison settings.

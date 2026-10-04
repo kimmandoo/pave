@@ -4,6 +4,7 @@ set -eu
 
 animator=
 temp_dir=
+fetch_pid=
 
 # Direct terminal installs animate a cat paving the road; `pave update` draws
 # its own animation from the phase lines, and pipes and dumb terminals get none.
@@ -79,7 +80,7 @@ phase() {
     fi
 }
 
-for prerequisite in uname curl tar mktemp awk mkdir cp chmod mv rm; do
+for prerequisite in uname curl tar mktemp awk mkdir cp chmod mv rm mkfifo head wc; do
     command -v "$prerequisite" >/dev/null 2>&1 || fail "missing prerequisite: $prerequisite"
 done
 
@@ -141,25 +142,95 @@ staged_binary=
 staged_license=
 staged_notices=
 staged_marker=
+backup_license=
+backup_notices=
+backup_marker=
+backup_binary=
+had_license=0
+had_notices=0
+had_marker=0
+installed_license=0
+installed_notices=0
+installed_marker=0
+installed_binary=0
+publish_started=0
+published=0
 cleanup() {
+    if [ -n "$fetch_pid" ]; then
+        kill "$fetch_pid" 2>/dev/null || :
+        wait "$fetch_pid" 2>/dev/null || :
+        fetch_pid=
+    fi
     stop_animation
+    if [ "$publish_started" -eq 1 ] && [ "$published" -eq 0 ]; then
+        if [ "$had_license" -eq 1 ]; then
+            if [ -e "$backup_license" ] || [ -L "$backup_license" ]; then mv -f "$backup_license" "$license_dir/LICENSE"; fi
+        elif [ "$installed_license" -eq 1 ]; then
+            rm -f "$license_dir/LICENSE"
+        fi
+        if [ "$had_notices" -eq 1 ]; then
+            if [ -e "$backup_notices" ] || [ -L "$backup_notices" ]; then mv -f "$backup_notices" "$license_dir/THIRD_PARTY_NOTICES"; fi
+        elif [ "$installed_notices" -eq 1 ]; then
+            rm -f "$license_dir/THIRD_PARTY_NOTICES"
+        fi
+        if [ "$had_marker" -eq 1 ]; then
+            if [ -e "$backup_marker" ] || [ -L "$backup_marker" ]; then mv -f "$backup_marker" "$license_dir/.native-install"; fi
+        elif [ "$installed_marker" -eq 1 ]; then
+            rm -f "$license_dir/.native-install"
+        fi
+        if [ "$installed_binary" -eq 1 ] && [ "$had_binary" -eq 1 ]; then
+            [ ! -e "$backup_binary" ] || mv -f "$backup_binary" "$install_dir/pave"
+        elif [ "$installed_binary" -eq 1 ]; then
+            rm -f "$install_dir/pave"
+        fi
+    fi
     [ -z "$staged_binary" ] || rm -f "$staged_binary"
     [ -z "$staged_license" ] || rm -f "$staged_license"
     [ -z "$staged_notices" ] || rm -f "$staged_notices"
     [ -z "$staged_marker" ] || rm -f "$staged_marker"
+    [ -z "$backup_license" ] || rm -f "$backup_license"
+    [ -z "$backup_notices" ] || rm -f "$backup_notices"
+    [ -z "$backup_marker" ] || rm -f "$backup_marker"
+    [ -z "$backup_binary" ] || rm -f "$backup_binary"
     rm -rf "$temp_dir"
 }
 trap cleanup 0
 trap 'exit 1' 1 2 3 15
 
 asset="pave-$os-$arch.tar.gz"
+# Each transfer uses a 10-second connect timeout, 180-second total timeout,
+# and a per-response byte cap. SHA256SUMS is at most 1 MiB; archives at most
+# 512 MiB. Download caps do not constrain expanded archive size.
 fetch() {
+    case "$1" in
+        SHA256SUMS) max_bytes=1048576 ;;
+        "$asset") max_bytes=536870912 ;;
+        *) fail "refusing unexpected release asset $1" ;;
+    esac
+    fifo="$temp_dir/download.fifo"
+    rm -f "$fifo"
+    mkfifo "$fifo" || fail 'cannot create a private release-transfer pipe'
     curl --fail --location --silent --show-error --proto '=https' --proto-redir '=https' \
-        --output "$2" "$release_url/$1" 2> "$temp_dir/curl-error" || {
+        --connect-timeout 10 --max-time 180 --max-filesize "$max_bytes" \
+        --output - "$release_url/$1" > "$fifo" 2> "$temp_dir/curl-error" &
+    fetch_pid=$!
+    if head -c "$((max_bytes + 1))" < "$fifo" > "$2"; then
+        reader_status=0
+    else
+        reader_status=$?
+    fi
+    if wait "$fetch_pid"; then curl_status=0; else curl_status=$?; fi
+    fetch_pid=
+    rm -f "$fifo"
+    size=$(wc -c < "$2")
+    if [ "$size" -gt "$max_bytes" ]; then
+        fail "$1 exceeds its $max_bytes-byte transfer limit"
+    fi
+    if [ "$reader_status" -ne 0 ] || [ "$curl_status" -ne 0 ]; then
         stop_animation
         cat "$temp_dir/curl-error" >&2
-        fail "cannot download $1; check that the release exists and is public at $release_url"
-    }
+        fail "cannot download $1 within its transfer budget; check that the release exists and is public at $release_url"
+    fi
 }
 phase 'Fetching checksums'
 fetch SHA256SUMS "$temp_dir/SHA256SUMS"
@@ -232,14 +303,51 @@ chmod 644 "$staged_license" "$staged_notices" || fail 'cannot set license file p
 for target in "$install_dir/pave" "$license_dir/LICENSE" "$license_dir/THIRD_PARTY_NOTICES" "$license_dir/.native-install"; do
     [ ! -d "$target" ] || fail "cannot replace directory $target"
 done
+# Preserve old metadata and binary until the executable has been renamed into place.
+backup_license=$(mktemp "$license_dir/.backup.XXXXXXXX") || fail 'cannot stage rollback for LICENSE'
+backup_notices=$(mktemp "$license_dir/.backup.XXXXXXXX") || fail 'cannot stage rollback for THIRD_PARTY_NOTICES'
+backup_marker=$(mktemp "$license_dir/.backup.XXXXXXXX") || fail 'cannot stage rollback for native-install marker'
+backup_binary=$(mktemp "$install_dir/.backup.XXXXXXXX") || fail 'cannot stage rollback for executable'
+rm -f "$backup_license" "$backup_notices" "$backup_marker" "$backup_binary" ||
+    fail 'cannot prepare rollback files'
+if [ -e "$install_dir/pave" ] || [ -L "$install_dir/pave" ]; then
+    cp -p "$install_dir/pave" "$backup_binary" || fail 'cannot preserve existing executable'
+    had_binary=1
+else
+    backup_binary=
+fi
+publish_started=1
+if [ -e "$license_dir/LICENSE" ] || [ -L "$license_dir/LICENSE" ]; then
+    had_license=1
+    mv "$license_dir/LICENSE" "$backup_license" || fail 'cannot preserve existing LICENSE'
+else
+    backup_license=
+fi
+if [ -e "$license_dir/THIRD_PARTY_NOTICES" ] || [ -L "$license_dir/THIRD_PARTY_NOTICES" ]; then
+    had_notices=1
+    mv "$license_dir/THIRD_PARTY_NOTICES" "$backup_notices" || fail 'cannot preserve existing THIRD_PARTY_NOTICES'
+else
+    backup_notices=
+fi
+if [ -e "$license_dir/.native-install" ] || [ -L "$license_dir/.native-install" ]; then
+    had_marker=1
+    mv "$license_dir/.native-install" "$backup_marker" || fail 'cannot preserve existing native-install marker'
+else
+    backup_marker=
+fi
+installed_license=1
 mv -f "$staged_license" "$license_dir/LICENSE" || fail 'cannot install LICENSE'
 staged_license=
+installed_notices=1
 mv -f "$staged_notices" "$license_dir/THIRD_PARTY_NOTICES" || fail 'cannot install THIRD_PARTY_NOTICES'
 staged_notices=
+installed_marker=1
 mv -f "$staged_marker" "$license_dir/.native-install" || fail 'cannot install native-install marker'
 staged_marker=
+installed_binary=1
 mv -f "$staged_binary" "$install_dir/pave" || fail 'cannot install pave executable'
 staged_binary=
+published=1
 stop_animation
 if [ "${PAVE_UPDATE_OUTPUT:-}" != 1 ]; then
     [ "$fancy" = 0 ] || printf '%s(=^w^=)%s  ' "$face_color" "$reset_color"

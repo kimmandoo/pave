@@ -39,9 +39,14 @@ let selected_directory root subroot =
         fail "project root contains a symlink or non-directory";
       path) root parts)
 
-let command ~root ~subroot ~action ~manager =
+let select_script ~root ~subroot ~script ~manager ~development =
   try
-    if action <> "test" && action <> "lint" then fail "unsupported node script action";
+    if script = "" || String.length script > 128 ||
+       String.contains script '\000' ||
+       String.exists (fun ch -> Char.code ch < 32 || Char.code ch = 127) script then
+      fail "invalid Node script name";
+    if not development && script <> "test" && script <> "lint" then
+      fail "unsupported node script action";
     if manager <> "" && manager <> "npm" && manager <> "yarn" && manager <> "pnpm" then
       fail "unsupported package manager";
     let directory = selected_directory root subroot in
@@ -56,15 +61,12 @@ let command ~root ~subroot ~action ~manager =
       List.exists (fun name -> match List.assoc_opt name entries with
         | Some (`String _) -> true
         | _ -> false) ["react-native"; "expo"] in
-    let dependencies = has_dependency "dependencies" in
-    let dev_dependencies = has_dependency "devDependencies" in
-    if not (dependencies || dev_dependencies) then
+    if not (has_dependency "dependencies" || has_dependency "devDependencies") then
       fail "package.json must declare react-native or expo as a string dependency";
     let scripts = optional_object "scripts" fields in
-    (match List.assoc_opt action scripts with
+    (match List.assoc_opt script scripts with
      | Some (`String _) -> ()
-     | _ -> fail ("undeclared or non-string script: " ^ action));
-    let cwd = directory in
+     | _ -> fail ("undeclared or non-string script: " ^ script));
     let locks = ["npm", "package-lock.json"; "npm", "npm-shrinkwrap.json";
                  "yarn", "yarn.lock"; "pnpm", "pnpm-lock.yaml"] in
     let choices = List.filter_map (fun (kind, name) ->
@@ -77,8 +79,16 @@ let command ~root ~subroot ~action ~manager =
       | "", _ -> fail "conflicting lockfiles: choose a package manager explicitly"
       | explicit, _ when List.mem explicit choices -> explicit
       | _ -> fail ("no matching lockfile for package manager: " ^ manager) in
-    ((if selected = "npm" then "npm run " else selected ^ " ") ^ action, cwd)
+    selected, directory
   with
   | Workspace_path.Error message -> fail message
   | Unix.Unix_error (error, operation, path) ->
       fail (Printf.sprintf "%s: %s (%s)" operation (Unix.error_message error) path)
+
+let command ~root ~subroot ~action ~manager =
+  let selected, cwd = select_script ~root ~subroot ~script:action ~manager
+      ~development:false in
+  ((if selected = "npm" then "npm run " else selected ^ " ") ^ action, cwd)
+
+let command_for_script ~root ~subroot ~script ~manager =
+  select_script ~root ~subroot ~script ~manager ~development:true

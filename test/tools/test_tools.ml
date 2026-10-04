@@ -1562,7 +1562,7 @@ esac
         "subroot", `String "focus/node"]));
     assert (contains (mobile "node" "test" "focus/node" [] false)
       "explicit interactive approval");
-    let node_preview = Pave.Tools.approval_request ~root
+    let node_preview = Pave.Tools.approval_request ~context:tool_context ~root
       ~name:"mobile_check"
       ~args:(`Assoc ["stack", `String "node"; "action", `String "test";
         "subroot", `String "focus/node"])
@@ -1735,7 +1735,7 @@ esac
       let instrumented ?(task = ":app:connectedDebugAndroidTest") extra =
         mobile "gradle" "instrumented" "focus/gradle"
           (["target", `String task] @ extra) true in
-      let instrumented_preview = Pave.Tools.approval_request ~root
+      let instrumented_preview = Pave.Tools.approval_request ~context:tool_context ~root
         ~name:"mobile_check"
         ~args:(`Assoc ["stack", `String "gradle"; "action", `String "instrumented";
           "subroot", `String "focus/gradle";
@@ -1743,10 +1743,14 @@ esac
           "serial", `String "emulator-5554"])
         (Pave.Tools.approval_decision ~command_patterns:[]
           ~name:"mobile_check" ~args:(`Assoc [])) in
-      assert (contains (String.concat "\n" instrumented_preview.details)
+      let instrumented_details = String.concat "\n" instrumented_preview.details in
+      let install_disclosure = List.exists (fun detail ->
+        let detail = String.lowercase_ascii detail in
+        contains detail "install" && contains detail "apk")
+        instrumented_preview.details in
+      assert (contains instrumented_details
         "ANDROID_SERIAL='emulator-5554' gradle --offline ':app:connectedDebugAndroidTest'" &&
-        contains (String.concat "\n" instrumented_preview.details)
-          "may install and run test APKs");
+        install_disclosure);
       assert (contains (mobile "gradle" "instrumented" "focus/gradle"
         (["target", `String ":app:connectedDebugAndroidTest"] @
           serial "emulator-5554") false) "explicit interactive approval");

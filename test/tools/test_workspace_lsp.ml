@@ -134,7 +134,7 @@ let handle_client_message server message =
         | None -> []
         | Some uri -> [`Assoc [
             "textDocument", `Assoc ["uri", `String uri;
-              "version", `Int server.rename_version]; "edits", edits]]) in
+              "version", `Null]; "edits", edits]]) in
       let result = `Assoc ["documentChanges", `List changes] in
       send server (response (member "id" message) result)
   | Some "textDocument/codeAction" ->
@@ -525,5 +525,44 @@ let () =
         while completed () = None && Unix.gettimeofday () < deadline do Thread.delay 0.01 done;
         expect (completed () = Some true)
           "terminating a native LSP server kills TERM-resistant descendants and closes their output pipe"));
+  with_root (fun root file ->
+    Unix.mkdir (Filename.concat root "other") 0o700;
+    let second_file = Filename.concat root "other/second.ml" in
+    write second_file "xyz\n";
+    let fake = create_fake_server ~file_uri:(uri file) ~fragment:1 in
+    fake.rename_extra_uri <- Some (uri second_file);
+    let manager = Workspace_lsp.create_manager
+      ~launcher:(fun ~program:_ ~arguments:_ ~cwd:_ ~environment:_ -> fake_io fake) () in
+    let changes = ref [] in
+    let record_change ~path ~before ~after =
+      changes := (path, before, after) :: !changes;
+      if path = "sample.ml" then write second_file "concurrent user edit\n" in
+    Fun.protect ~finally:(fun () -> Workspace_lsp.close_manager manager)
+      (fun () ->
+        start manager ~owner:"partial-write-session" ~root ();
+        let preview = execute manager ~owner:"partial-write-session" ~root
+          (arguments ~action:"rename" ["new_name", `String "changed"]) in
+        let preview_id = match preview with
+          | `List (`Assoc fields :: _) ->
+              (match List.assoc_opt "preview_id" fields with
+               | Some (`String id) -> id
+               | _ -> fail "rename preview is missing its approval ID")
+          | _ -> fail "rename preview is missing its first file" in
+        let result = execute manager ~owner:"partial-write-session" ~root
+          ~apply_approved:true ~on_file_change:record_change
+          (arguments ~action:"apply_preview" ["preview_id", `String preview_id]) in
+        expect (member "applied" result = `Bool false)
+          "a later target conflict reports a partial batch rather than batch atomicity";
+        expect (member "outcomes" result = `List [
+          `Assoc ["path", `String "sample.ml"; "outcome", `String "applied"];
+          `Assoc ["path", `String "other/second.ml"; "outcome", `String "unchanged"]])
+          "partial results identify the exact applied and untouched targets in order";
+        expect (read file = "Zbc\n" && read second_file = "concurrent user edit\n")
+          "a later user edit is preserved when the guarded write fails";
+        expect (List.rev !changes = ["sample.ml", "abc\n", "Zbc\n"])
+          "only the successfully written target enters the normal recovery recorder";
+        expect (member "failure" result <> `Null)
+          "partial results include the guarded later-target failure"))
+  ;
   test_stalled_native_writes ();
   print_endline "workspace LSP: ok"

@@ -18,8 +18,22 @@ let () =
           | _ -> false in
         if not valid then failwith "PAVE_RELEASE_VERSION must be a release tag such as v0.1.6";
         tag in
+  let test_release_base_url = match Sys.getenv_opt "PAVE_TEST_RELEASE_BASE_URL" with
+    | None | Some "" -> ""
+    | Some url ->
+        let prefix = "https://127.0.0.1:" in
+        let port = String.length url > String.length prefix &&
+          String.starts_with ~prefix url in
+        let port_text = if port then
+          String.sub url (String.length prefix)
+            (String.length url - String.length prefix) else "" in
+        if not port || port_text = "" ||
+           not (String.for_all (function '0'..'9' -> true | _ -> false) port_text) ||
+           (match int_of_string_opt port_text with Some port -> port < 1 || port > 65535 | None -> true)
+        then failwith "PAVE_TEST_RELEASE_BASE_URL must be an HTTPS loopback URL with a numeric port";
+        url in
   let output = open_out_bin Sys.argv.(2) in
   Fun.protect ~finally:(fun () -> close_out output) (fun () ->
     Printf.fprintf output
-      "(* Generated from install.sh; do not edit. *)\nlet script = %S\nlet version = %S\n"
-      script version)
+      "(* Generated from install.sh; do not edit. *)\nlet script = %S\nlet version = %S\nlet test_release_base_url = %S\n"
+      script version test_release_base_url)

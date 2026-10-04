@@ -318,6 +318,19 @@ let () =
     let system : Pave.Protocol.message = { role = "system"; content = Some "mobile system";
       tool_calls = []; tool_call_id = None; tool_result_content = None; provider_state = None; attachments = [] } in
     let user = Pave.Protocol.user "inspect" in
+    let oauth_cancelled = ref false in
+    let oauth_route = { anthropic with
+      endpoint = "https://api.anthropic.com/v1/messages" } in
+    (match Pave.Provider.complete ~authentication:Pave.Provider.OAuth
+      ~resolve_credential_cancel:(fun ~cancel () ->
+        assert (not (cancel ()));
+        oauth_cancelled := true;
+        { Pave.Provider.access = "mock-oauth";
+          account_id = Some "workspace"; residency = None })
+      ~cancel:(fun () -> !oauth_cancelled) oauth_route [system; user] [] with
+     | exception Pave.Provider.Cancelled -> ()
+     | _ -> failwith "cancelled credential resolution sent an inference request");
+    assert !oauth_cancelled;
     let credential_read = ref false in
     List.iter (fun endpoint ->
       let exposed = { openai with endpoint } in

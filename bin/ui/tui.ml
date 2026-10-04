@@ -156,12 +156,14 @@ type t = {
   bindings : Keybindings.binding list;
   signals : (int * Sys.signal_behavior) list;
   ui_events : ui_event Queue.t;
+  mutable ui_event_bytes : int;
   ui_lock : Mutex.t;
   ui_read_fd : Unix.file_descr;
   ui_write_fd : Unix.file_descr;
   ui_wake_byte : bytes;
   ui_drain_bytes : bytes;
   mutable ui_closed : bool;
+  ui_owner_thread : int;
   mutable agent_event_handler : (Pave.Turn_runner.event -> unit) option;
 
 }
@@ -178,10 +180,62 @@ let create_ui_pipe () =
     Unix.close write_fd;
     raise exn
 
+(* Event backlog: 4096 items / 4 MiB total; ordinary events are capped at
+   3840 items / 3 MiB, reserving 256 items / 1 MiB for settlement/input. *)
+let max_ui_events = 4096
+let max_ui_event_bytes = 4_194_304
+let reserved_ui_events = 256
+let reserved_ui_bytes = 1_048_576
+(* Stream pumping yields to terminal input after at most 128 queued events. *)
+let ui_pump_event_limit = 128
+
+let ui_event_size = function
+  | Agent_event (Pave.Turn_runner.Text_delta { text; _ }) -> String.length text
+  | Agent_event (Pave.Turn_runner.Transcript_message { text; _ })
+  | Background_message text -> String.length text
+  | Agent_event (Pave.Turn_runner.Tool_event { event; _ }) ->
+      (match event with
+       | Pave.Agent.Tool_settled { result; _ }
+       | Pave.Agent.Tool_aborted { result; _ } -> String.length result
+       | _ -> 64)
+  | Shutdown | Terminal_event _ -> 0
+  | User_prompt { text; attachments } ->
+      List.fold_left (fun bytes (item : Pave.Protocol.attachment) ->
+        bytes + String.length item.name + String.length item.mime_type +
+        String.length item.data) (String.length text) attachments
+  | _ -> 64
+
+let critical_ui_event = function
+  | Shutdown | Approval_event _ | Terminal_event _ -> true
+  | Agent_event (Pave.Turn_runner.Turn_completed _
+                | Pave.Turn_runner.Turn_cancelled _
+                | Pave.Turn_runner.Turn_failed _
+                | Pave.Turn_runner.Tool_event {
+                    event = Pave.Agent.Tool_settled _ | Pave.Agent.Tool_aborted _
+                      | Pave.Agent.Tool_draft_ended _;
+                    _ }) -> true
+  | _ -> false
+
 let enqueue_ui_event t event =
+  let size = ui_event_size event in
   Mutex.lock t.ui_lock;
-  let wake = not t.ui_closed && Queue.is_empty t.ui_events in
-  if not t.ui_closed then Queue.add event t.ui_events;
+  let ceiling = if critical_ui_event event then max_ui_events
+    else max_ui_events - reserved_ui_events in
+  let byte_ceiling = if critical_ui_event event then max_ui_event_bytes
+    else max_ui_event_bytes - reserved_ui_bytes in
+  let shutdown_event = match event with Shutdown -> true | _ -> false in
+  let shutdown_present = shutdown_event &&
+    Queue.fold (fun found item ->
+      found || (match item with Shutdown -> true | _ -> false))
+      false t.ui_events in
+  let accepted = not t.ui_closed && not shutdown_present &&
+    (Queue.length t.ui_events < ceiling ||
+     shutdown_event && Queue.length t.ui_events = max_ui_events) &&
+    size <= byte_ceiling - t.ui_event_bytes in
+  let wake = accepted && Queue.is_empty t.ui_events in
+  if accepted then (
+    Queue.add event t.ui_events;
+    t.ui_event_bytes <- t.ui_event_bytes + size);
   Mutex.unlock t.ui_lock;
   if wake then (
     let rec write () =
@@ -205,8 +259,9 @@ let drain_ui_pipe t =
 let max_delta_batch_bytes = 16_384
 let max_delta_batch_events = 64
 
-let coalesce_text_deltas first queue =
-  match first with
+let coalesce_text_deltas_accounted first queue =
+  let bytes = ref (ui_event_size first) in
+  let output = match first with
   | Agent_event (Pave.Turn_runner.Text_delta { turn_id; text }) ->
       let length = ref (String.length text) and count = ref 1 in
       let buffer = ref None in
@@ -219,6 +274,7 @@ let coalesce_text_deltas first queue =
             when next_turn = turn_id &&
                  String.length next_text <= max_delta_batch_bytes - !length ->
               ignore (Queue.take queue);
+              bytes := !bytes + String.length next_text;
               let output = match !buffer with
                 | Some output -> output
                 | None ->
@@ -240,7 +296,10 @@ let coalesce_text_deltas first queue =
            Agent_event (Pave.Turn_runner.Text_delta {
              turn_id; text = Buffer.contents output
            }))
-  | _ -> first
+  | _ -> first in
+  output, !bytes
+let coalesce_text_deltas first queue =
+  fst (coalesce_text_deltas_accounted first queue)
 
 let stream_frame_interval = 1. /. 60.
 
@@ -251,9 +310,12 @@ let pop_ui_event t =
     if Queue.is_empty t.ui_events then None
     else
       let first = Queue.take t.ui_events in
-      Some (coalesce_text_deltas first t.ui_events) in
+      let value, bytes = coalesce_text_deltas_accounted first t.ui_events in
+      t.ui_event_bytes <- max 0 (t.ui_event_bytes - bytes);
+      Some value in
   Mutex.unlock t.ui_lock;
   event
+
 
 
 let ui_events_pending t =
@@ -266,7 +328,11 @@ let set_agent_event_handler t handler =
   t.agent_event_handler <- Some handler
 
 let publish_agent_event t event =
-  enqueue_ui_event t (Agent_event event)
+  if Thread.id (Thread.self ()) = t.ui_owner_thread then (
+    match t.agent_event_handler with
+    | Some handler -> handler event
+    | None -> ignore (enqueue_ui_event t (Agent_event event)))
+  else ignore (enqueue_ui_event t (Agent_event event))
 
 let publish_prompt t ~attachments text =
   enqueue_ui_event t (User_prompt { text; attachments })
@@ -281,6 +347,7 @@ let close_ui_pipe t =
   let close = not t.ui_closed in
   t.ui_closed <- true;
   Queue.clear t.ui_events;
+  t.ui_event_bytes <- 0;
   Mutex.unlock t.ui_lock;
   if close then (
     Unix.close t.ui_read_fd;
@@ -1810,9 +1877,10 @@ let create ?(keybinding_overrides = []) ?(version = "source")
     last_paint = 0.; stream_pending = false;
     paste = false; paste_buffer = Buffer.create 256;
     bindings; signals;
-    ui_events = Queue.create (); ui_lock = Mutex.create ();
+    ui_events = Queue.create (); ui_event_bytes = 0; ui_lock = Mutex.create ();
     ui_read_fd; ui_write_fd; ui_wake_byte = Bytes.of_string "x";
     ui_drain_bytes = Bytes.create 256; ui_closed = false;
+    ui_owner_thread = Thread.id (Thread.self ());
     agent_event_handler = None;
   } with exn ->
     restore_terminal_signals signals;
@@ -2210,12 +2278,14 @@ let caller_woken = function
          ready <> []
        with Unix.Unix_error (Unix.EINTR, _, _) -> true)
 
-let rec next_input ?wake_fd t =
-  match pop_ui_event t with
+let rec next_input ?wake_fd ?(pumped = 0) t =
+  if pumped >= ui_pump_event_limit && ui_events_pending t then
+    Terminal_input.event ~timeout:0. t.input
+  else match pop_ui_event t with
   | Some queued ->
       (match process_ui_event t queued with
-      | `Continue -> next_input ?wake_fd t
-      | `Return `Tick -> paint t; next_input ?wake_fd t
+      | `Continue -> next_input ?wake_fd ~pumped:(pumped + 1) t
+      | `Return `Tick -> paint t; next_input ?wake_fd ~pumped:(pumped + 1) t
       | `Return event -> event)
   | None ->
       let now = Unix.gettimeofday () in
@@ -2235,13 +2305,9 @@ let rec next_input ?wake_fd t =
       (match Terminal_input.event ~wake_fds ?timeout t.input with
       | `Wake when ui_events_pending t -> next_input ?wake_fd t
       | `Wake when not (caller_woken wake_fd) ->
-          (* A producer queues its event before writing the wake byte, so the
-             byte can outlive an event already handled; never surface it. *)
           drain_ui_pipe t;
           next_input ?wake_fd t
-      | event ->
-          enqueue_ui_event t (Terminal_event event);
-          next_input ?wake_fd t)
+      | event -> event)
 
 let toggle_tool_detail t =
   let cols, _ = Notty_unix.Term.size t.term in

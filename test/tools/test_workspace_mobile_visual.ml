@@ -21,16 +21,17 @@ let bmp width height pixels =
 let () =
   let original = Visual.decode_bmp (bmp 2 1 [|0,0,0; 0,0,0|]) in
   let changed = Visual.decode_bmp (bmp 2 1 [|0,0,0; 255,0,0|]) in
-  let same = Visual.compare_pixels ~masks:[] original original in
+  let same = Visual.compare_pixels ~threshold:0 ~masks:[] original original in
   expect "unchanged pixels compare equal" (same.equal && same.differing_pixels = 0 && same.first_difference = None);
-  let diff = Visual.compare_pixels ~masks:[] original changed in
+  let diff = Visual.compare_pixels ~threshold:0 ~masks:[] original changed in
   expect "outside-mask pixel change found" (not diff.equal && diff.differing_pixels = 1 && diff.first_difference = Some (1, 0));
-  let ignored = Visual.compare_pixels ~masks:[{Visual.x=1; y=0; width=1; height=1}] original changed in
+  let ignored = Visual.compare_pixels ~threshold:0 ~masks:[{Visual.x=1; y=0; width=1; height=1}] original changed in
   expect "inside-mask pixel change ignored" (ignored.equal && ignored.differing_pixels = 0);
   rejects "truncated BMP" (fun () -> Visual.decode_bmp "BM\000");
   rejects "truncated BMP pixels" (fun () -> Visual.decode_bmp (String.sub (bmp 2 1 [|0,0,0; 0,0,0|]) 0 55));
   rejects "malformed PNG" (fun () -> Visual.validate_png_header "not a png");
-  let meta = {Visual.app="dev.example.app"; platform="android"; device="serial-1"; os="Android 15";
+  let meta = {Visual.app="dev.example.app"; platform="android"; device="serial-1";
+    build_hash=String.make 64 'a'; os="Android 15";
     locale="en-US"; theme="dark"; width=1; height=1; masks=[]} in
   let check_bad_masks masks = rejects "invalid mask" (fun () -> Visual.validate_metadata {meta with masks}) in
   check_bad_masks [{Visual.x=(-1); y=0; width=1; height=1}];
@@ -50,31 +51,33 @@ let () =
       else Unix.unlink path in remove root) (fun () ->
     (* PNG storage uses the fixed macOS ImageIO decoder; pure BMP/pixel tests above are portable. *)
     if Sys.os_type = "Unix" && Sys.file_exists "/usr/bin/swift" then begin
-      let png = "\137PNG\r\n\026\n\000\000\000\rIHDR\000\000\000\001\000\000\000\001\008\004\000\000\000\181\028\012\002\000\000\000\011IDATx\218c\252\255\031\000\003\003\002\000\239\154\007\169\000\000\000\000IEND\174B`\130" in
+      let png = "\137PNG\r\n\026\n\000\000\000\rIHDR\000\000\000\001\000\000\000\001\008\004\000\000\000\181\028\012\002\000\000\000\011IDATx\218c\252\255\031\000\003\003\002\000\239\162\167\091\000\000\000\000IEND\174B`\130" in
       let capture = {Visual.png; complete=true; metadata=meta} in
       Visual.save ~workspace:root ~name:"home" capture;
       let base = Filename.concat root ".pave/mobile-baselines" in
-      let same = Visual.compare ~workspace:root ~name:"home" capture in
-      expect "unchanged saved capture equal" same.equal;
-      let altered update = Visual.compare ~workspace:root ~name:"home" {capture with metadata=update meta} in
+      let same = Visual.compare ~workspace:root ~name:"home" ~threshold:0 ~max_differing_pixels:0 capture in
+      expect "unchanged saved capture equal" same.comparison.equal;
+      let altered update = Visual.compare ~workspace:root ~name:"home" ~threshold:0 ~max_differing_pixels:0 {capture with metadata=update meta} in
       List.iter (fun update -> rejects "metadata mismatch" (fun () -> altered update))
         [ (fun m -> {m with Visual.app="other.app"}); (fun m -> {m with Visual.platform="ios"});
-          (fun m -> {m with Visual.device="other-device"}); (fun m -> {m with Visual.os="Android 16"});
+          (fun m -> {m with Visual.device="other-device"});
+          (fun m -> {m with Visual.build_hash=String.make 64 'b'});
+          (fun m -> {m with Visual.os="Android 16"});
           (fun m -> {m with Visual.locale="fr-FR"}); (fun m -> {m with Visual.theme="light"}) ];
       let record = Filename.concat base "home.json" and image = Filename.concat base "home.png" in
       Unix.unlink image;
       let external_image = Filename.concat root "outside.png" in
       let out = open_out_bin external_image in output_string out png; close_out out;
       Unix.symlink external_image image;
-      rejects "baseline image symlink" (fun () -> Visual.compare ~workspace:root ~name:"home" capture);
+      rejects "baseline image symlink" (fun () -> Visual.compare ~workspace:root ~name:"home" ~threshold:0 ~max_differing_pixels:0 capture);
       Unix.unlink image; Unix.unlink external_image;
       let moved = base ^ "-moved" in
       Unix.rename base moved;
       Unix.symlink moved base;
-      rejects "baseline directory symlink" (fun () -> Visual.compare ~workspace:root ~name:"home" capture);
+      rejects "baseline directory symlink" (fun () -> Visual.compare ~workspace:root ~name:"home" ~threshold:0 ~max_differing_pixels:0 capture);
       Unix.unlink base;
       Unix.rename moved base;
       let out = open_out record in output_string out "{"; close_out out;
-      rejects "corrupt baseline record" (fun () -> Visual.compare ~workspace:root ~name:"home" capture)
+      rejects "corrupt baseline record" (fun () -> Visual.compare ~workspace:root ~name:"home" ~threshold:0 ~max_differing_pixels:0 capture)
     end);
   print_endline "workspace mobile visual baseline core: ok"

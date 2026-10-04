@@ -828,6 +828,10 @@ let job_status manager ~id =
   validate_id id;
   with_lock manager.lock (fun () -> (lookup manager id).status)
 
+let job_pid manager ~id =
+  validate_id id;
+  with_lock manager.lock (fun () -> (lookup manager id).pid)
+
 let jobs manager =
   with_lock manager.lock (fun () ->
     Hashtbl.fold (fun _ (job : job) rows -> summary_locked job :: rows) manager.jobs []

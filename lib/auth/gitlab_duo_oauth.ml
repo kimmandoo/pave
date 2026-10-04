@@ -56,8 +56,8 @@ let exchange ?http ?now (auth : Oauth_flow.authorization) ~response =
   let credential = Oauth_flow.exchange ?http ?now config auth ~response in
   { credential with metadata = ("gitlab_client_id", config.client_id) :: credential.metadata }
 
-let refresh ?http ?now (prior : Oauth_store.credential) =
+let refresh ?http ?cancel ?now (prior : Oauth_store.credential) =
   let config = policy () in
   if List.assoc_opt "gitlab_client_id" prior.metadata <> Some config.client_id then
     fail "GitLab OAuth application changed; log in again with the registered client ID";
-  Oauth_flow.refresh ?http ?now config prior
+  Oauth_flow.refresh ?http ?cancel ?now config prior

@@ -244,7 +244,10 @@ public final class SmokeTest {
                 "locale", `String "en-US";
                 "theme", `String "light";
                 "dynamic_regions", `List [];
-                "timeout_seconds", `Int 60] in
+                "timeout_seconds", `Int 60] @
+                (if action = "compare" then
+                   ["threshold", `Int 0; "max_differing_pixels", `Int 0]
+                 else []) in
               approve "mobile_visual" (`Assoc fields);
               match Pave.Tools.execute ~root ~context ~approved:true
                 ~name:"mobile_visual" ~args:(`Assoc fields) () with
@@ -376,14 +379,17 @@ public final class SmokeTest {
               failwith ("Android tap did not change the accessible fixture state: " ^ after_tree);
             (match visual "compare" with
              | [Pave.Protocol.Text summary;
-                Pave.Protocol.Image { mime_type = "image/png"; data }] ->
+                Pave.Protocol.Image { mime_type = "image/png"; data = baseline };
+                Pave.Protocol.Image { mime_type = "image/png"; data = current };
+                Pave.Protocol.Image { mime_type = "image/png"; data = diff }] ->
                  let result = Yojson.Basic.from_string summary in
                  let status = Yojson.Basic.Util.(result |> member "status" |> to_string) in
                  let changed = Yojson.Basic.Util.(result |> member "differing_pixels" |> to_int) in
                  if status <> "different" || changed <= 0 then
                    failwith ("Android screenshot comparison missed UI change: " ^ summary);
-                 expect "Android comparison screenshot image" "iVBOR" data
-             | _ -> failwith "Android screenshot comparison returned unexpected blocks");
+                 List.iter (fun data -> expect "Android comparison artifact" "iVBOR" data)
+                   [baseline; current; diff]
+             | _ -> failwith "Android screenshot comparison returned unexpected artifacts");
             print_endline ("real Android visual regression on " ^ serial ^
               ": saved the count:0 baseline and detected changed pixels after tap");
             print_endline ("real Android UI control on " ^ serial ^

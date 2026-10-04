@@ -43,6 +43,73 @@ let rec wait_for pid =
   try snd (Unix.waitpid [] pid) with
   | Unix.Unix_error (Unix.EINTR, _, _) -> wait_for pid
 
+let write_all_fd fd bytes count =
+  let rec write offset =
+    if offset < count then
+      try
+        let written = Unix.write fd bytes offset (count - offset) in
+        if written = 0 then fail "release download staging write failed";
+        write (offset + written)
+      with Unix.Unix_error (Unix.EINTR, _, _) -> write offset in
+  write 0
+
+let fixture_transfer_timeout ~default =
+  if Embedded_installer.test_release_base_url = "" then default
+  else match Sys.getenv_opt "PAVE_TEST_RELEASE_TIMEOUT_SECONDS" with
+    | None -> default
+    | Some value ->
+        (match int_of_string_opt value with
+         | Some seconds when seconds > 0 && seconds <= default -> seconds
+         | _ -> fail "invalid PAVE_TEST_RELEASE_TIMEOUT_SECONDS")
+
+let download_bounded ~url ~path ~max_bytes ~connect_timeout ~timeout_seconds
+    ?(headers = []) () =
+  if max_bytes < 1 then invalid_arg "release download limit must be positive";
+  let timeout_seconds = fixture_transfer_timeout ~default:timeout_seconds in
+  let output = Unix.openfile path
+      [Unix.O_WRONLY; Unix.O_TRUNC; Unix.O_CLOEXEC] 0o600 in
+  let read_end, write_end = Unix.pipe ~cloexec:true () in
+  let header_arguments = List.concat_map (fun header ->
+    ["--header"; header]) headers in
+  let request_arguments = ["--fail"; "--location"; "--silent"; "--show-error";
+    "--proto"; "=https"; "--proto-redir"; "=https";
+    "--connect-timeout"; string_of_int connect_timeout;
+    "--max-time"; string_of_int timeout_seconds;
+    "--max-filesize"; string_of_int max_bytes;
+    "--output"; "-"] @ header_arguments @ [url] in
+  let arguments = Array.of_list ("curl" :: request_arguments) in
+  let pid =
+    try Unix.create_process "curl" arguments Unix.stdin write_end Unix.stderr
+    with exn ->
+      Unix.close read_end;
+      Unix.close write_end;
+      Unix.close output;
+      raise exn in
+  Unix.close write_end;
+  let bytes = Bytes.create 8192 in
+  let received = ref 0 and oversized = ref false in
+  let rec pump () =
+    try
+      let count = Unix.read read_end bytes 0 (Bytes.length bytes) in
+      if count = 0 then ()
+      else if count > max_bytes - !received then oversized := true
+      else (write_all_fd output bytes count; received := !received + count; pump ())
+    with Unix.Unix_error (Unix.EINTR, _, _) -> pump () in
+  let pump_result = try pump (); None with exn -> Some exn in
+  Unix.close read_end;
+  Unix.close output;
+  (match pump_result with
+   | Some _ | None when !oversized ->
+       (try Unix.kill pid Sys.sigterm with Unix.Unix_error _ -> ())
+   | _ -> ());
+  let status = wait_for pid in
+  (match pump_result with
+   | Some exn -> raise exn
+   | None -> ());
+  if !oversized then fail (Printf.sprintf "release asset exceeds %d-byte transfer limit" max_bytes);
+  match status with
+  | Unix.WEXITED 0 -> ()
+  | _ -> fail "release download failed within its transfer deadline"
 let version_number tag =
   if String.length tag < 6 || String.length tag > 48 || tag.[0] <> 'v' then
     fail "invalid release version";
@@ -162,7 +229,10 @@ let supervise ~label spawn =
 
 let print_lines lines = List.iter prerr_endline lines
 
-let release_tag_prefix = "https://github.com/kimmandoo/pave/releases/tag/"
+let release_tag_prefix =
+  (if Embedded_installer.test_release_base_url = "" then
+     "https://github.com/kimmandoo/pave/releases"
+   else Embedded_installer.test_release_base_url ^ "/releases") ^ "/tag/"
 let redirect_prefix = "pave-redirect: "
 
 (* The release web page redirects to the latest tag without touching the
@@ -174,7 +244,9 @@ let latest_from_redirect () =
       "--max-filesize"; "1048576"; "--header"; "User-Agent: pave-updater";
       "--output"; "/dev/null";
       "--write-out"; redirect_prefix ^ "%{http_code} %{redirect_url}\\n";
-      "https://github.com/kimmandoo/pave/releases/latest" |]
+      (if Embedded_installer.test_release_base_url = "" then
+         "https://github.com/kimmandoo/pave/releases/latest"
+       else Embedded_installer.test_release_base_url ^ "/releases/latest") |]
       Unix.stdin output output) in
   let redirect = List.find_map (fun line ->
     if String.starts_with ~prefix:redirect_prefix line then
@@ -199,31 +271,18 @@ let latest_from_redirect () =
 let latest_from_api () =
   let path, output = Filename.open_temp_file ~mode:[ Open_binary ]
     "pave-release-" ".json" in
+  close_out output;
   Fun.protect ~finally:(fun () ->
-    close_out_noerr output;
     try Sys.remove path with Sys_error _ -> ()) (fun () ->
-    close_out output;
-    let status, lines = supervise ~label:"Asking the GitHub API" (fun output ->
-      Unix.create_process "curl" [| "curl"; "--fail"; "--silent"; "--show-error";
-        "--location"; "--proto"; "=https"; "--proto-redir"; "=https";
-        "--connect-timeout"; "5"; "--max-time"; "15";
-        "--max-filesize"; "65536";
-        "--header"; "Accept: application/vnd.github+json";
-        "--header"; "User-Agent: pave-updater";
-        "--output"; path;
-        "https://api.github.com/repos/kimmandoo/pave/releases/latest" |]
-        Unix.stdin output output) in
-    (match status with
-     | Unix.WEXITED 0 -> ()
-     | _ ->
-         print_lines lines;
-         fail (if List.exists (fun line -> contains line "403" || contains line "429") lines
-           then "GitHub API rate limit reached and the release page was unreachable; retry later"
-           else "cannot check latest release (network or GitHub error)"));
+    download_bounded ~url:(if Embedded_installer.test_release_base_url = "" then
+      "https://api.github.com/repos/kimmandoo/pave/releases/latest"
+    else Embedded_installer.test_release_base_url ^
+      "/repos/kimmandoo/pave/releases/latest")
+      ~path ~max_bytes:65_536 ~connect_timeout:5 ~timeout_seconds:15
+      ~headers:["Accept: application/vnd.github+json"; "User-Agent: pave-updater"] ();
     let input = open_in_bin path in
     let json = Fun.protect ~finally:(fun () -> close_in input) (fun () ->
       let size = in_channel_length input in
-      if size > 65_536 then fail "release metadata exceeds 64 KiB";
       try Yojson.Basic.from_string (really_input_string input size)
       with Yojson.Json_error _ -> fail "release metadata is not valid JSON") in
     match Pave.Protocol.member "tag_name" json with
@@ -234,6 +293,36 @@ let latest_version () =
   match latest_from_redirect () with
   | Some tag -> tag
   | None -> latest_from_api ()
+
+let replace_all ~needle ~replacement text =
+  let needle_length = String.length needle in
+  let output = Buffer.create (String.length text) in
+  let rec copy offset =
+    if offset >= String.length text then ()
+    else if offset + needle_length <= String.length text &&
+      String.sub text offset needle_length = needle then (
+      Buffer.add_string output replacement;
+      copy (offset + needle_length))
+    else (
+      Buffer.add_char output text.[offset];
+      copy (offset + 1)) in
+  copy 0;
+  Buffer.contents output
+
+let embedded_install_script () =
+  let script =
+    if Embedded_installer.test_release_base_url = "" then
+      Embedded_installer.script
+    else
+      replace_all
+        ~needle:"https://github.com/kimmandoo/pave/releases"
+        ~replacement:(Embedded_installer.test_release_base_url ^ "/releases")
+        Embedded_installer.script in
+  let timeout = fixture_transfer_timeout ~default:180 in
+  if timeout = 180 then script
+  else
+    replace_all ~needle:"--max-time 180"
+      ~replacement:("--max-time " ^ string_of_int timeout) script
 
 let run () =
   let directory = native_install_dir () in
@@ -251,7 +340,7 @@ let run () =
   Fun.protect ~finally:(fun () ->
     close_out_noerr output;
     try Sys.remove script with Sys_error _ -> ()) (fun () ->
-    output_string output Embedded_installer.script;
+    output_string output (embedded_install_script ());
     close_out output;
     let keep entry =
       not (String.starts_with ~prefix:"PAVE_INSTALL_DIR=" entry ||

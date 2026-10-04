@@ -1,5 +1,33 @@
 # Troubleshooting
 
+### [2026-10-04] macOS dependency check confused cached libraries with missing files
+
+- **Context / Symptom:** The native dependency-policy smoke rejected `/usr/lib/libSystem.B.dylib` because that path did not exist on this macOS 25.6 host. After adjusting the check, the local Apple helper check found `FoundationModels.framework` absent.
+- **Root Cause:** macOS exposes allowlisted `/usr/lib` system libraries through the dyld shared cache rather than requiring each path to exist as a file. The helper's FoundationModels framework is unavailable on this older workstation; the release matrix targets macOS 26.
+- **Solution:** The checker now allows the exact `/usr/lib` system-library names and retains file-existence checks for system frameworks. Native fixtures verify rejection of an actually linked non-system library and an actually missing dependency. The macOS arm64 main executable and negative fixtures passed locally; the helper and four-target artifact checks remain gated to native release runners.
+- **Prevention / Reference:** Run `test/distribution/check_release_dependencies.sh` on the native packaging runner. A local host missing a newer system framework cannot certify that helper artifact.
+
+### [2026-10-04] Local updater harness used the public release endpoint
+
+- **Context / Symptom:** Running `test/distribution/installed_update.py` with a normal source build let `pave update` use its production GitHub URL; the controlled fixture then saw the release `LICENSE` instead of its expected `updated license`. A source build without a release version also failed with `this build has no published release version`. The initial staging check additionally classified the valid `.native-install` ownership marker as a leftover temporary file.
+- **Root Cause:** `PAVE_RELEASE_VERSION` and `PAVE_TEST_RELEASE_BASE_URL` are Dune build-time inputs embedded in the executable, not variables the Python harness can set at runtime. The harness's staging check treated all dotfiles as temporary, including the persistent installer marker.
+- **Solution:** Excluded `.native-install` from staging-file checks and built the fixture executable with both inputs before running the loopback TLS harness: `PAVE_RELEASE_VERSION=v0.0.1 PAVE_TEST_RELEASE_BASE_URL=https://127.0.0.1:18443 opam exec -- dune build --profile release bin/main.exe && python3 test/distribution/installed_update.py _build/default/bin/main.exe install.sh`. The complete installed updater transaction harness then passed; the oversize-transfer fixture treated expected client disconnects as normal.
+- **Prevention / Reference:** Never run the updater harness with an ordinary source build: its updater will contact the production release endpoint. Keep both fixture variables set during the release-profile build; see [the release workflow](../.github/workflows/release.yml).
+
+### [2026-10-04] Turn shutdown dropped terminal worker notices
+
+- **Context / Symptom:** The turn-runner shutdown regression lost the terminal completion/abort events emitted while the worker was being joined.
+- **Root Cause:** `close` set the runner closed before the worker's final notices were admitted, and the notice guard rejected every post-close event.
+- **Solution:** Kept terminal notices admissible for the active turn until `close` joined the worker and drained the queue before clearing state and closing descriptors. `test_turn_runner` passed the shutdown and bounded-backpressure cases.
+- **Prevention / Reference:** Shutdown must join producers and deliver reserved terminal outcomes before discarding active-turn state.
+
+### [2026-10-04] iOS trace capture rejected absolute output paths
+
+- **Context / Symptom:** The Instruments command builder rejected the absolute `.trace` path required for a selected simulator capture.
+- **Root Cause:** The path guard rejected `Filename.is_relative output_path` when it was false, reversing the intended absolute-path check.
+- **Solution:** Rejected relative paths while retaining the `.trace` suffix and NUL checks; the regression accepts an absolute trace path and rejects a relative one.
+- **Prevention / Reference:** Keep the valid absolute-path case and relative-path boundary in `test_workspace_mobile_performance`.
+
 ### [2026-10-04] Portal slash approval hid its numeric port
 
 - **Context / Symptom:** The actual `/publish <port> <name>` approval screen showed `Local service: 127.0.0.1:(missing)` despite a valid active loopback listener. A separate real `/publish <port>` attempt also reported `gosuda portal-tunnel CLI not found` because `portal` was absent from `PATH` and `PAVE_PORTAL` was unset.
@@ -11,8 +39,8 @@
 
 - **Context / Symptom:** `/usr/bin/sips -s format bmp ... --out ...` reported `Error 13` and `Unable to write image to file` for a valid 1×1 PNG, despite readable input, writable temporary directories and successful `sips -g pixelWidth -g pixelHeight`.
 - **Root Cause:** The failure was in `sips`'s conversion-output path on this host; changing `--out`/`-o` and `TMPDIR` did not resolve it. Pixel dimensions alone did not provide the required decoded RGBA data.
-- **Solution:** Replaced the converter with a fixed inline Swift/ImageIO decoder that reads only the bounded captured PNG and writes a temporary RGBA buffer for the existing pixel comparator. The real Android screenshot baseline and changed-screen comparison passed.
-- **Prevention / Reference:** Keep the decoder source fixed in the tool, call the system Swift runtime directly without a shell, and reject a failed/short decoded buffer; do not treat `sips` metadata output as pixel decoding.
+- **Solution:** At the time, replaced the converter with a fixed inline Swift/ImageIO decoder that read only bounded captured PNGs. On 2026-10-04, replaced that runtime dependency with a bounded in-tree decoder; the Android screenshot baseline and changed-screen comparison remained covered by regression tests.
+- **Prevention / Reference:** Do not use `sips` for pixel decoding or execute project helpers. Keep native Linux support gated until maintained-decoder review and native package smoke pass; see [`docs/DESIGN_RULES.md`](DESIGN_RULES.md).
 
 ### [2026-10-03] mobile effects failed rewind bookkeeping after execution
 

@@ -3,6 +3,16 @@
 ## 2026-10-04
 - fix(tui): displayed the numeric localhost port in Portal publish approval previews instead of incorrectly showing `(missing)`, so reviewers can confirm the service target.
 - feat(portal): automatically downloaded and SHA-256-verified the official Portal CLI into private user state when an approved publication had no configured executable.
+- fix(auth): propagated turn cancellation through OAuth refresh and bounded credential-lock acquisition without retrying ambiguous token rotations.
+- fix(lsp): reported exact partial workspace-edit application and retained guarded recovery evidence after a later target failed.
+- fix(ui): bounded queued prompt and notice admission, preserved FIFO event delivery and pump fairness, and drained terminal outcomes before runner shutdown.
+- fix(distribution): bounded release manifest/archive transfers and added installed updater transaction coverage for upgrades, rollback, checksum and archive failures.
+- fix(ci): enforced target-specific system-library allowlists for packaged executables and helpers, and added native linked non-system/missing-dependency fixtures; macOS arm64 main-binary checks passed while four-target acceptance remained open.
+- feat(mobile): added separately approved ownership-aware AVD/Simulator boot, readiness, cancellation and shutdown without stopping pre-existing devices or downloading runtimes.
+- feat(mobile): added Android accessibility findings, guarded locale/theme/orientation experiments, exact selected-app deep links and lifecycle scenarios, bounded Android performance samples, and raw iOS Instruments capture.
+- feat(mobile): added Flutter device integration-test discovery and an owned React Native/Expo development-server workflow without dependency installation.
+- feat(mobile): added bounded in-tree PNG decoding for portable visual comparisons; maintained-dependency and native Linux package acceptance remained open.
+- fix(mobile): corrected absolute `.trace` path validation for iOS Simulator Instruments capture.
 
 ## 2026-10-03
 - feat(mobile): added session-bound approved Android/iOS builds, device install/launch/stop previews, validated Android activity selection, stateful sessions, and the `/mobile` session dashboard.

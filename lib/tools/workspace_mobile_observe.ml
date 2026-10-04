@@ -13,6 +13,7 @@ type node = {
   parent : int option;
   depth : int;
   role : string;
+  package : string;
   text : string;
   description : string;
   identifier : string;
@@ -40,6 +41,18 @@ let command action (session : Workspace_mobile_run.session) =
   | "accessibility", Workspace_mobile_run.Ios ->
       fail "iOS Simulator accessibility-tree capture is unavailable through the approved system tools"
   | _ -> fail "mobile observation action must be screenshot or accessibility"
+
+let accessibility_audit_command (session : Workspace_mobile_run.session) =
+  match session.platform with
+  | Workspace_mobile_run.Android ->
+      let quote = Filename.quote in
+      let path = "/data/local/tmp/pave-accessibility-" ^ session.id ^ ".xml" in
+      let remote = Printf.sprintf
+        "uiautomator dump %s >/dev/null; status=$?; if [ \"$status\" -eq 0 ]; then cat %s; status=$?; fi; if [ \"$status\" -eq 0 ]; then printf '\\nPAVE_MOBILE_DENSITY_BEGIN\\n'; if wm density 2>/dev/null; then :; else printf 'PAVE_MOBILE_DENSITY_UNAVAILABLE\\n'; fi; fi; rm -f %s; exit \"$status\""
+        (quote path) (quote path) (quote path) in
+      "adb -s " ^ quote session.device ^ " shell " ^ quote remote
+  | Workspace_mobile_run.Ios ->
+      fail "rule-based mobile accessibility audit is currently Android-only"
 
 let uint32_be data offset =
   let length = String.length data in
@@ -238,6 +251,7 @@ let parse_accessibility xml =
         let node = {
           index; parent; depth = List.length !stack;
           role = attr attributes "class";
+          package = attr attributes "package";
           text = attr attributes "text";
           description = attr attributes "content-desc";
           identifier = attr attributes "resource-id";
@@ -267,6 +281,7 @@ let node_json node = `Assoc [
   "parent", (match node.parent with None -> `Null | Some value -> `Int value);
   "depth", `Int node.depth;
   "role", `String node.role;
+  "package", `String node.package;
   "text", `String node.text;
   "description", `String node.description;
   "identifier", `String node.identifier;

@@ -98,14 +98,11 @@ jobs:
           fi
           tar -xzf "$ASSET" -C "$unpacked"
           test -x "$unpacked/pave"
-          if [ "$OS" = "darwin" ]; then
-            dependencies="$(otool -L "$unpacked/pave")"
+          if [ "$OS" = "darwin" ] && [ "$ARCH" = "arm64" ]; then
+            sh test/distribution/check_release_dependencies.sh "$OS" "$unpacked/pave" _build/default/bin/pave-apple-foundation-models
           else
-            dependencies="$(ldd "$unpacked/pave")"
+            sh test/distribution/check_release_dependencies.sh "$OS" "$unpacked/pave"
           fi
-          case "$dependencies" in
-            *libzstd*) echo "packaged binary unexpectedly depends on external libzstd" >&2; exit 1 ;;
-          esac
           "$unpacked/pave" --help >/dev/null
           providers="$("$unpacked/pave" --providers)"
           case "$providers" in
@@ -133,6 +130,13 @@ jobs:
               *) ;;
             esac
           fi
+      - name: Exercise disposable installed updater transactions
+        env:
+          PAVE_RELEASE_VERSION: v0.0.1
+          PAVE_TEST_RELEASE_BASE_URL: https://127.0.0.1:18443
+        run: |
+          opam exec -- dune build --profile release bin/main.exe
+          python3 test/distribution/installed_update.py _build/default/bin/main.exe install.sh
       - uses: actions/upload-artifact@v4
         with:
           name: pave-${{ matrix.os }}-${{ matrix.arch }}

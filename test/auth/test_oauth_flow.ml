@@ -115,9 +115,60 @@ let () =
   expect_error (fun () -> Flow.exchange ~http:(fun ~url:_ ~headers:_ ~body:_ ->
     200, {|{"access_token":"token","expires_in":null}|}) ~now:1001. policy auth
     ~response:(callback auth "good-code"));
+  (match Flow.refresh ~http:(fun ~url:_ ~headers:_ ~body:_ -> 200, "{}")
+      ~now:1100. policy initial with
+   | exception Flow.OAuth_error message ->
+       assert (contains_substring message "outcome is ambiguous");
+       assert (not (contains_substring message "refresh-one"))
+   | _ -> failwith "ambiguous refresh response was accepted");
+  let cancelled_calls = ref 0 in
+  (match Flow.refresh ~cancel:(fun () -> true)
+      ~http:(fun ~url:_ ~headers:_ ~body:_ ->
+        incr cancelled_calls; 200, "{}") ~now:1100. policy initial with
+   | exception Flow.Cancelled_before_request -> ()
+   | _ -> failwith "pre-request cancellation was accepted");
+  assert (!cancelled_calls = 0);
+  let cancelled = ref false and in_flight_calls = ref 0 in
+  (match Flow.refresh ~cancel:(fun () -> !cancelled)
+      ~http:(fun ~url:_ ~headers:_ ~body:_ ->
+        incr in_flight_calls;
+        cancelled := true;
+        200, {|{"access_token":"rotated-access","refresh_token":"rotated-refresh","expires_in":3600}|})
+      ~now:1100. policy initial with
+   | exception Flow.OAuth_error message ->
+       assert (contains_substring message "outcome is ambiguous");
+       assert (not (contains_substring message "rotated-refresh"))
+   | _ -> failwith "in-flight cancellation was accepted");
+  assert (!in_flight_calls = 1);
   expect_error (fun () -> Flow.refresh ~http:never ~now:1100. policy
     {initial with refresh = None});
   assert (not !ignored);
+  let helper = Filename.temp_file "pave-oauth-curl-" ".sh" in
+  let pid_file = helper ^ ".pid" in
+  let prior_pid_env = Sys.getenv_opt "PAVE_OAUTH_TEST_PID" in
+  let output = open_out helper in
+  output_string output "#!/bin/sh\necho $$ > \"$PAVE_OAUTH_TEST_PID\"\nexec /bin/sleep 30\n";
+  close_out output;
+  Unix.chmod helper 0o700;
+  Unix.putenv "PAVE_OAUTH_TEST_PID" pid_file;
+  Flow.Test.use_curl_helper helper;
+  Fun.protect ~finally:(fun () ->
+    Flow.Test.curl_helper := None;
+    (match prior_pid_env with
+     | None -> Unix.putenv "PAVE_OAUTH_TEST_PID" ""
+     | Some value -> Unix.putenv "PAVE_OAUTH_TEST_PID" value);
+    List.iter (fun path -> try Sys.remove path with Sys_error _ -> ())
+      [helper; pid_file]) (fun () ->
+    let cancel () = Sys.file_exists pid_file in
+    (match Flow.default_http_cancellable ~cancel ~url:"https://login.example.test/token"
+        ~headers:[] ~body:"fixture" with
+     | exception Flow.Cancelled_in_flight -> ()
+     | _ -> failwith "cancelled curl request completed");
+    let input = open_in pid_file in
+    let pid = int_of_string (input_line input) in
+    close_in input;
+    (try Unix.kill pid 0; failwith "cancelled curl child remains alive"
+     with Unix.Unix_error (Unix.ESRCH, _, _) -> ()));
   expect_error (fun () -> Flow.start {policy with
     authorize_url = "https://login.example.test/authorize?%73tate=attacker"});
   ignore (Flow.start ~now:1000.

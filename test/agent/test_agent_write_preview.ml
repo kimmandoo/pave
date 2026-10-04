@@ -112,7 +112,8 @@ let run scenario =
           if valid then assert (call_id = Some "write-call")
       | _ -> failwith "draft not finalized exactly once");
     let written = scenario = Success || scenario = Buffered || scenario = Masked in
-    assert (Sys.file_exists file = written);
+    if Sys.file_exists file <> written then
+      failwith "write preview scenario produced an unexpected filesystem side effect";
     if written then (
       let ic = open_in_bin file in
       let actual = really_input_string ic (in_channel_length ic) in close_in ic;

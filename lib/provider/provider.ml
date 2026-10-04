@@ -706,9 +706,9 @@ let supports_user_media = function
   | Kimi_code_messages | Kimi_code_cn_messages | Fireworks_chat -> true
   | Vertex_anthropic | Devin_connect | Apple_foundation_models -> false
 
-let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage
-    ?on_tool_arguments ?thinking ?max_output_tokens ?cancel ?apple_helper_path
-    config messages tools =
+let complete ?(authentication = Api_key) ?resolve_credential
+    ?resolve_credential_cancel ?on_text ?on_usage ?on_tool_arguments ?thinking
+    ?max_output_tokens ?cancel ?apple_helper_path config messages tools =
   check_cancel cancel;
   let on_text = match on_text, on_tool_arguments with
     | None, Some _ -> Some (fun _ -> ())
@@ -763,9 +763,12 @@ let complete ?(authentication = Api_key) ?resolve_credential ?on_text ?on_usage
     raise (Provider_error "Codex subscription inference requires OAuth");
   if config.api = Copilot_chat && authentication <> OAuth then
     raise (Provider_error "GitHub Copilot inference requires a device grant");
-  let credential = match resolve_credential with
-    | Some get -> get ()
-    | None -> { access = config.api_key; account_id = None; residency = None } in
+  let credential = match resolve_credential_cancel, resolve_credential with
+    | Some get, _ -> get ~cancel:(fun () -> match cancel with
+        | Some cancelled -> cancelled () | None -> false) ()
+    | None, Some get -> get ()
+    | None, None -> { access = config.api_key; account_id = None; residency = None } in
+  check_cancel cancel;
   let api_key = credential.access in
   reject_controls "API key" api_key;
   if authentication = OAuth && api_key = "" then
@@ -1739,7 +1742,8 @@ type native_compaction = {
   provider_state : Yojson.Basic.t;
 }
 let compact_anthropic_messages ?(authentication = Api_key) ?resolve_credential
-    ?max_output_tokens ?cancel ?on_usage config ~instructions ~messages ~tools =
+    ?resolve_credential_cancel ?max_output_tokens ?cancel ?on_usage config
+    ~instructions ~messages ~tools =
   if config.api <> Anthropic_messages || authentication <> Api_key then
     raise (Provider_error "native compaction requires the Anthropic Messages API-key route");
   if config.endpoint <> "https://api.anthropic.com/v1/messages" then
@@ -1747,9 +1751,11 @@ let compact_anthropic_messages ?(authentication = Api_key) ?resolve_credential
       "native compaction requires the official Anthropic Messages endpoint");
   if config.model = "" then raise (Provider_error "empty Anthropic model");
   reject_controls "model" config.model;
-  let credential = match resolve_credential with
-    | Some resolve -> resolve ()
-    | None -> { access = config.api_key; account_id = None; residency = None } in
+  let credential = match resolve_credential_cancel, resolve_credential with
+    | Some resolve, _ -> resolve ~cancel:(fun () -> match cancel with
+        | Some cancelled -> cancelled () | None -> false) ()
+    | None, Some resolve -> resolve ()
+    | None, None -> { access = config.api_key; account_id = None; residency = None } in
   let api_key = credential.access in
   reject_controls "API key" api_key;
   if api_key = "" then raise (Provider_error "missing Anthropic API key");
@@ -1779,7 +1785,7 @@ let compact_anthropic_messages ?(authentication = Api_key) ?resolve_credential
 
 
 let compact_openai_responses ?(authentication = Api_key) ?resolve_credential
-    ?cancel ?on_usage config ~instructions messages =
+    ?resolve_credential_cancel ?cancel ?on_usage config ~instructions messages =
   if config.api <> Openai_responses || authentication <> Api_key then
     raise (Provider_error "native compaction requires the OpenAI Responses API-key route");
   if config.model = "" then raise (Provider_error "empty Responses model");
@@ -1794,9 +1800,11 @@ let compact_openai_responses ?(authentication = Api_key) ?resolve_credential
     then config.endpoint ^ "/compact"
     else raise (Provider_error
       "native compaction requires a Responses endpoint ending in /responses") in
-  let credential = match resolve_credential with
-    | Some resolve -> resolve ()
-    | None -> { access = config.api_key; account_id = None; residency = None } in
+  let credential = match resolve_credential_cancel, resolve_credential with
+    | Some resolve, _ -> resolve ~cancel:(fun () -> match cancel with
+        | Some cancelled -> cancelled () | None -> false) ()
+    | None, Some resolve -> resolve ()
+    | None, None -> { access = config.api_key; account_id = None; residency = None } in
   let api_key = credential.access in
   reject_controls "API key" api_key;
   if api_key = "" then raise (Provider_error "missing OpenAI API key");

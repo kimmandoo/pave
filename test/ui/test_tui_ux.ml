@@ -138,6 +138,19 @@ let () =
      | Tui.Agent_event (Pave.Turn_runner.Text_delta {
          turn_id = 8; text = "next" }) -> true
      | _ -> false);
+  expect "event backlog and per-pump fairness limits are documented"
+    (Tui.max_ui_events = 4096 && Tui.max_ui_event_bytes = 4_194_304 &&
+     Tui.reserved_ui_events = 256 && Tui.reserved_ui_bytes = 1_048_576 &&
+     Tui.ui_pump_event_limit = 128);
+  let flood = Queue.create () in
+  for _ = 1 to Tui.max_delta_batch_events do Queue.add (delta 9 "x") flood done;
+  let batched = Tui.coalesce_text_deltas (delta 9 "x") flood in
+  expect "sustained stream batching retains byte order within a bounded batch"
+    (match batched with
+     | Tui.Agent_event (Pave.Turn_runner.Text_delta { text; _ }) ->
+         text = String.make Tui.max_delta_batch_events 'x' &&
+         Queue.length flood = 1
+     | _ -> false);
   let frame ~pending ~since =
     Tui.next_tick_timeout ~now:10.005 ~last_paint:10.
       ~stream_pending:pending ~activity_started:since in

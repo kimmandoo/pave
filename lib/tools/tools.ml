@@ -23,8 +23,26 @@ type android_inventory = {
   subroot : string;
   devices : Workspace_android_devices.device list;
 }
+type android_avd_inventory = { avd_root : string; avd_subroot : string; avd_names : string list }
+
 
 type guarded_edit_evidence = { before_sha256 : string; after_sha256 : string }
+type mobile_lifecycle_handler_cache = {
+  build_hash : string;
+  handlers : Workspace_mobile_app_lifecycle.handler list;
+}
+type mobile_performance_target = { build_hash : string; pid : int }
+type mobile_performance_templates = { template_build_hash : string; names : string list }
+type mobile_device_inventory_cache = {
+  device_root : string;
+  device_platform : Workspace_mobile_run.platform;
+  device_subroot : string;
+  device_scheme : string;
+  device_inventory : Workspace_mobile_device_lifecycle.inventory;
+}
+
+
+
 
 type session_context = {
   owner : string;
@@ -45,7 +63,25 @@ type session_context = {
   mobile_lock : Mutex.t;
   mutable mobile_discovery : mobile_discovery option;
   mutable android_inventory : android_inventory option;
+  mutable android_avds : android_avd_inventory option;
+  mobile_device_inventories : (string, mobile_device_inventory_cache) Hashtbl.t;
+  mobile_device_booting : (string, Workspace_mobile_device_lifecycle.booting) Hashtbl.t;
+  mobile_device_managed : (string, Workspace_mobile_device_lifecycle.managed) Hashtbl.t;
+  mutable next_mobile_device_session : int;
+  mutable next_mobile_device_inventory : int;
+  mutable next_mobile_device_process : int;
+
   mobile_run_manager : Workspace_mobile_run.manager;
+  node_server_manager : Workspace_node_server.manager;
+  mobile_environment_plans : (string, Workspace_mobile_environment.plan) Hashtbl.t;
+  mutable next_mobile_environment_plan : int;
+  mobile_lifecycle_handlers : (string, mobile_lifecycle_handler_cache) Hashtbl.t;
+  mobile_lifecycle_observations : (string, Workspace_mobile_app_lifecycle.observation) Hashtbl.t;
+  mobile_lifecycle_generations : (string, int) Hashtbl.t;
+  mobile_performance_targets : (string, mobile_performance_target) Hashtbl.t;
+  mobile_performance_templates : (string, mobile_performance_templates) Hashtbl.t;
+  mutable next_mobile_trace : int;
+
   guarded_edit_evidence : (string, guarded_edit_evidence) Hashtbl.t;
   record_file_change : path:string -> before:string -> after:string -> unit;
   mutable closed : bool;
@@ -116,7 +152,25 @@ let create_session_context ?lsp_manager ?hub_port ~owner ~root ~process_manager 
     xcode_lock = Mutex.create (); xcode_discovery = None;
     mobile_lock = Mutex.create (); mobile_discovery = None;
     android_inventory = None;
+    android_avds = None;
+    mobile_device_inventories = Hashtbl.create 8;
+    mobile_device_booting = Hashtbl.create 8;
+    mobile_device_managed = Hashtbl.create 8;
+    next_mobile_device_session = 0;
+    next_mobile_device_inventory = 0;
+    next_mobile_device_process = 0;
+
     mobile_run_manager = Workspace_mobile_run.create_manager ();
+    node_server_manager = Workspace_node_server.create_manager ~process_manager;
+    mobile_environment_plans = Hashtbl.create 8;
+    next_mobile_environment_plan = 0;
+    mobile_lifecycle_handlers = Hashtbl.create 8;
+    mobile_lifecycle_observations = Hashtbl.create 8;
+    mobile_lifecycle_generations = Hashtbl.create 8;
+    mobile_performance_targets = Hashtbl.create 8;
+    mobile_performance_templates = Hashtbl.create 8;
+    next_mobile_trace = 0;
+
     guarded_edit_evidence = Hashtbl.create 16;
     record_file_change; closed = false }
 
@@ -129,6 +183,16 @@ let close_session_context context =
     Mutex.lock context.mobile_lock;
     context.mobile_discovery <- None;
     context.android_inventory <- None;
+    context.android_avds <- None;
+    Hashtbl.clear context.mobile_device_inventories;
+    Hashtbl.clear context.mobile_device_booting;
+    Hashtbl.clear context.mobile_device_managed;
+    Hashtbl.clear context.mobile_environment_plans;
+    Hashtbl.clear context.mobile_lifecycle_handlers;
+    Hashtbl.clear context.mobile_lifecycle_observations;
+    Hashtbl.clear context.mobile_lifecycle_generations;
+    Hashtbl.clear context.mobile_performance_targets;
+    Hashtbl.clear context.mobile_performance_templates;
     Hashtbl.clear context.guarded_edit_evidence;
     Mutex.unlock context.mobile_lock;
     let ignore_failure action = try action () with _ -> () in
@@ -136,6 +200,7 @@ let close_session_context context =
     ignore_failure (fun () -> Workspace_dap.close_manager context.dap_manager);
     ignore_failure (fun () -> Workspace_browser.close_manager context.browser_manager);
     ignore_failure (fun () -> Workspace_mobile_run.close_manager context.mobile_run_manager);
+    ignore_failure (fun () -> Workspace_node_server.close_manager context.node_server_manager);
     let python_kernel, javascript_kernel =
       Mutex.lock context.eval_lock;
       let kernels = context.python_kernel, context.javascript_kernel in
@@ -217,6 +282,11 @@ let optional_bool name default args =
   match field name args with
   | `Null -> default
   | `Bool value -> value
+  | _ -> fail (name ^ " must be a boolean")
+let required_bool name args =
+  match field name args with
+  | `Bool value -> value
+  | `Null -> fail ("missing required boolean argument: " ^ name)
   | _ -> fail (name ^ " must be a boolean")
 
 (* Boyer-Moore-Horspool: skip ahead by the shift of the window's last byte. *)
@@ -1852,7 +1922,41 @@ let xcode_preflight ~approved ?cancel ?on_progress ?context root args =
          "\nChecked Swift errors:\n" ^ String.concat "\n" locations) ^
       "\n" ^ result.output)
 
-let mobile_command ~root args =
+let flutter_integration_device ~context ~root args =
+  if optional_string "stack" "" args <> "flutter" ||
+     optional_string "action" "" args <> "integration_test" then None
+  else
+    let root = Workspace_path.root_path root in
+    let subroot = required_string "subroot" args in
+    let session = Workspace_mobile_run.get context.mobile_run_manager
+      (required_string "session_id" args) in
+    if session.root <> root then
+      fail "Flutter integration test session belongs to a different workspace";
+    if session.platform <> Workspace_mobile_run.Android then
+      fail "Flutter integration tests require the selected Android app session";
+    let expected_android_root =
+      if subroot = "." then "android" else subroot ^ "/android" in
+    if session.subroot <> expected_android_root then
+      fail "Flutter integration test package does not match the selected Android app's host project";
+    let prefix = if subroot = "." then "" else subroot ^ "/" in
+    if not (starts_with session.app_path prefix) then
+      fail "selected Flutter app artifact is outside the integration-test package";
+    if not (List.mem session.state
+        [Workspace_mobile_run.Installed; Workspace_mobile_run.Running]) then
+      fail "Flutter integration tests require the selected app to be installed on its session device";
+    Mutex.lock context.mobile_lock;
+    let ready = Fun.protect ~finally:(fun () -> Mutex.unlock context.mobile_lock)
+      (fun () -> match context.android_inventory with
+        | Some inventory when inventory.root = root &&
+            inventory.subroot = session.subroot ->
+            List.exists (fun (device : Workspace_android_devices.device) ->
+              device.serial = session.device && device.emulator &&
+              device.state = Workspace_android_devices.Ready) inventory.devices
+        | _ -> false) in
+    if not ready then
+      fail "Flutter integration test device is absent from the current approved ready-emulator inventory";
+    Some session.device
+let mobile_command ?ready_device_id ~root args =
   let stack = required_string "stack" args in
   let action = required_string "action" args in
   let subroot = required_string "subroot" args in
@@ -1867,7 +1971,7 @@ let mobile_command ~root args =
       Workspace_gradle_focus.command ~root ~subroot ~action ~task:target
         ~serial:(optional_string "serial" "" args)
   | "flutter" ->
-      Workspace_flutter_focus.command ~root ~subroot ~action ~target
+      Workspace_flutter_focus.command ?ready_device_id ~root ~subroot ~action ~target ()
   | "node" ->
       Workspace_node_scripts.command ~root ~subroot ~action ~manager
   | _ -> fail "mobile check stack must be swiftpm, gradle, flutter or node"
@@ -1882,10 +1986,25 @@ let mobile_manifest ~root ~stack ~subroot =
           else fail "Gradle settings must be a regular file"
          with Unix.Unix_error (Unix.ENOENT, _, _) ->
            Filename.concat subroot "settings.gradle")
+    | "flutter" ->
+        (if subroot = "" || subroot = "." then "" else subroot ^ "/") ^
+        "pubspec.yaml"
     | _ -> fail "no discovery manifest for this mobile stack" in
   let path = Workspace_path.checked_path root relative in
+  let stat = Unix.lstat path in
+  if stat.Unix.st_kind <> Unix.S_REG then
+    fail "mobile discovery manifest is not a regular file";
   Digestif.SHA256.(
     to_hex (digest_string (Workspace_path.read_bounded path max_write_bytes)))
+
+let mobile_discovery_require context ~stack ~root ~subroot ~manifest_hash ~target =
+  Mutex.lock context.mobile_lock;
+  Fun.protect ~finally:(fun () -> Mutex.unlock context.mobile_lock) (fun () ->
+    match context.mobile_discovery with
+    | Some state when state.stack = stack && state.root = root &&
+        state.subroot = subroot && state.manifest_hash = manifest_hash &&
+        List.mem target state.choices -> ()
+    | _ -> fail "approve fresh discovery for this exact mobile project and target first")
 
 let mobile_check ~approved ?cancel ?on_progress ?context root args =
   if not approved then fail "mobile project code requires explicit interactive approval";
@@ -1894,11 +2013,17 @@ let mobile_check ~approved ?cancel ?on_progress ?context root args =
   let stack = required_string "stack" args
   and action = required_string "action" args
   and subroot = required_string "subroot" args in
-  let command, cwd = mobile_command ~root args in
+  let flutter_discovery = stack = "flutter" && action = "discover" in
+  let ready_device_id = flutter_integration_device ~context ~root args in
+  let command, cwd =
+    if flutter_discovery then ("", if subroot = "" || subroot = "." then root
+      else Workspace_path.checked_path root subroot)
+    else mobile_command ?ready_device_id ~root args in
   let discovery_action = (stack = "swiftpm" && action = "discover") ||
-    (stack = "gradle" && action = "tasks") in
+    (stack = "gradle" && action = "tasks") || flutter_discovery in
   let needs_discovery = (stack = "swiftpm" && action = "run") ||
-    (stack = "gradle" && (action = "run" || action = "instrumented")) in
+    (stack = "gradle" && (action = "run" || action = "instrumented")) ||
+    (stack = "flutter" && action = "integration_test") in
   let manifest_hash = if discovery_action || needs_discovery then
       Some (mobile_manifest ~root ~stack ~subroot)
     else None in
@@ -1942,60 +2067,76 @@ let mobile_check ~approved ?cancel ?on_progress ?context root args =
       | None ->
           fail ("emulator " ^ serial ^
             " was absent from the approved inventory; refresh android_devices"));
-    let result = Workspace_process.run_shell ?cancel ?on_progress
-      ~timeout_seconds:(optional_int "timeout_seconds" 120
-        ~minimum:1 ~maximum:300 args)
-      ~output_limit:max_command_bytes ~cwd:(Some cwd) ~command () in
-    let outcome = match result.termination with
-      | Workspace_process.Exited code -> Printf.sprintf "exit %d" code
-      | Workspace_process.Signaled signal -> Printf.sprintf "signal %d" signal
-      | Workspace_process.Timed_out -> "timed out"
-      | Workspace_process.Cancelled -> raise Cancelled in
-    let successful = result.termination = Workspace_process.Exited 0 &&
-      not result.truncated in
-    if discovery_action && successful then (
-      let choices = if stack = "swiftpm" then
-          Workspace_swiftpm_focus.tests result.output
-        else Workspace_gradle_focus.tasks result.output in
+    if flutter_discovery then (
+      let discovery = try Workspace_flutter_focus.discover_integration_tests
+          ~root ~subroot
+        with Workspace_flutter_focus.Error message -> fail message in
+      let choices = List.map (fun (target : Workspace_flutter_focus.integration_target) ->
+        target.path) discovery.targets in
+      if Some (mobile_manifest ~root ~stack ~subroot) <> manifest_hash then
+        fail "Flutter pubspec changed during integration-test discovery; discover again";
       context.mobile_discovery <- Some {
-        stack; root; subroot; manifest_hash = Option.get manifest_hash;
-        choices };
-      "Mobile " ^ stack ^ " discovery: " ^ outcome ^ "\nTasks:\n" ^
+        stack; root; subroot; manifest_hash = Option.get manifest_hash; choices };
+      "Mobile Flutter integration-test discovery: available\nTargets:\n" ^
+      String.concat "\n" choices
+    ) else (
+      let result = Workspace_process.run_shell ?cancel ?on_progress
+        ~timeout_seconds:(optional_int "timeout_seconds" 120
+          ~minimum:1 ~maximum:300 args)
+        ~output_limit:max_command_bytes ~cwd:(Some cwd) ~command () in
+      let outcome = match result.termination with
+        | Workspace_process.Exited code -> Printf.sprintf "exit %d" code
+        | Workspace_process.Signaled signal -> Printf.sprintf "signal %d" signal
+        | Workspace_process.Timed_out -> "timed out"
+        | Workspace_process.Cancelled -> raise Cancelled in
+      let successful = result.termination = Workspace_process.Exited 0 &&
+        not result.truncated in
+      if discovery_action && successful then (
+        let choices = if stack = "swiftpm" then
+            Workspace_swiftpm_focus.tests result.output
+          else Workspace_gradle_focus.tasks result.output in
+        context.mobile_discovery <- Some {
+          stack; root; subroot; manifest_hash = Option.get manifest_hash;
+          choices };
+        "Mobile " ^ stack ^ " discovery: " ^ outcome ^ "\nTasks:\n" ^
         String.concat "\n" choices)
-    else
-      let note =
-        if stack = "swiftpm" && action = "run" &&
-           Workspace_swiftpm_focus.no_tests result.output then
-          " (zero matching tests executed; not a pass)"
-        else if result.truncated then " (output truncated; incomplete result)"
-        else "" in
-      let locations =
-        if result.termination = Workspace_process.Exited 0 then []
-        else if stack = "swiftpm" && action = "run" then
-          Workspace_swift_diagnostics.locations ~within_cwd:true
-            ~root ~cwd result.output
-        else if stack = "gradle" &&
-            (action = "run" || action = "instrumented") then
-          Workspace_android_diagnostics.locations ~root ~cwd ~subroot
-            ~task:(required_string "target" args) result.output
-        else if stack = "flutter" then
-          Workspace_flutter_diagnostics.locations ~root ~cwd ~subroot result.output
-        else if stack = "node" then
-          Workspace_node_diagnostics.locations ~root ~cwd ~subroot result.output
-        else [] in
-      "Mobile " ^ stack ^ " " ^ action ^ ": " ^ outcome ^ note ^
-      (if stack = "gradle" && action = "run" then
-         " (selected task " ^ required_string "target" args ^ ")"
-       else if stack = "gradle" && action = "instrumented" then
-         " (selected task " ^ required_string "target" args ^
-         " on " ^ required_string "serial" args ^ ")"
-       else "") ^
-      (if locations = [] then "" else
-         "\nChecked " ^ (if stack = "flutter" then "Dart"
-           else if stack = "node" then "JS/TS"
-           else if stack = "gradle" then "Kotlin/Java" else "Swift") ^
-         " errors:\n" ^ String.concat "\n" locations) ^
-      "\n" ^ result.output)
+      else
+        let note =
+          if stack = "swiftpm" && action = "run" &&
+             Workspace_swiftpm_focus.no_tests result.output then
+            " (zero matching tests executed; not a pass)"
+          else if result.truncated then " (output truncated; incomplete result)"
+          else "" in
+        let locations =
+          if result.termination = Workspace_process.Exited 0 then []
+          else if stack = "swiftpm" && action = "run" then
+            Workspace_swift_diagnostics.locations ~within_cwd:true
+              ~root ~cwd result.output
+          else if stack = "gradle" &&
+              (action = "run" || action = "instrumented") then
+            Workspace_android_diagnostics.locations ~root ~cwd ~subroot
+              ~task:(required_string "target" args) result.output
+          else if stack = "flutter" then
+            Workspace_flutter_diagnostics.locations ~root ~cwd ~subroot result.output
+          else if stack = "node" then
+            Workspace_node_diagnostics.locations ~root ~cwd ~subroot result.output
+          else [] in
+        "Mobile " ^ stack ^ " " ^ action ^ ": " ^ outcome ^ note ^
+        (if stack = "gradle" && action = "run" then
+           " (selected task " ^ required_string "target" args ^ ")"
+         else if stack = "gradle" && action = "instrumented" then
+           " (selected task " ^ required_string "target" args ^
+           " on " ^ required_string "serial" args ^ ")"
+         else if stack = "flutter" && action = "integration_test" then
+           " (selected integration test " ^ required_string "target" args ^
+           " on " ^ Option.value ~default:"" ready_device_id ^ ")"
+         else "") ^
+        (if locations = [] then "" else
+           "\nChecked " ^ (if stack = "flutter" then "Dart"
+             else if stack = "node" then "JS/TS"
+             else if stack = "gradle" then "Kotlin/Java" else "Swift") ^
+           " errors:\n" ^ String.concat "\n" locations) ^
+        "\n" ^ result.output))
 
 let android_device_command ~root args =
   let subroot = required_string "subroot" args in
@@ -2029,12 +2170,26 @@ let android_devices ~approved ?cancel ?on_progress ?context root args =
       Mutex.lock context.mobile_lock;
       Fun.protect ~finally:(fun () -> Mutex.unlock context.mobile_lock)
         (fun () -> context.android_inventory <- None));
+    if action = "avds" then (
+      Mutex.lock context.mobile_lock;
+      Fun.protect ~finally:(fun () -> Mutex.unlock context.mobile_lock)
+        (fun () -> context.android_avds <- None));
     prefix ^ " (no device choices; command failed or output was truncated)")
-  else if action = "avds" then
-    let names = Workspace_android_devices.avds result.output in
+  else if action = "avds" then (
+    let names = try Workspace_android_devices.avds result.output
+      with Workspace_android_devices.Error message ->
+        Mutex.lock context.mobile_lock;
+        Fun.protect ~finally:(fun () -> Mutex.unlock context.mobile_lock)
+          (fun () -> context.android_avds <- None);
+        fail message in
+    Mutex.lock context.mobile_lock;
+    Fun.protect ~finally:(fun () -> Mutex.unlock context.mobile_lock) (fun () ->
+      context.android_avds <- Some {
+        avd_root = root; avd_subroot = required_string "subroot" args;
+        avd_names = names });
     prefix ^ "\nConfigured AVDs (not running; SDK image readiness unknown): " ^
     (if names = [] then "none"
-     else String.concat ", " (List.map (Printf.sprintf "%S") names))
+     else String.concat ", " (List.map (Printf.sprintf "%S") names)))
   else
     let devices =
       try Workspace_android_devices.adb_devices result.output
@@ -2509,6 +2664,1749 @@ let mobile_observe_tool ~approved ?cancel ?on_progress ~context ~root args =
       [Protocol.Text (Workspace_mobile_observe.accessibility_json nodes)]
   | _ -> fail "mobile observation action must be screenshot or accessibility"
 
+let mobile_accessibility_audit_tool ~approved ?cancel ?on_progress ~context ~root args =
+  if not approved then fail "mobile accessibility audit requires explicit interactive approval";
+  let root = Workspace_path.root_path root in
+  check_session_context context;
+  let id = required_string "session_id" args in
+  let session = Workspace_mobile_run.get context.mobile_run_manager id in
+  if session.root <> root then
+    fail "mobile app session belongs to a different workspace root";
+  if session.state <> Workspace_mobile_run.Running then
+    fail "mobile accessibility audit requires a running app session";
+  if session.platform <> Workspace_mobile_run.Android then
+    fail "rule-based mobile accessibility audit is currently Android-only";
+  let command = Workspace_mobile_observe.accessibility_audit_command session in
+  let result = Workspace_process.run_shell ?cancel ?on_progress
+    ~timeout_seconds:(optional_int "timeout_seconds" 30 ~minimum:1 ~maximum:120 args)
+    ~output_limit:Workspace_mobile_observe.max_accessibility_bytes
+    ~cwd:(Some root) ~command () in
+  (match result.termination with
+   | Workspace_process.Exited 0 when not result.truncated -> ()
+   | Workspace_process.Exited code ->
+       fail (Printf.sprintf "Mobile accessibility observation failed (exit %d)%s"
+         code (if result.truncated then "; output truncated" else ""))
+   | Workspace_process.Signaled signal ->
+       fail (Printf.sprintf "Mobile accessibility observation failed (signal %d)" signal)
+   | Workspace_process.Timed_out -> fail "Mobile accessibility observation timed out"
+   | Workspace_process.Cancelled -> raise Cancelled);
+  let capture = try Workspace_mobile_accessibility_audit.parse_capture result.output
+    with Workspace_mobile_accessibility_audit.Error message -> fail message in
+  let report = try Workspace_mobile_accessibility_audit.analyze
+      ~observation_id:capture.observation_id ?density:capture.density capture.nodes
+    with Workspace_mobile_accessibility_audit.Error message -> fail message in
+  Workspace_mobile_accessibility_audit.report_json report
+
+let mobile_dev_server_tool ~approved ?cancel ~context ~root args =
+  let context = require_session_context (Some context) in
+  let root = Workspace_path.root_path root in
+  let action = required_string "action" args in
+  let id = required_string "id" args in
+  (match action with
+   | "status" ->
+       let session = try Workspace_node_server.get context.node_server_manager ~id
+         with Workspace_node_server.Error message -> fail message in
+       if session.root <> root then
+         fail "Node development server belongs to a different workspace root";
+       Workspace_node_server.render session
+   | "stop" ->
+       if not approved then fail "stopping a mobile development server requires explicit approval";
+       let session = try Workspace_node_server.get context.node_server_manager ~id
+         with Workspace_node_server.Error message -> fail message in
+       if session.root <> root then
+         fail "Node development server belongs to a different workspace root";
+       let stopped = try Workspace_node_server.stop context.node_server_manager ~id
+         with Workspace_node_server.Error message -> fail message in
+       Workspace_node_server.render stopped
+   | "start" ->
+       if not approved then fail "starting a mobile development server requires explicit approval";
+       Workspace_process.validate_id id;
+       let subroot = required_string "subroot" args in
+       let script = required_string "script" args in
+       let package_manager = optional_string "manager" "" args in
+       let server = try Workspace_node_server.start context.node_server_manager
+           ~id ~root ~subroot ~script ~package_manager
+           ~host:(required_string "host" args)
+           ~port:(match field "port" args with
+             | `Int port when port >= 1 && port <= 65_535 -> port
+             | _ -> fail "port must be an integer between 1 and 65535")
+           ?cancel
+           ~readiness_timeout_seconds:(optional_int "readiness_timeout_seconds" 45
+             ~minimum:1 ~maximum:300 args) ()
+         with Workspace_node_server.Error message -> fail message in
+       Workspace_node_server.render server
+   | _ -> fail "mobile development server action must be start, status or stop")
+
+let mobile_environment_setting args =
+  let setting_name = required_string "effect" args in
+  match setting_name with
+  | "locale" ->
+      Workspace_mobile_environment.Locale (required_string "locale" args)
+  | "theme" ->
+      Workspace_mobile_environment.Theme
+        (match required_string "theme" args with
+         | "light" -> Workspace_mobile_environment.Light
+         | "dark" -> Workspace_mobile_environment.Dark
+         | _ -> fail "theme must be light or dark")
+  | "orientation" ->
+      Workspace_mobile_environment.Orientation
+        (match required_string "orientation" args with
+         | "portrait" -> Workspace_mobile_environment.Portrait
+         | "landscape" -> Workspace_mobile_environment.Landscape
+         | _ -> fail "orientation must be portrait or landscape")
+  | _ -> fail "unsupported mobile environment effect"
+
+let mobile_environment_value = function
+  | Workspace_mobile_environment.Locale_value "" -> "app locale: default"
+  | Workspace_mobile_environment.Locale_value locale -> "app locale: " ^ locale
+  | Workspace_mobile_environment.Theme_value Workspace_mobile_environment.Light ->
+      "theme: light"
+  | Workspace_mobile_environment.Theme_value Workspace_mobile_environment.Dark ->
+      "theme: dark"
+  | Workspace_mobile_environment.Orientation_value (auto, rotation) ->
+      Printf.sprintf "orientation: auto=%b rotation=%d" auto rotation
+
+let mobile_environment_build_hash root session =
+  try (Workspace_mobile_report.build_identity root session).build_hash
+  with Workspace_mobile_report.Error message -> fail message
+
+let mobile_environment_plan context plan_id =
+  Mutex.lock context.mobile_lock;
+  Fun.protect ~finally:(fun () -> Mutex.unlock context.mobile_lock) (fun () ->
+    match Hashtbl.find_opt context.mobile_environment_plans plan_id with
+    | Some plan -> plan
+    | None -> fail "mobile environment plan is absent or belongs to a closed session")
+
+let mobile_environment_session ~context ~root args =
+  let id = required_string "session_id" args in
+  let session = Workspace_mobile_run.get context.mobile_run_manager id in
+  if session.root <> root then
+    fail "mobile environment session belongs to a different workspace root";
+  if session.platform <> Workspace_mobile_run.Android ||
+     session.state <> Workspace_mobile_run.Running then
+    fail "mobile environment experiments require the exact running Android app session";
+  session
+
+let mobile_environment_plan_preview ~context ~root args =
+  let action = required_string "action" args in
+  if action = "preview" then (
+    let session = mobile_environment_session ~context ~root args in
+    let build_hash = mobile_environment_build_hash root session in
+    let setting = mobile_environment_setting args in
+    let command = try Workspace_mobile_environment.observation_command session ~setting
+      with Workspace_mobile_environment.Error message -> fail message in
+    let target = match setting with
+      | Workspace_mobile_environment.Locale locale -> "locale target: " ^ locale
+      | Workspace_mobile_environment.Theme theme ->
+          "theme target: " ^ (if theme = Workspace_mobile_environment.Dark then "dark" else "light")
+      | Workspace_mobile_environment.Orientation orientation ->
+          "orientation target: " ^ (if orientation = Workspace_mobile_environment.Portrait then "portrait" else "landscape") in
+    ["Observes the exact pre-state before creating a one-session, one-build preview; no device state changes.";
+     "Session/app/device: " ^ session.id ^ " · " ^ session.app_id ^ " · " ^ session.device;
+     "Selected build SHA-256: " ^ build_hash;
+     "Theme and orientation changes affect the whole selected emulator; locale is app-specific.";
+     target;
+     "Read command: " ^ command;
+     Printf.sprintf "Maximum output: %d bytes; deadline: %d ms."
+       Workspace_mobile_environment.max_output_bytes Workspace_mobile_environment.timeout_ms]
+  ) else (
+    let plan = mobile_environment_plan context (required_string "plan_id" args) in
+    let session = mobile_environment_session ~context ~root args in
+    let build_hash = mobile_environment_build_hash root session in
+    if not (Workspace_mobile_environment.same_session session ~build_hash plan) then
+      fail "mobile environment plan belongs to a different app session or build";
+    match action with
+    | "apply" ->
+        ["Applies one approved reversible emulator-only state change after rechecking the exact preview pre-state.";
+         "Session/app/device: " ^ session.id ^ " · " ^ session.app_id ^ " · " ^ session.device;
+         "Selected build SHA-256: " ^ build_hash;
+         "Observed before: " ^ mobile_environment_value plan.before;
+         "Approved target: " ^ mobile_environment_value plan.target;
+         "Pre-state recheck: " ^ plan.observe_command;
+         "Exact change command: " ^ plan.change_command;
+         "A partial/cancelled transition leaves this plan available for separately approved restore.";
+         Printf.sprintf "Each command is bounded to %d ms and %d output bytes."
+           Workspace_mobile_environment.timeout_ms Workspace_mobile_environment.max_output_bytes]
+    | "restore" ->
+        ["Restores only if the exact current state still equals this plan's target; no automatic restore.";
+         "Session/app/device: " ^ session.id ^ " · " ^ session.app_id ^ " · " ^ session.device;
+         "Selected build SHA-256: " ^ build_hash;
+         "Original state: " ^ mobile_environment_value plan.before;
+         "Approved target: " ^ mobile_environment_value plan.target;
+         "Exact state observation: " ^ plan.observe_command;
+         "Exact restore command: " ^ plan.restore_command;
+         "Restore requires this separate explicit approval."]
+    | _ -> fail "mobile environment action must be preview, apply or restore"
+  )
+
+let mobile_environment_tool ~approved ?cancel ~context ~root args =
+  let context = require_session_context (Some context) in
+  let root = Workspace_path.root_path root in
+  let action = required_string "action" args in
+  if not approved then
+    fail "mobile environment observation or state change requires explicit interactive approval";
+  let process ~command ~timeout_ms ~max_output_bytes =
+    let result = Workspace_process.run_shell ?cancel
+      ~timeout_seconds:(max 1 (timeout_ms / 1000))
+      ~output_limit:max_output_bytes ~cwd:(Some root) ~command () in
+    match result.termination with
+    | Workspace_process.Exited 0 when not result.truncated -> result.output
+    | Workspace_process.Exited code ->
+        fail (Printf.sprintf "mobile environment command exited %d%s"
+          code (if result.truncated then " with truncated output" else ""))
+    | Workspace_process.Signaled signal ->
+        fail (Printf.sprintf "mobile environment command received signal %d" signal)
+    | Workspace_process.Timed_out -> fail "mobile environment command timed out"
+    | Workspace_process.Cancelled -> raise Cancelled in
+  match action with
+  | "preview" ->
+      let session = mobile_environment_session ~context ~root args in
+      let build_hash = mobile_environment_build_hash root session in
+      let setting = mobile_environment_setting args in
+      let command = try Workspace_mobile_environment.observation_command session ~setting
+        with Workspace_mobile_environment.Error message -> fail message in
+      let before_output = process ~command
+        ~timeout_ms:Workspace_mobile_environment.timeout_ms
+        ~max_output_bytes:Workspace_mobile_environment.max_output_bytes in
+      let after_hash = mobile_environment_build_hash root session in
+      if build_hash <> after_hash then
+        fail "selected app build changed during environment-state observation";
+      let plan = try Workspace_mobile_environment.preview session ~build_hash
+          ~setting ~before_output
+        with Workspace_mobile_environment.Error message -> fail message in
+      Mutex.lock context.mobile_lock;
+      let plan_id = Fun.protect
+        ~finally:(fun () -> Mutex.unlock context.mobile_lock) (fun () ->
+          if Hashtbl.length context.mobile_environment_plans >= 16 then
+            fail "mobile environment plan limit reached; restore or discard an existing plan";
+          context.next_mobile_environment_plan <- context.next_mobile_environment_plan + 1;
+          let id = "env-" ^ string_of_int context.next_mobile_environment_plan in
+          Hashtbl.add context.mobile_environment_plans id plan;
+          id) in
+      Yojson.Basic.to_string (`Assoc [
+        "plan_id", `String plan_id;
+        "session_id", `String plan.session_id;
+        "device", `String plan.device;
+        "build_sha256", `String plan.build_hash;
+        "observed_before", `String (mobile_environment_value plan.before);
+        "target", `String (mobile_environment_value plan.target);
+        "apply_required", `Bool true;
+        "restore_required", `Bool true])
+  | "apply" ->
+      let plan = mobile_environment_plan context (required_string "plan_id" args) in
+      let session = mobile_environment_session ~context ~root args in
+      let build_hash = mobile_environment_build_hash root session in
+      let cancelled = ref false in
+      let run ~command ~timeout_ms ~max_output_bytes ~cancelled =
+        try process ~command ~timeout_ms ~max_output_bytes
+        with Cancelled -> cancelled := true; raise Cancelled in
+      let observe ~command ~timeout_ms ~max_output_bytes ~cancelled:_ =
+        process ~command ~timeout_ms ~max_output_bytes in
+      (try ignore (Workspace_mobile_environment.execute session ~build_hash
+        ~approved:true ~cancelled ~run ~observe plan)
+       with Workspace_mobile_environment.Error message -> fail message);
+      if mobile_environment_build_hash root session <> build_hash then
+        fail "selected app build changed during environment transition; restoration remains available";
+      Yojson.Basic.to_string (`Assoc [
+        "plan_id", `String (required_string "plan_id" args);
+        "status", `String "applied";
+        "build_sha256", `String build_hash;
+        "target", `String (mobile_environment_value plan.target);
+        "restore_action", `String "restore"])
+  | "restore" ->
+      let plan_id = required_string "plan_id" args in
+      let plan = mobile_environment_plan context plan_id in
+      let session = mobile_environment_session ~context ~root args in
+      let build_hash = mobile_environment_build_hash root session in
+      let cancelled = ref false in
+      let run ~command ~timeout_ms ~max_output_bytes ~cancelled =
+        try process ~command ~timeout_ms ~max_output_bytes
+        with Cancelled -> cancelled := true; raise Cancelled in
+      let observe ~command ~timeout_ms ~max_output_bytes ~cancelled:_ =
+        process ~command ~timeout_ms ~max_output_bytes in
+      let ownership : Workspace_mobile_environment.ownership = { plan } in
+      let result = try Workspace_mobile_environment.restore session ~build_hash
+          ~approved:true ~cancelled ~run ~observe ownership
+        with Workspace_mobile_environment.Error message -> fail message in
+      (match result with
+       | Workspace_mobile_environment.Restored
+       | Workspace_mobile_environment.Already_changed ->
+           Mutex.lock context.mobile_lock;
+           Hashtbl.remove context.mobile_environment_plans plan_id;
+           Mutex.unlock context.mobile_lock
+       | Workspace_mobile_environment.Restore_failed _ -> ());
+      let status = match result with
+        | Workspace_mobile_environment.Restored -> "restored"
+        | Workspace_mobile_environment.Already_changed -> "state_changed_not_restored"
+        | Workspace_mobile_environment.Restore_failed message -> "restore_failed: " ^ message in
+      Yojson.Basic.to_string (`Assoc [
+        "plan_id", `String plan_id;
+        "status", `String status;
+        "build_sha256", `String build_hash;
+        "original", `String (mobile_environment_value plan.before)])
+  | _ -> fail "mobile environment action must be preview, apply or restore"
+
+let mobile_lifecycle_session ~context ~root args =
+  let id = required_string "session_id" args in
+  let session = try Workspace_mobile_run.get context.mobile_run_manager id
+    with Workspace_mobile_run.Error message -> fail message in
+  if session.root <> root then
+    fail "mobile lifecycle session belongs to a different workspace root";
+  if session.platform <> Workspace_mobile_run.Android then
+    fail "live selected-app lifecycle operations are currently Android-only";
+  if session.state = Workspace_mobile_run.Selected then
+    fail "mobile lifecycle operations require a built selected app";
+  session
+
+let mobile_lifecycle_identity root session =
+  try
+    let build = Workspace_mobile_report.build_identity root session in
+    Workspace_mobile_app_lifecycle.identity_of_session session
+      ~build_id:build.Workspace_mobile_report.build_hash
+  with
+  | Workspace_mobile_report.Error message
+  | Workspace_mobile_app_lifecycle.Error message -> fail message
+
+let mobile_lifecycle_next_generation context session_id =
+  Mutex.lock context.mobile_lock;
+  Fun.protect ~finally:(fun () -> Mutex.unlock context.mobile_lock) (fun () ->
+    let previous = Option.value ~default:0
+      (Hashtbl.find_opt context.mobile_lifecycle_generations session_id) in
+    if previous = max_int then fail "mobile lifecycle observation generation exhausted";
+    let generation = previous + 1 in
+    Hashtbl.replace context.mobile_lifecycle_generations session_id generation;
+    generation)
+
+let mobile_lifecycle_observation context session_id =
+  Mutex.lock context.mobile_lock;
+  Fun.protect ~finally:(fun () -> Mutex.unlock context.mobile_lock) (fun () ->
+    Hashtbl.find_opt context.mobile_lifecycle_observations session_id)
+
+let mobile_lifecycle_cache_handlers context session_id =
+  Mutex.lock context.mobile_lock;
+  Fun.protect ~finally:(fun () -> Mutex.unlock context.mobile_lock) (fun () ->
+    Hashtbl.find_opt context.mobile_lifecycle_handlers session_id)
+
+let mobile_lifecycle_process ?cancel ?on_progress ~root command =
+  let result = Workspace_process.run_shell ?cancel ?on_progress
+    ~timeout_seconds:20
+    ~output_limit:Workspace_mobile_app_lifecycle.max_manifest_bytes
+    ~cwd:(Some root) ~command () in
+  match result.termination with
+  | Workspace_process.Exited 0 when not result.truncated -> result.output
+  | Workspace_process.Exited code ->
+      fail (Printf.sprintf "mobile lifecycle command exited %d%s%s" code
+        (if result.truncated then " with truncated output" else "")
+        (if result.output = "" then "" else ": " ^ result.output))
+  | Workspace_process.Signaled signal ->
+      fail (Printf.sprintf "mobile lifecycle command received signal %d" signal)
+  | Workspace_process.Timed_out -> fail "mobile lifecycle command timed out"
+  | Workspace_process.Cancelled -> raise Cancelled
+
+let mobile_lifecycle_accessibility ?cancel ?on_progress ~root session =
+  let command = try Workspace_mobile_observe.command "accessibility" session
+    with Workspace_mobile_observe.Error message -> fail message in
+  let output = mobile_lifecycle_process ?cancel ?on_progress ~root command in
+  try Workspace_mobile_observe.parse_accessibility output
+  with Workspace_mobile_observe.Error message -> fail message
+
+let mobile_lifecycle_observe ?cancel ?on_progress ~context ~root
+    (session : Workspace_mobile_run.session) =
+  if session.state <> Workspace_mobile_run.Running then
+    fail "fresh lifecycle observation requires a running selected-app session";
+  let before = mobile_lifecycle_identity root session in
+  let generation = mobile_lifecycle_next_generation context session.id in
+  let command = try Workspace_mobile_app_lifecycle.observation_command session
+    with Workspace_mobile_app_lifecycle.Error message -> fail message in
+  let output = mobile_lifecycle_process ?cancel ?on_progress ~root command in
+  let after = mobile_lifecycle_identity root session in
+  if not (Workspace_mobile_app_lifecycle.same_identity before after) then
+    fail "selected app build changed during lifecycle observation";
+  let observation = try Workspace_mobile_app_lifecycle.parse_observation
+      ~identity:after ~generation output
+    with Workspace_mobile_app_lifecycle.Error message -> fail message in
+  Mutex.lock context.mobile_lock;
+  Hashtbl.replace context.mobile_lifecycle_observations session.id observation;
+  Mutex.unlock context.mobile_lock;
+  observation
+
+let mobile_lifecycle_transition = function
+  | "background" -> Workspace_mobile_app_lifecycle.Background
+  | "resume" -> Workspace_mobile_app_lifecycle.Resume
+  | "recreate_process" -> Workspace_mobile_app_lifecycle.Recreate_process
+  | _ -> fail "transition must be background, resume or recreate_process"
+
+let mobile_app_lifecycle_tool ~approved ?cancel ?on_progress ~context ~root args =
+  let action = required_string "action" args in
+  if not approved && not (List.mem action ["list_scenarios"; "show_scenario"]) then
+    fail "mobile app lifecycle actions require explicit interactive approval";
+  let context = require_session_context (Some context) in
+  let root = Workspace_path.root_path root in
+  let get_scenario name =
+    try Workspace_mobile_app_lifecycle.load ~root name
+    with Workspace_mobile_app_lifecycle.Error message -> fail message in
+  match action with
+  | "inspect_handlers" ->
+      let session = mobile_lifecycle_session ~context ~root args in
+      Mutex.lock context.mobile_lock;
+      Hashtbl.remove context.mobile_lifecycle_handlers session.id;
+      Mutex.unlock context.mobile_lock;
+      let before = mobile_lifecycle_identity root session in
+      let apk = Workspace_path.checked_path root session.app_path in
+      let command = "apkanalyzer manifest print " ^ Filename.quote apk in
+      let output = mobile_lifecycle_process ?cancel ?on_progress ~root command in
+      let handlers = try Workspace_mobile_app_lifecycle.manifest_handlers
+          ~app_id:session.app_id output
+        with Workspace_mobile_app_lifecycle.Error message -> fail message in
+      let after = mobile_lifecycle_identity root session in
+      if not (Workspace_mobile_app_lifecycle.same_identity before after) then
+        fail "selected APK changed during URL-handler inspection";
+      Mutex.lock context.mobile_lock;
+      Hashtbl.replace context.mobile_lifecycle_handlers session.id
+        { build_hash = after.build_id; handlers };
+      Mutex.unlock context.mobile_lock;
+      let indexed = List.mapi (fun index
+          (handler : Workspace_mobile_app_lifecycle.handler) ->
+        `Assoc [
+          "handler_id", `String ("handler-" ^ string_of_int (index + 1));
+          "activity", `String handler.Workspace_mobile_app_lifecycle.activity;
+          "scheme", `String handler.scheme; "host", `String handler.host;
+          "path", `String handler.path]) handlers in
+      Yojson.Basic.to_string (`Assoc [
+        "session_id", `String session.id; "app_id", `String session.app_id;
+        "build_sha256", `String after.build_id;
+        "handler_evidence", `List indexed])
+  | "open_link" ->
+      let session = mobile_lifecycle_session ~context ~root args in
+      if session.state <> Workspace_mobile_run.Running then
+        fail "selected-app deep links require the selected app to be running";
+      let identity = mobile_lifecycle_identity root session in
+      let cache = match mobile_lifecycle_cache_handlers context session.id with
+        | Some cache when cache.build_hash = identity.build_id -> cache
+        | _ ->
+            Mutex.lock context.mobile_lock;
+            Hashtbl.remove context.mobile_lifecycle_handlers session.id;
+            Mutex.unlock context.mobile_lock;
+            fail "inspect URL handlers again; approved manifest evidence is missing or stale" in
+      let handler_id = required_string "handler_id" args in
+      let handler_index =
+        if String.starts_with ~prefix:"handler-" handler_id then
+          int_of_string_opt (String.sub handler_id 8 (String.length handler_id - 8))
+        else None in
+      let handler = match handler_index with
+        | Some index when index > 0 ->
+            (try List.nth cache.handlers (index - 1) with _ ->
+              fail "handler_id is not in the inspected selected-app manifest")
+        | _ -> fail "handler_id is not an inspected handler" in
+      let command, link = try Workspace_mobile_app_lifecycle.deep_link_preview
+          ~approved_evidence:true session ~handler
+          ~url:(required_string "url" args)
+        with Workspace_mobile_app_lifecycle.Error message -> fail message in
+      let output = mobile_lifecycle_process ?cancel ?on_progress ~root command in
+      let before = mobile_lifecycle_observe ?cancel ?on_progress
+        ~context ~root session in
+      let require_handler
+          (observation : Workspace_mobile_app_lifecycle.observation) =
+        if not (Workspace_mobile_app_lifecycle.same_identity identity observation.identity) then
+          fail "selected build changed while verifying the deep-link dispatch";
+        if observation.state <> Workspace_mobile_app_lifecycle.Foreground ||
+           observation.resumed_activity <> Some handler.activity then
+          fail ("deep-link dispatch did not verify the exact handler activity; observed " ^
+            Option.value ~default:"no selected-app resumed activity"
+              observation.resumed_activity) in
+      require_handler before;
+      let nodes = mobile_lifecycle_accessibility ?cancel ?on_progress ~root session in
+      let after = mobile_lifecycle_observe ?cancel ?on_progress
+        ~context ~root session in
+      require_handler after;
+      let assertion = required_string "destination_assertion" args in
+      let verified = try Workspace_mobile_app_lifecycle.verify_deep_link_destination
+          ~identity ~generation:before.generation ~link
+          ~observation:{ Workspace_mobile_app_lifecycle.identity = identity;
+            generation = before.generation; nodes } ~assertion
+        with Workspace_mobile_app_lifecycle.Error message -> fail message in
+      Yojson.Basic.to_string (`Assoc [
+        "session_id", `String session.id; "handler_id", `String handler_id;
+        "url", `String link.url; "command_status", `String "exited_zero";
+        "output", `String output; "handler_verified", `Bool true;
+        "observed_resumed_activity", `String handler.activity;
+        "destination_content_verified", `Bool true;
+        "destination_assertion", `String verified.assertion;
+        "destination_observation_generation", `Int verified.generation;
+        "accessibility_node_count", `Int (List.length nodes)])
+  | "observe" ->
+      let session = mobile_lifecycle_session ~context ~root args in
+      let observation = mobile_lifecycle_observe ?cancel ?on_progress
+        ~context ~root session in
+      Yojson.Basic.to_string (`Assoc [
+        "session_id", `String session.id;
+        "state", `String (Workspace_mobile_app_lifecycle.state_name observation.state);
+        "generation", `Int observation.generation;
+        "process_id", (match observation.process_id with None -> `Null | Some pid -> `Int pid);
+        "resumed_activity", (match observation.resumed_activity with
+          | None -> `Null | Some activity -> `String activity);
+        "build_sha256", `String observation.identity.build_id])
+  | "create_scenario" ->
+      let session = mobile_lifecycle_session ~context ~root args in
+      if session.state <> Workspace_mobile_run.Running then
+        fail "lifecycle scenario creation requires a running selected app session";
+      let identity = mobile_lifecycle_identity root session in
+      let observation = match mobile_lifecycle_observation context session.id with
+        | Some observation when Workspace_mobile_app_lifecycle.same_identity
+            identity observation.identity -> observation
+        | _ -> fail "observe the exact selected app after build before creating a lifecycle scenario" in
+      if observation.state <> Workspace_mobile_app_lifecycle.Foreground ||
+         observation.process_id = None then
+        fail "lifecycle scenario creation requires a foreground selected app with a verified PID";
+      let name = required_string "name" args in
+      let record = try Workspace_mobile_app_lifecycle.create_record ~name ~identity
+        with Workspace_mobile_app_lifecycle.Error message -> fail message in
+      record.state <- observation.state;
+      record.generation <- observation.generation;
+      record.process_id <- observation.process_id;
+      (try Workspace_mobile_app_lifecycle.save ~root record
+       with Workspace_mobile_app_lifecycle.Error message -> fail message);
+      Yojson.Basic.to_string (`Assoc [
+        "scenario", Workspace_mobile_app_lifecycle.record_json record;
+        "device_state_changed", `Bool false])
+  | "transition" ->
+      let session = mobile_lifecycle_session ~context ~root args in
+      if session.state <> Workspace_mobile_run.Running then
+        fail "lifecycle transitions require a running selected-app session";
+      let identity = mobile_lifecycle_identity root session in
+      let record = get_scenario (required_string "name" args) in
+      if not (Workspace_mobile_app_lifecycle.same_identity identity record.identity) then
+        fail "scenario belongs to a different selected build, app or device";
+      let observation = match mobile_lifecycle_observation context session.id with
+        | Some observation -> observation
+        | None -> fail "take a fresh lifecycle observation before transitioning" in
+      let activity = match session.activity with
+        | Some activity -> activity
+        | None -> fail "selected app session has no approved launch activity" in
+      let transition = mobile_lifecycle_transition (required_string "transition" args) in
+      let run command = ignore (mobile_lifecycle_process ?cancel ?on_progress ~root command) in
+      let observe () = mobile_lifecycle_observe ?cancel ?on_progress
+        ~context ~root session in
+      let after = try Workspace_mobile_app_lifecycle.run_transition record
+          ~approved:true ~observation ~activity ~run ~observe transition
+        with exn ->
+          (match record.state with
+           | Workspace_mobile_app_lifecycle.Failed _ ->
+               (try Workspace_mobile_app_lifecycle.update ~root record
+                with Workspace_mobile_app_lifecycle.Error message ->
+                  fail ("transition failed and its scenario could not be persisted: " ^ message))
+           | _ -> ());
+          raise exn in
+      (try Workspace_mobile_app_lifecycle.update ~root record
+       with Workspace_mobile_app_lifecycle.Error message -> fail message);
+      Yojson.Basic.to_string (`Assoc [
+        "scenario", Workspace_mobile_app_lifecycle.record_json record;
+        "observed_state", `String (Workspace_mobile_app_lifecycle.state_name after.state);
+        "generation", `Int after.generation;
+        "process_id", (match after.process_id with None -> `Null | Some pid -> `Int pid)])
+  | "list_scenarios" ->
+      let records = try Workspace_mobile_app_lifecycle.list ~root
+        with Workspace_mobile_app_lifecycle.Error message -> fail message in
+      Yojson.Basic.to_string (`List
+        (List.map Workspace_mobile_app_lifecycle.record_json records))
+  | "show_scenario" ->
+      Workspace_mobile_app_lifecycle.record_json
+        (get_scenario (required_string "name" args))
+      |> Yojson.Basic.to_string
+  | "delete_scenario" ->
+      let name = required_string "name" args in
+      (try Workspace_mobile_app_lifecycle.delete ~root name
+       with Workspace_mobile_app_lifecycle.Error message -> fail message);
+      Yojson.Basic.to_string (`Assoc ["deleted_scenario", `String name])
+  | _ ->
+      fail "mobile_app_lifecycle action must be inspect_handlers, open_link, observe, create_scenario, transition, list_scenarios, show_scenario or delete_scenario"
+
+let mobile_performance_session ~context ~root args =
+  let id = required_string "session_id" args in
+  let session = try Workspace_mobile_run.get context.mobile_run_manager id
+    with Workspace_mobile_run.Error message -> fail message in
+  if session.root <> root then
+    fail "mobile performance session belongs to a different workspace root";
+  if session.state <> Workspace_mobile_run.Running then
+    fail "mobile performance requires a running selected app session";
+  session
+
+let mobile_performance_identity root session =
+  try Workspace_mobile_report.build_identity root session
+  with Workspace_mobile_report.Error message -> fail message
+
+let mobile_performance_cached_target context session_id =
+  Mutex.lock context.mobile_lock;
+  Fun.protect ~finally:(fun () -> Mutex.unlock context.mobile_lock) (fun () ->
+    Hashtbl.find_opt context.mobile_performance_targets session_id)
+
+let mobile_performance_cache_target context session_id target =
+  Mutex.lock context.mobile_lock;
+  Fun.protect ~finally:(fun () -> Mutex.unlock context.mobile_lock) (fun () ->
+    Hashtbl.replace context.mobile_performance_targets session_id target)
+
+let mobile_performance_clear_target context session_id =
+  Mutex.lock context.mobile_lock;
+  Fun.protect ~finally:(fun () -> Mutex.unlock context.mobile_lock) (fun () ->
+    Hashtbl.remove context.mobile_performance_targets session_id)
+
+let mobile_performance_cached_templates context session_id =
+  Mutex.lock context.mobile_lock;
+  Fun.protect ~finally:(fun () -> Mutex.unlock context.mobile_lock) (fun () ->
+    Hashtbl.find_opt context.mobile_performance_templates session_id)
+
+let mobile_performance_cache_templates context session_id templates =
+  Mutex.lock context.mobile_lock;
+  Fun.protect ~finally:(fun () -> Mutex.unlock context.mobile_lock) (fun () ->
+    Hashtbl.replace context.mobile_performance_templates session_id templates)
+
+let mobile_performance_ios_process_command
+    (session : Workspace_mobile_run.session) =
+  if session.platform <> Workspace_mobile_run.Ios then
+    fail "iOS process inspection requires an iOS Simulator session";
+  "xcrun simctl spawn " ^ Filename.quote session.device ^ " launchctl list"
+
+let mobile_performance_ios_pid app_id output =
+  let marker = "UIKitApplication:" ^ app_id ^ "[" in
+  let rows = String.split_on_char '\n' output |> List.filter_map (fun line ->
+    let fields = String.split_on_char '\t' line
+      |> List.concat_map (String.split_on_char ' ')
+      |> List.filter (fun value -> value <> "") in
+    match fields with
+    | pid_text :: _status :: label :: _
+      when starts_with label marker && String.ends_with ~suffix:"]" label ->
+        (match int_of_string_opt pid_text with
+         | Some pid when pid > 0 && pid <= 4_194_304 -> Some pid
+         | _ -> fail "simulator launchctl returned an invalid selected-app PID")
+    | _ -> None) in
+  match List.sort_uniq Int.compare rows with
+  | [pid] -> pid
+  | [] -> fail "simulator launchctl did not expose one exact UIKitApplication process for the selected app"
+  | _ -> fail "simulator launchctl exposed multiple selected-app processes"
+
+let mobile_performance_run ?cancel ?on_progress ~root command =
+  Workspace_process.run_shell ?cancel ?on_progress
+    ~timeout_seconds:(Workspace_mobile_performance.max_capture_seconds + 15)
+    ~output_limit:Workspace_mobile_performance.max_output_bytes
+    ~cwd:(Some root) ~command ()
+
+
+let mobile_performance_exit_code result =
+  match result.Workspace_process.termination with
+  | Workspace_process.Exited code -> code
+  | Workspace_process.Signaled _ | Workspace_process.Timed_out
+  | Workspace_process.Cancelled -> -1
+
+let mobile_performance_require_result result =
+  match result.Workspace_process.termination with
+  | Workspace_process.Cancelled -> raise Cancelled
+  | Workspace_process.Exited _ | Workspace_process.Signaled _
+  | Workspace_process.Timed_out -> ()
+
+let mobile_performance_revalidate_android_pid ?cancel ?on_progress ~root session pid =
+  let before = mobile_performance_identity root session in
+  let command = try Workspace_mobile_performance.android_revalidate_pid_command session ~pid
+    with Workspace_mobile_performance.Error message -> fail message in
+  let result = mobile_performance_run ?cancel ?on_progress ~root command in
+  (match result.Workspace_process.termination with
+   | Workspace_process.Cancelled -> raise Cancelled
+   | Workspace_process.Exited 0 when not result.truncated -> ()
+   | _ -> fail "selected Android app PID changed or could not be revalidated immediately before capture");
+  let expected = "PAVE_SELECTED_PID=" ^ string_of_int pid in
+  let markers = String.split_on_char '\n' result.output |> List.map String.trim
+    |> List.filter (String.starts_with ~prefix:"PAVE_SELECTED_PID=") in
+  if markers <> [expected] then
+    fail "fresh Android PID revalidation did not identify exactly the selected process";
+  let after = mobile_performance_identity root session in
+  if before <> after then
+    fail "selected build changed during immediate Android PID revalidation"
+
+let mobile_performance_revalidate_ios_pid ?cancel ?on_progress ~root session pid =
+  let before = mobile_performance_identity root session in
+  let result = mobile_performance_run ?cancel ?on_progress ~root
+    (mobile_performance_ios_process_command session) in
+  (match result.Workspace_process.termination with
+   | Workspace_process.Cancelled -> raise Cancelled
+   | Workspace_process.Exited 0 when not result.truncated -> ()
+   | _ -> fail "selected simulator process list failed immediately before trace capture");
+  let current = try mobile_performance_ios_pid session.app_id result.output
+    with Tool_error message -> fail message in
+  if current <> pid then fail "selected simulator app PID changed immediately before trace capture";
+  let after = mobile_performance_identity root session in
+  if before <> after then
+    fail "selected build changed during immediate simulator PID revalidation"
+
+let mobile_performance_trace_path ~root
+    (session : Workspace_mobile_run.session) name =
+  if String.length name < 1 || String.length name > 80 ||
+     not (String.for_all (function
+       | 'a'..'z' | 'A'..'Z' | '0'..'9' | '_' | '-' -> true
+       | _ -> false) name) then
+    fail "trace name must contain 1..80 ASCII letters, digits, underscores or hyphens";
+  let relative = ".pave/mobile-performance/" ^ session.id ^ "-" ^ name ^ ".trace" in
+  let absolute = Filename.concat root relative in
+  (try
+     ignore (Unix.lstat absolute);
+     fail "trace output already exists; choose a new trace name"
+   with Unix.Unix_error (Unix.ENOENT, _, _) -> ());
+  relative, absolute
+
+let mobile_performance_prepare_trace_directory root =
+  let root = try Unix.realpath root with _ -> fail "workspace root is unavailable" in
+  let pave = Filename.concat root ".pave" in
+  (try Unix.mkdir pave 0o700 with Unix.Unix_error (Unix.EEXIST, _, _) -> ());
+  let pave_stat = try Unix.lstat pave with _ -> fail "workspace .pave directory is unavailable" in
+  if pave_stat.Unix.st_kind <> Unix.S_DIR || pave_stat.Unix.st_uid <> Unix.geteuid () then
+    fail "workspace .pave path must be an owner-controlled directory";
+  let directory = Filename.concat pave "mobile-performance" in
+  (try Unix.mkdir directory 0o700 with Unix.Unix_error (Unix.EEXIST, _, _) -> ());
+  let stat = try Unix.lstat directory with _ -> fail "mobile performance directory is unavailable" in
+  if stat.Unix.st_kind <> Unix.S_DIR || stat.Unix.st_uid <> Unix.geteuid () ||
+     stat.Unix.st_perm land 0o077 <> 0 then
+    fail "mobile performance output directory must be a private owner-controlled directory"
+
+let mobile_performance_android_target context session identity =
+  match mobile_performance_cached_target context session.Workspace_mobile_run.id with
+  | Some target when target.build_hash = identity.Workspace_mobile_report.build_hash -> target
+  | _ ->
+      (match mobile_lifecycle_observation context session.id with
+       | Some observation
+         when observation.identity.build_id = identity.build_hash &&
+              observation.state = Workspace_mobile_app_lifecycle.Foreground ->
+           (match observation.process_id with
+            | Some pid ->
+                let target = { build_hash = identity.build_hash; pid } in
+                mobile_performance_cache_target context session.id target;
+                target
+            | None -> fail "fresh selected-app lifecycle observation has no verified PID")
+       | _ -> fail "run an approved launch measurement or fresh lifecycle observation for this exact build first")
+
+let mobile_performance_preview ~context ~root args =
+  let session = mobile_performance_session ~context ~root args in
+  let identity = mobile_performance_identity root session in
+  let action = required_string "action" args in
+  let command, extra =
+    match action, session.platform with
+    | "launch", Workspace_mobile_run.Android ->
+        let condition = required_string "condition" args in
+        Workspace_mobile_performance.android_command ~action session ~condition (),
+        [if condition = "cold" then
+           "Cold launch force-stops only the selected app; app data is not cleared."
+         else
+           "Warm launch requires a pre-existing app PID and verifies that the PID survives ActivityManager startup.";
+         "The report includes exact condition, one complete ActivityManager sample and the selected PID."]
+    | ("frames" | "memory"), Workspace_mobile_run.Android ->
+        let condition = required_string "condition" args in
+        let target = mobile_performance_android_target context session identity in
+        let revalidate = Workspace_mobile_performance.android_revalidate_pid_command
+          session ~pid:target.pid in
+        Workspace_mobile_performance.android_command ~action session
+          ~pid:target.pid ~condition (),
+        ["Condition: " ^ condition;
+         "Exact selected process ID: " ^ string_of_int target.pid;
+         "Run immediately before capture: " ^ revalidate;
+         "The capture command independently rechecks the package PID; frames/PSS become available only for the exact PID and a complete known-unit sample."]
+    | "ios_templates", Workspace_mobile_run.Ios ->
+        Workspace_mobile_performance.ios_templates_command,
+        ["Only installed allowlisted templates are cached; no trace is started."]
+    | "ios_process", Workspace_mobile_run.Ios ->
+        mobile_performance_ios_process_command session,
+        ["Reads simulator launchctl process labels and accepts only one exact UIKitApplication bundle-ID match."]
+    | "ios_capture", Workspace_mobile_run.Ios ->
+        let condition = required_string "condition" args in
+        if condition <> "warm" then
+          fail "iOS trace capture currently accepts only a verified warm process; cold-start measurement is unavailable";
+        let target = match mobile_performance_cached_target context session.id with
+          | Some target when target.build_hash = identity.build_hash -> target
+          | _ -> fail "inspect the exact selected simulator process again for this build first" in
+        let installed = match mobile_performance_cached_templates context session.id with
+          | Some cache when cache.template_build_hash = identity.build_hash -> cache.names
+          | _ -> fail "list xctrace templates again for this exact build first" in
+        let template = required_string "template" args in
+        let _, output_path = mobile_performance_trace_path ~root session
+            (required_string "name" args) in
+        let command = Workspace_mobile_performance.ios_command ~template
+          ~installed_templates:installed ~pid:target.pid ~output_path session in
+        let revalidate = mobile_performance_ios_process_command session in
+        command,
+        ["Condition: verified warm process; raw trace only, not a parsed measurement.";
+         "Immediately before capture, require this process-list command to return the exact cached PID: " ^ revalidate;
+         "Trace bundle: " ^ output_path;
+         Printf.sprintf "Capture limit: %d seconds; process output limit: %d bytes."
+           Workspace_mobile_performance.max_capture_seconds
+           Workspace_mobile_performance.max_output_bytes;
+         "No energy or performance counter is inferred from the raw bundle."]
+    | _ -> fail "mobile performance action is unsupported for the selected platform" in
+  ("Captures one explicitly approved measurement from the exact running selected app; output may contain private runtime data.",
+   ["Session/app/device: " ^ session.id ^ " · " ^ session.app_id ^ " · " ^ session.device;
+    "Selected build SHA-256: " ^ identity.build_hash;
+    "Exact command: " ^ command;
+    Printf.sprintf "Deadline: %d seconds; captured output limit: %d bytes."
+      (Workspace_mobile_performance.max_capture_seconds + 15)
+      Workspace_mobile_performance.max_output_bytes] @ extra)
+
+let mobile_performance_tool ~approved ?cancel ?on_progress ~context ~root args =
+  if not approved then fail "mobile performance measurements require explicit interactive approval";
+  let context = require_session_context (Some context) in
+  let root = Workspace_path.root_path root in
+  let session = mobile_performance_session ~context ~root args in
+  let identity = mobile_performance_identity root session in
+  let action = required_string "action" args in
+  let run command =
+    let result = mobile_performance_run ?cancel ?on_progress ~root command in
+    mobile_performance_require_result result;
+    result in
+  let result_json report = Workspace_mobile_performance.report_json report in
+  match action, session.platform with
+  | "launch", Workspace_mobile_run.Android ->
+      mobile_performance_clear_target context session.id;
+      let condition = required_string "condition" args in
+      let command = Workspace_mobile_performance.android_command ~action session ~condition () in
+      let result = run command in
+      let after = mobile_performance_identity root session in
+      if identity <> after then
+        fail "selected build changed during Android launch measurement";
+      let report = try Workspace_mobile_performance.parse_android_launch session
+          ~condition ~output:result.output ~truncated:result.truncated
+          ~exit_code:(mobile_performance_exit_code result)
+        with Workspace_mobile_performance.Error message -> fail message in
+      (match report.pid with
+       | Some pid when report.status = "available" ->
+           mobile_performance_revalidate_android_pid ?cancel ?on_progress
+             ~root session pid;
+           mobile_performance_cache_target context session.id
+             { build_hash = identity.build_hash; pid }
+       | _ -> ());
+      result_json { report with build = identity.build_hash }
+  | ("frames" | "memory"), Workspace_mobile_run.Android ->
+      let condition = required_string "condition" args in
+      let target = mobile_performance_android_target context session identity in
+      mobile_performance_revalidate_android_pid ?cancel ?on_progress
+        ~root session target.pid;
+      let command = try Workspace_mobile_performance.android_command
+          ~action session ~pid:target.pid ~condition ()
+        with Workspace_mobile_performance.Error message -> fail message in
+      let result = run command in
+      let after = mobile_performance_identity root session in
+      if identity <> after then
+        fail "selected build changed during Android measurement";
+      let report = try Workspace_mobile_performance.parse_android ~action session
+          ~pid:target.pid ~condition ~output:result.output ~truncated:result.truncated
+          ~exit_code:(mobile_performance_exit_code result)
+        with Workspace_mobile_performance.Error message -> fail message in
+      result_json { report with build = identity.build_hash }
+  | "ios_templates", Workspace_mobile_run.Ios ->
+      mobile_performance_clear_target context session.id;
+      let result = run Workspace_mobile_performance.ios_templates_command in
+      let after = mobile_performance_identity root session in
+      if identity <> after then
+        fail "selected iOS build changed while listing Instruments templates";
+      let templates = try Workspace_mobile_performance.ios_templates
+          result.output ~truncated:result.truncated
+        with Workspace_mobile_performance.Error message -> fail message in
+      let templates = if mobile_performance_exit_code result = 0 then templates else [] in
+      mobile_performance_cache_templates context session.id
+        { template_build_hash = identity.build_hash; names = templates };
+      Yojson.Basic.to_string (`Assoc [
+        "session_id", `String session.id; "status",
+        `String (if templates = [] then "unavailable" else "available");
+        "installed_templates", `List (List.map (fun name -> `String name) templates);
+        "reason", `String (if templates = [] then
+          "no allowlisted xctrace template was confirmed" else "listed by xctrace")])
+  | "ios_process", Workspace_mobile_run.Ios ->
+      mobile_performance_clear_target context session.id;
+      let result = run (mobile_performance_ios_process_command session) in
+      if mobile_performance_exit_code result <> 0 || result.truncated then
+        fail "simulator launchctl process listing did not complete successfully";
+      let after = mobile_performance_identity root session in
+      if identity <> after then
+        fail "selected iOS build changed during process inspection";
+      let pid = try mobile_performance_ios_pid session.app_id result.output
+        with Tool_error message -> fail message in
+      mobile_performance_cache_target context session.id
+        { build_hash = identity.build_hash; pid };
+      Yojson.Basic.to_string (`Assoc [
+        "session_id", `String session.id; "app_id", `String session.app_id;
+        "device", `String session.device; "process_id", `Int pid;
+        "source", `String "xcrun simctl spawn launchctl list";
+        "status", `String "available"])
+  | "ios_capture", Workspace_mobile_run.Ios ->
+      let condition = required_string "condition" args in
+      if condition <> "warm" then
+        fail "iOS trace capture currently accepts only a verified warm process; cold-start measurement is unavailable";
+      let target = match mobile_performance_cached_target context session.id with
+        | Some target when target.build_hash = identity.build_hash -> target
+        | _ -> fail "inspect the exact selected simulator process again for this build first" in
+      let installed = match mobile_performance_cached_templates context session.id with
+        | Some cache when cache.template_build_hash = identity.build_hash -> cache.names
+        | _ -> fail "list xctrace templates again for this exact build first" in
+      let template = required_string "template" args in
+      let relative, output_path = mobile_performance_trace_path ~root session
+          (required_string "name" args) in
+      let command = try Workspace_mobile_performance.ios_command
+          ~template ~installed_templates:installed ~pid:target.pid ~output_path session
+        with Workspace_mobile_performance.Error message -> fail message in
+      mobile_performance_prepare_trace_directory root;
+      mobile_performance_revalidate_ios_pid ?cancel ?on_progress
+        ~root session target.pid;
+      let result = run command in
+      let after = mobile_performance_identity root session in
+      if identity <> after then
+        fail "selected iOS build changed during Instruments capture";
+      let stat = try Unix.lstat output_path with _ -> fail "xctrace completed without creating its trace bundle" in
+      if stat.Unix.st_kind <> Unix.S_DIR || stat.Unix.st_uid <> Unix.geteuid () then
+        fail "xctrace output must be an owner-controlled trace directory";
+      (try Unix.chmod output_path 0o700 with _ -> fail "could not make the trace bundle private");
+      let trace_hash = try Workspace_mobile_report.hash_build root relative
+        with Workspace_mobile_report.Error message -> fail message in
+      let report = try Workspace_mobile_performance.parse_ios_capture session
+          ~template ~pid:target.pid ~condition ~output_path ~output:result.output
+          ~truncated:result.truncated ~exit_code:(mobile_performance_exit_code result)
+        with Workspace_mobile_performance.Error message -> fail message in
+      let report = { report with build = identity.build_hash;
+        status = if report.status = "available" then "trace_captured" else report.status } in
+      Yojson.Basic.to_string (`Assoc [
+        "report", Yojson.Basic.from_string (result_json report);
+        "trace_sha256", `String trace_hash;
+        "counters_parsed", `Bool false;
+        "counter_status_reason", `String "raw xctrace bundle captured; supported counter export is not implemented"])
+  | _ -> fail "mobile performance action is unsupported for the selected platform"
+
+let mobile_device_cache context inventory_id =
+  Mutex.lock context.mobile_lock;
+  Fun.protect ~finally:(fun () -> Mutex.unlock context.mobile_lock) (fun () ->
+    Hashtbl.find_opt context.mobile_device_inventories inventory_id)
+
+let mobile_device_state_key inventory target =
+  Workspace_mobile_device_lifecycle.inventory_id inventory ^ "\000" ^
+  Workspace_mobile_device_lifecycle.target_id target
+
+let mobile_device_run ?cancel ?on_progress ~root ?(timeout_seconds = 15) command =
+  let result = Workspace_process.run_shell ?cancel ?on_progress
+    ~timeout_seconds ~output_limit:Workspace_mobile_device_lifecycle.max_output_bytes
+    ~cwd:(Some root) ~command () in
+  match result.termination with
+  | Workspace_process.Exited 0 when not result.truncated -> result.output
+  | Workspace_process.Exited code ->
+      fail (Printf.sprintf "mobile device command exited %d%s%s" code
+        (if result.truncated then " with truncated output" else "")
+        (if result.output = "" then "" else ": " ^ result.output))
+  | Workspace_process.Signaled signal ->
+      fail (Printf.sprintf "mobile device command received signal %d" signal)
+  | Workspace_process.Timed_out -> fail "mobile device command timed out"
+  | Workspace_process.Cancelled -> raise Cancelled
+
+let mobile_device_inventory_ids context =
+  Mutex.lock context.mobile_lock;
+  Fun.protect ~finally:(fun () -> Mutex.unlock context.mobile_lock) (fun () ->
+    if context.next_mobile_device_session = max_int ||
+       context.next_mobile_device_inventory = max_int then
+      fail "mobile device inventory ID space exhausted";
+    context.next_mobile_device_session <- context.next_mobile_device_session + 1;
+    context.next_mobile_device_inventory <- context.next_mobile_device_inventory + 1;
+    "device-session-" ^ string_of_int context.next_mobile_device_session,
+    "device-inventory-" ^ string_of_int context.next_mobile_device_inventory)
+
+let mobile_device_store_inventory context cache =
+  let id = Workspace_mobile_device_lifecycle.inventory_id cache.device_inventory in
+  Mutex.lock context.mobile_lock;
+  Fun.protect ~finally:(fun () -> Mutex.unlock context.mobile_lock) (fun () ->
+    if Hashtbl.length context.mobile_device_inventories >= 32 then
+      fail "mobile device inventory limit reached; use a new private session";
+    Hashtbl.replace context.mobile_device_inventories id cache)
+
+let mobile_device_require_cache context ~root args =
+  let inventory_id = required_string "inventory_id" args in
+  match mobile_device_cache context inventory_id with
+  | Some cache when cache.device_root = root -> cache
+  | Some _ -> fail "mobile device inventory belongs to a different workspace root"
+  | None -> fail "mobile device inventory is absent or stale; take a fresh approved inventory"
+
+let mobile_device_target cache args =
+  match cache.device_platform with
+  | Workspace_mobile_run.Android ->
+      let name = required_string "target_name" args in
+      let port = match field "port" args with
+        | `Int value -> value
+        | _ -> fail "Android AVD boot requires an exact console port" in
+      Workspace_mobile_device_lifecycle.Android_avd { name; port }
+  | Workspace_mobile_run.Ios ->
+      Workspace_mobile_device_lifecycle.Ios_simulator {
+        id = required_string "simulator_id" args }
+
+let mobile_device_approval inventory action target =
+  Workspace_mobile_device_lifecycle.approval
+    ~marker:"interactive-mobile-device-effect"
+    ~action ~session_id:(Workspace_mobile_device_lifecycle.inventory_session_id inventory)
+    ~inventory_id:(Workspace_mobile_device_lifecycle.inventory_id inventory)
+    ~target_id:(Workspace_mobile_device_lifecycle.target_id target)
+
+let mobile_device_android_snapshot ?cancel ?on_progress ~root ~session_id
+    ~inventory_id ~subroot ~configured_avds ?expected_devices () =
+  let inventory_args action = `Assoc [
+    "action", `String action; "subroot", `String subroot] in
+  let list_command, cwd = android_device_command ~root (inventory_args "avds") in
+  let device_command, _ = android_device_command ~root (inventory_args "devices") in
+  let names = mobile_device_run ?cancel ?on_progress ~root list_command in
+  let names = try Workspace_android_devices.avds names
+    with Workspace_android_devices.Error message -> fail message in
+  if List.sort String.compare names <>
+     List.sort String.compare configured_avds then
+    fail "configured AVD inventory changed; refresh android_devices before this action";
+  let output = mobile_device_run ?cancel ?on_progress ~root device_command in
+  let devices = try Workspace_android_devices.adb_devices output
+    with Workspace_android_devices.Error message -> fail message in
+  (match expected_devices with
+   | Some expected when
+       List.sort (fun (a : Workspace_android_devices.device) b ->
+         compare (a.serial, a.state, a.emulator) (b.serial, b.state, b.emulator)) devices <>
+       List.sort (fun (a : Workspace_android_devices.device) b ->
+         compare (a.serial, a.state, a.emulator) (b.serial, b.state, b.emulator)) expected ->
+       fail "Android device transports changed; refresh android_devices before this action"
+   | Some _ | None -> ());
+  let bindings = ref [] and complete = ref true in
+  List.iter (fun (device : Workspace_android_devices.device) ->
+    if device.emulator then
+      if device.state <> Workspace_android_devices.Ready then complete := false
+      else
+        let command = Workspace_mobile_device_lifecycle.avd_name_command device.serial in
+        let output = mobile_device_run ?cancel ?on_progress ~root command in
+        let name = try Workspace_mobile_device_lifecycle.parse_avd_name output
+          with Workspace_mobile_device_lifecycle.Error message -> fail message in
+        if not (List.mem name names) then
+          fail "running emulator AVD name is absent from the configured inventory";
+        bindings := (name, device.serial) :: !bindings) devices;
+  let bindings = List.rev !bindings in
+  let avd_names = List.map fst bindings in
+  if List.length avd_names <> List.length (List.sort_uniq String.compare avd_names) then
+    fail "multiple emulator serials identify the same AVD";
+  let inventory = try Workspace_mobile_device_lifecycle.create_inventory
+      ~session_id ~inventory_id ~configured_avds:names
+      ~android_devices:devices ~avd_bindings:bindings
+      ~android_bindings_complete:!complete
+      ~configured_simulator_ids:[] ~ios_destinations:[] ~compatible_simulators:[]
+    with Workspace_mobile_device_lifecycle.Error message -> fail message in
+  inventory, cwd
+
+let mobile_device_xcode_discovery context ~root ~bundle ~scheme =
+  Mutex.lock context.xcode_lock;
+  let discovery = context.xcode_discovery in
+  Mutex.unlock context.xcode_lock;
+  let discovery = match discovery with
+    | Some discovery when discovery.root = root && discovery.bundle = bundle -> discovery
+    | _ -> fail "approve Xcode scheme, destination and simulator discovery for this exact bundle first" in
+  let fingerprint = try Workspace_xcode.fingerprint ~root ~bundle
+    with Workspace_xcode.Error message -> fail message in
+  if discovery.fingerprint <> fingerprint then
+    fail "Xcode project changed; refresh scheme and simulator discovery";
+  let destinations = match List.assoc_opt scheme discovery.destinations with
+    | Some destinations when List.mem scheme discovery.schemes -> destinations
+    | _ -> fail "scheme was not discovered for this Xcode bundle" in
+  if not (List.mem_assoc scheme discovery.simulators) then
+    fail "approve compatible simulator inventory for this scheme first";
+  destinations
+
+let mobile_device_ios_snapshot ?cancel ?on_progress ~root ~session_id
+    ~inventory_id ~destinations () =
+  let output = mobile_device_run ?cancel ?on_progress ~root
+      "xcrun simctl list devices available -j" in
+  let configured = try Workspace_mobile_device_lifecycle.configured_simulator_ids output
+    with Workspace_mobile_device_lifecycle.Error message -> fail message in
+  let compatible = try Workspace_xcode.compatible_simulators ~destinations output
+    with Workspace_xcode.Error message -> fail message in
+  let inventory = try Workspace_mobile_device_lifecycle.create_inventory
+      ~session_id ~inventory_id ~configured_avds:[] ~android_devices:[]
+      ~avd_bindings:[] ~android_bindings_complete:true
+      ~configured_simulator_ids:configured ~ios_destinations:destinations
+      ~compatible_simulators:compatible
+    with Workspace_mobile_device_lifecycle.Error message -> fail message in
+  inventory, compatible, output
+
+
+let mobile_device_inventory_tool ?cancel ?on_progress ~context ~root args =
+  let platform = match required_string "platform" args with
+    | "android" -> Workspace_mobile_run.Android
+    | "ios" -> Workspace_mobile_run.Ios
+    | _ -> fail "platform must be android or ios" in
+  let session_id, inventory_id = mobile_device_inventory_ids context in
+  let cache =
+    match platform with
+    | Workspace_mobile_run.Android ->
+        let subroot = required_string "subroot" args in
+        let android, avds =
+          Mutex.lock context.mobile_lock;
+          Fun.protect ~finally:(fun () -> Mutex.unlock context.mobile_lock) (fun () ->
+            match context.android_inventory, context.android_avds with
+            | Some android, Some avds
+              when android.root = root && android.subroot = subroot &&
+                   avds.avd_root = root && avds.avd_subroot = subroot ->
+                android, avds
+            | _ -> fail "approve Android AVD and device inventories for this exact project first") in
+        let inventory, _ = mobile_device_android_snapshot ?cancel ?on_progress ~root
+            ~session_id ~inventory_id ~subroot ~configured_avds:avds.avd_names
+            ~expected_devices:android.devices () in
+        { device_root = root; device_platform = platform; device_subroot = subroot;
+          device_scheme = ""; device_inventory = inventory }
+    | Workspace_mobile_run.Ios ->
+        let bundle = required_string "subroot" args in
+        let scheme = required_string "scheme" args in
+        let destinations = mobile_device_xcode_discovery context ~root ~bundle ~scheme in
+        let inventory, _, _ = mobile_device_ios_snapshot ?cancel ?on_progress ~root
+            ~session_id ~inventory_id ~destinations () in
+
+        { device_root = root; device_platform = platform; device_subroot = bundle;
+          device_scheme = scheme; device_inventory = inventory } in
+  mobile_device_store_inventory context cache;
+  let inventory = cache.device_inventory in
+  let targets = match platform with
+    | Workspace_mobile_run.Android ->
+        List.map (fun name ->
+          `Assoc ["target_name", `String name; "requires_console_port", `Bool true])
+          inventory.configured_avds
+    | Workspace_mobile_run.Ios ->
+        List.map (fun (device : Workspace_xcode.simulator) ->
+          `Assoc ["simulator_id", `String device.id; "name", `String device.name;
+            "runtime", `String device.runtime; "state", `String device.state])
+          inventory.compatible_simulators in
+  Yojson.Basic.to_string (`Assoc [
+    "device_session_id", `String session_id; "inventory_id", `String inventory_id;
+    "platform", `String (Workspace_mobile_run.platform_name platform);
+    "targets", `List targets;
+    "physical_devices_selectable", `Bool false;
+    "image_or_runtime_readiness", `String "unknown until boot readiness observation"])
+
+let mobile_device_job_id context =
+  Mutex.lock context.mobile_lock;
+  Fun.protect ~finally:(fun () -> Mutex.unlock context.mobile_lock) (fun () ->
+    if context.next_mobile_device_process = max_int then
+      fail "mobile device process ID space exhausted";
+    context.next_mobile_device_process <- context.next_mobile_device_process + 1;
+    "pave-device-" ^ string_of_int context.next_mobile_device_process)
+
+let mobile_device_current_android ?cancel ?on_progress ~root cache =
+  let inventory = cache.device_inventory in
+  let fresh, cwd = mobile_device_android_snapshot ?cancel ?on_progress ~root
+      ~session_id:(Workspace_mobile_device_lifecycle.inventory_session_id inventory)
+      ~inventory_id:(Workspace_mobile_device_lifecycle.inventory_id inventory)
+      ~subroot:cache.device_subroot ~configured_avds:inventory.configured_avds
+      ~expected_devices:inventory.android_devices () in
+  { cache with device_inventory = fresh }, cwd
+
+let mobile_device_current_ios ?cancel ?on_progress ~context ~root cache =
+  let inventory = cache.device_inventory in
+  let destinations = mobile_device_xcode_discovery context ~root
+      ~bundle:cache.device_subroot ~scheme:cache.device_scheme in
+  let fresh, simulators, output = mobile_device_ios_snapshot ?cancel ?on_progress ~root
+      ~session_id:(Workspace_mobile_device_lifecycle.inventory_session_id inventory)
+      ~inventory_id:(Workspace_mobile_device_lifecycle.inventory_id inventory)
+      ~destinations () in
+  { cache with device_inventory = fresh }, simulators, output
+let mobile_device_lookup_target_state table context cache target =
+  let key = mobile_device_state_key cache.device_inventory target in
+  Mutex.lock context.mobile_lock;
+  Fun.protect ~finally:(fun () -> Mutex.unlock context.mobile_lock) (fun () ->
+    Hashtbl.find_opt table key)
+
+let mobile_device_store_target_state table context cache target value =
+  let key = mobile_device_state_key cache.device_inventory target in
+  Mutex.lock context.mobile_lock;
+  Fun.protect ~finally:(fun () -> Mutex.unlock context.mobile_lock) (fun () ->
+    Hashtbl.replace table key value)
+
+let mobile_device_remove_target_state table context cache target =
+  let key = mobile_device_state_key cache.device_inventory target in
+  Mutex.lock context.mobile_lock;
+  Fun.protect ~finally:(fun () -> Mutex.unlock context.mobile_lock) (fun () ->
+    Hashtbl.remove table key)
+
+let mobile_device_replace_inventory context cache =
+  let id = Workspace_mobile_device_lifecycle.inventory_id cache.device_inventory in
+  Mutex.lock context.mobile_lock;
+  Fun.protect ~finally:(fun () -> Mutex.unlock context.mobile_lock) (fun () ->
+    Hashtbl.replace context.mobile_device_inventories id cache)
+
+let mobile_device_check_approved approved =
+  if not approved then
+    fail "mobile device lifecycle effects require exact explicit interactive approval"
+
+let mobile_device_process_job_status context job_id =
+  try Workspace_process.job_status context.process_manager ~id:job_id
+  with Workspace_process.Error message -> fail message
+
+let mobile_device_wait_job ?cancel context job_id seconds =
+  let rec loop remaining =
+    (match cancel with Some cancelled when cancelled () -> raise Cancelled | _ -> ());
+    match mobile_device_process_job_status context job_id with
+    | Workspace_process.Completed result -> Some result
+    | Workspace_process.Running when remaining <= 0 -> None
+    | Workspace_process.Running ->
+        ignore (try Workspace_process.wait_job context.process_manager
+            ~id:job_id ~timeout_seconds:1 ()
+          with Workspace_process.Error message -> fail message);
+        loop (remaining - 1) in
+  loop seconds
+
+let mobile_device_process_output context job_id =
+  try Workspace_process.read_output context.process_manager ~id:job_id
+      ~max_bytes:Workspace_mobile_device_lifecycle.max_output_bytes ()
+  with Workspace_process.Error message -> fail message
+
+let mobile_device_android_live_inventory ?cancel ?on_progress ~root cache target =
+  let previous = cache.device_inventory in
+  let output = mobile_device_run ?cancel ?on_progress ~root "adb devices" in
+  let devices = try Workspace_android_devices.adb_devices output
+    with Workspace_android_devices.Error message -> fail message in
+  let serial = Workspace_mobile_device_lifecycle.target_serial target in
+  let target_device = List.find_opt (fun (device : Workspace_android_devices.device) ->
+    device.serial = serial) devices in
+  let avd_name_output, bindings = match target_device with
+    | Some { emulator = true; state = Workspace_android_devices.Ready; _ } ->
+        let avd_name_output = mobile_device_run ?cancel ?on_progress ~root
+            (Workspace_mobile_device_lifecycle.avd_name_command serial) in
+        let name = try Workspace_mobile_device_lifecycle.parse_avd_name avd_name_output
+          with Workspace_mobile_device_lifecycle.Error message -> fail message in
+        if not (List.mem name previous.configured_avds) then
+          fail "running emulator AVD identity changed outside the configured inventory";
+        Some avd_name_output, [name, serial]
+    | _ -> None, [] in
+  let fresh = try Workspace_mobile_device_lifecycle.create_inventory
+      ~session_id:(Workspace_mobile_device_lifecycle.inventory_session_id previous)
+      ~inventory_id:(Workspace_mobile_device_lifecycle.inventory_id previous)
+      ~configured_avds:previous.configured_avds ~android_devices:devices
+      ~avd_bindings:bindings ~android_bindings_complete:false
+      ~configured_simulator_ids:[] ~ios_destinations:[] ~compatible_simulators:[]
+    with Workspace_mobile_device_lifecycle.Error message -> fail message in
+  { cache with device_inventory = fresh }, output, avd_name_output
+
+let mobile_device_status_tool ~context ~root args =
+  let cache = mobile_device_require_cache context ~root args in
+  let inventory = cache.device_inventory in
+  let session_id = Workspace_mobile_device_lifecycle.inventory_session_id inventory in
+  if required_string "device_session_id" args <> session_id then
+    fail "device session ID does not match this inventory";
+  let prefix = Workspace_mobile_device_lifecycle.inventory_id inventory ^ "\000" in
+  Mutex.lock context.mobile_lock;
+  let booting = Fun.protect ~finally:(fun () -> Mutex.unlock context.mobile_lock) (fun () ->
+    Hashtbl.fold (fun key _ rows ->
+      if starts_with key prefix then
+        let target = String.sub key (String.length prefix)
+            (String.length key - String.length prefix) in
+        `Assoc ["target_id", `String target; "state", `String "booting"] :: rows
+      else rows) context.mobile_device_booting []) in
+  Mutex.lock context.mobile_lock;
+  let managed = Fun.protect ~finally:(fun () -> Mutex.unlock context.mobile_lock) (fun () ->
+    Hashtbl.fold (fun key state rows ->
+      if starts_with key prefix then
+        let target = String.sub key (String.length prefix)
+            (String.length key - String.length prefix) in
+        let ownership = match Workspace_mobile_device_lifecycle.ownership state with
+          | Workspace_mobile_device_lifecycle.Preexisting -> "preexisting"
+          | Workspace_mobile_device_lifecycle.Owned _ -> "owned" in
+        `Assoc ["target_id", `String target; "state", `String ownership] :: rows
+      else rows) context.mobile_device_managed []) in
+  Yojson.Basic.to_string (`Assoc [
+    "device_session_id", `String session_id;
+    "inventory_id", `String inventory.inventory_id;
+    "booting", `List (List.rev booting);
+    "managed", `List (List.rev managed)])
+
+let mobile_device_execution_cache context ~root args =
+  let cache = mobile_device_require_cache context ~root args in
+  if required_string "device_session_id" args <>
+     Workspace_mobile_device_lifecycle.inventory_session_id cache.device_inventory then
+    fail "device session ID does not match this inventory";
+  cache
+
+let mobile_device_error result =
+  match result with
+  | Workspace_process.Exited 0 -> ()
+  | Workspace_process.Exited code ->
+      fail (Printf.sprintf "owned emulator launcher exited %d" code)
+  | Workspace_process.Signaled signal ->
+      fail (Printf.sprintf "owned emulator launcher received signal %d" signal)
+  | Workspace_process.Timed_out -> fail "owned simulator boot command timed out"
+  | Workspace_process.Cancelled -> raise Cancelled
+
+let mobile_device_store_ready context cache target managed =
+  mobile_device_store_target_state context.mobile_device_managed context cache target managed;
+  mobile_device_remove_target_state context.mobile_device_booting context cache target
+
+let mobile_device_boot_tool ~approved ?cancel ?on_progress ~context ~root args =
+  mobile_device_check_approved approved;
+  let cache = mobile_device_execution_cache context ~root args in
+  let target = mobile_device_target cache args in
+  let inventory_id = Workspace_mobile_device_lifecycle.inventory_id cache.device_inventory in
+  let existing = mobile_device_lookup_target_state context.mobile_device_managed
+      context cache target in
+  if Option.is_some existing then fail "this exact device already has a lifecycle ownership record";
+  if Option.is_some (mobile_device_lookup_target_state context.mobile_device_booting
+      context cache target) then
+    fail "this exact device already has a pending boot; use readiness or abort_boot";
+  let cache, cwd = match cache.device_platform with
+    | Workspace_mobile_run.Android ->
+        mobile_device_current_android ?cancel ?on_progress ~root cache
+    | Workspace_mobile_run.Ios ->
+        let fresh, _, _ = mobile_device_current_ios ?cancel ?on_progress
+            ~context ~root cache in
+        fresh, root in
+
+  mobile_device_replace_inventory context cache;
+  let ownership_id = "ownership-" ^ mobile_device_job_id context in
+  let approval = mobile_device_approval cache.device_inventory
+      Workspace_mobile_device_lifecycle.Boot target in
+  let plan = try Workspace_mobile_device_lifecycle.boot_command
+      ~inventory:cache.device_inventory ~approval ~target ~ownership_id
+    with Workspace_mobile_device_lifecycle.Error message -> fail message in
+  match plan with
+  | Workspace_mobile_device_lifecycle.Already_booted managed ->
+      mobile_device_store_target_state context.mobile_device_managed
+        context cache (Workspace_mobile_device_lifecycle.managed_target managed) managed;
+      Yojson.Basic.to_string (`Assoc [
+        "status", `String "preexisting";
+        "target_id", `String (Workspace_mobile_device_lifecycle.target_id
+          (Workspace_mobile_device_lifecycle.managed_target managed));
+        "device_session_id", `String
+          (Workspace_mobile_device_lifecycle.inventory_session_id cache.device_inventory);
+        "inventory_id", `String inventory_id;
+        "shutdown_owned_device", `Bool false])
+  | Workspace_mobile_device_lifecycle.Start { command; pending } ->
+      (match cancel with Some cancelled when cancelled () -> raise Cancelled | _ -> ());
+      let job_id = mobile_device_job_id context in
+      (try Workspace_process.start_shell context.process_manager ~id:job_id
+          ~cwd:(Some cwd) ~output_limit:Workspace_mobile_device_lifecycle.max_output_bytes
+          ~command ()
+       with Workspace_process.Error message -> fail message);
+      let booting = try Workspace_mobile_device_lifecycle.settle_launch pending
+          (`Started job_id)
+        with Workspace_mobile_device_lifecycle.Error message -> fail message in
+      let booting = match booting with
+        | Some booting -> booting
+        | None -> fail "owned device launch did not create a pending boot" in
+      mobile_device_store_target_state context.mobile_device_booting
+        context cache target booting;
+      (match cache.device_platform with
+       | Workspace_mobile_run.Android ->
+           (match mobile_device_process_job_status context job_id with
+            | Workspace_process.Completed termination -> mobile_device_error termination
+            | Workspace_process.Running -> ())
+       | Workspace_mobile_run.Ios ->
+           let result =
+             try mobile_device_wait_job ?cancel context job_id 45
+             with Cancelled ->
+               (try Workspace_process.kill_job context.process_manager ~id:job_id
+                with Workspace_process.Error message ->
+                  fail ("cancelled simulator boot launcher could not be reaped: " ^ message));
+               raise Cancelled in
+           (match result with
+            | None ->
+                (try Workspace_process.kill_job context.process_manager ~id:job_id
+                 with Workspace_process.Error message ->
+                   fail ("simulator boot timed out and its owned launcher could not be reaped: " ^
+                     message));
+                fail "simctl boot command did not complete before its deadline; pending ownership retained"
+            | Some termination -> mobile_device_error termination));
+      Yojson.Basic.to_string (`Assoc [
+        "status", `String "booting";
+        "target_id", `String (Workspace_mobile_device_lifecycle.target_id target);
+        "device_session_id", `String
+          (Workspace_mobile_device_lifecycle.inventory_session_id cache.device_inventory);
+        "inventory_id", `String inventory_id;
+        "launcher_job_id", `String job_id;
+        "readiness_action", `String "readiness";
+        "abort_action", `String "abort_boot"])
+
+let mobile_device_readiness_tool ~approved ?cancel ?on_progress ~context ~root args =
+  mobile_device_check_approved approved;
+  let cache = mobile_device_execution_cache context ~root args in
+  let target = mobile_device_target cache args in
+  let booting = mobile_device_lookup_target_state context.mobile_device_booting
+      context cache target in
+  match booting with
+  | None ->
+      (match mobile_device_lookup_target_state context.mobile_device_managed
+          context cache target with
+       | Some managed ->
+           Yojson.Basic.to_string (`Assoc [
+             "status", `String "already_managed";
+             "target_id", `String (Workspace_mobile_device_lifecycle.target_id target);
+             "ownership", `String (match Workspace_mobile_device_lifecycle.ownership managed with
+               | Workspace_mobile_device_lifecycle.Preexisting -> "preexisting"
+               | Workspace_mobile_device_lifecycle.Owned _ -> "owned")])
+       | None -> fail "boot this exact device or refresh its lifecycle inventory first")
+  | Some booting ->
+      let launcher_id = Workspace_mobile_device_lifecycle.launcher_identity booting in
+      (match mobile_device_process_job_status context launcher_id with
+       | Workspace_process.Completed (Workspace_process.Exited 0)
+       | Workspace_process.Running -> ()
+       | Workspace_process.Completed termination -> mobile_device_error termination);
+      let timeout = optional_int "readiness_timeout_seconds" 60
+          ~minimum:1 ~maximum:300 args in
+      let deadline = Unix.gettimeofday () +. float timeout in
+      let inventory = cache.device_inventory in
+      let approval = mobile_device_approval inventory
+          Workspace_mobile_device_lifecycle.Readiness target in
+      let rec wait () =
+        (match cancel with Some cancelled when cancelled () -> raise Cancelled | _ -> ());
+        let current, ready =
+          match cache.device_platform with
+          | Workspace_mobile_run.Android ->
+              let current, devices_output, avd_name_output =
+                mobile_device_android_live_inventory ?cancel ?on_progress ~root cache target in
+              mobile_device_replace_inventory context current;
+              (match avd_name_output with
+               | None -> current, Workspace_mobile_device_lifecycle.Waiting
+               | Some avd_name_output ->
+                   let boot_status_output = mobile_device_run ?cancel ?on_progress
+                       ~root ~timeout_seconds:5
+                       (Workspace_mobile_device_lifecycle.readiness_command
+                         ~booting ~approval) in
+                   let ready = try Workspace_mobile_device_lifecycle.android_readiness
+                       ~booting ~inventory:current.device_inventory ~approval
+                       ~avd_name_output ~devices_output ~boot_status_output
+                     with Workspace_mobile_device_lifecycle.Error message -> fail message in
+                   current, ready)
+          | Workspace_mobile_run.Ios ->
+              let current, _, devices_json = mobile_device_current_ios ?cancel ?on_progress
+                  ~context ~root cache in
+              mobile_device_replace_inventory context current;
+              let ready = try Workspace_mobile_device_lifecycle.ios_readiness
+                  ~booting ~inventory:current.device_inventory ~approval ~devices_json
+                with Workspace_mobile_device_lifecycle.Error message -> fail message in
+              current, ready in
+        match ready with
+        | Workspace_mobile_device_lifecycle.Ready managed ->
+            mobile_device_store_ready context current target managed;
+            Some managed
+        | Workspace_mobile_device_lifecycle.Waiting ->
+            if Unix.gettimeofday () >= deadline then None
+            else (Thread.delay 0.5; wait ()) in
+      let result = wait () in
+      match result with
+      | None ->
+          Yojson.Basic.to_string (`Assoc [
+            "status", `String "waiting";
+            "target_id", `String (Workspace_mobile_device_lifecycle.target_id target);
+            "device_session_id", `String
+              (Workspace_mobile_device_lifecycle.inventory_session_id inventory);
+            "inventory_id", `String inventory.inventory_id;
+            "readiness_timeout_seconds", `Int timeout;
+            "next_action", `String "readiness or abort_boot"])
+      | Some managed ->
+          Yojson.Basic.to_string (`Assoc [
+            "status", `String "ready";
+            "target_id", `String (Workspace_mobile_device_lifecycle.target_id target);
+            "ownership", `String (match Workspace_mobile_device_lifecycle.ownership managed with
+              | Workspace_mobile_device_lifecycle.Preexisting -> "preexisting"
+              | Workspace_mobile_device_lifecycle.Owned _ -> "owned");
+            "device_session_id", `String
+              (Workspace_mobile_device_lifecycle.inventory_session_id inventory);
+            "inventory_id", `String inventory.inventory_id])
+
+let mobile_device_shutdown_tool ~approved ?cancel ?on_progress ~context ~root args =
+  mobile_device_check_approved approved;
+  let cache = mobile_device_execution_cache context ~root args in
+  let target = mobile_device_target cache args in
+  let managed = match mobile_device_lookup_target_state context.mobile_device_managed
+      context cache target with
+    | Some managed -> managed
+    | None -> fail "take fresh readiness for this exact device before shutdown" in
+  let cache = match cache.device_platform with
+    | Workspace_mobile_run.Android ->
+        let fresh, _ = mobile_device_current_android ?cancel ?on_progress ~root cache in
+        fresh
+    | Workspace_mobile_run.Ios ->
+        let fresh, _, _ = mobile_device_current_ios ?cancel ?on_progress
+            ~context ~root cache in
+        fresh in
+  mobile_device_replace_inventory context cache;
+  let approval = mobile_device_approval cache.device_inventory
+      Workspace_mobile_device_lifecycle.Shutdown target in
+  let command = try Workspace_mobile_device_lifecycle.shutdown_command
+      ~inventory:cache.device_inventory ~approval ~managed
+    with Workspace_mobile_device_lifecycle.Error message -> fail message in
+  match command with
+  | None ->
+      Yojson.Basic.to_string (`Assoc [
+        "status", `String "preexisting_not_shutdown";
+        "target_id", `String (Workspace_mobile_device_lifecycle.target_id target);
+        "ownership", `String "preexisting";
+        "device_state_changed", `Bool false])
+  | Some command ->
+      ignore (mobile_device_run ?cancel ?on_progress ~root command);
+      let stopped =
+        match cache.device_platform, Workspace_mobile_device_lifecycle.ownership managed with
+        | Workspace_mobile_run.Android,
+          Workspace_mobile_device_lifecycle.Owned { launcher_id; _ } ->
+            (match mobile_device_wait_job ?cancel context launcher_id 45 with
+             | Some (Workspace_process.Exited 0) ->
+                 let output = mobile_device_run ?cancel ?on_progress ~root "adb devices" in
+                 let devices = try Workspace_android_devices.adb_devices output
+                   with Workspace_android_devices.Error message -> fail message in
+                 let serial = Workspace_mobile_device_lifecycle.target_serial target in
+                 not (List.exists (fun (device : Workspace_android_devices.device) ->
+                   device.serial = serial && device.emulator &&
+                   device.state = Workspace_android_devices.Ready) devices)
+             | Some _ | None -> false)
+        | Workspace_mobile_run.Ios, _ ->
+            let fresh, simulators, _ = mobile_device_current_ios ?cancel ?on_progress
+                ~context ~root cache in
+            mobile_device_replace_inventory context fresh;
+            let id = match target with
+              | Workspace_mobile_device_lifecycle.Ios_simulator { id } -> id
+              | Workspace_mobile_device_lifecycle.Android_avd _ -> assert false in
+            List.exists (fun (simulator : Workspace_xcode.simulator) ->
+              simulator.id = id && simulator.state = "Shutdown") simulators
+        | Workspace_mobile_run.Android, _ -> false in
+      if not stopped then
+        fail "shutdown has not been verified; device ownership remains active";
+      ignore (Workspace_mobile_device_lifecycle.complete_shutdown managed `Succeeded);
+      mobile_device_remove_target_state context.mobile_device_managed
+        context cache target;
+      Yojson.Basic.to_string (`Assoc [
+        "status", `String "shutdown";
+        "target_id", `String (Workspace_mobile_device_lifecycle.target_id target);
+        "ownership", `String "owned";
+        "device_state_changed", `Bool true])
+
+let mobile_device_abort_tool ~approved ?cancel ?on_progress ~context ~root args =
+  mobile_device_check_approved approved;
+  let cache = mobile_device_execution_cache context ~root args in
+  let target = mobile_device_target cache args in
+  let booting = match mobile_device_lookup_target_state context.mobile_device_booting
+      context cache target with
+    | Some booting -> booting
+    | None -> fail "no pending owned boot exists for this exact device" in
+  let current = match cache.device_platform with
+    | Workspace_mobile_run.Android ->
+        let fresh, _, _ = mobile_device_android_live_inventory ?cancel ?on_progress
+            ~root cache target in
+        fresh
+    | Workspace_mobile_run.Ios ->
+        let fresh, _, _ = mobile_device_current_ios ?cancel ?on_progress
+            ~context ~root cache in
+        fresh in
+  mobile_device_replace_inventory context current;
+  let approval = mobile_device_approval current.device_inventory
+      Workspace_mobile_device_lifecycle.Shutdown target in
+  let command = try Workspace_mobile_device_lifecycle.abort_command
+      ~inventory:current.device_inventory ~approval ~booting
+    with Workspace_mobile_device_lifecycle.Error message -> fail message in
+  (match command with
+   | Some command -> ignore (mobile_device_run ?cancel ?on_progress ~root command)
+   | None -> ());
+  let job_id = Workspace_mobile_device_lifecycle.launcher_identity booting in
+  (match mobile_device_process_job_status context job_id with
+   | Workspace_process.Running ->
+       (try Workspace_process.kill_job context.process_manager ~id:job_id
+        with Workspace_process.Error message ->
+          fail ("owned device launcher could not be reaped; abort ownership retained: " ^ message));
+       (match mobile_device_wait_job ?cancel context job_id 10 with
+        | Some (Workspace_process.Exited _)
+        | Some (Workspace_process.Signaled _) -> ()
+        | Some Workspace_process.Timed_out | Some Workspace_process.Cancelled | None ->
+            fail "owned device launcher did not stop; abort ownership retained")
+   | Workspace_process.Completed _ -> ());
+  let stopped =
+    match cache.device_platform with
+    | Workspace_mobile_run.Android ->
+        let output = mobile_device_run ?cancel ?on_progress ~root "adb devices" in
+        let devices = try Workspace_android_devices.adb_devices output
+          with Workspace_android_devices.Error message -> fail message in
+        let serial = Workspace_mobile_device_lifecycle.target_serial target in
+        not (List.exists (fun (device : Workspace_android_devices.device) ->
+          device.serial = serial && device.emulator &&
+          device.state = Workspace_android_devices.Ready) devices)
+    | Workspace_mobile_run.Ios ->
+        let fresh, simulators, _ = mobile_device_current_ios ?cancel ?on_progress
+            ~context ~root cache in
+        mobile_device_replace_inventory context fresh;
+        let id = match target with
+          | Workspace_mobile_device_lifecycle.Ios_simulator { id } -> id
+          | Workspace_mobile_device_lifecycle.Android_avd _ -> assert false in
+        List.exists (fun (simulator : Workspace_xcode.simulator) ->
+          simulator.id = id && simulator.state = "Shutdown") simulators in
+  if not stopped then
+    fail "abort has not verified the exact device is stopped; boot ownership retained";
+  ignore (Workspace_mobile_device_lifecycle.complete_abort booting `Succeeded);
+  mobile_device_remove_target_state context.mobile_device_booting context cache target;
+  Yojson.Basic.to_string (`Assoc [
+    "status", `String "aborted";
+    "target_id", `String (Workspace_mobile_device_lifecycle.target_id target);
+    "owned_process_job_id", `String job_id])
+
+let mobile_device_lifecycle_tool ~approved ?cancel ?on_progress ~context ~root args =
+  let context = require_session_context (Some context) in
+  let root = Workspace_path.root_path root in
+  match required_string "action" args with
+  | "inventory" ->
+      mobile_device_check_approved approved;
+      mobile_device_inventory_tool ?cancel ?on_progress ~context ~root args
+  | "status" -> mobile_device_status_tool ~context ~root args
+  | "boot" ->
+      mobile_device_boot_tool ~approved ?cancel ?on_progress ~context ~root args
+  | "readiness" ->
+      mobile_device_readiness_tool ~approved ?cancel ?on_progress ~context ~root args
+  | "shutdown" ->
+      mobile_device_shutdown_tool ~approved ?cancel ?on_progress ~context ~root args
+  | "abort_boot" ->
+      mobile_device_abort_tool ~approved ?cancel ?on_progress ~context ~root args
+  | _ -> fail "mobile_device_lifecycle action must be inventory, status, boot, readiness, shutdown or abort_boot"
+let mobile_device_lifecycle_preview ~context ~root args =
+  let action = required_string "action" args in
+  let command_details commands cwd =
+    ["Working directory: " ^ Printf.sprintf "%S" cwd] @
+    List.map (fun (label, command) -> label ^ ": " ^ command) commands in
+  let android_commands subroot =
+    let command action =
+      android_device_command ~root (`Assoc [
+        "action", `String action; "subroot", `String subroot]) in
+    let avds, cwd = command "avds" in
+    let devices, _ = command "devices" in
+    cwd, avds, devices in
+  if action = "inventory" then
+    let platform = match required_string "platform" args with
+      | "android" -> Workspace_mobile_run.Android
+      | "ios" -> Workspace_mobile_run.Ios
+      | _ -> fail "platform must be android or ios" in
+    (match platform with
+     | Workspace_mobile_run.Android ->
+         let subroot = required_string "subroot" args in
+         let cwd, avds, devices = android_commands subroot in
+         ("Reads configured Android AVDs and ADB transport state for one explicit inventory; no device is booted.",
+          ["Platform: Android";
+           "Exact target scope: configured AVDs only; attached physical devices are not selectable."] @
+          command_details ["AVD inventory command", avds; "ADB inventory command", devices] cwd @
+          ["The boot action separately revalidates this inventory before launching one selected AVD.";
+           "No SDK or system image is downloaded."])
+     | Workspace_mobile_run.Ios ->
+         let bundle = required_string "subroot" args in
+         let scheme = required_string "scheme" args in
+         ignore (mobile_device_xcode_discovery context ~root ~bundle ~scheme);
+         let command = "xcrun simctl list devices available -j" in
+         ("Reads compatible iOS Simulator state for a previously discovered exact Xcode bundle and scheme; no simulator is booted.",
+          ["Platform: iOS Simulator";
+           "Xcode bundle/scheme: " ^ bundle ^ " · " ^ scheme;
+           "Exact command: " ^ command;
+           "Physical devices, runtime downloads and erasure are unsupported."]))
+  else
+    let cache = mobile_device_execution_cache context ~root args in
+    let inventory = cache.device_inventory in
+    let session_id = Workspace_mobile_device_lifecycle.inventory_session_id inventory in
+    let target = mobile_device_target cache args in
+    let target_id = Workspace_mobile_device_lifecycle.target_id target in
+    let binding = [
+      "Device session/inventory: " ^ session_id ^ " · " ^
+        Workspace_mobile_device_lifecycle.inventory_id inventory;
+      "Exact target: " ^ target_id;
+      "Physical devices are never selectable; no runtime/image download or erase is performed."] in
+    let android_live_commands () =
+      let serial = Workspace_mobile_device_lifecycle.target_serial target in
+      ["ADB transport recheck", "adb devices";
+       "Exact selected AVD identity recheck (if ready)",
+       Workspace_mobile_device_lifecycle.avd_name_command serial] in
+    let platform_refresh action =
+      match cache.device_platform with
+      | Workspace_mobile_run.Android when action = "readiness" || action = "abort_boot" ->
+          root, android_live_commands ()
+      | Workspace_mobile_run.Android ->
+          let _, avds, devices = android_commands cache.device_subroot in
+          let bindings = List.filter_map
+            (fun (device : Workspace_android_devices.device) ->
+              if device.emulator && device.state = Workspace_android_devices.Ready then
+                Some ("Current emulator identity recheck",
+                  Workspace_mobile_device_lifecycle.avd_name_command device.serial)
+              else None) inventory.android_devices in
+          root, (["AVD inventory recheck", avds; "ADB transport recheck", devices] @ bindings)
+      | Workspace_mobile_run.Ios ->
+          root, ["Compatible simulator state recheck",
+            "xcrun simctl list devices available -j"] in
+    let approval action =
+      mobile_device_approval inventory action target in
+    let refresh_and action commands =
+      let cwd, refresh = platform_refresh action in
+      command_details (refresh @ commands) cwd in
+    match action with
+    | "boot" ->
+        let plan = try Workspace_mobile_device_lifecycle.boot_command
+            ~inventory ~approval:(approval Workspace_mobile_device_lifecycle.Boot)
+            ~target ~ownership_id:"approval-preview"
+          with Workspace_mobile_device_lifecycle.Error message -> fail message in
+        let preview_details = match plan with
+          | Workspace_mobile_device_lifecycle.Already_booted _ ->
+              ["Observed in the approved inventory as pre-existing; no boot or shutdown command will run."]
+          | Workspace_mobile_device_lifecycle.Start { command; _ } ->
+              let launcher_cwd = match cache.device_platform with
+                | Workspace_mobile_run.Android ->
+                    let cwd, _, _ = android_commands cache.device_subroot in cwd
+                | Workspace_mobile_run.Ios -> root in
+              ["Exact boot command: " ^ command;
+               "Owned launcher working directory: " ^ Printf.sprintf "%S" launcher_cwd;
+               "Boot ownership is recorded only after this session starts the launcher."] in
+        ("Boots only the exact configured AVD or compatible simulator after fresh inventory revalidation; pre-existing devices are never owned or shut down.",
+         binding @ refresh_and "boot" [] @ preview_details)
+    | "readiness" ->
+        let booting = mobile_device_lookup_target_state context.mobile_device_booting
+            context cache target in
+        (match booting with
+         | None ->
+             ("Reports lifecycle state without issuing a device command.",
+              binding @ ["No pending owned boot exists for this exact target."])
+         | Some booting ->
+             let command = Workspace_mobile_device_lifecycle.readiness_command
+                 ~booting ~approval:(approval Workspace_mobile_device_lifecycle.Readiness) in
+             let platform_commands = match cache.device_platform with
+               | Workspace_mobile_run.Android ->
+                   ["ADB transport recheck", "adb devices";
+                    "Exact selected AVD identity recheck (when ready)",
+                    Workspace_mobile_device_lifecycle.avd_name_command
+                      (Workspace_mobile_device_lifecycle.target_serial target);
+                    "Boot-complete readiness command", command]
+               | Workspace_mobile_run.Ios -> ["Simulator readiness command", command] in
+             ("Checks readiness only for this session-owned boot; it does not boot, install or shut down a device.",
+              binding @ command_details platform_commands root @
+              [Printf.sprintf "Readiness deadline: %d seconds."
+                (optional_int "readiness_timeout_seconds" 60 ~minimum:1 ~maximum:300 args)]))
+    | "shutdown" ->
+        let managed = match mobile_device_lookup_target_state context.mobile_device_managed
+            context cache target with
+          | Some managed -> managed
+          | None -> fail "take fresh readiness for this exact device before shutdown" in
+        let command = try Workspace_mobile_device_lifecycle.shutdown_command
+            ~inventory ~approval:(approval Workspace_mobile_device_lifecycle.Shutdown)
+            ~managed
+          with Workspace_mobile_device_lifecycle.Error message -> fail message in
+        let preview_details = match command with
+          | None -> ["This target is pre-existing; shutdown will not run."]
+          | Some command -> ["Exact shutdown command: " ^ command] in
+        let verification = match cache.device_platform with
+          | Workspace_mobile_run.Android -> ["Exact post-shutdown verification", "adb devices"]
+          | Workspace_mobile_run.Ios -> ["Exact post-shutdown verification",
+              "xcrun simctl list devices available -j"] in
+        ("Shuts down only a device booted and owned by this session; pre-existing devices are preserved.",
+         binding @ refresh_and "shutdown" verification @ preview_details @
+         ["The exact target must be observed in stopped state before ownership is cleared."])
+    | "abort_boot" ->
+        let booting = match mobile_device_lookup_target_state context.mobile_device_booting
+            context cache target with
+          | Some booting -> booting
+          | None -> fail "no pending owned boot exists for this exact device" in
+        let command = try Workspace_mobile_device_lifecycle.abort_command
+            ~inventory ~approval:(approval Workspace_mobile_device_lifecycle.Shutdown)
+            ~booting
+          with Workspace_mobile_device_lifecycle.Error message -> fail message in
+        let preview_details = (match command with
+          | Some command -> ["Exact target shutdown command: " ^ command]
+          | None -> ["No target shutdown command is needed because this exact device is not ready."]) @
+          ["Stops only the launcher process owned by this session; failed stop retains ownership."] in
+        let verification = match cache.device_platform with
+          | Workspace_mobile_run.Android -> ["Exact post-abort verification", "adb devices"]
+          | Workspace_mobile_run.Ios -> ["Exact post-abort verification",
+              "xcrun simctl list devices available -j"] in
+        ("Cancels one pending owned boot, shutting down only its exact target and reaping only its owned launcher.",
+         binding @ refresh_and "abort_boot" verification @ preview_details)
+    | _ -> fail "unsupported mobile device lifecycle action"
+
+
 let mobile_diagnostics_tool ~approved ?cancel ?on_progress ~context ~root args =
   if not approved then fail "mobile runtime diagnostics require explicit interactive approval";
   let root = Workspace_path.root_path root in
@@ -2580,17 +4478,37 @@ let mobile_visual_request ~context ~root args =
   let command = Workspace_mobile_observe.command "screenshot" session in
   session, action, name, os, locale, theme, masks, command
 
+let mobile_visual_compare_settings args =
+  let bounded_integer name minimum maximum =
+    match field name args with
+    | `Int value when value >= minimum && value <= maximum -> value
+    | `Null -> fail ("comparison requires explicit " ^ name)
+    | _ -> fail (Printf.sprintf "%s must be between %d and %d"
+        name minimum maximum) in
+  bounded_integer "threshold" 0 255,
+  bounded_integer "max_differing_pixels" 0 Workspace_mobile_visual.max_pixels
+
 let mobile_visual_preview ~context ~root args =
   let session, action, name, os, locale, theme, masks, command =
     mobile_visual_request ~context ~root args in
+  let identity = try Workspace_mobile_report.build_identity root session
+    with Workspace_mobile_report.Error message -> fail message in
+  let threshold, max_differing_pixels =
+    if action = "compare" then mobile_visual_compare_settings args
+    else 0, 0 in
   (if action = "save" then
-     "Captures one screenshot and writes a private pixel-comparison baseline."
-   else "Captures one screenshot and compares pixels outside the stored dynamic regions."),
+     "Captures one screenshot and writes a private versioned pixel-comparison baseline."
+   else "Captures one screenshot and returns baseline/current/difference PNG artifacts plus bounded changed regions."),
   ["Session/app/device: " ^ session.id ^ " · " ^ session.app_id ^
      " · " ^ session.device;
+   "Selected build SHA-256: " ^ identity.build_hash;
    "Baseline: " ^ name ^ " · action: " ^ action;
    "Operator-declared OS/locale/theme: " ^ os ^ " · " ^ locale ^ " · " ^ theme;
    Printf.sprintf "Dynamic regions: %d" (List.length masks);
+   (if action = "compare" then
+      Printf.sprintf "Comparison settings v%d: per-channel threshold=%d; maximum differing pixels=%d."
+        Workspace_mobile_visual.version threshold max_differing_pixels
+    else "Baseline settings are versioned; no tolerance is applied during save.");
    "Working directory: " ^ Printf.sprintf "%S" session.root;
    "Exact command: " ^ command;
    Printf.sprintf "Maximum screenshot: %d bytes."
@@ -2603,6 +4521,10 @@ let mobile_visual_tool ~approved ?cancel ?on_progress ~context ~root args =
   check_session_context context;
   let session, action, name, os, locale, theme, masks, command =
     mobile_visual_request ~context ~root args in
+  let threshold, max_differing_pixels =
+    if action = "compare" then mobile_visual_compare_settings args else 0, 0 in
+  let build_identity = try Workspace_mobile_report.build_identity root session
+    with Workspace_mobile_report.Error message -> fail message in
   let result = Workspace_process.run_shell ?cancel ?on_progress
     ~timeout_seconds:(optional_int "timeout_seconds" 30 ~minimum:1
       ~maximum:120 args)
@@ -2624,46 +4546,59 @@ let mobile_visual_tool ~approved ?cancel ?on_progress ~context ~root args =
   let metadata = {
     Workspace_mobile_visual.app = session.app_id;
     platform = Workspace_mobile_run.platform_name session.platform;
-    device = session.device; os; locale; theme;
+    device = session.device; build_hash = build_identity.build_hash;
+    os; locale; theme;
     width = screenshot.width; height = screenshot.height; masks
   } in
   let capture = {
     Workspace_mobile_visual.png = screenshot.png;
     complete = not result.truncated; metadata
   } in
-  let output = try
+  let output, images = try
     if action = "save" then (
       Workspace_mobile_visual.save ~workspace:root ~name capture;
-      Yojson.Basic.to_string (`Assoc [
+      let text = Yojson.Basic.to_string (`Assoc [
         "session_id", `String session.id;
         "app_id", `String session.app_id;
         "device", `String session.device;
         "baseline", `String name;
         "status", `String "baseline_saved";
+        "settings_version", `Int Workspace_mobile_visual.version;
         "environment_metadata", `String "operator_declared";
         "width", `Int screenshot.width; "height", `Int screenshot.height;
-        "dynamic_regions", `Int (List.length masks)]))
+        "dynamic_regions", `Int (List.length masks)]) in
+      text, [screenshot.png])
     else
-      let difference =
-        Workspace_mobile_visual.compare ~workspace:root ~name capture in
-      let first = match difference.first_difference with
+      let report = Workspace_mobile_visual.compare ~workspace:root ~name
+        ~threshold ~max_differing_pixels capture in
+      let first = match report.comparison.first_difference with
         | None -> `Null
         | Some (x, y) -> `Assoc ["x", `Int x; "y", `Int y] in
-      Yojson.Basic.to_string (`Assoc [
+      let regions = `List (List.map (fun rect -> `Assoc [
+        "x", `Int rect.Workspace_mobile_visual.x;
+        "y", `Int rect.y; "width", `Int rect.width;
+        "height", `Int rect.height]) report.regions) in
+      let text = Yojson.Basic.to_string (`Assoc [
         "session_id", `String session.id;
         "app_id", `String session.app_id;
         "device", `String session.device;
         "baseline", `String name;
-        "status", `String (if difference.equal then "equal" else "different");
-        "differing_pixels", `Int difference.differing_pixels;
-        "first_difference", first;
+        "status", `String (if report.comparison.equal then "within_tolerance" else "different");
+        "differing_pixels", `Int report.comparison.differing_pixels;
+        "first_difference", first; "regions", regions;
+        "settings_version", `Int report.settings_version;
+        "threshold", `Int report.threshold;
+        "max_differing_pixels", `Int report.max_differing_pixels;
+        "image_order", `List (List.map (fun name -> `String name)
+          ["baseline"; "current"; "difference"]);
         "environment_metadata", `String "operator_declared";
         "width", `Int screenshot.width; "height", `Int screenshot.height;
-        "dynamic_regions", `Int (List.length masks)])
+        "dynamic_regions", `Int (List.length masks)]) in
+      text, [report.baseline_png; report.current_png; report.difference_png]
   with Workspace_mobile_visual.Error message -> fail message in
-  [Protocol.Text output;
-   Protocol.Image { mime_type = "image/png";
-     data = Workspace_mobile_observe.base64_encode screenshot.png }]
+  [Protocol.Text output] @ List.map (fun png ->
+    Protocol.Image { mime_type = "image/png";
+      data = Workspace_mobile_observe.base64_encode png }) images
 
 let mobile_control_action action args =
   let integer name minimum maximum =
@@ -3971,21 +5906,31 @@ let is_shell_tool = function
   | "run_command" | "start_process" | "start_shell" | "xcode_preflight"
   | "mobile_check" | "android_devices" | "mobile_session" | "mobile_verify"
   | "mobile_observe" | "mobile_control" | "mobile_scenario"
-  | "mobile_diagnostics" | "mobile_visual" -> true
+  | "mobile_diagnostics" | "mobile_visual" | "mobile_accessibility_audit"
+  | "mobile_performance" | "mobile_device_lifecycle" -> true
   | _ -> false
+
 
 
 let requires_explicit_approval ~name ~args =
   match name with
   | "start_process" | "xcode_preflight" | "mobile_check" | "android_devices" | "mobile_verify"
-  | "mobile_visual" | "mobile_observe" | "mobile_control" | "mobile_diagnostics" -> true
-  | "process_stdin" | "process_close_stdin" | "process_kill"
+  | "mobile_visual" | "mobile_observe" | "mobile_control" | "mobile_diagnostics"
+  | "mobile_accessibility_audit" | "mobile_environment"
+  | "mobile_performance" -> true
+  | "mobile_device_lifecycle" ->
+      List.mem (optional_string "action" "" args)
+        ["inventory"; "boot"; "readiness"; "shutdown"; "abort_boot"]
+  | "mobile_app_lifecycle" ->
+      not (List.mem (optional_string "action" "" args)
+        ["list_scenarios"; "show_scenario"])
+  | "mobile_dev_server" ->
+      List.mem (optional_string "action" "" args) ["start"; "stop"]
   | "worktree_create" | "worktree_commit" | "worktree_remove"
   | "web_search" | "web_fetch" | "image_ocr"
   | "clipboard_read" | "clipboard_write"
   | "lsp_start" | "workspace_eval"
-  | "ssh_open" | "ssh_read" | "ssh_write" | "ssh_command"
-  | "dap_start" -> true
+  | "ssh_open" | "ssh_read" | "ssh_write" | "ssh_command" | "dap_start" -> true
   | "mobile_session" ->
       List.mem (optional_string "action" "" args)
         ["build"; "install"; "launch"; "stop"]
@@ -4027,8 +5972,17 @@ let non_reversible_tool ~name ~args =
         ["build"; "install"; "launch"; "stop"]
   | "mobile_scenario" ->
       not (List.mem (optional_string "action" "" args) ["list"; "status"])
+  | "mobile_dev_server" ->
+      List.mem (optional_string "action" "" args) ["start"; "stop"]
   | "mobile_visual" ->
       optional_string "action" "" args = "save"
+  | "mobile_app_lifecycle" ->
+      List.mem (optional_string "action" "" args) ["open_link"; "transition"]
+  | "mobile_performance" ->
+      List.mem (optional_string "action" "" args) ["launch"; "ios_capture"]
+  | "mobile_device_lifecycle" ->
+      List.mem (optional_string "action" "" args)
+        ["boot"; "shutdown"; "abort_boot"]
   | "workspace_eval" -> optional_string "action" "run" args = "run"
   | "dap" ->
       (match field "action" args with
@@ -4157,19 +6111,73 @@ let definitions = [
      "derived_data_path", string_field "Optional workspace-relative output directory for Xcode build artifacts";
      "timeout_seconds", integer_field "Per-command deadline (default 120 seconds)" 1 300]
     ["action"; "subroot"];
-  schema "mobile_check" "Run one explicitly approved focused SwiftPM test, offline system-Gradle task, Gradle instrumentation test bound to one inventoried ready emulator, Flutter analysis/test, or local React Native/Expo script. Discovery, device inventory and each execution need separate approvals; project code runs as your user. No dependency installation, SDK setup or emulator boot."
+  schema "mobile_check" "Run focused SwiftPM tests, offline system-Gradle tasks, Gradle instrumentation tests bound to one inventoried ready emulator, Flutter analysis/tests or discovered device integration_test bound to an exact installed Android app session, or local React Native/Expo scripts. Discovery, device inventory and every execution need separate approvals; project code runs as your user. Flutter integration tests may deploy/install a test runner and app but never run pub get, install dependencies/SDKs, or boot a device."
     ["stack", enum_string_field "Selected mobile stack" ["swiftpm"; "gradle"; "flutter"; "node"];
-     "action", enum_string_field "SwiftPM discover/run, Gradle tasks/run/instrumented, Flutter analyze/test, or Node test/lint" ["discover"; "tasks"; "run"; "instrumented"; "analyze"; "test"; "lint"];
+     "action", enum_string_field "Focused check action" ["discover"; "tasks"; "run"; "instrumented"; "analyze"; "test"; "integration_test"; "lint"];
      "subroot", string_field "Exact workspace-relative package/settings/project root";
-     "target", string_field "Exact discovered Swift test or Gradle task; for Flutter test, exact workspace-relative .dart test file";
+     "target", string_field "Exact discovered Swift/Gradle target, Flutter test/*.dart or integration_test/*.dart target";
      "serial", string_field "Gradle instrumented only: exact ready emulator serial reported by the approved android_devices inventory";
+     "session_id", string_field "Flutter integration_test only: exact installed Android app session";
      "manager", enum_string_field "Node script runner when multiple lockfiles exist" ["npm"; "pnpm"; "yarn"];
      "timeout_seconds", integer_field "Per-command deadline (default 120 seconds)" 1 300]
     ["stack"; "action"; "subroot"];
+  schema "mobile_dev_server" "Start, inspect or stop one private-session-owned React Native/Expo development server using an already declared package.json script. Start/stop require exact approval, readiness and owned-process cleanup; LAN exposure must be selected explicitly. No npx, package installation or prebuild."
+    ["action", enum_string_field "Owned development server operation" ["start"; "status"; "stop"];
+     "id", bounded_string_field "Unique process-session ID" 100;
+     "subroot", bounded_string_field "Exact workspace-relative RN/Expo package root" 4096;
+     "script", bounded_string_field "Exact declared package.json development script" 128;
+     "manager", enum_string_field "Package manager when multiple lockfiles exist" ["npm"; "pnpm"; "yarn"];
+     "host", enum_string_field "Required bind exposure" ["localhost"; "lan"];
+     "port", integer_field "Selected listen port" 1 65535;
+     "readiness_timeout_seconds", integer_field "Listen readiness deadline (default 45 seconds)" 1 300]
+    ["action"; "id"];
+  schema "mobile_environment" "Preview, apply or explicitly restore one bounded reversible Android-emulator app locale, global theme or orientation effect. Preview binds the exact running app, device and build; apply and restore each require separate approval and restore only when current state still equals the approved target. Theme/orientation changes are emulator-wide. Permission transitions and airplane-mode controls remain unavailable until their design/capability contracts are reviewed."
+    ["action", enum_string_field "Environment operation" ["preview"; "apply"; "restore"];
+     "session_id", string_field "Exact running Android app session";
+     "effect", enum_string_field "Preview-only supported effect kind" ["locale"; "theme"; "orientation"];
+     "locale", bounded_string_field "App locale tag or empty default" 64;
+     "theme", enum_string_field "Global emulator theme target" ["light"; "dark"];
+     "orientation", enum_string_field "Emulator orientation target" ["portrait"; "landscape"];
+     "plan_id", bounded_string_field "Opaque plan ID returned by preview" 32]
+    ["action"; "session_id"];
+  schema "mobile_app_lifecycle" "Inspect exact selected Android APK URL-handler evidence, open only an exactly matched URL, and verify one exact accessible destination text/description between fresh selected-app observations. open_link requires destination_assertion and exact foreground handler identity. Scenarios bind build, app, device, generation and PID; process recreation requires a changed verified PID. No app-data clear, iOS URL dispatch or device boot."
+    ["action", enum_string_field "Lifecycle operation" [
+       "inspect_handlers"; "open_link"; "observe"; "create_scenario";
+       "transition"; "list_scenarios"; "show_scenario"; "delete_scenario"];
+     "session_id", string_field "Exact built/installed Android app session";
+     "name", bounded_string_field "Private scenario name [a-z0-9_-]{1,48}" 48;
+     "handler_id", bounded_string_field "handler_id from exact APK inspection" 16;
+     "url", bounded_string_field "Exact URL matching inspected scheme, host and path" 2048;
+     "destination_assertion", bounded_string_field "Required for open_link: exact accessibility text or content description" 512;
+     "transition", enum_string_field "Explicit lifecycle effect" [
+       "background"; "resume"; "recreate_process"]]
+    ["action"];
+  schema "mobile_performance" "Capture separately approved Android launch, warm frame/PSS samples with exact build and PID provenance, or an explicitly warm raw iOS Simulator Instruments trace. Android launch condition is verified by force-stop or pre-existing PID continuity; frames/PSS require immediate exact-PID revalidation and complete known-unit samples. iOS xctrace remains raw and does not provide measured counters or energy."
+    ["action", enum_string_field "Selected app measurement" [
+       "launch"; "frames"; "memory"; "ios_templates"; "ios_process"; "ios_capture"];
+     "session_id", string_field "Exact running selected app session";
+     "condition", enum_string_field "Required for measured launch/frame/memory and iOS trace operations" ["cold"; "warm"];
+     "template", enum_string_field "Installed xctrace template" [
+       "Time Profiler"; "Allocations"; "Leaks"; "Activity Monitor"];
+     "name", bounded_string_field "Unique private iOS trace name [A-Za-z0-9_-]{1,80}" 80]
+    ["action"; "session_id"];
   schema "android_devices" "Inventory configured Android AVDs or attached ADB devices with one separately approved command per phase; never boot, install, select a physical serial or run a test."
     ["action", enum_string_field "AVD configuration or ADB transport listing" ["avds"; "devices"];
      "subroot", string_field "Exact workspace-relative Gradle settings directory"]
     ["action"; "subroot"];
+  schema "mobile_device_lifecycle" "Inventory one selected session's existing configured AVDs or compatible iOS simulators, then separately approve owned boot, readiness, shutdown or boot cancellation. Every effect binds the exact device session, inventory and target. Physical devices, runtime/image downloads and erasure are unsupported; pre-existing devices are never shut down."
+    ["action", enum_string_field "Device lifecycle operation" [
+       "inventory"; "status"; "boot"; "readiness"; "shutdown"; "abort_boot"];
+     "platform", enum_string_field "Selected target platform" ["android"; "ios"];
+     "subroot", bounded_string_field "Exact workspace-relative Gradle settings directory or Xcode bundle" 4096;
+     "scheme", bounded_string_field "Exact Xcode scheme already discovered for this bundle" 256;
+     "device_session_id", bounded_string_field "Exact returned device session ID" 64;
+     "inventory_id", bounded_string_field "Exact returned device inventory ID" 64;
+     "target_name", bounded_string_field "Exact configured Android AVD name" 256;
+     "port", integer_field "Unused even Android emulator console port" 5554 5682;
+     "simulator_id", bounded_string_field "Exact compatible iOS Simulator UUID" 36;
+     "readiness_timeout_seconds", integer_field "Readiness deadline (default 60 seconds)" 1 300]
+    ["action"];
   schema "mobile_session" "Select an app, build its chosen Android variant or non-signing iOS Simulator scheme, then separately install, launch and stop the session. Each build/device effect has an exact explicit approval; no physical device is selectable."
     ["action", enum_string_field "Session action" ["list"; "select"; "status"; "build"; "install"; "launch"; "stop"];
      "session_id", string_field "Session ID returned by select";
@@ -4199,12 +6207,16 @@ let definitions = [
      "session_id", string_field "Running mobile app session ID";
      "timeout_seconds", integer_field "Device read deadline (default 30 seconds)" 1 120]
     ["action"; "session_id"];
+  schema "mobile_accessibility_audit" "Capture a fresh bounded Android accessibility tree from the exact running selected app session and report only rule-based findings supported by observed nodes. This does not certify screen-reader, contrast, focus-order or unknown-density touch-target behavior; each private tree capture requires explicit approval."
+    ["session_id", string_field "Exact running Android app session";
+     "timeout_seconds", integer_field "Device read deadline (default 30 seconds)" 1 120]
+    ["session_id"];
   schema "mobile_diagnostics" "Read bounded runtime logs, Android crash-buffer or last-ANR evidence, and selected iOS Simulator process/crash logs. Every capture requires exact explicit approval. Reports preserve truncation and identify local mapping/dSYM artifacts without claiming automatic symbolication."
     ["action", enum_string_field "Diagnostic capture" ["logs"; "crashes"; "anr"];
      "session_id", string_field "Selected built mobile app session ID";
      "timeout_seconds", integer_field "Capture deadline (default 30 seconds)" 1 120]
     ["action"; "session_id"];
-  schema "mobile_visual" "Save a bounded screenshot as a private pixel baseline or compare a fresh capture against one. Metadata binds exact app/platform/device plus operator-declared OS/locale/theme and exact dynamic-region masks. Pixel differences outside masks are counted; incomplete images and any metadata mismatch are rejected."
+  schema "mobile_visual" "Save a bounded screenshot as a private version-2 pixel baseline or compare it with a fresh capture. Metadata binds exact app/platform/device, operator-declared OS/locale/theme and dynamic-region masks. Compare requires explicit per-channel threshold and differing-pixel tolerance, returns baseline/current/difference artifacts plus at most 128 regions, and rejects incomplete images or metadata mismatches."
     ["action", enum_string_field "Save or compare a screenshot baseline" ["save"; "compare"];
      "session_id", string_field "Exact running mobile app session";
      "name", bounded_string_field "Baseline name [A-Za-z0-9_-]{1,80}" 80;
@@ -4220,6 +6232,8 @@ let definitions = [
          "width", integer_field "Region width" 1 max_int;
          "height", integer_field "Region height" 1 max_int]
          ["x"; "y"; "width"; "height"]];
+     "threshold", integer_field "Compare only: explicit maximum channel delta (0..255)" 0 255;
+     "max_differing_pixels", integer_field "Compare only: explicit allowed differing-pixel count" 0 Workspace_mobile_visual.max_pixels;
      "timeout_seconds", integer_field "Screenshot deadline (default 30 seconds)" 1 120]
     ["action"; "session_id"; "name"; "os"; "locale"; "theme"; "dynamic_regions"];
 
@@ -4462,7 +6476,26 @@ let approval_decision ~command_patterns ~name ~args =
            not (optional_bool "terminate_debuggee" false args) -> tier Approval.Read
        | _ -> tier Approval.Exec)
   | "mobile_observe" -> tier Approval.Read
+  | "mobile_accessibility_audit" -> tier Approval.Read
   | "mobile_diagnostics" -> tier Approval.Read
+  | "mobile_environment" when optional_string "action" "" args = "preview" ->
+      tier Approval.Read
+  | "mobile_app_lifecycle" ->
+      (match optional_string "action" "" args with
+       | "create_scenario" | "delete_scenario" -> tier Approval.Write
+       | "open_link" | "transition" -> tier Approval.Exec
+       | _ -> tier Approval.Read)
+  | "mobile_performance" ->
+      (match optional_string "action" "" args with
+       | "launch" | "ios_capture" -> tier Approval.Exec
+       | _ -> tier Approval.Read)
+  | "mobile_device_lifecycle" ->
+      (match optional_string "action" "" args with
+       | "boot" | "shutdown" | "abort_boot" -> tier Approval.Exec
+       | _ -> tier Approval.Read)
+  | "mobile_dev_server" when optional_string "action" "" args = "status" ->
+      tier Approval.Read
+  | "mobile_dev_server" -> tier Approval.Exec
   | "mobile_visual" when optional_string "action" "" args = "save" ->
       tier Approval.Write
   | "mobile_visual" -> tier Approval.Read
@@ -4825,15 +6858,48 @@ let approval_request ?cancel ?context ?(env = Sys.getenv_opt)
           else
             "Build/test may write derived data; simulator tests may launch a simulator. No signing or physical-device destination is selected.")]
     | "mobile_check" ->
-        let command, cwd = mobile_command ~root:base_root args in
-        "Executes selected mobile project code as your user; discovery and execution each need approval. Commands do not install dependencies, provision SDKs, or sandbox project code.",
-        ["Working directory: " ^ Printf.sprintf "%S" cwd;
-         "Exact command: " ^ command;
-         (if optional_string "stack" "" args = "gradle" &&
-             optional_string "action" "" args = "instrumented" then
-            "Runs the selected Gradle task with ANDROID_SERIAL bound to the one emulator you choose; that task may install and run test APKs on it. Boot and standalone install remain separately approved actions."
+        let context = require_session_context context in
+        let stack = required_string "stack" args
+        and action = required_string "action" args
+        and subroot = required_string "subroot" args in
+        let ready_device_id = flutter_integration_device ~context ~root:base_root args in
+        let flutter_discovery = stack = "flutter" && action = "discover" in
+        let discovery = if flutter_discovery then
+            Some (try Workspace_flutter_focus.discover_integration_tests
+              ~root:base_root ~subroot
+             with Workspace_flutter_focus.Error message -> fail message)
+          else None in
+        let command, cwd = if flutter_discovery then
+            ("bounded filesystem discovery only; no subprocess is started",
+             if subroot = "" || subroot = "." then base_root
+             else Workspace_path.checked_path base_root subroot)
+          else mobile_command ?ready_device_id ~root:base_root args in
+        let integration = match ready_device_id with
+          | None ->
+              (match discovery with
+               | Some discovery ->
+                   ["Discovered integration tests:\n" ^
+                    String.concat "\n" (List.map
+                      (fun (target : Workspace_flutter_focus.integration_target) ->
+                        target.path) discovery.targets)]
+               | None -> [])
+          | Some serial ->
+              let session = Workspace_mobile_run.get context.mobile_run_manager
+                (required_string "session_id" args) in
+              mobile_discovery_require context ~stack ~root:base_root ~subroot
+                ~manifest_hash:(mobile_manifest ~root:base_root ~stack ~subroot)
+                ~target:(required_string "target" args);
+              ["Selected app session: " ^ session.id ^ " · " ^ session.app_id;
+               "Exact installed emulator: " ^ serial;
+               "Flutter integration_test runs with --no-pub and may compile/deploy or install the test runner and app on this emulator.";
+               "No pub get, dependency install, SDK/image install or device boot is performed."] in
+        ("Executes selected mobile project code as your user; discovery and execution each need approval. Commands do not provision SDKs or sandbox project code.",
+         ["Working directory: " ^ Printf.sprintf "%S" cwd;
+          "Exact command: " ^ command] @ integration @
+         [if stack = "gradle" && action = "instrumented" then
+            "Runs the selected Gradle task with ANDROID_SERIAL bound to one emulator; the task may install/run test APKs. Boot and standalone install remain separately approved."
           else
-            "The selected toolchain may write local build artifacts or invoke project-defined code.")]
+            "The selected toolchain may write local build artifacts or invoke project-defined code."])
     | "android_devices" ->
         let command, cwd = android_device_command ~root:base_root args in
         "Lists Android devices as your user; this inventory is not authorization to boot, install, launch or test. Each phase requires separate interactive approval.",
@@ -4843,6 +6909,9 @@ let approval_request ?cancel ?context ?(env = Sys.getenv_opt)
             "ADB may start its local server and access your configured ADB identity. Physical serials are withheld; offline and unauthorized transports are not ready."
           else
             "Reads locally configured AVD names; no SDK or system image is installed, and no emulator is booted.")]
+    | "mobile_device_lifecycle" ->
+        let context = require_session_context context in
+        mobile_device_lifecycle_preview ~context ~root:base_root args
     | "mobile_verify" ->
         let context = require_session_context context in
         mobile_verify_preview ~context ~root:base_root args
@@ -4865,6 +6934,179 @@ let approval_request ?cancel ?context ?(env = Sys.getenv_opt)
           "Exact command: " ^ command;
           Printf.sprintf "Maximum captured output: %d bytes."
             Workspace_mobile_observe.max_screenshot_bytes])
+    | "mobile_accessibility_audit" ->
+        let context = require_session_context context in
+        let session = Workspace_mobile_run.get context.mobile_run_manager
+          (required_string "session_id" args) in
+        if session.root <> base_root then
+          fail "mobile app session belongs to a different workspace root";
+        if session.state <> Workspace_mobile_run.Running then
+          fail "mobile accessibility audit requires a running app session";
+        if session.platform <> Workspace_mobile_run.Android then
+          fail "rule-based mobile accessibility audit is currently Android-only";
+        let command = Workspace_mobile_observe.accessibility_audit_command session in
+        ("Captures one fresh selected-app accessibility tree and reports only evidenced Android accessibility rules; output may contain private app labels.",
+         ["Working directory: " ^ Printf.sprintf "%S" session.root;
+          "Session/app/device: " ^ session.id ^ " · " ^ session.app_id ^ " · " ^ session.device;
+          "Exact command: " ^ command;
+          Printf.sprintf "Maximum captured output: %d bytes."
+            Workspace_mobile_observe.max_accessibility_bytes])
+    | "mobile_environment" ->
+        let context = require_session_context context in
+        let lines = mobile_environment_plan_preview ~context ~root:base_root args in
+        ("Reads or changes only the exact approved Android emulator state for the selected running app; preview, apply and restore are separate approvals.",
+         lines)
+    | "mobile_app_lifecycle" ->
+        let context = require_session_context context in
+        let action = required_string "action" args in
+        let detail lines = "Performs the exact selected-app lifecycle operation shown; it never clears app data or boots a device.", lines in
+        (match action with
+         | "list_scenarios" ->
+             detail ["Lists only private lifecycle records under .pave/mobile-app-lifecycle."]
+         | "show_scenario" | "delete_scenario" ->
+             let name = required_string "name" args in
+             let path = Filename.concat base_root
+               (".pave/mobile-app-lifecycle/" ^ name ^ ".json") in
+             detail ["Scenario: " ^ name; "Exact private record: " ^ path;
+               if action = "delete_scenario" then "Deletes only this local scenario record; device state is unchanged."
+               else "Reads this local scenario record; device state is unchanged."]
+         | "inspect_handlers" | "open_link" | "observe" | "create_scenario" | "transition" ->
+             let session = mobile_lifecycle_session ~context ~root:base_root args in
+             let identity = mobile_lifecycle_identity base_root session in
+             let binding = [
+               "Session/app/device: " ^ session.id ^ " · " ^ session.app_id ^ " · " ^ session.device;
+               "Selected APK: " ^ session.app_path;
+               "Selected build SHA-256: " ^ identity.build_id] in
+             (match action with
+              | "inspect_handlers" ->
+                  let command = "apkanalyzer manifest print " ^
+                    Filename.quote (Workspace_path.checked_path base_root session.app_path) in
+                  detail (binding @ ["Exact read command: " ^ command;
+                    "Only exact VIEW+BROWSABLE+DEFAULT scheme/host/path handlers are retained."])
+              | "open_link" ->
+                  let cache = match mobile_lifecycle_cache_handlers context session.id with
+                    | Some cache when cache.build_hash = identity.build_id -> cache
+                    | _ -> fail "inspect URL handlers again; approved manifest evidence is missing or stale" in
+                  let handler_id = required_string "handler_id" args in
+                  let index = if String.starts_with ~prefix:"handler-" handler_id then
+                      int_of_string_opt (String.sub handler_id 8 (String.length handler_id - 8))
+                    else None in
+                  let handler = match index with
+                    | Some index when index > 0 ->
+                        (try List.nth cache.handlers (index - 1) with _ ->
+                          fail "handler_id is not in the inspected selected-app manifest")
+                    | _ -> fail "handler_id is not an inspected handler" in
+                  let command, link = try Workspace_mobile_app_lifecycle.deep_link_preview
+                      ~approved_evidence:true session ~handler
+                      ~url:(required_string "url" args)
+                    with Workspace_mobile_app_lifecycle.Error message -> fail message in
+                  let observation_command =
+                    Workspace_mobile_app_lifecycle.observation_command session in
+                  let accessibility_command = Workspace_mobile_observe.command
+                    "accessibility" session in
+                  let assertion = required_string "destination_assertion" args in
+                  detail (binding @ ["Exact inspected handler: " ^ handler_id;
+                    "Exact URL: " ^ link.url; "Exact explicit-component command: " ^ command;
+                    "Exact destination text/content description: " ^ assertion;
+                    "Fresh selected-app lifecycle observation before and after accessibility capture: " ^ observation_command;
+                    "Fresh accessibility tree command: " ^ accessibility_command;
+                    "The action fails unless the exact selected-app handler is foreground both before and after, and exactly one accessibility node has the requested text or content description."])
+              | "observe" ->
+                  let command = try Workspace_mobile_app_lifecycle.observation_command session
+                    with Workspace_mobile_app_lifecycle.Error message -> fail message in
+                  detail (binding @ ["Exact bounded observation command: " ^ command;
+                    "Output is parsed for resumed component and selected-app PID."])
+              | "create_scenario" ->
+                  if session.state <> Workspace_mobile_run.Running then
+                    fail "scenario creation requires a running selected app session";
+                  let observation = match mobile_lifecycle_observation context session.id with
+                    | Some observation when Workspace_mobile_app_lifecycle.same_identity
+                        identity observation.identity -> observation
+                    | _ -> fail "observe the exact selected app after build before creating a lifecycle scenario" in
+                  if observation.state <> Workspace_mobile_app_lifecycle.Foreground ||
+                     observation.process_id = None then
+                    fail "scenario creation requires a foreground selected app and verified PID";
+                  let name = required_string "name" args in
+                  let path = Filename.concat base_root
+                    (".pave/mobile-app-lifecycle/" ^ name ^ ".json") in
+                  detail (binding @ ["Scenario name: " ^ name;
+                    "Scenario file: " ^ path;
+                    "Fresh generation/PID: " ^ string_of_int observation.generation ^
+                      "/" ^ string_of_int (Option.get observation.process_id);
+                    "Writes a private record only; device state is unchanged."])
+              | "transition" ->
+                  let name = required_string "name" args in
+                  let record = try Workspace_mobile_app_lifecycle.load
+                      ~root:base_root name
+                    with Workspace_mobile_app_lifecycle.Error message -> fail message in
+                  if not (Workspace_mobile_app_lifecycle.same_identity
+                      identity record.identity) then
+                    fail "scenario belongs to a different selected build, app or device";
+                  let observation = match mobile_lifecycle_observation context session.id with
+                    | Some observation -> observation
+                    | None -> fail "take a fresh lifecycle observation before transitioning" in
+                  let activity = match session.activity with Some value -> value
+                    | None -> fail "selected app session has no approved launch activity" in
+                  let transition = mobile_lifecycle_transition
+                    (required_string "transition" args) in
+                  let commands = try Workspace_mobile_app_lifecycle.prepare_transition
+                      record ~approved:true ~observation ~activity transition
+                    with Workspace_mobile_app_lifecycle.Error message -> fail message in
+                  let verify = Workspace_mobile_app_lifecycle.observation_command session in
+                  detail (binding @ [
+                    "Scenario: " ^ name;
+                    "Expected state: " ^
+                      Workspace_mobile_app_lifecycle.state_name
+                        (Workspace_mobile_app_lifecycle.expected_state transition);
+                    "State-loss warning: " ^
+                      Workspace_mobile_app_lifecycle.data_loss_description transition;
+                    "Exact commands: " ^ String.concat " ; " commands;
+                    "Exact post-transition observation: " ^ verify;
+                    "No app data is cleared; failed verification is recorded as failed."])
+              | _ -> assert false)
+         | _ -> fail "unsupported mobile app lifecycle action")
+    | "mobile_performance" ->
+        let context = require_session_context context in
+        mobile_performance_preview ~context ~root:base_root args
+    | "mobile_dev_server" ->
+        let context = require_session_context context in
+        let action = required_string "action" args in
+        let id = required_string "id" args in
+        if action = "start" then (
+          let root = Workspace_path.root_path base_root in
+          let subroot = required_string "subroot" args in
+          let script = required_string "script" args in
+          let package_manager = optional_string "manager" "" args in
+          let manager, cwd = try Workspace_node_server.command ~root ~subroot
+              ~script ~package_manager
+            with Workspace_node_server.Error message -> fail message in
+          let exposure = Workspace_node_server.parse_exposure
+            (required_string "host" args) in
+          let executable, arguments = Workspace_node_server.package_manager_and_args
+            ~manager ~script ~host:exposure
+            ~port:(match field "port" args with
+              | `Int port when port >= 1 && port <= 65_535 -> port
+              | _ -> fail "port must be an integer between 1 and 65535") in
+          ("Runs declared project code as a session-owned process and waits for the selected port; no dependency install or implicit restart.",
+           ["Process session: " ^ id;
+            "Package/script: " ^ subroot ^ " · " ^ script;
+            "Working directory: " ^ Printf.sprintf "%S" cwd;
+            "Exact argv: " ^ String.concat " "
+              (List.map (Printf.sprintf "%S") (executable :: arguments));
+            "Exposure: " ^ Workspace_node_server.display_host exposure;
+            Printf.sprintf "Readiness deadline: %d seconds."
+              (optional_int "readiness_timeout_seconds" 45 ~minimum:1 ~maximum:300 args)])
+        ) else if action = "stop" then (
+          let server = try Workspace_node_server.get context.node_server_manager ~id
+            with Workspace_node_server.Error message -> fail message in
+          if server.root <> base_root then
+            fail "Node development server belongs to a different workspace root";
+          ("Stops only the owned Node development server process for this private session.",
+           ["Process session: " ^ server.id;
+            "Owned process: " ^ server.process_id;
+            "Current state: " ^ Workspace_node_server.render server])
+        ) else
+          fail "only start and stop require development-server effect approval"
     | "mobile_diagnostics" ->
         let context = require_session_context context in
         let session = Workspace_mobile_run.get context.mobile_run_manager
@@ -5347,7 +7589,11 @@ let session_tool_names = [
   "ssh_open"; "ssh_close"; "ssh_read"; "ssh_write"; "ssh_command";
   "dap_start"; "dap"; "xcode_preflight"; "mobile_check"; "android_devices";
   "mobile_session"; "mobile_verify"; "mobile_observe"; "mobile_diagnostics";
-  "mobile_visual"; "mobile_control"; "mobile_scenario"; "browser"; "publish_web"
+  "mobile_visual"; "mobile_control"; "mobile_scenario"; "mobile_dev_server";
+  "mobile_environment"; "mobile_app_lifecycle"; "mobile_performance";
+  "mobile_device_lifecycle";
+
+  "browser"; "publish_web"
 ]
 
 let path_tool_names = [
@@ -5370,6 +7616,11 @@ let error_message = function
   | Workspace_mobile_scenario.Error message
   | Workspace_mobile_diagnostics.Error message
   | Workspace_mobile_visual.Error message
+  | Workspace_mobile_environment.Error message
+  | Workspace_mobile_app_lifecycle.Error message
+  | Workspace_mobile_performance.Error message
+  | Workspace_mobile_device_lifecycle.Error message
+
   | Workspace_android_devices.Error message
   | Workspace_mobile_observe.Error message
   | Workspace_browser.Error message | Workspace_portal.Error message ->
@@ -5447,6 +7698,22 @@ let prepare ?cancel ?context ~root ~name ~args () =
           | "mobile_observe" ->
               Ok (mobile_observe_tool ~approved ?cancel ?on_progress
                 ~context:(require_session_context context) ~root args)
+          | "mobile_accessibility_audit" ->
+              Ok [Protocol.Text (mobile_accessibility_audit_tool ~approved
+                ?cancel ?on_progress ~context:(require_session_context context)
+                ~root args)]
+          | "mobile_dev_server" ->
+              Ok [Protocol.Text (mobile_dev_server_tool ~approved ?cancel
+                ~context:(require_session_context context) ~root args)]
+          | "mobile_environment" ->
+              Ok [Protocol.Text (mobile_environment_tool ~approved ?cancel
+                ~context:(require_session_context context) ~root args)]
+          | "mobile_app_lifecycle" ->
+              Ok [Protocol.Text (mobile_app_lifecycle_tool ~approved ?cancel
+                ?on_progress ~context:(require_session_context context) ~root args)]
+          | "mobile_performance" ->
+              Ok [Protocol.Text (mobile_performance_tool ~approved ?cancel
+                ?on_progress ~context:(require_session_context context) ~root args)]
           | "mobile_diagnostics" ->
               Ok (mobile_diagnostics_tool ~approved ?cancel ?on_progress
                 ~context:(require_session_context context) ~root args)
@@ -5463,6 +7730,10 @@ let prepare ?cancel ?context ~root ~name ~args () =
           | "memory" -> Ok [Protocol.Text (Yojson.Basic.to_string
               (try memory_tool ~approved ~root args
                with Workspace_memory.Error message -> fail message))]
+          | "mobile_device_lifecycle" ->
+              Ok [Protocol.Text (mobile_device_lifecycle_tool ~approved
+                ?cancel ?on_progress ~context:(require_session_context context)
+                ~root args)]
           | _ -> Ok [Protocol.Text (match name with
           | "read_file" -> read_file ?cancel ?context root args
           | "workspace_snapshot" -> workspace_snapshot ?cancel ?context tool_root tool_args

@@ -220,6 +220,41 @@ let () =
       | Unix.WEXITED 0 -> ()
       | _ -> failwith "concurrent credential writer failed") children;
     assert ((find path "counter" (Some "user-1") |> Option.get).access = "48");
+    let invoked = ref false in
+    assert (rejects (fun () ->
+      Store.with_lock ~path ~cancel:(fun () -> true) (fun () -> invoked := true)));
+    assert (not !invoked);
+    assert (rejects (fun () ->
+      Store.with_lock ~path ~deadline:(Unix.gettimeofday () -. 1.)
+        (fun () -> invoked := true)));
+    assert (not !invoked);
+    let lock_fd = Unix.openfile (path ^ ".lock") [Unix.O_RDWR] 0 in
+    Unix.lockf lock_fd Unix.F_LOCK 0;
+    let waiter = Unix.fork () in
+    if waiter = 0 then (
+      let started = Unix.gettimeofday () in
+      (try
+         Store.with_lock ~path
+           ~cancel:(fun () -> Unix.gettimeofday () -. started > 0.1)
+           (fun () -> ());
+         exit 3
+       with Store.Storage_error _ -> exit 0 | _ -> exit 4));
+    (match snd (Unix.waitpid [] waiter) with
+     | Unix.WEXITED 0 -> ()
+     | _ -> failwith "cancelled cross-process OAuth lock waiter did not stop");
+    let contender = Unix.fork () in
+    if contender = 0 then (
+      let fd = Unix.openfile (path ^ ".lock") [Unix.O_RDWR] 0 in
+      (try Unix.lockf fd Unix.F_TLOCK 0; exit 2
+       with Unix.Unix_error ((Unix.EACCES | Unix.EAGAIN), _, _) -> exit 0));
+    (match snd (Unix.waitpid [] contender) with
+     | Unix.WEXITED 0 -> ()
+     | _ -> failwith "cancelled lock waiter released another process lock");
+    Unix.lockf lock_fd Unix.F_ULOCK 0;
+    Unix.close lock_fd;
+    Store.with_lock ~path (fun () ->
+      Store.with_lock ~path (fun () -> invoked := true));
+    assert !invoked;
     assert (Store.accounts ~path ~provider:"beta" = []);
     assert (mode path = 0o600));
   print_endline "oauth store: ok"

@@ -1820,22 +1820,6 @@ let () =
       let authentication, api_key, raw_resolver =
         Cli_auth.resolve_authentication ?account_id:identity.account_id
           ?custom_route ~descriptor ~route ~endpoint () in
-      let resolved_credential = Option.map (fun resolve -> resolve ()) raw_resolver in
-      let local_oauth_selection = match descriptor.oauth, identity.account_id,
-          raw_resolver, resolved_credential with
-        | Some _, Some _, Some _, Some
-            (credential : Pave.Provider.credentials)
-          when credential.account_id = None -> true
-        | _ -> false in
-      let credential_account_id =
-        if local_oauth_selection then identity.account_id
-        else match custom_route with
-          | Some custom -> custom.account_id
-          | None -> Option.bind resolved_credential
-              (fun (credential : Pave.Provider.credentials) ->
-                credential.account_id) in
-      if identity.account_id <> credential_account_id then
-        failwith "selected model account does not match the active credentials; reselect the model for this account";
       let endpoint =
         if route.wire = Pave.Provider.Cloudflare_ai_gateway_chat then
           Option.get (Pave.Cloudflare_ai_gateway_api.env_chat_url ())
@@ -1843,15 +1827,27 @@ let () =
         else endpoint in
       let provider : Pave.Provider.config = {
         endpoint; model = model_name; api_key; api = route.wire } in
-      let secret_mask = make_secret_mask provider identity resolved_credential in
-      let resolve_credential = Option.map (fun resolve ->
-        fun () ->
-          let credential = resolve () in
+      let secret_mask = make_secret_mask provider identity None in
+      let resolve_credential_cancel = Option.map (fun resolve ->
+        fun ~cancel () ->
+          let (credential : Pave.Provider.credentials) =
+            resolve ?cancel:(Some cancel) () in
+          let credential_account_id =
+            if Option.is_some descriptor.oauth && credential.account_id = None
+            then identity.account_id
+            else match custom_route with
+              | Some custom -> custom.account_id
+              | None -> credential.account_id in
+          if identity.account_id <> credential_account_id then
+            failwith "selected model account does not match the active credentials; reselect the model for this account";
           Option.iter (fun mask ->
             Pave.Secret_mask.add mask [credential.Pave.Provider.access])
             secret_mask;
           credential) raw_resolver in
-      provider, authentication, resolve_credential, secret_mask in
+      let resolve_credential = Option.map (fun resolve ->
+        fun () -> resolve ~cancel:(fun () -> false) ()) resolve_credential_cancel in
+      provider, authentication, resolve_credential, resolve_credential_cancel,
+        secret_mask in
     let resolve_provider () =
       if !active_model = "" then
         failwith ("Select a model with /model " ^ !active_descriptor.id
@@ -1859,13 +1855,14 @@ let () =
       let identity = match !active_identity with
         | Some identity -> identity
         | None -> failwith "active model identity is unavailable" in
-      let provider, authentication, resolve_credential, secret_mask =
+      let provider, authentication, resolve_credential,
+          resolve_credential_cancel, secret_mask =
         provider_for ~descriptor:!active_descriptor ~route:!active_route
           ~identity ~endpoint:!endpoint_override ~model_name:!active_model in
       active_secret_mask := Option.map (fun mask ->
         !active_descriptor.id, identity.Pave.Model_identity.account_id, mask)
         secret_mask;
-      provider, authentication, resolve_credential in
+      provider, authentication, resolve_credential, resolve_credential_cancel in
 
     let native_openai_route () =
       let endpoint = if !endpoint_override = "" then !active_route.endpoint
@@ -2004,8 +2001,8 @@ let () =
                     let signed_prefix = List.exists
                       (fun (message : Pave.Protocol.message) ->
                         Option.is_some message.provider_state) prefix in
-                    let provider, authentication, resolve_credential =
-                      resolve_provider () in
+                    let provider, authentication, resolve_credential,
+                        resolve_credential_cancel = resolve_provider () in
                     worker_event "Context over budget; checking compaction route and capabilities.";
                     let native_openai = native_openai_compaction provider in
                     let native_anthropic =
@@ -2032,13 +2029,15 @@ let () =
                       if native_fits then
                         let compacted = if native_anthropic then
                           Pave.Provider.compact_anthropic_messages
-                            ~authentication ?resolve_credential ?cancel
+                            ~authentication ?resolve_credential
+                            ?resolve_credential_cancel ?cancel
                             ?max_output_tokens:!context_window_max_output_tokens
                             ~on_usage provider ~instructions:native_instruction
                             ~messages:native_messages ~tools:native_tools
                         else
                           Pave.Provider.compact_openai_responses
-                            ~authentication ?resolve_credential ?cancel
+                            ~authentication ?resolve_credential
+                            ?resolve_credential_cancel ?cancel
                             ~on_usage provider ~instructions:native_instruction
                             prefix in
                         compacted.summary, Some compacted.provider_state
@@ -2047,7 +2046,7 @@ let () =
                       else
                         Pave.Context_compaction.summarize ~provider
                           ~authentication ?resolve_credential
-                          ?thinking:!thinking_level ?cancel
+                          ?resolve_credential_cancel ?thinking:!thinking_level ?cancel
                           ?max_output_tokens:!context_window_max_output_tokens
                           ~window_tokens prefix ~on_usage, None in
                     let summary = mask_text secret_mask summary in
@@ -2069,17 +2068,20 @@ let () =
                      | None -> ());
                     Some projected)) in
     let start_child_job ~session ~provider ~authentication ?resolve_credential
-        ?secret_mask ~tool_allowed ~kind ~label ~task ?(model = None) () =
+        ?resolve_credential_cancel ?secret_mask ~tool_allowed ~kind ~label
+        ~task ?(model = None) () =
       if not !enable_subagents then
         failwith "subagents are disabled; launch with --enable-subagents";
       (* modelTiers resolves a full selector; omitted/inherit keeps the parent. *)
       let child_max_output_tokens = match model with
         | None | Some "inherit" -> !context_window_max_output_tokens
         | Some _ -> None in
-      let provider, authentication, resolve_credential, secret_mask, child_identity =
+      let provider, authentication, resolve_credential,
+          resolve_credential_cancel, secret_mask, child_identity =
         match model with
         | None | Some "inherit" ->
-            provider, authentication, resolve_credential, secret_mask, !active_identity
+            provider, authentication, resolve_credential,
+            resolve_credential_cancel, secret_mask, !active_identity
         | Some requested ->
             let selector = match List.assoc_opt requested
                 configured.Pave.Settings.model_tiers with
@@ -2095,11 +2097,11 @@ let () =
                 ~current_provider:!active_descriptor.id
                 ~input:selector () in
             let next_provider, next_authentication, next_resolver,
-                next_secret_mask =
+                next_cancel_resolver, next_secret_mask =
               provider_for ~descriptor ~route ~identity ~endpoint:""
                 ~model_name:identity.Pave.Model_identity.upstream_id in
             next_provider, next_authentication, next_resolver,
-              next_secret_mask, Some identity in
+              next_cancel_resolver, next_secret_mask, Some identity in
       let history = Pave.Session.context session in
       let history = match child_identity with
         | None -> history
@@ -2128,7 +2130,8 @@ let () =
             (if session_guidance = [] then "" else
               "\n\n" ^ String.concat "\n" session_guidance) in
           let child = Pave.Agent.create ~provider ~authentication
-            ?resolve_credential ?secret_mask ~root ~system:child_system
+            ?resolve_credential ?resolve_credential_cancel ?secret_mask
+            ~root ~system:child_system
             ?max_output_tokens:child_max_output_tokens
             ~history ~allow_shell:false
             ~tool_available:(fun name ->
@@ -2147,7 +2150,8 @@ let () =
       try Pave.Recent_model.save ~root identity with exn ->
         worker_event ("Recent model was not saved: " ^ error_message exn) in
     let make_agent () =
-      let provider, authentication, resolve_credential = resolve_provider () in
+      let provider, authentication, resolve_credential,
+          resolve_credential_cancel = resolve_provider () in
       let used_identity = !active_identity in
       let secret_mask = current_secret_mask () in
       (match !journal, !active_identity with
@@ -2183,7 +2187,8 @@ let () =
         | None -> failwith "child-agent jobs require a private saved session"
         | Some session ->
             start_child_job ~session ~provider ~authentication
-              ?resolve_credential ?secret_mask ~tool_allowed:tool_available
+              ?resolve_credential ?resolve_credential_cancel
+              ?secret_mask ~tool_allowed:tool_available
               ~kind:"delegate" ~label ~task ~model () in
       let on_change (message : Pave.Protocol.message) =
         (match !journal with
@@ -2319,6 +2324,8 @@ let () =
                            (String.concat " " (List.map Filename.quote arguments));
                        "Timeout: " ^ string_of_int timeout ^ " seconds"])) in
       Pave.Agent.create ~provider ~authentication ?resolve_credential
+        ?resolve_credential_cancel
+        ?prepare_credential_cancel:resolve_credential_cancel
         ?workspace_context
         ?secret_mask
         ~thinking:(fun () -> !thinking_level)
@@ -2630,7 +2637,8 @@ let () =
               ~wire:!active_route.wire ~model:!active_model prefix in
             let signed_prefix = List.exists (fun (message : Pave.Protocol.message) ->
               Option.is_some message.provider_state) prefix in
-            let provider, authentication, resolve_credential = resolve_provider () in
+            let provider, authentication, resolve_credential,
+                resolve_credential_cancel = resolve_provider () in
             let secret_mask = current_secret_mask () in
             let prefix = mask_messages secret_mask prefix in
             let compaction_system = mask_text secret_mask system in
@@ -2667,22 +2675,25 @@ let () =
                 let compacted = if native_anthropic then
                   Pave.Provider.compact_anthropic_messages
                     ~authentication ?resolve_credential
+                    ?resolve_credential_cancel
                     ?max_output_tokens:!context_window_max_output_tokens
                     ~on_usage:collect_usage provider
                     ~instructions:Pave.Context_compaction.native_summary_instruction
                     ~messages:native_messages ~tools:native_tools
                 else
                   Pave.Provider.compact_openai_responses
-                    ~authentication ?resolve_credential ~on_usage:collect_usage
-                    provider ~instructions:Pave.Context_compaction.native_summary_instruction
+                    ~authentication ?resolve_credential
+                    ?resolve_credential_cancel
+                    ~on_usage:collect_usage provider
+                    ~instructions:Pave.Context_compaction.native_summary_instruction
                     prefix in
                 compacted.summary, Some compacted.provider_state
               else
                 match active_context_window () with
                 | Some window_tokens ->
                     Pave.Context_compaction.summarize ~provider ~authentication
-                      ?resolve_credential ?thinking:!thinking_level
-                      ?max_output_tokens:!context_window_max_output_tokens
+                      ?resolve_credential ?resolve_credential_cancel
+                      ?thinking:!thinking_level
                       ~window_tokens prefix ~on_usage:collect_usage, None
                 | None ->
                     let instruction : Pave.Protocol.message = {
@@ -2697,8 +2708,9 @@ let () =
                     let transcript = Yojson.Basic.to_string (`List
                       (List.map Pave.Protocol.message_to_json source)) in
                     let reply = Pave.Provider.complete ~authentication
-                      ?resolve_credential ?thinking:!thinking_level
-                      ~on_usage:collect_usage provider
+                      ?resolve_credential ?resolve_credential_cancel
+                      ?thinking:!thinking_level
+                      provider
                       [ instruction; Pave.Protocol.user transcript ] [] in
                     (match reply.content, reply.tool_calls with
                      | Some summary, [] when String.trim summary <> "" ->
@@ -3148,21 +3160,51 @@ let () =
                 target ^ " Save a mobile_visual baseline only after the user confirms the exact baseline name, operator-declared OS/locale/theme and dynamic-region masks. Do not guess environment metadata."
             | "Compare screenshot baseline" ->
                 target ^ " Compare with mobile_visual only after the user supplies an exact baseline name and matching operator-declared OS/locale/theme and dynamic-region masks. Report changed-pixel count and screenshot."
+            | "Accessibility audit" ->
+                target ^ " Run mobile_accessibility_audit, which captures a fresh selected-app Android tree with separate approval. Report only evidenced missing labels, duplicate identifiers and known-density undersized touch targets; unknown density, contrast, focus order and screen-reader behavior remain unknown."
+            | "Environment experiment" ->
+                target ^ " Use mobile_environment only for one user-selected app locale, emulator-global theme or orientation change. Preview the exact pre-state, request separate approval for apply and restore, and never infer permissions/network controls or automatically restore."
+            | "Exercise deep link" ->
+                target ^ " User-specified URL and exact destination assertion: " ^ detail ^
+                "\nUse mobile_app_lifecycle to inspect the selected APK's handlers, dispatch only the exact verified selected-app handler and verify the destination from a fresh package-bound accessibility observation. Never delegate to another app."
+            | "Lifecycle scenario" ->
+                target ^ " User-specified lifecycle transition/scenario: " ^ detail ^
+                "\nUse mobile_app_lifecycle only for supported background, resume or process-recreation steps. Inspect the exact app/session first; explain data-loss risk, require separate approval per transition and verify fresh state. Never clear data, uninstall or touch a foreign app."
+            | "Android performance" ->
+                target ^ " Use mobile_performance only for supported app-scoped Android launch, frame or memory measurement. Ask which action and warm/cold condition; show units, exact build/PID provenance and sample completeness, and never infer energy or unsupported counters."
+            | "Flutter integration test" ->
+                target ^ " User-selected integration_test target: " ^ detail ^
+                "\nUse mobile_check stack=flutter with the exact package subroot and selected session ID. Discover and present the bounded integration_test targets first; run only the user's chosen exact target with no pub get or dependency/SDK installation. Before execution disclose that Flutter may compile, deploy and install the test runner/app on the already selected emulator; rely on the tool's separate approval and report actual test assertions."
             | _ -> assert false in
           let start_workflow action id =
-            if action = "Control app" then
-              (match !ui with
-               | None -> ()
-               | Some screen ->
-                   (match Tui.choose ~allow_custom:true
-                      ~intro:["Describe the one UI action to perform.";
-                        "Escape cancels without submitting or changing app state."]
-                      screen ~title:"Mobile · UI action intent" ~choices:[] with
-                    | Some intent when String.trim intent <> "" ->
-                        launch (session_prompt action id (String.trim intent))
-                    | Some _ -> notify "Mobile control requires a nonempty intent."
-                    | None -> ()))
-            else launch (session_prompt action id "") in
+            let detail = match action with
+              | "Control app" -> Some ("Mobile · UI action intent",
+                  ["Describe the one UI action to perform.";
+                   "Escape cancels without submitting or changing app state."])
+              | "Exercise deep link" -> Some ("Mobile · exact deep link",
+                  ["Enter the exact registered URL and exact destination text or content description.";
+                   "The tool rejects external-app delegation; Escape submits nothing."])
+              | "Environment experiment" -> Some ("Mobile · environment intent",
+                  ["Name one supported app locale, emulator-global theme or orientation change.";
+                   "Apply and restore require separate approvals; Escape submits nothing."])
+              | "Lifecycle scenario" -> Some ("Mobile · lifecycle intent",
+                  ["Name one background, resume or process-recreation transition and exact state to verify.";
+                   "Process recreation can lose unsaved app state; Escape submits nothing."])
+              | "Flutter integration test" -> Some ("Mobile · Flutter integration test",
+                  ["Enter the exact discovered integration_test target path.";
+                   "Requires an existing Flutter runtime, dependencies, installed selected app and approved ready emulator; no pub get. Escape submits nothing."])
+              | _ -> None in
+            match detail with
+            | None -> launch (session_prompt action id "")
+            | Some (title, intro) ->
+                (match !ui with
+                 | None -> ()
+                 | Some screen ->
+                     (match Tui.choose ~allow_custom:true ~intro screen ~title ~choices:[] with
+                      | Some intent when String.trim intent <> "" ->
+                          launch (session_prompt action id (String.trim intent))
+                      | Some _ -> notify "Enter a nonempty mobile workflow intent."
+                      | None -> ())) in
           (match !ui with
            | None ->
                emit_lines (if rows = [] then
@@ -3193,21 +3235,114 @@ let () =
                        Pave.Workspace_mobile_run.render mobile = row) sessions with
                     | None -> notify "The selected mobile session is no longer available; reopen /mobile."
                     | Some mobile ->
-                        let actions = [
+                        let common = [
                           "Observe app";
-                          "Control app";
-                          "Replay bug scenario";
                           "Read runtime diagnostics";
                           "Verify guarded edit";
                           "Save screenshot baseline";
-                          "Compare screenshot baseline";
-                          "Back"] in
-                        let action = Tui.choose ~intro:[row;
-                          "Results appear in the transcript; reopen /mobile to refresh lifecycle state."]
+                          "Compare screenshot baseline"] in
+                        let flutter_integration = match mobile.platform with
+                          | Pave.Workspace_mobile_run.Ios ->
+                              None, "Flutter device integration requires an Android app session."
+                          | Pave.Workspace_mobile_run.Android ->
+                              let package_subroot =
+                                if mobile.subroot = "android" then Some "."
+                                else if String.ends_with ~suffix:"/android" mobile.subroot then
+                                  Some (String.sub mobile.subroot 0
+                                    (String.length mobile.subroot - String.length "/android"))
+                                else None in
+                              (match package_subroot with
+                               | None -> None, "selected Android app is not bound to a Flutter package's android/ host."
+                               | Some package_subroot ->
+                                   let expected_host =
+                                     if package_subroot = "." then "android"
+                                     else package_subroot ^ "/android" in
+                                   let prefix =
+                                     if package_subroot = "." then ""
+                                     else package_subroot ^ "/" in
+                                   if mobile.subroot <> expected_host ||
+                                      not (String.starts_with ~prefix mobile.app_path) then
+                                     None, "selected APK does not belong to the exact Flutter package."
+                                   else if not (List.mem mobile.state [
+                                       Pave.Workspace_mobile_run.Installed;
+                                       Pave.Workspace_mobile_run.Running]) then
+                                     None, "selected Flutter app is not installed on its session device."
+                                   else
+                                     (try
+                                        let discovery =
+                                          Pave.Workspace_flutter_focus.discover_integration_tests
+                                            ~root:mobile.root ~subroot:package_subroot in
+                                        if discovery.targets = [] then
+                                          None, "no existing integration_test target is available."
+                                        else if not
+                                            (Pave.Workspace_flutter_focus.flutter_runtime_available ()) then
+                                          None, "Flutter CLI is not installed; no runtime will be downloaded."
+                                        else
+                                          let ready = Mutex.lock context.mobile_lock;
+                                          Fun.protect
+                                            ~finally:(fun () -> Mutex.unlock context.mobile_lock)
+                                            (fun () -> match context.android_inventory with
+                                              | Some inventory
+                                                when inventory.root = mobile.root &&
+                                                     inventory.subroot = mobile.subroot ->
+                                                  List.exists
+                                                    (fun (device : Pave.Workspace_android_devices.device) ->
+                                                      device.serial = mobile.device &&
+                                                      device.emulator &&
+                                                      device.state = Pave.Workspace_android_devices.Ready)
+                                                    inventory.devices
+                                              | _ -> false) in
+                                          if not ready then None,
+                                            "selected emulator is not in the current approved ready-device inventory."
+                                          else Some (), ""
+                                      with Pave.Workspace_flutter_focus.Error message ->
+                                        None, message)) in
+                        let supported, unavailable_actions, capability_details =
+                          match mobile.platform with
+                          | Pave.Workspace_mobile_run.Android ->
+                              let flutter_action, flutter_reason = flutter_integration in
+                              let flutter_details = match flutter_action with
+                                | Some () ->
+                                    ["Flutter integration is available for this exact installed app and approved ready emulator.";
+                                     "Target discovery and execution stay separately approved; no pub get or SDK install."]
+                                | None ->
+                                    ["Flutter integration unavailable: " ^ flutter_reason;
+                                     "It is offered only for the exact installed Flutter app, existing test target/runtime and current approved ready emulator; no pub get or SDK install."] in
+                              common @ [
+                                "Control app";
+                                "Replay bug scenario";
+                                "Accessibility audit";
+                                "Environment experiment";
+                                "Exercise deep link";
+                                "Lifecycle scenario";
+                                "Android performance"] @
+                              (if flutter_action = None then [] else ["Flutter integration test"]),
+                              [], flutter_details
+                          | Pave.Workspace_mobile_run.Ios ->
+                              common, [
+                                "iOS accessibility tree — unavailable";
+                                "iOS semantic control — unavailable";
+                                "iOS scenario replay — unavailable";
+                                "iOS performance counters — unavailable"], [
+                                "iOS accessibility tree unavailable: no supported XCTest accessibility backend or design-rule amendment.";
+                                "iOS semantic control and replay unavailable: they depend on that backend.";
+                                "iOS performance counters unavailable: xctrace currently produces raw traces only."] in
+                        let actions = supported @ unavailable_actions @ ["Back"] in
+                        let unavailable_details = capability_details in
+                        let action = Tui.choose ~intro:([row;
+                          "Results appear in the transcript; reopen /mobile to refresh lifecycle state.";
+                          "Every device effect retains separate tool approval."] @ unavailable_details)
                           screen ~title:("Mobile · " ^ mobile.id) ~choices:actions in
                         match action with
-                        | Some action when List.mem action actions &&
-                            action <> "Back" ->
+                        | Some "iOS accessibility tree — unavailable" ->
+                            notify "iOS accessibility backend unavailable: no supported XCTest accessibility-tree implementation or design-rule amendment."
+                        | Some "iOS semantic control — unavailable" ->
+                            notify "iOS semantic control unavailable: it depends on the gated accessibility backend."
+                        | Some "iOS scenario replay — unavailable" ->
+                            notify "iOS scenario replay unavailable: it depends on gated iOS semantic controls and fresh accessibility observations."
+                        | Some "iOS performance counters — unavailable" ->
+                            notify "iOS performance counters unavailable: xctrace output remains raw; no validated counter parser is installed."
+                        | Some action when List.mem action supported ->
                             start_workflow action mobile.id
                         | _ -> ())) in
     let show_job manager id =
@@ -3320,6 +3455,7 @@ let () =
           let id = start_child_job ~session ~provider:current.provider
             ~authentication:current.authentication
             ?resolve_credential:current.resolve_credential
+            ?resolve_credential_cancel:current.resolve_credential_cancel
             ?secret_mask:current.secret_mask
             ~tool_allowed:current.tool_available ~kind ~label ~task:prompt () in
           notify (Printf.sprintf
@@ -3662,6 +3798,7 @@ let () =
                     if Tui.prepend_prompt
                         ~paste_ranges:queued.submission.paste_ranges screen
                         queued.submission.display_prompt then (
+                      Pave.Turn_runner.release_dequeued active queued;
                       set_pending_attachments queued.submission.attachments;
                       Tui.alert screen ("Restored queued prompt into draft · " ^
                         Tui.enter_key ^ " sends or queues; /steer MESSAGE interrupts"))

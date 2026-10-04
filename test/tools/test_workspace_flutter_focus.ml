@@ -30,7 +30,7 @@ let () =
     let mkdir path = Unix.mkdir (at path) 0o700 in
     let create path contents = write (at path) contents in
     let command ?(subroot="flutter") ?(target="") action =
-      Flutter.command ~root ~subroot ~action ~target in
+      Flutter.command ~root ~subroot ~action ~target () in
     mkdir "flutter";
     mkdir "flutter/test";
     mkdir "flutter/test/nested";

@@ -11,10 +11,10 @@ let oauth_exchange service policy authorization response =
     Pave.Gitlab_duo_oauth.exchange authorization ~response
   else Pave.Oauth_flow.exchange policy authorization ~response
 
-let oauth_refresh service policy credential =
-  if service = "openai-codex" then Pave.Codex_oauth.refresh credential
-  else if service = "gitlab-duo" then Pave.Gitlab_duo_oauth.refresh credential
-  else Pave.Oauth_flow.refresh policy credential
+let oauth_refresh ?cancel service policy credential =
+  if service = "openai-codex" then Pave.Codex_oauth.refresh ?cancel credential
+  else if service = "gitlab-duo" then Pave.Gitlab_duo_oauth.refresh ?cancel credential
+  else Pave.Oauth_flow.refresh ?cancel policy credential
 
 let grant_type service = match service with
   | "github-copilot" | "kilo" -> Pave.Oauth_store.Device_approval
@@ -272,54 +272,72 @@ let resolve_builtin_authentication ?account_id
           let policy = if List.mem service
             ["openrouter"; "github-copilot"; "devin"; "kilo"]
             then None else Some (oauth_policy service) in
-          let resolve_credential () = Pave.Oauth_store.with_lock ~path (fun () ->
-            let account = match Pave.Oauth_store.account ~path
-                ~provider:provider_id ~account_id:selected_account_id with
-              | Some account -> account
-              | None -> failwith ("OAuth account removed; run pave --login " ^
-                  provider_id) in
-            let credential = account.Pave.Oauth_store.credential in
-            let account_binding = match account.binding with
-              | Some actual -> validate_binding actual; actual
-              | None ->
-                  failwith "saved credential route binding is missing; sign in again" in
-            let credential = match credential.expires_at with
-              | Some expires when Unix.gettimeofday () >= expires -. 60. ->
-                  let policy = match policy with
-                    | Some policy -> policy
-                    | None -> failwith "nonrefreshable provider credential unexpectedly has an expiry" in
-                  let updated = oauth_refresh service policy credential in
-                  if updated.account_id <> credential.account_id then
-                    failwith "OAuth refresh changed the provider account; credential was not updated";
-                  Pave.Oauth_store.put_account ~path ~provider:provider_id
-                    ~binding:account_binding ~selection_id:account.selection_id
-                    updated;
-                  updated
-              | _ -> credential in
-            if service = "openrouter" &&
-               (credential.refresh <> None || credential.expires_at <> None ||
-                not (String.starts_with ~prefix:"sk-or-" credential.access)) then
-              failwith "OpenRouter stored API key is invalid";
-            if service = "github-copilot" &&
-               (credential.access = "" || credential.refresh <> None ||
-                credential.expires_at <> None) then
-              failwith "GitHub Copilot stored credential is invalid";
-            if service = "devin" &&
-               (not (Pave.Devin_api.valid_text credential.access) ||
-                credential.access = "devin-session-token$" ||
-                credential.refresh <> None || credential.expires_at <> None) then
-              failwith "Devin session credential is invalid; run pave --login devin";
-            if service = "kilo" &&
-               (not (Pave.Kilo_api.valid_key credential.access) ||
-                credential.refresh <> None || credential.expires_at <> None) then
-              failwith "Kilo gateway credential is invalid; run pave --login kilo";
-            let account_id, residency =
-              if service = "openai-codex" then
-                let id, residency = Pave.Codex_oauth.identity credential in
-                Some id, residency
-              else credential.account_id, None in
-            ({ access = credential.access; account_id; residency }
-              : Pave.Provider.credentials)) in
+          let resolve_credential ?(cancel = fun () -> false) () =
+            let deadline = Unix.gettimeofday () +. 35. in
+            Pave.Oauth_store.with_lock ~cancel ~deadline ~path (fun () ->
+              let account = match Pave.Oauth_store.account ~path
+                  ~provider:provider_id ~account_id:selected_account_id with
+                | Some account -> account
+                | None -> failwith ("OAuth account removed; run pave --login " ^
+                    provider_id) in
+              let credential = account.Pave.Oauth_store.credential in
+              let account_binding = match account.binding with
+                | Some actual -> validate_binding actual; actual
+                | None ->
+                    failwith "saved credential route binding is missing; sign in again" in
+              let credential = match credential.expires_at with
+                | Some expires when Unix.gettimeofday () >= expires -. 60. ->
+                    let policy = match policy with
+                      | Some policy -> policy
+                      | None -> failwith "nonrefreshable provider credential unexpectedly has an expiry" in
+                    let updated = try oauth_refresh ~cancel service policy credential
+                      with
+                      | Pave.Oauth_flow.Cancelled_before_request ->
+                          Pave.Provider.check_cancel (Some cancel);
+                          failwith "OAuth refresh cancelled"
+                      | _ ->
+                          Pave.Oauth_store.put_account ~path ~provider:provider_id
+                            ~binding:account_binding
+                            ~selection_id:account.selection_id
+                            { credential with refresh = None };
+                          Pave.Provider.check_cancel (Some cancel);
+                          failwith "OAuth refresh outcome is ambiguous; sign in again" in
+                    if updated.account_id <> credential.account_id then (
+                      Pave.Oauth_store.put_account ~path ~provider:provider_id
+                        ~binding:account_binding ~selection_id:account.selection_id
+                        { credential with refresh = None };
+                      Pave.Provider.check_cancel (Some cancel);
+                      failwith "OAuth refresh outcome is ambiguous; sign in again");
+                    Pave.Oauth_store.put_account ~path ~provider:provider_id
+                      ~binding:account_binding ~selection_id:account.selection_id
+                      updated;
+                    updated
+                | _ -> credential in
+              if service = "openrouter" &&
+                 (credential.refresh <> None || credential.expires_at <> None ||
+                  not (String.starts_with ~prefix:"sk-or-" credential.access)) then
+                failwith "OpenRouter stored API key is invalid";
+              if service = "github-copilot" &&
+                 (credential.access = "" || credential.refresh <> None ||
+                  credential.expires_at <> None) then
+                failwith "GitHub Copilot stored credential is invalid";
+              if service = "devin" &&
+                 (not (Pave.Devin_api.valid_text credential.access) ||
+                  credential.access = "devin-session-token$" ||
+                  credential.refresh <> None || credential.expires_at <> None) then
+                failwith "Devin session credential is invalid; run pave --login devin";
+              if service = "kilo" &&
+                 (not (Pave.Kilo_api.valid_key credential.access) ||
+                  credential.refresh <> None || credential.expires_at <> None) then
+                failwith "Kilo gateway credential is invalid; run pave --login kilo";
+              let account_id, residency =
+                if service = "openai-codex" then
+                  let id, residency = Pave.Codex_oauth.identity credential in
+                  Some id, residency
+                else credential.account_id, None in
+              ({ access = credential.access; account_id; residency }
+                : Pave.Provider.credentials))
+          in
           (if service = "openrouter" then Pave.Provider.Api_key
            else Pave.Provider.OAuth), "", Some resolve_credential in
     authentication, api_key, resolve_credential

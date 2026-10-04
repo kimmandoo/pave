@@ -1,6 +1,8 @@
 (* Approval consumers may explicitly request shutdown without teaching this
    library about terminal-specific exception types. *)
 exception Stop of exn
+exception Queue_full
+
 
 type completion = Completed | Cancelled | Failed of exn
 type submission = {
@@ -78,7 +80,12 @@ type t = {
   mutable approvals : approval list;
   steering : queued_submission Queue.t;
   follow_ups : queued_submission Queue.t;
+  dequeued : (int, queued_submission) Hashtbl.t;
+  mutable queued_bytes : int;
+  mutable notice_bytes : int;
+
   pending : int Atomic.t;
+  dequeued_count : int Atomic.t;
   mutable worker : Thread.t option;
   mutable active_turn : turn option;
   mutable next_turn_id : int;
@@ -108,28 +115,59 @@ let create ~run ~on_event ~on_approve ~on_queued
     guard = Mutex.create (); notices = Queue.create ();
     drafts = Hashtbl.create 8; approvals = [];
     steering = Queue.create (); follow_ups = Queue.create ();
-    pending = Atomic.make 0;
+    dequeued = Hashtbl.create 4; queued_bytes = 0; notice_bytes = 0;
+    pending = Atomic.make 0; dequeued_count = Atomic.make 0;
     worker = None; active_turn = None;
     next_turn_id = 0; next_queue_id = 0; closed = false;
     owner = Thread.self ();
     run; on_event; on_approve; on_approve_tool; on_queued }
+
 let fd t = t.read_fd
 let busy t = t.worker <> None
 
 
-let queued_count t = Atomic.get t.pending
+let queued_count t =
+  Atomic.get t.pending - Atomic.get t.dequeued_count
+(* Follow-up/steering admission: 32 retained submissions / 1 MiB counting
+   prompt/display text, attachment names/MIME/payload, and paste-range metadata. *)
+let max_queued_items = 32
+let max_queued_bytes = 1_048_576
+
+let submission_bytes submission =
+  let attachment_bytes =
+    List.fold_left (fun total (attachment : Protocol.attachment) ->
+      total + String.length attachment.name + String.length attachment.mime_type +
+      String.length attachment.data) 0 submission.attachments in
+  let ranges_bytes = 16 * List.length submission.paste_ranges in
+  String.length submission.prompt + String.length submission.display_prompt +
+  attachment_bytes + ranges_bytes
+
+let reserve_queued t kind submission =
+  with_guard t (fun () ->
+    if t.closed then invalid_arg "turn runner closed";
+    let bytes = submission_bytes submission in
+    if Atomic.get t.pending >= max_queued_items ||
+       bytes > max_queued_bytes - t.queued_bytes then raise Queue_full;
+    let id = t.next_queue_id in
+    t.next_queue_id <- id + 1;
+    t.queued_bytes <- t.queued_bytes + bytes;
+    ignore (Atomic.fetch_and_add t.pending 1);
+    { id; kind; submission })
+
+let release_queued t queued =
+  with_guard t (fun () ->
+    t.queued_bytes <- max 0
+      (t.queued_bytes - submission_bytes queued.submission);
+    let pending = Atomic.get t.pending in
+    if pending > 0 then Atomic.set t.pending (pending - 1))
+
 
 let queued t =
   List.rev (Queue.fold (fun pending item -> item :: pending)
     (Queue.fold (fun pending item -> item :: pending) [] t.steering)
     t.follow_ups)
 
-let make_queued t kind submission =
-  with_guard t (fun () ->
-    let id = t.next_queue_id in
-    t.next_queue_id <- id + 1;
-    { id; kind; submission })
-
+let make_queued = reserve_queued
 
 let emit_finish t turn_id = function
   | Completed -> t.on_event (Turn_completed { turn_id })
@@ -164,32 +202,101 @@ let wake t =
     | Unix.Unix_error ((Unix.EAGAIN | Unix.EPIPE | Unix.EBADF), _, _) -> () in
   write ()
 
+(* Notice backlog: 4096 items / 4 MiB total; ordinary stream notices stop at
+   3840 items / 3 MiB, leaving terminal/approval/tool outcomes reserved. *)
+let max_notice_events = 4096
+let max_notice_bytes = 4_194_304
+let reserved_notice_events = 256
+let reserved_notice_bytes = 1_048_576
+(* Keep terminal-input work responsive when a worker streams continuously. *)
+let max_drain_events = 128
+
+let notice_bytes = function
+  | Enqueue queued -> submission_bytes queued.submission
+  | Message (_, text) | Delta (_, text) | External text -> String.length text
+  | Tool (_, Agent.Tool_settled { result; _ })
+  | Tool (_, Agent.Tool_aborted { result; _ }) -> String.length result + 64
+  | _ -> 64
+
+let critical_notice = function
+  | Finished _ | Approve _ | Approve_tool _ | Cancel_remote _ -> true
+  | Tool (_, Agent.Tool_settled _)
+  | Tool (_, Agent.Tool_aborted _)
+  | Tool (_, Agent.Tool_draft_ended _) -> true
+  | _ -> false
+
 let post_notice t notice =
+  let size = notice_bytes notice in
   let fresh = with_guard t (fun () ->
-    if t.closed then false
+    let critical = critical_notice notice in
+    let ceiling = if critical then max_notice_events
+      else max_notice_events - reserved_notice_events in
+    let byte_ceiling = if critical then max_notice_bytes
+      else max_notice_bytes - reserved_notice_bytes in
+    if t.closed || Queue.length t.notices >= ceiling ||
+       size > byte_ceiling - t.notice_bytes then false
     else (
       let empty = Queue.is_empty t.notices in
-      (match notice with
-       | Enqueue _ -> ignore (Atomic.fetch_and_add t.pending 1)
-       | _ -> ());
       Queue.add notice t.notices;
+      t.notice_bytes <- t.notice_bytes + size;
       empty)) in
   if fresh then wake t
 
-(* Completion enqueue and cancellation share the guard, so the first one wins. *)
+let enqueue_remote t kind submission =
+  let queued_size = submission_bytes submission in
+  let notice = Enqueue { id = 0; kind; submission } in
+  let size = notice_bytes notice in
+  let fresh = with_guard t (fun () ->
+    if t.closed then invalid_arg "turn runner closed";
+    let byte_ceiling = max_notice_bytes - reserved_notice_bytes in
+    if Atomic.get t.pending >= max_queued_items ||
+       queued_size > max_queued_bytes - t.queued_bytes ||
+       Queue.length t.notices >= max_notice_events - reserved_notice_events ||
+       size > byte_ceiling - t.notice_bytes then raise Queue_full;
+    let id = t.next_queue_id in
+    t.next_queue_id <- id + 1;
+    let queued = { id; kind; submission } in
+    let empty = Queue.is_empty t.notices in
+    Queue.add (Enqueue queued) t.notices;
+    t.queued_bytes <- t.queued_bytes + queued_size;
+    t.notice_bytes <- t.notice_bytes + size;
+    ignore (Atomic.fetch_and_add t.pending 1);
+    empty) in
+  if fresh then wake t
 let notify t turn notice =
-  let accepted = with_guard t (fun () ->
-    match t.active_turn with
-    | Some active when not t.closed && active.id = turn.id ->
-        let notice = match notice with
-          | Finished (id, Completed) when Atomic.get turn.cancelled ->
-              Finished (id, Cancelled)
-          | _ -> notice in
-        let empty = Queue.is_empty t.notices in
-        Queue.add notice t.notices;
-        empty
-    | _ -> false) in
-  if accepted then wake t
+  let rec enqueue () =
+    let result = with_guard t (fun () ->
+      match t.active_turn with
+      | Some active when active.id = turn.id &&
+                         (not t.closed || critical_notice notice) ->
+          let notice = match notice with
+            | Finished (id, Completed) when Atomic.get turn.cancelled ->
+                Finished (id, Cancelled)
+            | _ -> notice in
+          let size = notice_bytes notice in
+          if size > max_notice_bytes then `Too_large
+          else
+            let critical = critical_notice notice ||
+              size > max_notice_bytes - reserved_notice_bytes in
+            let ceiling = if critical then max_notice_events
+              else max_notice_events - reserved_notice_events in
+            let byte_ceiling = if critical then max_notice_bytes
+              else max_notice_bytes - reserved_notice_bytes in
+            if Queue.length t.notices >= ceiling ||
+               size > byte_ceiling - t.notice_bytes then `Full
+            else (
+              let empty = Queue.is_empty t.notices in
+              Queue.add notice t.notices;
+              t.notice_bytes <- t.notice_bytes + size;
+              `Accepted empty)
+      | _ -> `Gone) in
+    match result with
+    | `Accepted fresh -> if fresh then wake t
+    | `Full -> Thread.delay 0.001; enqueue ()
+    | `Gone -> ()
+    | `Too_large ->
+        invalid_arg "turn runner notice exceeds the bounded event size" in
+  enqueue ()
 
 let post t message = post_notice t (External message)
 
@@ -334,11 +441,10 @@ let follow_up t ?display_prompt ?(attachments = []) ?(paste_ranges = []) text =
   let submission = make_submission ?display_prompt ~attachments
       ~paste_ranges text in
   if remote t then
-    post_notice t (Enqueue (make_queued t Follow_up submission))
+    enqueue_remote t Follow_up submission
   else if busy t then (
     let queued = make_queued t Follow_up submission in
     Queue.add queued t.follow_ups;
-    ignore (Atomic.fetch_and_add t.pending 1);
     t.on_queued (queued_count t))
   else start t submission
 
@@ -362,16 +468,15 @@ let steer t ?display_prompt ?(attachments = []) ?(paste_ranges = []) text =
   let submission = make_submission ?display_prompt ~attachments
       ~paste_ranges text in
   if remote t then
-    post_notice t (Enqueue (make_queued t Steering submission))
+    enqueue_remote t Steering submission
   else if busy t then (
     let queued = make_queued t Steering submission in
     Queue.add queued t.steering;
-    ignore (Atomic.fetch_and_add t.pending 1);
     t.on_queued (queued_count t);
     cancel_local t)
   else start t submission
 
-let remove_queued t ~id =
+let remove_queued ?(release = true) t ~id =
   let remove queue =
     if not (Queue.fold (fun found (item : queued_submission) ->
       found || item.id = id) false queue) then None
@@ -386,7 +491,7 @@ let remove_queued t ~id =
   let selected = match remove t.steering with
     | Some _ as found -> found
     | None -> remove t.follow_ups in
-  Option.iter (fun _ -> ignore (Atomic.fetch_and_add t.pending (-1))) selected;
+  if release then Option.iter (release_queued t) selected;
   selected
 
 let take_queued t ~id =
@@ -396,18 +501,18 @@ let take_queued t ~id =
 
 let prioritize_queued t ~id ~interrupt =
   if t.closed then false
-  else match remove_queued t ~id with
+  else match remove_queued ~release:false t ~id with
   | None -> false
   | Some selected ->
       if busy t then (
         let remaining = Queue.create () in
         Queue.transfer t.steering remaining;
         Queue.add { selected with kind = Steering } t.steering;
-        ignore (Atomic.fetch_and_add t.pending 1);
         Queue.transfer remaining t.steering;
         t.on_queued (queued_count t);
         if interrupt then cancel_local t)
       else (
+        release_queued t selected;
         start t selected.submission;
         t.on_queued (queued_count t));
       true
@@ -424,22 +529,48 @@ let pop_last queue =
     Some last)
 
 let dequeue_last t =
-  let queued = match pop_last t.steering with
-    | Some queued -> Some queued
-    | None -> pop_last t.follow_ups in
-  (match queued with
-  | None -> ()
-  | Some _ ->
-      ignore (Atomic.fetch_and_add t.pending (-1));
-      t.on_queued (queued_count t));
-  queued
+  match pop_last t.steering with
+  | Some queued ->
+      with_guard t (fun () ->
+        Hashtbl.add t.dequeued queued.id queued;
+        ignore (Atomic.fetch_and_add t.dequeued_count 1));
+      t.on_queued (queued_count t);
+      Some queued
+  | None ->
+      (match pop_last t.follow_ups with
+       | None -> None
+       | Some queued ->
+           with_guard t (fun () ->
+             Hashtbl.add t.dequeued queued.id queued;
+             ignore (Atomic.fetch_and_add t.dequeued_count 1));
+           t.on_queued (queued_count t);
+           Some queued)
 
-let restore_dequeued t queued =
-  if t.closed then invalid_arg "turn runner closed";
-  (match queued.kind with
-  | Steering -> Queue.add queued t.steering
-  | Follow_up -> Queue.add queued t.follow_ups);
-  ignore (Atomic.fetch_and_add t.pending 1);
+let release_dequeued (t : t) (queued : queued_submission) =
+  let released = with_guard t (fun () ->
+    match Hashtbl.find_opt t.dequeued queued.id with
+    | Some retained when retained = queued ->
+        Hashtbl.remove t.dequeued queued.id;
+        t.queued_bytes <- t.queued_bytes - submission_bytes queued.submission;
+        ignore (Atomic.fetch_and_add t.pending (-1));
+        ignore (Atomic.fetch_and_add t.dequeued_count (-1));
+        true
+    | _ -> false) in
+  if not released then invalid_arg "turn runner dequeued item is not retained"
+
+let restore_dequeued (t : t) (queued : queued_submission) =
+  let restored = with_guard t (fun () ->
+    if t.closed then invalid_arg "turn runner closed";
+    match Hashtbl.find_opt t.dequeued queued.id with
+    | Some retained when retained = queued ->
+        Hashtbl.remove t.dequeued queued.id;
+        (match queued.kind with
+         | Steering -> Queue.add queued t.steering
+         | Follow_up -> Queue.add queued t.follow_ups);
+        ignore (Atomic.fetch_and_add t.dequeued_count (-1));
+        true
+    | _ -> false) in
+  if not restored then invalid_arg "turn runner dequeued item is not retained";
   t.on_queued (queued_count t)
 let drain_pipe t =
   let bytes = t.drain_bytes in
@@ -452,16 +583,24 @@ let drain_pipe t =
 
 let drain t =
   drain_pipe t;
-  let rec handle () =
-    let notice = with_guard t (fun () ->
-      if Queue.is_empty t.notices then None else Some (Queue.take t.notices)) in
-    match notice with
-    | None -> ()
+  let rec handle remaining =
+    if remaining = 0 then (
+      let pending = with_guard t (fun () -> not (Queue.is_empty t.notices)) in
+      if pending then wake t)
+    else
+      let notice = with_guard t (fun () ->
+        if Queue.is_empty t.notices then None
+        else
+          let notice = Queue.take t.notices in
+          t.notice_bytes <- max 0 (t.notice_bytes - notice_bytes notice);
+          Some notice) in
+      match notice with
+      | None -> ()
     | Some (External message) ->
         t.on_event (Background_notice { message });
-        handle ()
+        handle (remaining - 1)
     | Some (Enqueue queued) ->
-        if t.closed then ()
+        if t.closed then release_queued t queued
         else if busy t then (
           (match queued.kind with
            | Steering -> Queue.add queued t.steering
@@ -469,26 +608,26 @@ let drain t =
           t.on_queued (queued_count t);
           if queued.kind = Steering then cancel_local t)
         else (
-          ignore (Atomic.fetch_and_add t.pending (-1));
+          release_queued t queued;
           start t queued.submission);
-        handle ()
+        handle (remaining - 1)
     | Some (Cancel_remote turn_id) ->
         (match turn_id with
          | Some id when Option.is_some (active_turn t id) -> cancel_local t
          | _ -> ());
-        handle ()
+        handle (remaining - 1)
     | Some (Message (id, text)) ->
         if not (cancel_requested t id) then
           t.on_event (Transcript_message { turn_id = id; text });
-        handle ()
+        handle (remaining - 1)
     | Some (Delta (id, text)) ->
         if not (cancel_requested t id) then
           t.on_event (Text_delta { turn_id = id; text });
-        handle ()
+        handle (remaining - 1)
     | Some (Phase (id, phase)) ->
         if not (cancel_requested t id) then
           t.on_event (Activity_phase { turn_id = id; phase });
-        handle ()
+        handle (remaining - 1)
     | Some (Preview (id, draft)) ->
         let name, preview = with_guard t (fun () ->
           draft.pending <- false;
@@ -496,7 +635,7 @@ let drain t =
         if not (cancel_requested t id) then
           t.on_event (Draft_preview {
             turn_id = id; key = draft.key; name; preview });
-        handle ()
+        handle (remaining - 1)
     | Some (Tool (id, event)) ->
         let terminal = match event with
           | Agent.Tool_settled _ | Agent.Tool_aborted _ |
@@ -505,7 +644,7 @@ let drain t =
             Agent.Tool_updated _ -> false in
         if terminal || not (cancel_requested t id) then
           t.on_event (Tool_event { turn_id = id; event });
-        handle ()
+        handle (remaining - 1)
     | Some (Approve (id, command, request, cancelled)) ->
         if cancelled () || cancel_requested t id then answer request false
         else (try answer request (t.on_approve command)
@@ -518,7 +657,7 @@ let drain t =
                 turn_id = id;
                 text = "Error: shell approval failed: " ^ Printexc.to_string exn
               }));
-        handle ()
+        handle (remaining - 1)
     | Some (Approve_tool (id, approval_request, request, cancelled)) ->
         if cancelled () || cancel_requested t id then answer request false
         else (try answer request (t.on_approve_tool approval_request)
@@ -531,7 +670,7 @@ let drain t =
                 turn_id = id;
                 text = "Error: tool approval failed: " ^ Printexc.to_string exn
               }));
-        handle ()
+        handle (remaining - 1)
     | Some (Finished (id, outcome)) ->
         (match active_turn t id with
         | None -> ()
@@ -548,26 +687,38 @@ let drain t =
                   Some (Queue.take t.follow_ups)
                 else None in
               Option.iter (fun queued ->
-                ignore (Atomic.fetch_and_add t.pending (-1));
+                release_queued t queued;
                 start t queued.submission;
                 t.on_queued (queued_count t)) queued));
-        handle () in
-  handle ()
+        handle (remaining - 1) in
+  handle max_drain_events
 
 let close t =
-  if not t.closed then (
+  let closing = with_guard t (fun () ->
+    if t.closed then false
+    else (t.closed <- true; true)) in
+  if closing then (
     Queue.clear t.steering;
     Queue.clear t.follow_ups;
-    Atomic.set t.pending 0;
-    cancel t;
+    with_guard t (fun () ->
+      t.queued_bytes <- 0;
+      Hashtbl.clear t.dequeued;
+      Atomic.set t.pending 0;
+      Atomic.set t.dequeued_count 0);
+    cancel_local t;
     (match t.worker with Some worker -> Thread.join worker | None -> ());
-    with_guard t (fun () -> t.closed <- true);
-    Atomic.set t.pending 0;
+    t.worker <- None;
     Fun.protect ~finally:(fun () ->
-      t.worker <- None;
       with_guard t (fun () ->
         t.active_turn <- None;
         Hashtbl.clear t.drafts;
-        Queue.clear t.notices);
+        Queue.clear t.notices;
+        t.notice_bytes <- 0);
       Unix.close t.read_fd;
-      Unix.close t.write_fd) (fun () -> drain t))
+      Unix.close t.write_fd) (fun () ->
+        let rec drain_pending () =
+          drain t;
+          let pending = with_guard t (fun () -> not (Queue.is_empty t.notices)) in
+          if pending then drain_pending ()
+        in
+        drain_pending ()))

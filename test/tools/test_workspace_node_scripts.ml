@@ -45,7 +45,7 @@ let () =
     let shrinkwrap = Filename.concat app "npm-shrinkwrap.json" in
     let marker = Filename.concat app "should-not-exist" in
     let valid = "{\"dependencies\":{\"react-native\":\"0.72.0\"}," ^
-      "\"scripts\":{\"test\":\"touch should-not-exist\",\"lint\":\"echo ok\"}}" in
+      "\"scripts\":{\"test\":\"touch should-not-exist\",\"lint\":\"echo ok\",\"start\":\"react-native start\"}}" in
     let command ?(manager = "") ?(action = "test") ?(subroot = "mobile app") () =
       Scripts.command ~root ~subroot ~action ~manager in
     write package valid;
@@ -53,6 +53,11 @@ let () =
     expect "npm command and manifest cwd"
       (command () = ("npm run test", app));
     expect "script is never executed" (not (Sys.file_exists marker));
+    expect "development server selects an existing arbitrary RN script"
+      (Scripts.command_for_script ~root ~subroot:"mobile app" ~script:"start" ~manager:"" =
+       ("npm", app));
+    expect_error "unknown development script is refused" "undeclared" (fun () ->
+      Scripts.command_for_script ~root ~subroot:"mobile app" ~script:"serve" ~manager:"");
     expect "lint command" (command ~action:"lint" () = ("npm run lint", app));
     expect_error "unsupported action" "unsupported" (fun () ->
       command ~action:"build" ());

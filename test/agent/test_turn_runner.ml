@@ -125,16 +125,18 @@ let queue_management_cases () =
       | _ -> assert false in
     assert (first.id < second.id && second.id < tail.id);
     assert (first.submission = second.submission);
+    assert (Runner.dequeue_last runner = Some tail);
+    assert (ids () = [first.id; second.id]);
+    assert (Runner.queued_count runner = 2);
     assert (Runner.take_queued runner ~id:first.id = Some first);
-    assert (ids () = [second.id; tail.id]);
+    assert (ids () = [second.id]);
     assert (not ((!active_cancel) ()));
     let count_events = !counts in
     assert (Runner.take_queued runner ~id:first.id = None);
     assert (not (Runner.prioritize_queued runner ~id:first.id ~interrupt:true));
     assert (!counts = count_events && not ((!active_cancel) ()));
-    Runner.restore_dequeued runner first;
-    assert (ids () = [second.id; tail.id; first.id]);
-    assert (Runner.dequeue_last runner = Some first);
+    Runner.restore_dequeued runner tail;
+    assert (ids () = [second.id; tail.id]);
     assert (Runner.prioritize_queued runner ~id:second.id ~interrupt:false);
     assert (ids () = [second.id; tail.id]);
     assert (not ((!active_cancel) ()));
@@ -167,14 +169,132 @@ let queue_management_cases () =
       Runner.make_submission "active";
       c.submission; b.submission; a.submission; d.submission
     ]);
-    (* An item restored after the active turn ended runs once, not twice. *)
+    (* A reserved draft can be restored after the active turn ends exactly once. *)
     started := [];
-    Runner.restore_dequeued runner first;
-    assert (Runner.prioritize_queued runner ~id:first.id ~interrupt:true);
+    start_active ();
+    Runner.submit runner "restore-after-active";
+    let held = Option.get (Runner.dequeue_last runner) in
+    Atomic.set release true;
+    drain_idle ();
+    assert (!cancellations = 1);
+    assert (List.rev !started = [Runner.make_submission "active"]);
+    Runner.restore_dequeued runner held;
+    assert (Runner.prioritize_queued runner ~id:held.id ~interrupt:true);
     assert (Runner.queued runner = []);
     drain_idle ();
-    assert (List.rev !started = [first.submission]);
+    assert (List.rev !started = [
+      Runner.make_submission "active";
+      Runner.make_submission "restore-after-active"
+    ]);
     assert (!cancellations = 1))
+
+let queue_admission_limits () =
+  let module Runner = Pave.Turn_runner in
+  let ready = Atomic.make false and release = Atomic.make false in
+  let active_cancel = ref (fun () -> false) in
+  let runner = Runner.create
+    ~run:(fun ~cancel submission ->
+      if submission.Runner.prompt = "held" then (
+        active_cancel := cancel;
+        Atomic.set ready true;
+        while not (Atomic.get release) && not (cancel ()) do
+          Thread.delay 0.001
+        done))
+    ~on_event:(fun _ -> ()) ~on_approve:(fun _ -> false)
+    ~on_queued:(fun _ -> ()) () in
+  Fun.protect ~finally:(fun () ->
+    Atomic.set release true;
+    Runner.close runner) (fun () ->
+    Runner.submit runner "held";
+    while not (Atomic.get ready) do Thread.delay 0.001 done;
+    assert (Runner.max_queued_items = 32);
+    assert (Runner.max_queued_bytes = 1_048_576);
+    assert (Runner.max_notice_events = 4096);
+    assert (Runner.max_notice_bytes = 4_194_304);
+    for index = 1 to Runner.max_queued_items do
+      Runner.submit runner (Printf.sprintf "prompt-%02d" index)
+    done;
+    (try Runner.steer runner "overflow"; assert false
+     with Runner.Queue_full -> ());
+    assert (Runner.queued_count runner = Runner.max_queued_items);
+    let held = Option.get (Runner.dequeue_last runner) in
+    assert (Runner.queued_count runner = Runner.max_queued_items - 1);
+    (try Runner.submit runner "held-capacity-must-remain-reserved"; assert false
+     with Runner.Queue_full -> ());
+    Runner.restore_dequeued runner held;
+    assert (Runner.queued_count runner = Runner.max_queued_items);
+    assert (not ((!active_cancel) ()));
+    let original = List.hd (Runner.queued runner) in
+    assert (Runner.take_queued runner ~id:original.id = Some original);
+    Runner.submit runner "replacement";
+    let prompts = List.map (fun (item : Runner.queued_submission) ->
+      item.submission.prompt) (Runner.queued runner) in
+    assert (prompts = List.init 31 (fun index ->
+      Printf.sprintf "prompt-%02d" (index + 2)) @ ["replacement"]);
+    let image : Pave.Protocol.attachment = {
+      name = "large.bin"; mime_type = "application/octet-stream";
+      data = String.make 600_000 'x'
+    } in
+    List.iter (fun (item : Runner.queued_submission) ->
+      ignore (Runner.take_queued runner ~id:item.id)) (Runner.queued runner);
+    Runner.submit runner ~attachments:[image] "first-large";
+    (try Runner.submit runner ~attachments:[image] "second-large";
+         assert false
+     with Runner.Queue_full -> ());
+    assert (Runner.queued_count runner = 1);
+    assert ((List.hd (Runner.queued runner)).submission.attachments = [image]);
+    assert (not ((!active_cancel) ())))
+
+let bounded_stream_backpressure_case () =
+  let module Runner = Pave.Turn_runner in
+  let runner_ref = ref None in
+  let produced = Atomic.make 0 and emitted = Atomic.make false in
+  let received = ref [] and completed = ref 0 in
+  let runner = Runner.create
+    ~run:(fun ~cancel:_ _ ->
+      let runner = Option.get !runner_ref in
+      for index = 1 to 5_000 do
+        Runner.message runner (string_of_int index);
+        Atomic.set produced index
+      done;
+      Atomic.set emitted true)
+    ~on_event:(function
+      | Runner.Turn_started _ -> ()
+      | Runner.Transcript_message { text; _ } -> received := text :: !received
+      | Runner.Turn_completed _ -> incr completed
+      | Runner.Turn_cancelled _ -> failwith "stream turn was cancelled"
+      | Runner.Turn_failed { error; _ } -> raise error
+      | _ -> ()) ~on_approve:(fun _ -> false) ~on_queued:(fun _ -> ()) () in
+  runner_ref := Some runner;
+  Fun.protect ~finally:(fun () -> Runner.close runner) (fun () ->
+    Runner.submit runner "stream";
+    let deadline = Unix.gettimeofday () +. 5. in
+    while Atomic.get produced < Runner.max_notice_events -
+        Runner.reserved_notice_events do
+      assert (Unix.gettimeofday () < deadline);
+      Thread.delay 0.001
+    done;
+    assert (not (Atomic.get emitted));
+    Runner.drain runner;
+    assert (List.length !received <= Runner.max_drain_events);
+    let deadline = Unix.gettimeofday () +. 10. in
+    while Runner.busy runner do
+      assert (Unix.gettimeofday () < deadline);
+      Runner.drain runner;
+      Thread.delay 0.001
+    done;
+    assert (Atomic.get emitted);
+    let actual = List.rev !received and
+        expected = List.init 5_000 (fun index -> string_of_int (index + 1)) in
+    if actual <> expected then (
+      let rec first_mismatch index left right = match left, right with
+        | left :: lefts, right :: rights when left = right ->
+            first_mismatch (index + 1) lefts rights
+        | _ -> index in
+      failwith (Printf.sprintf "bounded stream retained %d/5000 messages; first mismatch %d"
+        (List.length actual) (first_mismatch 0 actual expected))
+    );
+    assert (!completed = 1))
 
 let remote_submission_case () =
   let module Runner = Pave.Turn_runner in
@@ -380,6 +500,8 @@ let non_prompt_work_case () =
 let () =
   shutdown_cases ();
   queue_management_cases ();
+  queue_admission_limits ();
+  bounded_stream_backpressure_case ();
   remote_submission_case ();
   remote_cancel_boundary_case ();
   approval_stop_cases ();

@@ -1,4 +1,6 @@
 exception OAuth_error of string
+exception Cancelled_before_request
+exception Cancelled_in_flight
 
 type body_format = Json | Form
 
@@ -310,7 +312,9 @@ module Test = struct
     curl_helper := Some (Unix.realpath executable)
 end
 
-let default_http ~url ~headers ~body =
+let default_http_cancellable ~cancel ~url ~headers ~body =
+  let check_cancel () = if cancel () then raise Cancelled_in_flight in
+  if cancel () then raise Cancelled_before_request;
   ignore (validate_url url);
   let executable, environment = match !Test.curl_helper with
     | Some executable -> executable, Unix.environment ()
@@ -338,6 +342,7 @@ let default_http ~url ~headers ~body =
         option "max-filesize" "1048576";
         option "proto" "=https";
         close_out config_file;
+        if cancel () then raise Cancelled_before_request;
         let input = Unix.openfile "/dev/null" [Unix.O_RDONLY] 0 in
         let errors = Unix.openfile "/dev/null" [Unix.O_WRONLY] 0 in
         let output_read, output_write = Unix.pipe () in
@@ -348,18 +353,49 @@ let default_http ~url ~headers ~body =
             List.iter Unix.close [input; errors; output_read; output_write];
             fail "could not start OAuth token request" in
         List.iter Unix.close [input; errors; output_write];
-        let status = Fun.protect ~finally:(fun () -> Unix.close output_read) (fun () ->
-          let bytes = Bytes.create 16 in
-          let n = Unix.read output_read bytes 0 16 in
-          Bytes.sub_string bytes 0 n) in
-        let _, exited = Unix.waitpid [] pid in
+        let wait_for_child () =
+          let bytes = Buffer.create 16 in
+          let chunk = Bytes.create 16 in
+          let rec poll exited eof =
+            check_cancel ();
+            let readable, _, _ = Unix.select [output_read] [] [] 0.05 in
+            let eof = if readable = [] then eof else
+              let n = Unix.read output_read chunk 0 16 in
+              if n = 0 then true else (Buffer.add_subbytes bytes chunk 0 n; false) in
+            let exited = match exited with
+              | Some _ -> exited
+              | None -> (match Unix.waitpid [Unix.WNOHANG] pid with
+                  | 0, _ -> None | _, status -> Some status) in
+            match exited, eof with
+            | Some status, true -> status, Buffer.contents bytes
+            | _ -> poll exited eof in
+          poll None false in
+        let exited, status =
+          try wait_for_child () with exn ->
+            let rec terminate () =
+              try Unix.kill pid Sys.sigkill with
+              | Unix.Unix_error (Unix.EINTR, _, _) -> terminate ()
+              | Unix.Unix_error _ -> () in
+            terminate ();
+            let rec reap () =
+              try ignore (Unix.waitpid [] pid) with
+              | Unix.Unix_error (Unix.EINTR, _, _) -> reap ()
+              | Unix.Unix_error (Unix.ECHILD, _, _) -> () in
+            reap ();
+            Unix.close output_read;
+            raise exn in
+        Unix.close output_read;
         match exited with
         | Unix.WEXITED 0 ->
             let code = try int_of_string status with _ -> fail "invalid OAuth HTTP status" in
             code, read_bounded output_path
         | _ -> fail "OAuth token request failed")))
+let default_http ~url ~headers ~body =
+  default_http_cancellable ~cancel:(fun () -> false) ~url ~headers ~body
 
-let post ?http ~url ~headers ~format params =
+
+let post ?http ?(cancel = fun () -> false) ~url ~headers ~format params =
+  if cancel () then raise Cancelled_before_request;
   ignore (validate_url ~local:(Option.is_some http) url);
   unique_params params;
   let body, content_type = match format with
@@ -374,8 +410,13 @@ let post ?http ~url ~headers ~format params =
        || key_lower = "content-type" || Hashtbl.mem seen_headers key_lower then
       fail "invalid or duplicate OAuth token header";
     Hashtbl.add seen_headers key_lower ()) headers;
-  let send = match http with None -> default_http | Some send -> send in
-  let status, response = send ~url ~headers:(("Content-Type", content_type) :: headers) ~body in
+  let status, response = match http with
+    | None -> default_http_cancellable ~cancel ~url
+        ~headers:(("Content-Type", content_type) :: headers) ~body
+    | Some send ->
+        let result = send ~url ~headers:(("Content-Type", content_type) :: headers) ~body in
+        if cancel () then raise Cancelled_in_flight;
+        result in
   if status < 200 || status >= 300 then fail "OAuth token endpoint rejected the grant";
   if String.length response > 1_048_576 then fail "OAuth token response too large";
   let json = try Yojson.Basic.from_string response with _ -> fail "invalid OAuth token response" in
@@ -453,7 +494,8 @@ let refresh_headers policy =
   List.filter (fun (name, _) -> not (replaced name)) policy.extra_token_headers
   @ policy.extra_refresh_headers
 
-let refresh ?http ?(now = Unix.gettimeofday ()) policy (prior : Oauth_store.credential) =
+let refresh ?http ?(cancel = fun () -> false)
+    ?(now = Unix.gettimeofday ()) policy (prior : Oauth_store.credential) =
   validate_policy ?http policy;
   if not (Float.is_finite now) then fail "invalid OAuth refresh time";
   let token = match prior.refresh with
@@ -461,11 +503,15 @@ let refresh ?http ?(now = Unix.gettimeofday ()) policy (prior : Oauth_store.cred
     | _ -> fail "OAuth credential has no refresh token" in
   let params = ["grant_type", "refresh_token"; "client_id", policy.client_id;
     "refresh_token", token] @ policy.extra_refresh_params in
-  let json = post ?http ~url:(Option.value policy.refresh_url ~default:policy.token_url)
-      ~headers:(refresh_headers policy)
-      ~format:(Option.value policy.refresh_body ~default:policy.token_body) params in
-  credential ~prior ~now policy json
-
+  try
+    let json = post ?http ~cancel ~url:(Option.value policy.refresh_url ~default:policy.token_url)
+        ~headers:(refresh_headers policy)
+        ~format:(Option.value policy.refresh_body ~default:policy.token_body) params in
+    credential ~prior ~now policy json
+  with
+  | Cancelled_before_request as cancelled -> raise cancelled
+  | Cancelled_in_flight -> fail "OAuth refresh outcome is ambiguous; sign in again"
+  | _ -> fail "OAuth refresh outcome is ambiguous; sign in again"
 let port_of_authority authority =
   let split = try String.rindex authority ':' with Not_found -> fail "loopback callback requires a port" in
   let port = try int_of_string (slice authority (split + 1) (String.length authority))

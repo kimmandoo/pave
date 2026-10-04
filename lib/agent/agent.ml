@@ -37,6 +37,11 @@ type t = {
   provider : Provider.config;
   authentication : Provider.authentication;
   resolve_credential : (unit -> Provider.credentials) option;
+  resolve_credential_cancel :
+    (cancel:(unit -> bool) -> unit -> Provider.credentials) option;
+  prepare_credential_cancel :
+    (cancel:(unit -> bool) -> unit -> Provider.credentials) option;
+  prepared_credential : Provider.credentials option ref;
   thinking : unit -> string option;
   max_output_tokens : int option;
   root : string;
@@ -76,22 +81,31 @@ type t = {
 }
 let create ~provider ~root ~system ?workspace_context
     ?(authentication = Provider.Api_key)
-    ?resolve_credential ?secret_mask ?before_request ?(history = [])
-    ?(thinking = fun () -> None) ?max_output_tokens ?(allow_shell = false)
-    ?(tool_available = fun _ -> true) ?delegate_task ?(stream = false)
+    ?resolve_credential ?resolve_credential_cancel ?prepare_credential_cancel
+    ?secret_mask ?before_request ?(history = [])
+    ?(allow_shell = false) ?(tool_available = fun _ -> true) ?(stream = false)
     ?(preview_tools = false)
     ?(external_tools = []) ?execute_external ?validate_external_tool
-    ?external_approval_details
+    ?external_approval_details ?delegate_task
     ?(approval_mode = Approval.Ask_exec) ?(tool_approval = [])
     ?(command_patterns = []) ?(approve_command = fun _ -> false)
     ?approve_tool ?on_usage ?on_phase ?on_tool_event ?on_stage ?on_workspace_effect
+    ?(thinking = fun () -> None) ?max_output_tokens
     ?(on_change = fun _ -> ())
     ?(on_delta = fun _ -> ()) ~on_event () =
   let root = Workspace_path.root_path root in
-  let redact = match secret_mask with
-    | Some mask -> Secret_mask.redact mask
-    | None -> Fun.id in
-  { provider; authentication; resolve_credential; thinking; max_output_tokens;
+  let prepared_credential = ref None in
+  let resolve_credential_cancel = Option.map (fun resolve ->
+    fun ~cancel () -> match !prepared_credential with
+      | Some credential ->
+          prepared_credential := None;
+          credential
+      | None -> resolve ~cancel ()) resolve_credential_cancel in
+  let redact value = match secret_mask with
+    | Some mask -> Secret_mask.redact mask value
+    | None -> value in
+  { provider; authentication; resolve_credential; resolve_credential_cancel;
+    prepare_credential_cancel; prepared_credential; thinking; max_output_tokens;
     root; workspace_context;
     system; secret_mask;
     allow_shell; tool_available; external_tools; execute_external;
@@ -307,6 +321,11 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
         tool_call_id = None; tool_result_content = None; provider_state = None;
         attachments = [] } in
     (match t.on_phase with None -> () | Some notify -> notify Model);
+    Option.iter (fun prepare ->
+      Provider.check_cancel cancel;
+      let credential = prepare ~cancel:(fun () -> match cancel with
+        | Some cancelled -> cancelled () | None -> false) () in
+      t.prepared_credential := Some credential) t.prepare_credential_cancel;
     let mask = match t.secret_mask with
       | Some mask -> Secret_mask.mask mask
       | None -> Fun.id in
@@ -378,12 +397,16 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
       try
         let reply =
           if t.stream then Provider.complete ~authentication:t.authentication
-            ?resolve_credential:t.resolve_credential ?thinking:(t.thinking ())
+            ?resolve_credential:t.resolve_credential
+            ?resolve_credential_cancel:t.resolve_credential_cancel
+            ?thinking:(t.thinking ())
             ?max_output_tokens:t.max_output_tokens
             ~on_text ?on_tool_arguments ?on_usage:t.on_usage ?cancel
             t.provider transcript definitions
           else Provider.complete ~authentication:t.authentication
-            ?resolve_credential:t.resolve_credential ?thinking:(t.thinking ())
+            ?resolve_credential:t.resolve_credential
+            ?resolve_credential_cancel:t.resolve_credential_cancel
+            ?thinking:(t.thinking ())
             ?max_output_tokens:t.max_output_tokens
             ?on_usage:t.on_usage ?cancel t.provider transcript definitions in
         Provider.check_cancel cancel;

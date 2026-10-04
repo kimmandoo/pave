@@ -680,9 +680,16 @@ let snapshot_for_uri root uri =
   let relative = relative_file root uri in
   relative, (try Workspace_edit.read_snapshot ~root ~path:relative with Workspace_edit.Error message -> fail message)
 
-let text_edits_preview manager ~root uri edits version =
-  let relative, snapshot = snapshot_for_uri root uri in
-  let document = document_for_uri manager uri in
+let text_edits_preview ~cancel manager ~root ~language_id uri edits version =
+  let relative = relative_file root uri in
+  let document =
+    match with_lock manager.lock (fun () ->
+        Hashtbl.find_opt manager.documents uri) with
+    | Some document -> document
+    | None ->
+        ignore (current_document ~cancel manager root relative language_id);
+        document_for_uri manager uri in
+  let _, snapshot = snapshot_for_uri root uri in
   (match version with
    | Some (`Int value) when value = document.version -> ()
    | Some (`Int _) -> fail "LSP workspace edit has a stale document version"
@@ -730,7 +737,7 @@ let text_edits_preview manager ~root uri edits version =
       "result_sha256", `String preview.result_sha256;
       "content", `String preview.content; "changed", `Bool preview.changed])
 
-let workspace_edit manager ~root edit =
+let workspace_edit ~cancel manager ~root ~language_id edit =
   match edit with
   | `Null -> `List []
   | `Assoc _ ->
@@ -744,7 +751,9 @@ let workspace_edit manager ~root edit =
               if member "kind" item <> `Null then fail "LSP resource operations are not supported";
               let text_document = member "textDocument" item in
               let uri = required_string "uri" text_document in
-              let version = Some (member "version" text_document) in
+              let version = match member "version" text_document with
+                | `Null -> None
+                | version -> Some version in
               uri, version,
               (match member "edits" item with `List edits -> edits | _ -> fail "invalid LSP text edits"))
               items
@@ -755,7 +764,7 @@ let workspace_edit manager ~root edit =
         | `Null, `Null -> []
         | _ -> fail "invalid LSP workspace edit" in
       let previews = List.map (fun (uri, version, edits) ->
-        text_edits_preview manager ~root uri edits version) entries in
+        text_edits_preview ~cancel manager ~root ~language_id uri edits version) entries in
       let output = `List (List.filter (( <> ) `Null) previews) in
       if String.length (json output) > max_frame_bytes then
         fail "LSP workspace edit preview exceeds the output limit";
@@ -854,21 +863,48 @@ let apply_edit_preview manager ~owner ~root ~program ~arguments ~preview_id
     if Hashtbl.mem manager.edit_previews preview.preview_id then (
       Hashtbl.remove manager.edit_previews preview.preview_id;
       manager.preview_bytes <- max 0 (manager.preview_bytes - preview.bytes)));
-  List.iter (fun (path, absolute, before, after, changed) ->
-    if changed then (
-      let current = try Workspace_edit.read_snapshot ~root:preview.root ~path
-        with Workspace_edit.Error message -> fail message in
-      (try Workspace_edit.verify_snapshot (Workspace_edit.sha256 before) current.sha256
-       with Workspace_edit.Error message -> fail message);
-      (try Workspace_path.atomic_write absolute after
-       with Workspace_path.Error message -> fail message);
-      on_file_change ~path ~before ~after)) prepared;
-  `Assoc [
-    "applied", `Bool true;
+  let outcomes = ref [] in
+  let failure = ref None in
+  let remaining = ref prepared in
+  while !remaining <> [] && !failure = None do
+    match !remaining with
+    | (path, absolute, before, after, changed) :: rest ->
+        remaining := rest;
+        if changed then (
+          let did_write = ref false in
+          try
+            let current = Workspace_edit.read_snapshot ~root:preview.root ~path in
+            Workspace_edit.verify_snapshot (Workspace_edit.sha256 before) current.sha256;
+            Workspace_path.atomic_write absolute after;
+            did_write := true;
+            outcomes := (path, "applied") :: !outcomes;
+            on_file_change ~path ~before ~after
+          with
+          | Error message | Workspace_edit.Error message | Workspace_path.Error message
+          | Sys_error message ->
+              if not !did_write then outcomes := (path, "unchanged") :: !outcomes;
+              failure := Some message
+          | Unix.Unix_error (error, operation, target) ->
+              if not !did_write then outcomes := (path, "unchanged") :: !outcomes;
+              failure := Some (Printf.sprintf "%s: %s (%s)"
+                operation (Unix.error_message error) target))
+        else outcomes := (path, "unchanged") :: !outcomes
+    | [] -> ()
+  done;
+  List.iter (fun (path, _, _, _, _) -> outcomes := (path, "unchanged") :: !outcomes)
+    !remaining;
+  let outcomes = List.rev !outcomes in
+  let outcome_json (path, outcome) =
+    `Assoc ["path", `String path; "outcome", `String outcome] in
+  `Assoc ([
+    "applied", `Bool (!failure = None);
     "preview_id", `String preview.preview_id;
-    "files", `List (List.filter_map (fun (path, _, _, _, changed) ->
-      if changed then Some (`String path) else None) prepared)
-  ]
+    "files", `List (List.filter_map (fun (path, outcome) ->
+      if outcome = "applied" then Some (`String path) else None) outcomes);
+    "outcomes", `List (List.map outcome_json outcomes)
+  ] @ match !failure with
+    | None -> []
+    | Some message -> ["failure", `String message])
 
 let add_preview_id id = function
   | `Assoc fields -> `Assoc (("preview_id", `String id) :: fields)
@@ -1036,7 +1072,7 @@ let rec execute manager ~owner ~root ~program ~args ?(cancel = fun () -> false)
           if action = "rename" then (
             if apply_approved then
               fail "preview the rename first, then apply its preview ID";
-            let files = workspace_edit manager ~root result in
+            let files = workspace_edit ~cancel manager ~root ~language_id result in
             if preview_has_changes files then (
               let preview_id = store_edit_preview manager ~owner ~root ~program
                 ~arguments:args ~title:("Rename to " ^
@@ -1069,7 +1105,7 @@ let rec execute manager ~owner ~root ~program ~args ?(cancel = fun () -> false)
                 | value -> `List (validate_diagnostics document.text value) in
               let edit = member "edit" action in
               let previews = if edit = `Null then `List [] else
-                workspace_edit manager ~root edit in
+                workspace_edit ~cancel manager ~root ~language_id edit in
               let preview_id =
                 if preview_has_changes previews then
                   `String (store_edit_preview manager ~owner ~root ~program

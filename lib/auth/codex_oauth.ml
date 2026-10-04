@@ -129,11 +129,11 @@ let with_account (credential : Oauth_store.credential) =
 let exchange ?http ?now authorization ~response =
   with_account (Oauth_flow.exchange ?http ?now (policy ()) authorization ~response)
 
-let refresh ?http ?now (credential : Oauth_store.credential) =
+let refresh ?http ?cancel ?now (credential : Oauth_store.credential) =
   (* Never let Oauth_flow's metadata inheritance reuse a previous id_token. *)
   let prior = { credential with
     metadata = List.remove_assoc "id_token" credential.metadata } in
-  with_account (Oauth_flow.refresh ?http ?now (policy ()) prior)
+  with_account (Oauth_flow.refresh ?http ?cancel ?now (policy ()) prior)
 
 let device_usercode_url =
   "https://auth.openai.com/api/accounts/deviceauth/usercode"
