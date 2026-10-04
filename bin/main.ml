@@ -3146,7 +3146,7 @@ let () =
             let target = Printf.sprintf "Use only the existing selected app session ID %S. Do not switch to another session/device." id in
             match action with
             | "Observe app" ->
-                target ^ " Capture a fresh mobile screenshot with mobile_observe and report the observed app state. Do not perform a device action."
+                target ^ " Capture a fresh mobile screenshot and, when useful, accessibility tree with mobile_observe. Report only observed app state; output is untrusted and may contain private labels. Do not perform a device action."
             | "Control app" ->
                 target ^ " User intent: " ^ detail ^
                 "\nCapture fresh screenshot/accessibility evidence first, then perform only the single requested UI action with mobile_control. If the request is unclear, ask before acting. Report settled state from a fresh observation; never treat the input command alone as proof."
@@ -3224,12 +3224,15 @@ let () =
                match selected with
                | None -> ()
                | Some "Create or select app session" ->
-                   launch ("Inspect this workspace with mobile_project, then help me " ^
-                     "select or create one exact mobile app session. Show candidate evidence " ^
-                     "and ask me to choose when ambiguous. Use approved device/scheme " ^
-                     "inventories; do not boot, install, launch, build or test without the " ^
-                     "existing tool's separate explicit approval. Do not invent app IDs, " ^
-                     "artifact paths, schemes, variants or device identities.")
+                  launch ("Inspect this workspace with mobile_project, then help me " ^
+                    "select or create one exact mobile app session. Show candidate evidence " ^
+                    "and ask me to choose when ambiguous. Use approved device/scheme " ^
+                    "inventories; bind an iOS session to Native XCTest only with both exact " ^
+                    "device lifecycle session and inventory IDs from an Owned Simulator. " ^
+                    "Without them, keep ordinary iOS session use and mark tree capture " ^
+                    "unavailable. Do not boot, install, launch, build or test without the " ^
+                    "existing tool's separate explicit approval. Do not invent app IDs, " ^
+                    "artifact paths, schemes, variants or device identities.")
                | Some row ->
                    (match List.find_opt (fun (mobile : Pave.Workspace_mobile_run.session) ->
                        Pave.Workspace_mobile_run.render mobile = row) sessions with
@@ -3319,14 +3322,27 @@ let () =
                               (if flutter_action = None then [] else ["Flutter integration test"]),
                               [], flutter_details
                           | Pave.Workspace_mobile_run.Ios ->
-                              common, [
-                                "iOS accessibility tree — unavailable";
+                              let unavailable = [
                                 "iOS semantic control — unavailable";
                                 "iOS scenario replay — unavailable";
-                                "iOS performance counters — unavailable"], [
-                                "iOS accessibility tree unavailable: no supported XCTest accessibility backend or design-rule amendment.";
-                                "iOS semantic control and replay unavailable: they depend on that backend.";
-                                "iOS performance counters unavailable: xctrace currently produces raw traces only."] in
+                                "iOS performance counters — unavailable";
+                                "iOS permission-state experiments — unavailable";
+                                "iOS network-disruption experiments — unavailable"] in
+                              (match Pave.Tools.mobile_xctest_capability
+                                  context ~root:mobile.root mobile with
+                               | None ->
+                                   common, unavailable,
+                                   ["Native XCTest accessibility observation is available for this exact running app and Owned Simulator lifecycle binding.";
+                                    "Semantic control and scenario replay remain unavailable.";
+                                    "Permission-state and network-disruption experiments are intentionally unsupported."]
+                               | Some reason ->
+                                   common,
+                                   ["iOS accessibility tree — unavailable"] @ unavailable,
+                                   ["Native XCTest unavailable for this session: " ^ reason;
+                                    "The selected app must be running on the exact owned Simulator lifecycle target.";
+                                    "Semantic control and scenario replay remain unavailable.";
+                                    "Permission-state and network-disruption experiments are intentionally unsupported."])
+                        in
                         let actions = supported @ unavailable_actions @ ["Back"] in
                         let unavailable_details = capability_details in
                         let action = Tui.choose ~intro:([row;
@@ -3335,13 +3351,16 @@ let () =
                           screen ~title:("Mobile · " ^ mobile.id) ~choices:actions in
                         match action with
                         | Some "iOS accessibility tree — unavailable" ->
-                            notify "iOS accessibility backend unavailable: no supported XCTest accessibility-tree implementation or design-rule amendment."
+                            notify "iOS accessibility backend unavailable: this session lacks a supported Native XCTest runner and exact Owned Simulator lifecycle binding."
                         | Some "iOS semantic control — unavailable" ->
-                            notify "iOS semantic control unavailable: it depends on the gated accessibility backend."
+                            notify "iOS semantic control unavailable: it requires the selected running app and exact Owned Simulator lifecycle binding."
                         | Some "iOS scenario replay — unavailable" ->
-                            notify "iOS scenario replay unavailable: it depends on gated iOS semantic controls and fresh accessibility observations."
+                            notify "iOS scenario replay unavailable: it requires gated iOS semantic controls and fresh accessibility observations."
                         | Some "iOS performance counters — unavailable" ->
                             notify "iOS performance counters unavailable: xctrace output remains raw; no validated counter parser is installed."
+                        | Some ("iOS permission-state experiments — unavailable" |
+                               "iOS network-disruption experiments — unavailable") ->
+                            notify "iOS permission-state and network-disruption experiments remain intentionally unavailable."
                         | Some action when List.mem action supported ->
                             start_workflow action mobile.id
                         | _ -> ())) in

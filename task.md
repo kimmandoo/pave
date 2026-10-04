@@ -87,10 +87,11 @@ Prioritize platform gaps (MX01–MX04), accessibility/visual review (MX05–MX08
   **Gate:** Installed runtime/image; no SDK/image download, erase or physical device support.
 
 - [ ] **MX02 — iOS accessibility backend contract**
-  **Evidence:** [lib/tools/workspace_mobile_observe.ml](lib/tools/workspace_mobile_observe.ml) — iOS accessibility capture is explicitly unavailable. **Deliver:** Select and document a real XCTest/accessibility backend, helper provenance, permissions, deployment effects and bounded tree schema before advertising support.
-  **Accept:** An available backend reads only the selected disposable app; absent backend yields explicit unavailable, never a fabricated tree.
-  **Depends:** none.
-  **Gate:** Real supported macOS/Xcode backend and explicit design-rule amendment.
+  **Evidence:** [lib/tools/workspace_mobile_observe.ml](lib/tools/workspace_mobile_observe.ml) generates a fixed public-API XCTest UI-test host/runner, exports and validates its structured attachment, bounds output to 10,000 nodes, depth 128 and 1 MiB, creates private temporary project artifacts, and refuses to invoke `xcodebuild` unless `simctl` still reports the exact target UUID Booted. [lib/tools/tools.ml](lib/tools/tools.ml) gates capture on an already-running app and the exact Owned Simulator lifecycle identity; unbound iOS sessions retain prior behavior. Tests cover tree/attachment validation, private project modes and unbound capability refusal, but no Xcode, Simulator or device command was run.
+  **Deliver:** Use a separately approved temporary Native XCTest runner against only the selected running app on the exact Owned Simulator; disclose helper provenance, build/install/launch and activation effects (including foregrounding or possible reactivation after a race), permissions/deployment constraints and temporary paths. Never mutate user project sources or fabricate a tree.
+  **Accept:** A supported backend reads only the selected disposable app; absent backend/binding yields explicit unavailable, never a fabricated tree.
+  **Depends:** MX01 for the Owned Simulator lifecycle binding; ordinary unbound iOS sessions remain supported.
+  **Gate:** Real supported macOS/Xcode runner and an explicitly approved disposable Simulator capture remain unverified; keep this card unchecked until the returned tree is observed.
 
 - [ ] **MX03 — Approved iOS semantic UI actions**
   **Evidence:** [lib/tools/workspace_mobile_control.ml](lib/tools/workspace_mobile_control.ml) — Control currently supports Android only. **Deliver:** Implement app-bound tap, text and scroll through the MX02 backend with fresh semantic identifiers and exact per-action approval.
@@ -145,6 +146,7 @@ Prioritize platform gaps (MX01–MX04), accessibility/visual review (MX05–MX08
   **Accept:** A disposable app handles denial/grant as observed; unsupported permissions stay unavailable, and restore cannot overwrite a later user change.
   **Depends:** none.
   **Gate:** Reviewed runtime-permission contract and emulator-only acceptance.
+  **Decision:** User chose to keep runtime permission transitions unavailable on 2026-10-04; do not implement grant/revoke effects without a new design decision.
 
 - [ ] **MX12 — Android crash deobfuscation**
   **Evidence:** [lib/tools/workspace_mobile_diagnostics.ml](lib/tools/workspace_mobile_diagnostics.ml) — Mapping presence is reported without deobfuscation. **Deliver:** Bind crash/build identity to an existing verified mapping and approved installed retrace tool; preserve raw and transformed provenance.
@@ -175,6 +177,7 @@ Prioritize platform gaps (MX01–MX04), accessibility/visual review (MX05–MX08
   **Accept:** A disposable app demonstrates its offline recovery with fresh observations; cancellation restores only owned settings and no credentials/traffic are captured implicitly.
   **Depends:** none.
   **Gate:** Reviewed platform network-control contract; supported commands, no implicit MITM.
+  **Decision:** User chose to keep network-disruption experiments unavailable on 2026-10-04; do not implement emulator-wide network effects without a new design decision.
 
 - [ ] **MX17 — Flutter device integration tests**
   **Evidence:** [lib/tools/workspace_flutter_focus.ml](lib/tools/workspace_flutter_focus.ml) — Flutter checks support analysis and targeted test/*.dart, not device integration_test. **Deliver:** Discover an existing integration test and bind an exact installed Flutter device identity to the selected app session; preview separate approved execution without pub get.

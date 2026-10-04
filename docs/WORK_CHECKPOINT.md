@@ -1,6 +1,17 @@
 # Work checkpoint
 
 
+## Current session — MX02 Native XCTest accessibility backend
+
+- **Date:** 2026-10-05.
+- **User request:** Finish mobile implementation only through MX02. Native XCTest was selected; runtime permission and network controls remain unavailable.
+- **Starting state:** `main...origin/main` at `82a49a0 docs(checkpoint): record P0/P1 acceptance gates` (two commits ahead). The MX02 implementation was uncommitted. An out-of-scope MX06/stb experiment was restored; no decoder/vendor changes remain.
+- **Implementation:** Added a temporary repository-generated XCTest host/UI-test runner using public APIs for accessibility observation only. Capture requires an already-running app and exact Owned Simulator lifecycle IDs; the approval binds helper/project/app/device identity and paths. A fresh `simctl` preflight must find the exact UUID Booted before `xcodebuild`; output is private and bounded, and labels/values are untrusted. The helper can foreground the selected app and may reactivate it if it exits during the check/activation race; it does not install/reinstall the selected app or mutate project sources. Ordinary unbound iOS session workflows remain available; only Native XCTest is gated.
+- **Scope and acceptance:** No iOS MX03/MX04 semantic controls/scenario work, and no MX06 decoder. MX02 remains unchecked pending real supported macOS/Xcode execution and an explicitly approved disposable Owned Simulator accessibility capture. No Xcode, `xcrun simctl`, Simulator boot/install or device command was run.
+- **Changed files:** `bin/main.ml`, `lib/tools/{tools.ml,workspace_mobile_device_lifecycle.ml,workspace_mobile_device_lifecycle.mli,workspace_mobile_observe.ml,workspace_mobile_run.ml}`, `test/tools/{test_tools.ml,test_workspace_mobile_app_lifecycle.ml,test_workspace_mobile_control.ml,test_workspace_mobile_diagnostics.ml,test_workspace_mobile_environment.ml,test_workspace_mobile_observe.ml,test_workspace_mobile_performance.ml,test_workspace_mobile_report.ml,test_workspace_mobile_run.ml,test_workspace_mobile_scenario.ml,test_workspace_mobile_symbolication_mx12_mx13.ml}`, `docs/{DESIGN_RULES.md,USAGE.md}`, `task.md`, `CHANGELOG.md`, and this checkpoint.
+- **Verification:** Focused `test_workspace_mobile_observe` and `test_workspace_mobile_run` passed; the observation test parsed the generated PBX project with host `plutil -lint` and checked private file/directory modes. `opam exec -- dune build @install && opam exec -- dune runtest --force -j 1 && opam lint pave.opam` passed (124.73 s); `test_browser_live` skipped because `CHROME_BIN` and `SMOKE_URL` were unset. An actual Pave TUI `/mobile` run displayed the empty Mobile dashboard and no app action was selected. No Xcode/simulator runner smoke was performed.
+- **Exact next action / blocker:** Obtain separate approval for a real supported macOS/Xcode capture on a disposable Owned Simulator, observe the returned accessibility tree, and only then mark MX02 complete. No Xcode/Simulator acceptance was authorized in this session.
+
 ## Current session — P0/P1 reliability and mobile implementation
 
 - **Date:** 2026-10-04.

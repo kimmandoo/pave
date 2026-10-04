@@ -40,6 +40,8 @@ val create_inventory : session_id:string -> inventory_id:string ->
   compatible_simulators:Workspace_xcode.simulator list -> inventory
 val inventory_session_id : inventory -> string
 val inventory_id : inventory -> string
+val valid_uuid : string -> bool
+
 
 type ownership = Preexisting | Owned of {
   owner_session_id : string;
@@ -48,6 +50,8 @@ type ownership = Preexisting | Owned of {
 }
 type managed
 val ownership : managed -> ownership
+val managed_session_id : managed -> string
+val managed_inventory_id : managed -> string
 val managed_target : managed -> target
 
 type pending

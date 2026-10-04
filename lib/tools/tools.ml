@@ -40,6 +40,8 @@ type mobile_device_inventory_cache = {
   device_scheme : string;
   device_inventory : Workspace_mobile_device_lifecycle.inventory;
 }
+type mobile_xctest_plans = (string, string) Hashtbl.t
+
 
 
 
@@ -67,6 +69,7 @@ type session_context = {
   mobile_device_inventories : (string, mobile_device_inventory_cache) Hashtbl.t;
   mobile_device_booting : (string, Workspace_mobile_device_lifecycle.booting) Hashtbl.t;
   mobile_device_managed : (string, Workspace_mobile_device_lifecycle.managed) Hashtbl.t;
+  mobile_xctest_plans : mobile_xctest_plans;
   mutable next_mobile_device_session : int;
   mutable next_mobile_device_inventory : int;
   mutable next_mobile_device_process : int;
@@ -156,6 +159,7 @@ let create_session_context ?lsp_manager ?hub_port ~owner ~root ~process_manager 
     mobile_device_inventories = Hashtbl.create 8;
     mobile_device_booting = Hashtbl.create 8;
     mobile_device_managed = Hashtbl.create 8;
+    mobile_xctest_plans = Hashtbl.create 16;
     next_mobile_device_session = 0;
     next_mobile_device_inventory = 0;
     next_mobile_device_process = 0;
@@ -187,6 +191,7 @@ let close_session_context context =
     Hashtbl.clear context.mobile_device_inventories;
     Hashtbl.clear context.mobile_device_booting;
     Hashtbl.clear context.mobile_device_managed;
+    Hashtbl.clear context.mobile_xctest_plans;
     Hashtbl.clear context.mobile_environment_plans;
     Hashtbl.clear context.mobile_lifecycle_handlers;
     Hashtbl.clear context.mobile_lifecycle_observations;
@@ -2234,6 +2239,75 @@ let android_devices ~approved ?cancel ?on_progress ?context root args =
       (count Workspace_android_devices.Unauthorized)
       (count Workspace_android_devices.Unavailable)
 
+let mobile_xctest_require_owned_lifecycle context ~root ~device_session_id
+    ~inventory_id ~simulator_id ~target_id =
+  if not (Workspace_mobile_device_lifecycle.valid_uuid simulator_id) then
+    fail "Native XCTest requires an exact iOS Simulator UUID";
+  if target_id <> "ios:" ^ simulator_id then
+    fail "Native XCTest lifecycle target does not match the Simulator UUID";
+  Mutex.lock context.mobile_lock;
+  Fun.protect ~finally:(fun () -> Mutex.unlock context.mobile_lock) (fun () ->
+    let cache = match Hashtbl.find_opt context.mobile_device_inventories inventory_id with
+      | Some cache when cache.device_root = root &&
+          cache.device_platform = Workspace_mobile_run.Ios &&
+          Workspace_mobile_device_lifecycle.inventory_id cache.device_inventory = inventory_id &&
+          Workspace_mobile_device_lifecycle.inventory_session_id cache.device_inventory =
+            device_session_id -> cache
+      | _ -> fail "Native XCTest requires the current exact iOS lifecycle inventory" in
+    let inventory = cache.device_inventory in
+    if not (List.mem simulator_id inventory.configured_simulator_ids &&
+            List.mem simulator_id inventory.ios_destinations) then
+      fail "selected Simulator is absent from the current compatible lifecycle inventory";
+    (match List.filter (fun (simulator : Workspace_xcode.simulator) ->
+        simulator.id = simulator_id) inventory.compatible_simulators with
+     | [{ state = "Booted"; _ }] -> ()
+     | _ -> fail "selected Simulator is not uniquely booted in the current lifecycle inventory");
+    let key = inventory_id ^ "\000" ^ target_id in
+    let managed = match Hashtbl.find_opt context.mobile_device_managed key with
+      | Some managed -> managed
+      | None -> fail "Native XCTest requires an owned lifecycle record for this Simulator" in
+    if Workspace_mobile_device_lifecycle.managed_session_id managed <> device_session_id ||
+       Workspace_mobile_device_lifecycle.managed_inventory_id managed <> inventory_id ||
+       Workspace_mobile_device_lifecycle.target_id
+         (Workspace_mobile_device_lifecycle.managed_target managed) <> target_id then
+      fail "Native XCTest lifecycle ownership record does not match the selected session";
+    (match Workspace_mobile_device_lifecycle.managed_target managed with
+     | Workspace_mobile_device_lifecycle.Ios_simulator { id }
+       when id = simulator_id -> ()
+     | _ -> fail "Native XCTest ownership is not for the exact selected Simulator");
+    match Workspace_mobile_device_lifecycle.ownership managed with
+    | Workspace_mobile_device_lifecycle.Owned { owner_session_id; _ }
+      when owner_session_id = device_session_id -> ()
+    | Workspace_mobile_device_lifecycle.Owned _ ->
+        fail "Native XCTest lifecycle ownership belongs to a different device session"
+    | Workspace_mobile_device_lifecycle.Preexisting ->
+        fail "Native XCTest is unavailable for a pre-existing Simulator")
+
+let mobile_xctest_lifecycle_guard context ~root
+    (session : Workspace_mobile_run.session) =
+  if session.platform <> Workspace_mobile_run.Ios then
+    fail "Native XCTest backend is available only for iOS Simulator sessions";
+  if session.root <> root then
+    fail "selected mobile app session belongs to a different workspace root";
+  let binding = match session.ios_device_binding with
+    | Some binding -> binding
+    | None -> fail "iOS app session has no bound device lifecycle identity" in
+  if binding.simulator_id <> session.device then
+    fail "iOS app session Simulator UUID changed after selection";
+  mobile_xctest_require_owned_lifecycle context ~root
+    ~device_session_id:binding.device_session_id
+    ~inventory_id:binding.inventory_id
+    ~simulator_id:binding.simulator_id ~target_id:binding.target_id
+
+let mobile_xctest_capability context ~root
+    (session : Workspace_mobile_run.session) =
+  try
+    if session.state <> Workspace_mobile_run.Running then
+      fail "selected app session is not running";
+    mobile_xctest_lifecycle_guard context ~root session;
+    None
+  with Tool_error message -> Some message
+
 let mobile_session_select ~context ~root args =
   let subroot = required_string "subroot" args in
   let platform = required_string "platform" args in
@@ -2271,6 +2345,22 @@ let mobile_session_select ~context ~root args =
         List.mem device destinations && List.mem device simulators in
       scheme_ready, scheme_ready)
     else fail "mobile session platform must be android or ios" in
+  let ios_device_binding =
+    if platform = "ios" then (
+      let device_session_id = optional_string "device_session_id" "" args in
+      let inventory_id = optional_string "inventory_id" "" args in
+      match device_session_id, inventory_id with
+      | "", "" -> None
+      | "", _ | _, "" ->
+          fail "iOS lifecycle binding requires both device_session_id and inventory_id"
+      | device_session_id, inventory_id ->
+          let simulator_id = device in
+          let target_id = "ios:" ^ simulator_id in
+          mobile_xctest_require_owned_lifecycle context ~root ~device_session_id
+            ~inventory_id ~simulator_id ~target_id;
+          Some { Workspace_mobile_run.device_session_id;
+            inventory_id; simulator_id; target_id })
+    else None in
   Workspace_mobile_run.select context.mobile_run_manager ~root ~subroot
     ~platform ~device ~app_id:(required_string "app_id" args)
     ~app_path:(required_string "app_path" args)
@@ -2281,6 +2371,7 @@ let mobile_session_select ~context ~root args =
     ~activity:(match optional_string "activity" "" args with
       | "" -> None | value -> Some value)
     ~device_ready ~scheme_ready
+    ~ios_device_binding
 let xcode_derived_data_path ~root ~app_path =
   let parts = String.split_on_char '/' app_path in
   let rec locate prefix = function
@@ -2616,6 +2707,237 @@ let mobile_session ~approved ?cancel ?on_progress ?context root args =
       "Mobile " ^ action ^ " completed for " ^ id ^ ".\n" ^ output
   | _ -> fail "mobile session action must be list, select, status, install, launch or stop"
 
+let mobile_xctest_build_hash root session =
+  try (Workspace_mobile_report.build_identity root session).build_hash
+  with Workspace_mobile_report.Error message -> fail message
+
+let mobile_xctest_plan_key (session : Workspace_mobile_run.session)
+    ~build_hash ~source_hash ~project_hash =
+  let binding = match session.ios_device_binding with
+    | Some binding -> binding
+    | None -> fail "iOS app session has no bound device lifecycle identity" in
+  Workspace_edit.sha256 (String.concat "\000" [
+    session.id; session.root; session.subroot; session.app_id; session.app_path;
+    session.device; binding.device_session_id; binding.inventory_id;
+    binding.simulator_id; binding.target_id; build_hash; source_hash; project_hash])
+
+let mobile_xctest_temporary_directory () =
+  let path = Filename.temp_file "pave-native-xctest-" "" in
+  Unix.unlink path;
+  path
+
+let mobile_xctest_preview_directory context key =
+  let path = mobile_xctest_temporary_directory () in
+  Mutex.lock context.mobile_lock;
+  Fun.protect ~finally:(fun () -> Mutex.unlock context.mobile_lock) (fun () ->
+    if Hashtbl.length context.mobile_xctest_plans >= 128 &&
+       not (Hashtbl.mem context.mobile_xctest_plans key) then
+      fail "too many pending Native XCTest approval previews";
+    Hashtbl.replace context.mobile_xctest_plans key path);
+  path
+
+let mobile_xctest_execution_directory context key =
+  Mutex.lock context.mobile_lock;
+  let path = Fun.protect ~finally:(fun () -> Mutex.unlock context.mobile_lock)
+    (fun () ->
+      match Hashtbl.find_opt context.mobile_xctest_plans key with
+      | Some path ->
+          Hashtbl.remove context.mobile_xctest_plans key;
+          Some path
+      | None -> None) in
+  match path with
+  | Some path -> path
+  | None -> fail "Native XCTest approval preview is missing or stale; request a new preview"
+
+let mobile_xctest_preview ~context ~root ~session =
+  if session.Workspace_mobile_run.state <> Workspace_mobile_run.Running then
+    fail "Native XCTest requires a running selected app session";
+  mobile_xctest_lifecycle_guard context ~root session;
+  let binding = Option.get session.Workspace_mobile_run.ios_device_binding in
+  let source = try Workspace_mobile_observe.xctest_runner_source
+      ~bundle_id:session.app_id
+    with Workspace_mobile_observe.Error message -> fail message in
+  let source_hash = Workspace_edit.sha256 source in
+  let project_hash = try Workspace_mobile_observe.xctest_project_fingerprint
+      ~bundle_id:session.app_id
+    with Workspace_mobile_observe.Error message -> fail message in
+  let build_hash = mobile_xctest_build_hash root session in
+  let key = mobile_xctest_plan_key session ~build_hash ~source_hash ~project_hash in
+  let directory = mobile_xctest_preview_directory context key in
+  let shell, project, derived, result, export, booted_log, log, export_log =
+    try Workspace_mobile_observe.xctest_command ~directory
+      ~simulator_id:binding.simulator_id
+    with Workspace_mobile_observe.Error message -> fail message in
+  let target_id = binding.target_id in
+  let details = [
+    "Selected session/app/device: " ^ session.id ^ " · " ^ session.app_id ^
+      " · " ^ binding.simulator_id;
+    "Lifecycle binding: " ^ binding.device_session_id ^ " · " ^
+      binding.inventory_id ^ " · " ^ target_id ^ " · ownership=Owned";
+    "Selected app artifact/build SHA-256: " ^ session.app_path ^ " · " ^ build_hash;
+    "XCTest helper source version/provenance: " ^
+      Workspace_mobile_observe.xctest_version ^ " · generated in-repository from fixed public XCTest/XCUIApplication templates";
+    "Generated UI-test source: " ^ Filename.concat (Filename.concat directory "Tests")
+      "PaveXCTestRunner.swift";
+    Printf.sprintf "Generated Swift source SHA-256: %s (%d bytes)"
+      source_hash (String.length source);
+    "Generated project/host/scheme template SHA-256: " ^ project_hash;
+    "Exact generated test source follows:\n" ^ source;
+    "Temporary project: " ^ Printf.sprintf "%S" project;
+    "Derived data: " ^ Printf.sprintf "%S" derived;
+    "Result bundle: " ^ Printf.sprintf "%S" result;
+    "Attachment export: " ^ Printf.sprintf "%S" export;
+    "Booted Simulator preflight log: " ^ Printf.sprintf "%S" booted_log;
+    "Build log: " ^ Printf.sprintf "%S" log;
+    "Attachment export log: " ^ Printf.sprintf "%S" export_log;
+    "xcodebuild will build, install and launch only the generated helper host/test runner on this exact Simulator. The selected app must already be running; XCTest calls activate(), which may foreground it and could relaunch it if it exits between the state check and activation. It never installs or reinstalls the selected app.";
+    "No physical device, network download, xcodegen, private API, or project-source mutation is used.";
+    "Exact approved host command (xcodebuild test for the selected Simulator, followed by xcresulttool attachment export):";
+    shell;
+    Printf.sprintf "Maximum request/response: %d/%d bytes; maximum accessibility nodes: %d."
+      Workspace_mobile_observe.max_xctest_request_bytes
+      Workspace_mobile_observe.max_xctest_response_bytes
+      Workspace_mobile_observe.max_nodes] in
+  "Runs one separately approved Native XCTest accessibility observation against only the selected running app and Simulator.",
+  details
+
+let mobile_xctest_read_private ~maximum path =
+  let before = try Unix.lstat path with Unix.Unix_error _ ->
+    fail "XCTest result file is missing" in
+  if before.Unix.st_kind <> Unix.S_REG || before.Unix.st_uid <> Unix.geteuid () ||
+     before.Unix.st_perm land 0o077 <> 0 || before.Unix.st_size > maximum then
+    fail "XCTest result file is unsafe or exceeds its byte limit";
+  let fd = try Unix.openfile path [Unix.O_RDONLY; Unix.O_CLOEXEC] 0
+    with Unix.Unix_error _ -> fail "XCTest result file could not be opened safely" in
+  Fun.protect ~finally:(fun () -> Unix.close fd) (fun () ->
+    let opened = Unix.fstat fd in
+    if opened.Unix.st_kind <> Unix.S_REG ||
+       opened.Unix.st_uid <> Unix.geteuid () ||
+       opened.Unix.st_dev <> before.Unix.st_dev ||
+       opened.Unix.st_ino <> before.Unix.st_ino ||
+       opened.Unix.st_perm land 0o077 <> 0 ||
+       opened.Unix.st_size > maximum then
+      fail "XCTest result file changed or became unsafe while being read";
+    let buffer = Buffer.create (min maximum (max 0 opened.Unix.st_size)) in
+    let chunk = Bytes.create 8192 in
+    let rec read total =
+      let count = Unix.read fd chunk 0 (min (Bytes.length chunk) (maximum + 1 - total)) in
+      if count = 0 then Buffer.contents buffer
+      else if total + count > maximum then
+        fail "XCTest result file exceeds its byte limit"
+      else (
+        Buffer.add_subbytes buffer chunk 0 count;
+        read (total + count)) in
+    read 0)
+
+let mobile_xctest_log path =
+  try mobile_xctest_read_private ~maximum:8192 path
+  with Tool_error _ -> ""
+
+let mobile_xctest_status label output =
+  let prefix = label ^ "=" in
+  match String.split_on_char '\n' output
+      |> List.filter (fun line -> String.starts_with ~prefix line) with
+  | [line] ->
+      let text = String.sub line (String.length prefix)
+          (String.length line - String.length prefix) in
+      let status = try int_of_string text
+        with _ -> fail ("XCTest host returned invalid " ^ label) in
+      if status < 0 then fail ("XCTest host returned invalid " ^ label);
+      status
+  | [] -> fail ("XCTest host returned no " ^ label)
+  | _ -> fail ("XCTest host returned ambiguous " ^ label)
+
+let rec mobile_xctest_remove_tree path =
+  let stat = Unix.lstat path in
+  if stat.Unix.st_uid <> Unix.geteuid () then
+    fail "refusing to remove a temporary XCTest path owned by another user";
+  match stat.Unix.st_kind with
+  | Unix.S_DIR ->
+      Sys.readdir path |> Array.iter (fun name ->
+        mobile_xctest_remove_tree (Filename.concat path name));
+      Unix.rmdir path
+  | Unix.S_REG | Unix.S_LNK -> Unix.unlink path
+  | _ -> fail "refusing to remove an unexpected temporary XCTest file type"
+
+let mobile_xctest_run ?cancel ?on_progress ~timeout_seconds ~context ~root
+    ~session () =
+  if session.Workspace_mobile_run.state <> Workspace_mobile_run.Running then
+    fail "Native XCTest requires a running selected app session";
+  mobile_xctest_lifecycle_guard context ~root session;
+  (match cancel with Some cancelled when cancelled () -> raise Cancelled | _ -> ());
+  let binding = Option.get session.Workspace_mobile_run.ios_device_binding in
+  let source = try Workspace_mobile_observe.xctest_runner_source
+      ~bundle_id:session.app_id
+    with Workspace_mobile_observe.Error message -> fail message in
+  let source_hash = Workspace_edit.sha256 source in
+  let project_hash = try Workspace_mobile_observe.xctest_project_fingerprint
+      ~bundle_id:session.app_id
+    with Workspace_mobile_observe.Error message -> fail message in
+  let build_hash = mobile_xctest_build_hash root session in
+  let key = mobile_xctest_plan_key session ~build_hash ~source_hash ~project_hash in
+  let directory = mobile_xctest_execution_directory context key in
+  let cleanup () =
+    try mobile_xctest_remove_tree directory with
+    | Unix.Unix_error (Unix.ENOENT, _, _) -> () in
+  Fun.protect ~finally:cleanup (fun () ->
+    let generated_hash = try Workspace_mobile_observe.create_xctest_project
+        ~directory ~bundle_id:session.app_id
+      with Workspace_mobile_observe.Error message -> fail message in
+    if generated_hash <> project_hash then
+      fail "generated Native XCTest project does not match the approved source fingerprint";
+    let shell, _project, _derived, _result_bundle, export_directory,
+        booted_log, log, export_log =
+      try Workspace_mobile_observe.xctest_command ~directory
+        ~simulator_id:binding.simulator_id
+      with Workspace_mobile_observe.Error message -> fail message in
+    (match cancel with Some cancelled when cancelled () -> raise Cancelled | _ -> ());
+    let result = Workspace_process.run_shell ?cancel ?on_progress
+      ~timeout_seconds ~output_limit:2048 ~cwd:(Some root) ~command:shell () in
+    (match result.termination with
+     | Workspace_process.Exited 0 when not result.truncated -> ()
+     | Workspace_process.Cancelled ->
+         fail "Native XCTest outcome is ambiguous: cancellation arrived after xcodebuild may have started; the selected app may already have been observed or acted on. No retry was attempted."
+     | Workspace_process.Timed_out ->
+         fail "Native XCTest outcome is ambiguous: xcodebuild exceeded its deadline and may already have observed or acted on the selected app. No retry was attempted."
+     | Workspace_process.Exited code ->
+         fail (Printf.sprintf "Native XCTest host wrapper exited %d%s"
+           code (if result.truncated then " with truncated output" else ""))
+     | Workspace_process.Signaled signal ->
+         fail (Printf.sprintf "Native XCTest host wrapper received signal %d; app outcome may be ambiguous"
+           signal));
+    let preflight_status =
+      mobile_xctest_status "PAVE_XCTEST_PREFLIGHT_STATUS" result.output in
+    if preflight_status <> 0 then
+      fail (Printf.sprintf
+        "Native XCTest did not start because the selected Simulator was not confirmed booted (preflight exit %d); xcodebuild was not run.\n%s"
+        preflight_status (mobile_xctest_log booted_log));
+    let build_status = mobile_xctest_status "PAVE_XCTEST_BUILD_STATUS" result.output in
+    let export_status = mobile_xctest_status "PAVE_XCTEST_EXPORT_STATUS" result.output in
+    if export_status <> 0 then
+      fail (Printf.sprintf
+        "xcresulttool attachment export failed with exit %d (xcodebuild exit %d)\n%s\n%s"
+        export_status build_status (mobile_xctest_log log)
+        (mobile_xctest_log export_log));
+    let manifest = mobile_xctest_read_private ~maximum:
+      Workspace_mobile_observe.max_xctest_manifest_bytes
+      (Filename.concat export_directory "manifest.json") in
+    let filename = try Workspace_mobile_observe.xctest_manifest_attachment manifest
+      with Workspace_mobile_observe.Error message -> fail message in
+    let payload = mobile_xctest_read_private
+        ~maximum:Workspace_mobile_observe.max_xctest_response_bytes
+        (Filename.concat export_directory filename) in
+    let payload = try Workspace_mobile_observe.xctest_export_payload
+        ~manifest ~files:[filename, payload]
+      with Workspace_mobile_observe.Error message -> fail message in
+    let response = try Workspace_mobile_observe.parse_xctest_response
+        ~bundle_id:session.app_id payload
+      with Workspace_mobile_observe.Error message -> fail message in
+    if build_status <> 0 then
+      fail (Printf.sprintf "xcodebuild test exited %d after its XCTest response; no retry was attempted.\n%s"
+        build_status (mobile_xctest_log log));
+    Yojson.Basic.to_string response)
+
 let mobile_observe_tool ~approved ?cancel ?on_progress ~context ~root args =
   if not approved then fail "mobile screen observation requires explicit interactive approval";
   let root = Workspace_path.root_path root in
@@ -2627,42 +2949,48 @@ let mobile_observe_tool ~approved ?cancel ?on_progress ~context ~root args =
   if session.state <> Workspace_mobile_run.Running then
     fail "mobile screen observation requires a running app session";
   let action = required_string "action" args in
-  let command = Workspace_mobile_observe.command action session in
-  let timeout_seconds = optional_int "timeout_seconds" 30
-    ~minimum:1 ~maximum:120 args in
-  let result = Workspace_process.run_shell ?cancel ?on_progress
-    ~timeout_seconds ~output_limit:Workspace_mobile_observe.max_screenshot_bytes
-    ~cwd:(Some root) ~command () in
-  let status = match result.termination with
-    | Workspace_process.Exited 0 when not result.truncated -> None
-    | Workspace_process.Exited code -> Some (Printf.sprintf "exit %d" code)
-    | Workspace_process.Signaled signal -> Some (Printf.sprintf "signal %d" signal)
-    | Workspace_process.Timed_out -> Some "timed out"
-    | Workspace_process.Cancelled -> raise Cancelled in
-  (match status with
-   | Some reason ->
-       fail ("Mobile " ^ action ^ " failed: " ^ reason ^
-         (if result.truncated then " (output truncated)" else "") ^
-         "\n" ^ result.output)
-   | None -> ());
-  match action with
-  | "screenshot" ->
-      let screenshot = Workspace_mobile_observe.validate_png result.output in
-      Workspace_mobile_run.set_screen_size context.mobile_run_manager ~id
-        ~width:screenshot.width ~height:screenshot.height;
-      [Protocol.Text (Yojson.Basic.to_string (`Assoc [
-         "session_id", `String id;
-         "status", `String "available";
-         "mime_type", `String "image/png";
-         "width", `Int screenshot.width;
-         "height", `Int screenshot.height;
-         "bytes", `Int (String.length screenshot.png)]));
-       Protocol.Image { mime_type = "image/png";
-         data = Workspace_mobile_observe.base64_encode screenshot.png }]
-  | "accessibility" ->
-      let nodes = Workspace_mobile_observe.parse_accessibility result.output in
-      [Protocol.Text (Workspace_mobile_observe.accessibility_json nodes)]
-  | _ -> fail "mobile observation action must be screenshot or accessibility"
+  if action = "accessibility" && session.platform = Workspace_mobile_run.Ios then
+    [Protocol.Text (mobile_xctest_run ?cancel ?on_progress
+      ~timeout_seconds:(optional_int "timeout_seconds" 120 ~minimum:1 ~maximum:120 args)
+      ~context ~root ~session ())]
+  else (
+    let command = Workspace_mobile_observe.command action session in
+    let timeout_seconds = optional_int "timeout_seconds" 30
+      ~minimum:1 ~maximum:120 args in
+    let result = Workspace_process.run_shell ?cancel ?on_progress
+      ~timeout_seconds ~output_limit:Workspace_mobile_observe.max_screenshot_bytes
+      ~cwd:(Some root) ~command () in
+    let status = match result.termination with
+      | Workspace_process.Exited 0 when not result.truncated -> None
+      | Workspace_process.Exited code -> Some (Printf.sprintf "exit %d" code)
+      | Workspace_process.Signaled signal -> Some (Printf.sprintf "signal %d" signal)
+      | Workspace_process.Timed_out -> Some "timed out"
+      | Workspace_process.Cancelled -> raise Cancelled in
+    (match status with
+     | Some reason ->
+         fail ("Mobile " ^ action ^ " failed: " ^ reason ^
+           (if result.truncated then " (output truncated)" else "") ^
+           "\n" ^ result.output)
+     | None -> ());
+    match action with
+    | "screenshot" ->
+        let screenshot = Workspace_mobile_observe.validate_png result.output in
+        Workspace_mobile_run.set_screen_size context.mobile_run_manager ~id
+          ~width:screenshot.width ~height:screenshot.height;
+        [Protocol.Text (Yojson.Basic.to_string (`Assoc [
+           "session_id", `String id;
+           "status", `String "available";
+           "mime_type", `String "image/png";
+           "width", `Int screenshot.width;
+           "height", `Int screenshot.height;
+           "bytes", `Int (String.length screenshot.png)]));
+         Protocol.Image { mime_type = "image/png";
+           data = Workspace_mobile_observe.base64_encode screenshot.png }]
+    | "accessibility" ->
+        let nodes = Workspace_mobile_observe.parse_accessibility result.output in
+        [Protocol.Text (Workspace_mobile_observe.accessibility_json nodes)]
+    | _ -> fail "mobile observation action must be screenshot or accessibility"
+  )
 
 let mobile_accessibility_audit_tool ~approved ?cancel ?on_progress ~context ~root args =
   if not approved then fail "mobile accessibility audit requires explicit interactive approval";
@@ -4923,12 +5251,31 @@ let mobile_session_preview ~context ~root args =
       let app_id = required_string "app_id" args in
       let app_path = required_string "app_path" args in
       let activity = optional_string "activity" "" args in
-      ignore root;
+      let binding_details =
+        if platform = "ios" then (
+          let device_session_id = optional_string "device_session_id" "" args in
+          let inventory_id = optional_string "inventory_id" "" args in
+          match device_session_id, inventory_id with
+          | "", "" ->
+              ["Native XCTest accessibility is unavailable until both device_session_id and inventory_id bind this app session to an Owned Simulator lifecycle record."]
+          | "", _ | _, "" ->
+              fail "iOS lifecycle binding requires both device_session_id and inventory_id"
+          | device_session_id, inventory_id ->
+              let target_id = "ios:" ^ device in
+              mobile_xctest_require_owned_lifecycle context ~root
+                ~device_session_id ~inventory_id ~simulator_id:device ~target_id;
+              ["Device lifecycle session: " ^ device_session_id;
+               "Device inventory: " ^ inventory_id;
+               "Exact target: " ^ target_id ^ " · ownership=Owned";
+               "Native XCTest accessibility observations are scoped to this Simulator.";
+               "iOS semantic control and scenario replay remain unavailable."]
+        ) else if platform = "android" then [] else
+          fail "mobile session platform must be android or ios" in
       ("Stores a mobile app/device selection in this private session; executes no project or device command.",
        ["Project: " ^ subroot; "Platform: " ^ platform;
         "Device: " ^ device; "App: " ^ app_id;
         "Activity: " ^ if activity = "" then "(launcher intent)" else activity;
-        "Artifact: " ^ app_path])
+        "Artifact: " ^ app_path] @ binding_details)
   | "list" | "status" ->
       ("Reads session-owned mobile app state; no device command is executed.", [])
   | _ -> fail "mobile session action must be list, select, status, install, launch or stop"
@@ -6173,17 +6520,17 @@ let definitions = [
      "scheme", bounded_string_field "Exact Xcode scheme already discovered for this bundle" 256;
      "device_session_id", bounded_string_field "Exact returned device session ID" 64;
      "inventory_id", bounded_string_field "Exact returned device inventory ID" 64;
-     "target_name", bounded_string_field "Exact configured Android AVD name" 256;
-     "port", integer_field "Unused even Android emulator console port" 5554 5682;
      "simulator_id", bounded_string_field "Exact compatible iOS Simulator UUID" 36;
      "readiness_timeout_seconds", integer_field "Readiness deadline (default 60 seconds)" 1 300]
     ["action"];
-  schema "mobile_session" "Select an app, build its chosen Android variant or non-signing iOS Simulator scheme, then separately install, launch and stop the session. Each build/device effect has an exact explicit approval; no physical device is selectable."
+  schema "mobile_session" "Select an app and optionally bind an iOS accessibility session to the exact Owned Simulator lifecycle record, then separately build, install, launch or stop. Unbound iOS sessions retain existing behavior but Native XCTest accessibility remains unavailable. Every device/build effect has exact interactive approval; no physical device is selectable."
     ["action", enum_string_field "Session action" ["list"; "select"; "status"; "build"; "install"; "launch"; "stop"];
      "session_id", string_field "Session ID returned by select";
      "platform", enum_string_field "Verified app platform" ["ios"; "android"];
      "subroot", string_field "Exact workspace-relative project root; Xcode bundle path for iOS";
      "device", string_field "Exact iOS Simulator UUID or ready emulator serial from approved inventory";
+     "device_session_id", bounded_string_field "Optional exact Owned iOS Simulator lifecycle session ID; supply with inventory_id to enable Native XCTest accessibility" 64;
+     "inventory_id", bounded_string_field "Optional exact approved iOS device inventory ID; supply with device_session_id to enable Native XCTest accessibility" 64;
      "app_id", string_field "Exact bundle identifier or Android application ID";
      "app_path", string_field "Workspace-relative expected .app directory or .apk build artifact";
      "scheme", string_field "Exact approved Xcode scheme for iOS";
@@ -6202,10 +6549,10 @@ let definitions = [
      "target", bounded_string_field "Android discovered instrumentation task; required for Android test" 512;
      "timeout_seconds", integer_field "Per-command deadline (default 120 seconds)" 1 300]
     ["action"; "session_id"; "source_path"; "before_sha256"; "after_sha256"];
-  schema "mobile_observe" "Capture a bounded screenshot or accessibility tree from a running app in the selected private mobile session. Each device read has an exact explicit approval; Android accessibility output is untrusted and iOS accessibility-tree capture is unavailable."
+  schema "mobile_observe" "Capture a bounded screenshot or fresh accessibility tree from a running selected app. Every read is separately approved; iOS accessibility uses a temporary native XCTest runner bound to the selected app, exact Simulator and an Owned lifecycle record. Output is bounded and untrusted."
     ["action", enum_string_field "Read one selected-screen representation" ["screenshot"; "accessibility"];
      "session_id", string_field "Running mobile app session ID";
-     "timeout_seconds", integer_field "Device read deadline (default 30 seconds)" 1 120]
+     "timeout_seconds", integer_field "Device/XCTest read deadline (default 30 seconds Android, 120 seconds iOS)" 1 120]
     ["action"; "session_id"];
   schema "mobile_accessibility_audit" "Capture a fresh bounded Android accessibility tree from the exact running selected app session and report only rule-based findings supported by observed nodes. This does not certify screen-reader, contrast, focus-order or unknown-density touch-target behavior; each private tree capture requires explicit approval."
     ["session_id", string_field "Exact running Android app session";
@@ -6238,7 +6585,7 @@ let definitions = [
     ["action"; "session_id"; "name"; "os"; "locale"; "theme"; "dynamic_regions"];
 
 
-  schema "mobile_control" "Perform one explicit tap, swipe, text input or Back action on the selected running Android app. Coordinate actions require a recent screenshot and stay within its captured dimensions; each action invalidates that observation and requires fresh screenshot/accessibility verification."
+  schema "mobile_control" "Perform one explicit Android coordinate/back action on the selected running app. Coordinates are bounded by a recent screenshot, and each action requires separate approval."
     ["action", enum_string_field "One UI action" ["tap"; "swipe"; "text"; "back"];
      "session_id", string_field "Running mobile app session ID";
      "x", integer_field "Tap x coordinate in the most recent screenshot" 0 max_int;
@@ -6252,13 +6599,13 @@ let definitions = [
      "timeout_seconds", integer_field "Device action deadline (default 30 seconds)" 1 120]
     ["action"; "session_id"];
 
-  schema "mobile_scenario" "Save, explicitly replay one step at a time, and verify Android bug scenarios. Records are private, versioned, bound to exact app/device identity and contain accessibility assertions. Each device step, observation and persisted transition is separately approved; failures stop without implicit retries."
+  schema "mobile_scenario" "Save and explicitly replay Android bug scenarios with fresh accessibility assertions. Version-1 coordinate records are bound to the app and device; every action, observation and state transition is separately approved, and failures stop without implicit retries."
     ["action", enum_string_field "Scenario operation" ["list"; "save"; "status"; "start"; "step"; "verify"; "delete"];
      "name", bounded_string_field "Scenario identifier [a-z][a-z0-9_-]{0,47}" 48;
      "session_id", string_field "Exact running app session ID";
      "steps", `Assoc ["type", `String "array";
        "maxItems", `Int Workspace_mobile_scenario.max_steps;
-       "description", `String "Ordered UI actions and expected accessibility values";
+       "description", `String "Ordered Android UI actions and expected accessibility values";
        "items", object_field [
          "action", enum_string_field "Tap, swipe, text or Back" ["tap"; "swipe"; "text"; "back"];
          "x", integer_field "Tap x coordinate" 0 max_int;
@@ -6272,8 +6619,9 @@ let definitions = [
          "expected_field", enum_string_field "Exact accessibility field to assert" ["role"; "text"; "description"; "identifier"];
          "expected_value", bounded_string_field "Expected exact value (maximum 1024 bytes)" 1024]
          ["action"; "expected_field"; "expected_value"]];
-     "timeout_seconds", integer_field "Per-step device or accessibility observation deadline (default 30 seconds)" 1 120]
+     "timeout_seconds", integer_field "Per-step device deadline (default 30 seconds)" 1 120]
     ["action"];
+
 
   schema "read_file" "Read bounded workspace files, directories, documents, archives, notebooks, SQLite, owned artifacts, managed worktrees, or public HTTPS URLs. HTTPS fetches send no credentials and require approval."
     ["path", string_field "Workspace-relative path or supported local://, artifact://, worktree://, or HTTPS source";
@@ -6926,14 +7274,18 @@ let approval_request ?cancel ?context ?(env = Sys.getenv_opt)
           fail "mobile app session belongs to a different workspace root";
         if session.state <> Workspace_mobile_run.Running then
           fail "mobile screen observation requires a running app session";
-        let command = Workspace_mobile_observe.command
-          (required_string "action" args) session in
-        ("Reads screen pixels or accessibility content from the selected app; output is untrusted and may contain private user data.",
-         ["Working directory: " ^ Printf.sprintf "%S" session.root;
-          "Device: " ^ session.device ^ " · app: " ^ session.app_id;
-          "Exact command: " ^ command;
-          Printf.sprintf "Maximum captured output: %d bytes."
-            Workspace_mobile_observe.max_screenshot_bytes])
+        let action = required_string "action" args in
+        if action = "accessibility" &&
+           session.platform = Workspace_mobile_run.Ios then
+          mobile_xctest_preview ~context ~root:base_root ~session
+        else
+          let command = Workspace_mobile_observe.command action session in
+          ("Reads screen pixels or accessibility content from the selected app; output is untrusted and may contain private user data.",
+           ["Working directory: " ^ Printf.sprintf "%S" session.root;
+            "Device: " ^ session.device ^ " · app: " ^ session.app_id;
+            "Exact command: " ^ command;
+            Printf.sprintf "Maximum captured output: %d bytes."
+              Workspace_mobile_observe.max_screenshot_bytes])
     | "mobile_accessibility_audit" ->
         let context = require_session_context context in
         let session = Workspace_mobile_run.get context.mobile_run_manager
@@ -7130,9 +7482,10 @@ let approval_request ?cancel ?context ?(env = Sys.getenv_opt)
           (required_string "session_id" args) in
         if session.root <> base_root then
           fail "mobile app session belongs to a different workspace root";
+        let action = required_string "action" args in
+        let value = mobile_control_action action args in
         let command = Workspace_mobile_control.command session
-          ~screen_size:session.screen_size
-          (mobile_control_action (required_string "action" args) args) in
+          ~screen_size:session.screen_size value in
         ("Performs one device-side UI state change; screen coordinates are bounded by the last screenshot. Device content may be private.",
          ["Working directory: " ^ Printf.sprintf "%S" session.root;
           "Device: " ^ session.device ^ " · app: " ^ session.app_id;

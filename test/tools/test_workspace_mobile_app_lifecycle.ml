@@ -11,7 +11,7 @@ let session ?(platform = Run.Android) ?(state = Run.Running) ?(activity = Some "
   { Run.id = "mobile-1"; root = "/tmp/mobile"; subroot = "/tmp/mobile";
     platform; device = "emulator-5554"; app_id = "dev.example";
     app_path = "app/build/app.apk"; scheme = Some "demo"; variant = Some "debug";
-    activity; screen_size = None; state }
+    activity; ios_device_binding = None; screen_size = None; state }
 
 let rec remove_tree path =
   match (Unix.lstat path).Unix.st_kind with

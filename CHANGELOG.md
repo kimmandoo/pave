@@ -1,5 +1,8 @@
 # Changelog
 
+## 2026-10-05
+- feat(mobile): added bounded Native XCTest accessibility capture for explicitly owned iOS Simulator sessions.
+
 ## 2026-10-04
 - fix(tui): displayed the numeric localhost port in Portal publish approval previews instead of incorrectly showing `(missing)`, so reviewers can confirm the service target.
 - feat(portal): automatically downloaded and SHA-256-verified the official Portal CLI into private user state when an approved publication had no configured executable.

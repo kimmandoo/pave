@@ -5,6 +5,13 @@ let fail message = raise (Error message)
 type platform = Android | Ios
 type state = Selected | Built | Installed | Running | Stopped
 
+type ios_device_binding = {
+  device_session_id : string;
+  inventory_id : string;
+  simulator_id : string;
+  target_id : string;
+}
+
 type session = {
   id : string;
   root : string;
@@ -16,6 +23,7 @@ type session = {
   scheme : string option;
   variant : string option;
   activity : string option;
+  ios_device_binding : ios_device_binding option;
   mutable screen_size : (int * int) option;
   mutable state : state;
 }
@@ -104,7 +112,7 @@ let artifact_path ~must_exist ~root ~platform relative =
   absolute
 
 let select manager ~root ~subroot ~platform ~device ~app_id:bundle ~app_path
-    ~scheme ~variant ~activity ~device_ready ~scheme_ready =
+    ~scheme ~variant ~activity ~ios_device_binding ~device_ready ~scheme_ready =
   let platform = match platform with
     | "android" -> Android | "ios" -> Ios
     | _ -> fail "mobile session platform must be android or ios" in
@@ -132,6 +140,26 @@ let select manager ~root ~subroot ~platform ~device ~app_id:bundle ~app_path
        String.length value <= String.length bundle + 1 then
       fail "Android launch activity must be a component in the selected app"
     else value) activity in
+  (match platform, ios_device_binding with
+   | Android, Some _ -> fail "Android app sessions cannot carry an iOS lifecycle binding"
+   | Android, None -> ()
+   | Ios, None -> ()
+   | Ios, Some binding ->
+       let valid_value value =
+         value <> "" && String.length value <= 256 &&
+         String.for_all (fun ch -> let code = Char.code ch in code >= 33 && code < 127) value in
+       if not (valid_value binding.device_session_id &&
+               valid_value binding.inventory_id &&
+               valid_value binding.target_id) ||
+          String.length binding.simulator_id <> 36 ||
+          not (String.for_all (function
+            | '0'..'9' | 'a'..'f' | 'A'..'F' | '-' -> true | _ -> false)
+            binding.simulator_id) ||
+          not (List.for_all (fun offset -> binding.simulator_id.[offset] = '-')
+            [8; 13; 18; 23]) ||
+          binding.simulator_id <> device ||
+          binding.target_id <> "ios:" ^ binding.simulator_id then
+         fail "iOS app session lifecycle binding does not match its Simulator UUID and target");
   if platform = Ios && Option.is_some activity then
     fail "iOS app sessions do not accept an Android launch activity";
   with_lock manager (fun () ->
@@ -140,7 +168,8 @@ let select manager ~root ~subroot ~platform ~device ~app_id:bundle ~app_path
     manager.next_id <- manager.next_id + 1;
     let id = Printf.sprintf "mobile-%d" manager.next_id in
     let session = { id; root; subroot; platform; device; app_id = bundle;
-      app_path; scheme; variant; activity; state = Selected; screen_size = None } in
+      app_path; scheme; variant; activity; ios_device_binding; state = Selected;
+      screen_size = None } in
     Hashtbl.add manager.sessions id session;
     session)
 
@@ -228,7 +257,7 @@ let clear_screen_size manager ~id =
     session.screen_size <- None)
 
 let render session =
-  Printf.sprintf "%s · %s · %s · app %s · device %s · %s · artifact %s%s%s%s"
+  Printf.sprintf "%s · %s · %s · app %s · device %s · %s · artifact %s%s%s%s%s"
     session.id (platform_name session.platform) (state_name session.state)
     session.app_id session.device
     (match session.scheme with Some value -> "scheme " ^ value | None -> "")
@@ -236,6 +265,11 @@ let render session =
     (match session.variant with Some value -> " · variant " ^ value | None -> "")
     (match session.activity with Some value -> " · activity " ^ value | None -> "")
     (match session.scheme with Some _ -> "" | None -> "")
+  (match session.ios_device_binding with
+   | Some binding ->
+       Printf.sprintf " · lifecycle %s/%s · %s"
+         binding.device_session_id binding.inventory_id binding.target_id
+   | None -> "")
 
 let close_manager manager = with_lock manager (fun () ->
   manager.closed <- true;

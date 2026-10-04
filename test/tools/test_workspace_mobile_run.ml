@@ -39,7 +39,7 @@ let () =
       ~app_id:"com.example.fixture" ~app_path:"apps/My Fixture.apk"
       ~scheme:None ~variant:(Some "debug")
       ~activity:(Some "com.example.fixture/.MainActivity")
-      ~device_ready:true ~scheme_ready:false in
+      ~ios_device_binding:None ~device_ready:true ~scheme_ready:false in
     expect "session starts selected" (session.Run.state = Run.Selected);
     expect "session carries variant" (contains (Run.render session) "variant debug");
     expect "not listed on another manager" (Run.sessions (Run.create_manager ()) = []);
@@ -81,16 +81,18 @@ let () =
     rejects "shell-injected app ID" (fun () -> Run.select manager ~root
       ~subroot:"android" ~platform:"android" ~device:"emulator-5554"
       ~app_id:"com.example;touch" ~app_path:"apps/My Fixture.apk"
-      ~scheme:None ~variant:None ~activity:None ~device_ready:true ~scheme_ready:false);
+      ~scheme:None ~variant:None ~activity:None ~ios_device_binding:None
+      ~device_ready:true ~scheme_ready:false);
     rejects "cross-package launch activity" (fun () -> Run.select manager ~root
       ~subroot:"android" ~platform:"android" ~device:"emulator-5554"
       ~app_id:"com.example.fixture" ~app_path:"apps/My Fixture.apk"
       ~scheme:None ~variant:None ~activity:(Some "com.other/.Activity")
-      ~device_ready:true ~scheme_ready:false);
+      ~ios_device_binding:None ~device_ready:true ~scheme_ready:false);
     rejects "wrong artifact extension" (fun () -> Run.select manager ~root
       ~subroot:"android" ~platform:"android" ~device:"emulator-5554"
       ~app_id:"com.example.other" ~app_path:"My.app"
-      ~scheme:None ~variant:None ~activity:None ~device_ready:true ~scheme_ready:false);
+      ~scheme:None ~variant:None ~activity:None ~ios_device_binding:None
+      ~device_ready:true ~scheme_ready:false);
     let built = Run.mark_built manager ~id:session.id in
     expect "successful build state accepted" (built.state = Run.Built);
     expect "built state rendered" (contains (Run.render built) "android · built");
@@ -98,13 +100,17 @@ let () =
       ~platform:"android" ~device:"emulator-5554"
       ~app_id:"com.example.built" ~app_path:"future.apk"
       ~scheme:None ~variant:(Some "release") ~activity:None
-      ~device_ready:true ~scheme_ready:false in
+      ~ios_device_binding:None ~device_ready:true ~scheme_ready:false in
     rejects "marking absent artifact built" (fun () ->
       Run.mark_built manager ~id:missing.id);
+    let simulator_id = "26ae0000-0000-0000-0000-000000000000" in
+    let binding = Some {
+      Run.device_session_id = "device-session-1"; inventory_id = "inventory-1";
+      simulator_id; target_id = "ios:" ^ simulator_id } in
     let ios = Run.select manager ~root ~subroot:"ios/App.xcodeproj"
-      ~platform:"ios" ~device:"26ae0000-0000-0000-0000-000000000000"
-      ~app_id:"com.example.ios" ~app_path:"My.app" ~scheme:(Some "App")
-      ~variant:None ~activity:None ~device_ready:true ~scheme_ready:true in
+      ~platform:"ios" ~device:simulator_id ~app_id:"com.example.ios"
+      ~app_path:"My.app" ~scheme:(Some "App") ~variant:None ~activity:None
+      ~ios_device_binding:binding ~device_ready:true ~scheme_ready:true in
     expect "iOS install selects exact simulator" (contains
       (Run.command "install" ios) "simctl install '26ae0000-0000-0000-0000-000000000000'");
     expect "iOS launch selects exact bundle" (contains
@@ -113,18 +119,32 @@ let () =
       ignore (Run.select manager ~root ~subroot:"android"
         ~platform:"android" ~device:"emulator-5554"
         ~app_id:"com.example.fixture" ~app_path:"apps/My Fixture.apk"
-        ~scheme:None ~variant:None ~activity:None
+        ~scheme:None ~variant:None ~activity:None ~ios_device_binding:None
         ~device_ready:true ~scheme_ready:false)
     done;
     let session_ids = Run.sessions manager |> List.map (fun row -> row.Run.id) in
     expect "session rows are sorted by descending numeric ID"
       (session_ids = List.init 12 (fun index ->
         Printf.sprintf "mobile-%d" (12 - index)));
+    let unbound_ios = Run.select manager ~root ~subroot:"ios/App.xcodeproj"
+      ~platform:"ios" ~device:simulator_id ~app_id:"com.example.ios"
+      ~app_path:"My.app" ~scheme:(Some "App") ~variant:None ~activity:None
+      ~ios_device_binding:None ~device_ready:true ~scheme_ready:true in
+    expect "iOS app selection preserves the existing unbound session path"
+      (unbound_ios.Run.ios_device_binding = None);
+    rejects "iOS selection with a mismatched lifecycle UUID" (fun () ->
+      Run.select manager ~root ~subroot:"ios/App.xcodeproj" ~platform:"ios"
+        ~device:simulator_id ~app_id:"com.example.ios" ~app_path:"My.app"
+        ~scheme:(Some "App") ~variant:None ~activity:None
+        ~ios_device_binding:(Some { Run.device_session_id = "device-session-1";
+          inventory_id = "inventory-1"; simulator_id = "26ae0000-0000-0000-0000-000000000001";
+          target_id = "ios:26ae0000-0000-0000-0000-000000000001" })
+        ~device_ready:true ~scheme_ready:true);
     rejects "iOS selection without scheme inventory" (fun () ->
       Run.select manager ~root ~subroot:"ios/App.xcodeproj" ~platform:"ios"
-        ~device:"26ae0000-0000-0000-0000-000000000000"
-        ~app_id:"com.example.ios" ~app_path:"My.app" ~scheme:(Some "App")
-        ~variant:None ~activity:None ~device_ready:true ~scheme_ready:false);
+        ~device:simulator_id ~app_id:"com.example.ios" ~app_path:"My.app"
+        ~scheme:(Some "App") ~variant:None ~activity:None
+        ~ios_device_binding:binding ~device_ready:true ~scheme_ready:false);
     Run.close_manager manager;
     rejects "closed session manager" (fun () -> Run.sessions manager));
   print_endline "workspace mobile app sessions: ok"

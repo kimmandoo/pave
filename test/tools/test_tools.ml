@@ -1838,6 +1838,20 @@ esac
           contains selected_session "device emulator-5554" &&
           contains selected_session "activity dev.pave.fixture/.MainActivity")
       then failwith ("mobile selection output:\n" ^ selected_session);
+      directory "focus/ios";
+      directory "focus/ios/Sample.app";
+      let simulator_id = "26ae0000-0000-0000-0000-000000000000" in
+      let unbound_ios = Pave.Workspace_mobile_run.select
+        tool_context.mobile_run_manager ~root ~subroot:"focus/ios/App.xcodeproj"
+        ~platform:"ios" ~device:simulator_id ~app_id:"dev.example.ios"
+        ~app_path:"focus/ios/Sample.app" ~scheme:(Some "Fixture")
+        ~variant:None ~activity:None ~ios_device_binding:None
+        ~device_ready:true ~scheme_ready:true in
+      unbound_ios.state <- Pave.Workspace_mobile_run.Running;
+      assert (match Pave.Tools.mobile_xctest_capability tool_context ~root
+          unbound_ios with
+        | Some reason -> contains reason "no bound device lifecycle identity"
+        | None -> false);
       let verify ?cancel ?(approved = true) action fields =
         execute_text ?cancel ~root ~context:tool_context ~approved
           ~name:"mobile_verify" ~args:(`Assoc

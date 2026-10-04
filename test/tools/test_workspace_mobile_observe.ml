@@ -5,6 +5,15 @@ let rejects label action =
   try ignore (action ()); failwith ("mobile observation accepted " ^ label)
   with Observe.Error _ -> ()
 
+let rec remove_tree path =
+  match (Unix.lstat path).Unix.st_kind with
+  | Unix.S_DIR ->
+      Sys.readdir path |> Array.iter (fun name ->
+        remove_tree (Filename.concat path name));
+      Unix.rmdir path
+  | Unix.S_REG | Unix.S_LNK -> Unix.unlink path
+  | _ -> failwith "unexpected XCTest temporary artifact type"
+
 let png width height =
   let buffer = Buffer.create 64 in
   Buffer.add_string buffer "\137PNG\r\n\026\n";
@@ -53,4 +62,98 @@ let () =
   rejects "unclosed node" (fun () -> Observe.parse_accessibility "<hierarchy><node class='Broken'>");
   rejects "empty tree" (fun () -> Observe.parse_accessibility "<hierarchy/>");
   rejects "unsupported entity" (fun () -> Observe.parse_accessibility "<hierarchy><node text='&boom;' /></hierarchy>");
+  let node = `Assoc [
+    "index", `Int 0; "parent", `Null; "depth", `Int 0;
+    "role", `String "Application"; "type", `String "XCUIApplication";
+    "identifier", `String "sample.app"; "label", `String "Home";
+    "text", `String "Home"; "description", `String "Home screen";
+    "value", `Null; "enabled", `Bool true; "hittable", `Bool true;
+    "bounds", `Assoc ["x", `Int 0; "y", `Int 0;
+      "width", `Int 100; "height", `Int 200]] in
+  let response ?(operation = Observe.xctest_operation) ?(status = "available")
+      ?(node_count = 1) ?(nodes = [node]) extra =
+    Yojson.Basic.to_string (`Assoc ([
+      "version", `Int 1; "bundle_id", `String "sample.app";
+      "operation", `String operation; "status", `String status;
+      "node_count", `Int node_count; "nodes", `List nodes] @ extra)) in
+  let payload = response [] in
+  let parsed = Observe.parse_xctest_response ~bundle_id:"sample.app" payload in
+  expect "XCTest accessibility response is marked untrusted"
+    (Yojson.Basic.Util.member "content_trust" parsed = `String "untrusted");
+  rejects "XCTest response bundle mismatch" (fun () ->
+    Observe.parse_xctest_response ~bundle_id:"other.app" payload);
+  rejects "XCTest response rejects out-of-scope semantic operations" (fun () ->
+    Observe.parse_xctest_response ~bundle_id:"sample.app"
+      (response ~operation:"tap" []));
+  rejects "XCTest response rejects non-available status" (fun () ->
+    Observe.parse_xctest_response ~bundle_id:"sample.app"
+      (response ~status:"performed" []));
+  rejects "XCTest duplicate response keys" (fun () ->
+    Observe.parse_xctest_response ~bundle_id:"sample.app"
+      "{\"version\":1,\"version\":1}");
+  rejects "oversized XCTest response" (fun () ->
+    Observe.parse_xctest_response ~bundle_id:"sample.app"
+      (String.make (Observe.max_xctest_response_bytes + 1) 'x'));
+  rejects "XCTest request rejects an unbound bundle identifier" (fun () ->
+    Observe.xctest_request ~bundle_id:"");
+  rejects "XCTest response rejects inconsistent node count" (fun () ->
+    Observe.parse_xctest_response ~bundle_id:"sample.app"
+      (response ~node_count:2 []));
+  rejects "XCTest response rejects negative element sizes" (fun () ->
+    let invalid = match node with
+      | `Assoc fields -> `Assoc (List.map (function
+          | "bounds", _ -> "bounds", `Assoc [
+              "x", `Int 0; "y", `Int 0; "width", `Int (-1); "height", `Int 20]
+          | field -> field) fields)
+      | _ -> assert false in
+    Observe.parse_xctest_response ~bundle_id:"sample.app"
+      (response ~nodes:[invalid] []));
+  let manifest = "{\"tests\":[{\"attachments\":[{\"name\":\"PaveXCTestResponse\",\"uniformTypeIdentifier\":\"public.json\",\"exportedFileName\":\"response.json\"}]}]}" in
+  expect "kept XCTest attachment filename is selected"
+    (Observe.xctest_manifest_attachment manifest = "response.json");
+  expect "XCTest exported payload follows manifest identity"
+    (Observe.xctest_export_payload ~manifest
+      ~files:["other.json", "wrong"; "response.json", payload] = payload);
+  rejects "missing XCTest response attachment" (fun () ->
+    Observe.xctest_manifest_attachment "{\"tests\":[]}");
+  rejects "ambiguous XCTest response attachments" (fun () ->
+    Observe.xctest_manifest_attachment
+      "{\"a\":{\"name\":\"PaveXCTestResponse\",\"uniformTypeIdentifier\":\"public.json\",\"exportedFileName\":\"a.json\"},\"b\":{\"name\":\"PaveXCTestResponse\",\"uniformTypeIdentifier\":\"public.json\",\"exportedFileName\":\"b.json\"}}");
+  rejects "oversized XCTest attachment manifest" (fun () ->
+    Observe.xctest_manifest_attachment
+      (String.make (Observe.max_xctest_manifest_bytes + 1) ' '));
+  let directory = Filename.temp_file "pave-native-xctest-test-" "" in
+  Unix.unlink directory;
+  Fun.protect ~finally:(fun () -> remove_tree directory) (fun () ->
+    ignore (Observe.create_xctest_project ~directory ~bundle_id:"sample.app");
+    let project_file = Filename.concat directory
+      "PaveXCTestRunner.xcodeproj/project.pbxproj" in
+    if Sys.file_exists "/usr/bin/plutil" then (
+      let null = Unix.openfile "/dev/null" [Unix.O_RDWR] 0 in
+      Fun.protect ~finally:(fun () -> Unix.close null) (fun () ->
+        let pid = Unix.create_process "/usr/bin/plutil"
+          [|"/usr/bin/plutil"; "-lint"; project_file|] null null null in
+        let _, status = Unix.waitpid [] pid in
+        expect "generated Xcode project parses as a property list"
+          (status = Unix.WEXITED 0)));
+    let private_directory path =
+      (Unix.stat path).Unix.st_perm land 0o777 = 0o700 in
+    let private_file path =
+      (Unix.stat path).Unix.st_perm land 0o777 = 0o600 in
+    expect "XCTest project and source directories are private"
+      (private_directory directory &&
+       private_directory (Filename.concat directory "PaveXCTestRunner.xcodeproj") &&
+       private_directory (Filename.concat directory
+         "PaveXCTestRunner.xcodeproj/xcshareddata") &&
+       private_directory (Filename.concat directory
+         "PaveXCTestRunner.xcodeproj/xcshareddata/xcschemes") &&
+       private_directory (Filename.concat directory "Host") &&
+       private_directory (Filename.concat directory "Tests"));
+    expect "XCTest helper project and source files are private"
+      (List.for_all private_file [
+        Filename.concat directory "Host/PaveXCTestHost.swift";
+        Filename.concat directory "Tests/PaveXCTestRunner.swift";
+        Filename.concat directory "PaveXCTestRunner.xcodeproj/project.pbxproj";
+        Filename.concat directory
+          "PaveXCTestRunner.xcodeproj/xcshareddata/xcschemes/PaveXCTestRunner.xcscheme"]));
   print_endline "workspace mobile screen observation: ok"

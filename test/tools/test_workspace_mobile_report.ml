@@ -18,11 +18,17 @@ let () =
       (Pave.Workspace_mobile_run.create_manager ())
       ~root ~subroot:"." ~platform:"android" ~device:"serial-1" ~app_id:"dev.example.app"
       ~app_path:"app.apk" ~scheme:None ~variant:(Some "debug") ~activity:None
-      ~device_ready:true ~scheme_ready:true) with state=Pave.Workspace_mobile_run.Built } in
+      ~ios_device_binding:None ~device_ready:true ~scheme_ready:true) with state=Pave.Workspace_mobile_run.Built } in
+    let simulator_id = "26ae0000-0000-0000-0000-000000000000" in
+    let ios_binding = Some {
+      Pave.Workspace_mobile_run.device_session_id = "device-session";
+      inventory_id = "inventory";
+      simulator_id; target_id = "ios:" ^ simulator_id } in
     let ios_session=Pave.Workspace_mobile_run.select
       (Pave.Workspace_mobile_run.create_manager ())
-      ~root ~subroot:"." ~platform:"ios" ~device:"sim-1" ~app_id:"dev.example.ios"
-      ~app_path:"Sample.app" ~scheme:(Some "Sample") ~variant:None ~activity:None
+      ~root ~subroot:"." ~platform:"ios" ~device:simulator_id
+      ~app_id:"dev.example.ios" ~app_path:"Sample.app" ~scheme:(Some "Sample")
+      ~variant:None ~activity:None ~ios_device_binding:ios_binding
       ~device_ready:true ~scheme_ready:true in
     let bundle_hash= (Report.build_identity root ios_session).build_hash in
     put (Filename.concat bundle "Info.plist") 0o644 "bundle-B";

@@ -12,7 +12,8 @@ let session ?(platform = Run.Android) ?(state = Run.Running) ?activity () = {
   device = (if platform = Run.Android then "emulator-5554" else "simulator-uuid");
   app_id = "com.example.fixture"; app_path = "app/build/outputs/apk/debug/app.apk";
   scheme = (if platform = Run.Ios then Some "Fixture" else None);
-  variant = Some "debug"; activity; screen_size = None; state;
+  variant = Some "debug"; activity; ios_device_binding = None;
+  screen_size = None; state;
 }
 let metric name json =
   let fields = match Yojson.Basic.from_string json with

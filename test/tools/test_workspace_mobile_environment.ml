@@ -9,7 +9,8 @@ let rejects label action =
 let session ?(platform = Run.Android) ?(device = "emulator-5554") () =
   { Run.id = "mobile-1"; root = "/tmp/mobile"; subroot = "/tmp/mobile";
     platform; device; app_id = "dev.example"; app_path = "app.apk";
-    scheme = None; variant = None; activity = None; state = Run.Running; screen_size = None }
+    scheme = None; variant = None; activity = None; ios_device_binding = None;
+    state = Run.Running; screen_size = None }
 
 let () =
   let app = session () and build_hash = "sha256:build-a" in

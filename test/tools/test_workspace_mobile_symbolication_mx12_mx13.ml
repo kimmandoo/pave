@@ -12,7 +12,7 @@ let session ?(platform = Run.Android) ?(variant = Some "debug") ?(root = "/tmp")
   Run.id = "mx12-mx13-fixture"; root; subroot = "app"; platform;
   device = "simulator-uuid"; app_id = "com.example.fixture"; app_path;
   scheme = (if platform = Run.Ios then Some "Fixture" else None); variant;
-  activity = None; screen_size = None; state = Run.Built;
+  activity = None; ios_device_binding = None; screen_size = None; state = Run.Built;
 }
 let fails label fn =
   try ignore (fn ()); failwith (label ^ " unexpectedly succeeded")

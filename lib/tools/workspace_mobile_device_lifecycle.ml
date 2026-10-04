@@ -219,6 +219,8 @@ type managed = {
 
 let ownership managed = managed.ownership
 let managed_target managed = managed.managed_target
+let managed_session_id managed = managed.managed_session_id
+let managed_inventory_id managed = managed.managed_inventory_id
 
 type pending = {
   pending_session_id : string;

@@ -18,7 +18,7 @@ let session ?(device = "emulator-5554") ?(state = Run.Running) () =
   { Run.id = "mobile-1"; root = "/tmp/mobile"; subroot = "/tmp/mobile";
     platform = Run.Android; device; app_id = "dev.example";
     app_path = "app/build/app.apk"; scheme = None; variant = Some "debug";
-    activity = None; state; screen_size = Some (1080, 2400) }
+    activity = None; ios_device_binding = None; state; screen_size = Some (1080, 2400) }
 
 let tree description = Yojson.Basic.to_string (`Assoc [
   "status", `String "available";

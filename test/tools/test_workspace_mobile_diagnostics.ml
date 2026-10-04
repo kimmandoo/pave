@@ -13,7 +13,7 @@ let session ?(platform = Run.Android) ?(variant = Some "debug") () = {
   device = (if platform = Run.Android then "emulator-5554" else "simulator-uuid");
   app_id = "com.example.fixture"; app_path = "app/build/outputs/apk/debug/app.apk";
   scheme = (if platform = Run.Ios then Some "Fixture" else None); variant;
-  activity = None; screen_size = None; state = Run.Running;
+  activity = None; ios_device_binding = None; screen_size = None; state = Run.Running;
 }
 
 let () =
