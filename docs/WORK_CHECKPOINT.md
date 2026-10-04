@@ -1,6 +1,17 @@
 # Work checkpoint
 
 
+## Current session — current-project backlog refresh
+
+- **Date:** 2026-10-04.
+- **User request:** Rebuild `task.md` against the current project and include mobile-specialized feature opportunities.
+- **Starting state:** Clean `main` at `c637eb4 feat(portal): auto-install Portal for approved web publishing`.
+- **Deliverable:** Rebuilt the backlog around implemented capabilities and P0 reliability, P1 mobile proposals, P2 focused general improvements, P3 optional local capabilities and P4 external gates. Preserved 90 existing unfinished scopes, renamed general timing LD01 to ST01, repaired the completed-browser dependency and removed stale source line anchors/coverage references. Added 20 mobile cards MX01–MX20 with evidence, deliverable, acceptance, dependencies and explicit platform/trust gates.
+- **Audit:** Read-only source review confirmed current mobile boundaries and priority reliability gaps; no SDK/device/provider execution or new implementation was performed. Planning did not amend the design rules or authorize device boot, helpers, signing, physical devices or network experiments.
+- **Changed files:** `task.md`, `docs/MOBILE_DEVELOPMENT_PLAN.md`, and this checkpoint.
+- **Verification:** Programmatic validation found 110 unique cards, preserved all old scopes except the explicit ID rename, checked every local Markdown link, and found no unresolved dependency IDs. Documentation-only change; no code/build/runtime tests required.
+- **Exact next action / blockers:** No active implementation task. If asked to implement the default backlog, begin AU01; for mobile specialization begin MX01, with MX02 backend research independently gated. Commit this documentation refresh; no release required.
+
 ## Current session — automatic Portal setup for web publication
 
 - **Date:** 2026-10-04.

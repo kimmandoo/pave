@@ -1,70 +1,208 @@
-# Tasks — ordered remaining work
+# Tasks — current project backlog
 
-**Audit:** 2026-10-03, continuing the existing mobile backlog. This is the single active backlog. Only unfinished, independently verifiable work belongs here. Completed M01–M24 and EX01–EX10 were removed; acceptance history remains in [the mobile plan](docs/MOBILE_DEVELOPMENT_PLAN.md), [changelog](CHANGELOG.md) and Git. Existing file tools, LSP/DAP, approved processes/eval/network tools, read-only jobs, local extensions/MCP, compact read cards and Devin status diagnostics are not new implementation tasks.
+**Baseline:** 2026-10-04 · `main` at `c637eb4` · documentation audit, not runtime certification.
 
-## How to execute this list
+This is the single active backlog. It separates source-confirmed remaining work from proposed mobile features and externally gated product plans. Completed work is not an open checkbox. Historical acceptance remains in [the mobile plan](docs/MOBILE_DEVELOPMENT_PLAN.md), [changelog](CHANGELOG.md) and [checkpoint](docs/WORK_CHECKPOINT.md).
 
-- Work top-to-bottom within P1 → P2 → P3 → P4. A named dependency must finish first; a missing external gate blocks only that card. Skip gated cards rather than inventing credentials, device readiness, registry contracts or hosted services. Complete the remaining mobile core capabilities in their listed order before returning to unrelated backlog cards.
-- Each checkbox is one deliverable, not an entire subsystem. Letter suffixes split an old card; the unsuffixed ID is a scope family, not another checkbox. `Depends: none` means no unfinished prerequisite, not permission to ignore existing contracts.
-- **Evidence** describes inspected source or an existing plan, not an executed failure. Cards labeled **diagnostic** must first reproduce the suspected behavior; close with evidence if not reproduced, rather than inventing a fix. Other new gaps are source-observed and still require failing-before/passing-after proof when implemented.
-- **Accept** is future acceptance, not a claim that this audit ran it. Runtime changes require focused behavioral checks plus actual CLI/tool/PTY smoke. Real Xcode simulator acceptance stays manual-only, never CI. No model/tool request is automatically replayed, and every shell/device command retains separate informed approval.
-- Keep [design rules](docs/DESIGN_RULES.md) binding. Remove a finished checkbox after recording verification in the changelog/checkpoint; never retain `[x]` history here. Planning does not authorize new products, trust boundaries, releases or live account spending.
+## Current capabilities — do not reimplement
 
-## P1 — Existing-path safety and reliability
+| Area | Implemented baseline | Remaining boundary |
+| --- | --- | --- |
+| Mobile project understanding | Swift/Xcode/SwiftPM, Android Gradle, Flutter, RN/Expo inventory; focused separately approved checks; checked source diagnostics; sensitive mobile-config review | Dynamic build/config evidence is not inferred; dependencies/toolchains are not installed implicitly |
+| Mobile app sessions | Private selected app/device identity; build/install/launch/stop; `/mobile` dashboard; emulator/simulator inventory and tests | No physical devices or automatic device boot; Flutter/RN device workflows are not equivalent to native app-session support |
+| Observe/control/replay | Android screenshots/accessibility, tap/swipe/text/back and persisted one-step scenarios; iOS screenshots | iOS accessibility/control/replay remains unavailable |
+| Diagnostics and verification | App-scoped logs/crashes/Android ANR, guarded-source verification, strict masked screenshot baselines | Symbol-file presence is not symbolication; PNG comparison currently requires macOS Swift/ImageIO |
+| Web previews | `publish_web` and `/publish`, per-prefix private identities, official Portal auto-setup after approval | Local app server must already listen; no alternate tunnel, automatic public exposure or shell-profile modification |
+| General agent tools | Guarded file edits, LSP/DAP, approved owned processes/eval/network/browser tools, local plugins/MCP, read-only child jobs, journal/branch/compaction, redacted one-shot JSONL | Do not schedule these entire subsystems as new features; only residual cards below |
+
+M01–M24, AS01, AO01, UI01, mobile BR01/LD01, FV01, VR01 and MD01 are completed baseline IDs. Mobile **LD01** means diagnostics; new **ST01** means request timing. Browser BR01a/BR01b are also historical completed work, not open dependencies.
+
+## Execution and acceptance rules
+
+- Recommended order: **P0 reliability → P1 mobile specialization → P2 focused general improvements → P3 optional local capabilities → P4 external gates**. Within a tier, respect named dependencies; skip a blocked card rather than guessing availability. Mobile backend research may run in parallel with independent reliability work.
+- Each checkbox is one deliverable. `Evidence` is inspected source or a retained plan, not a reproduced runtime bug. P0 and the mobile baseline received a fresh source audit; other retained cards must be revalidated against current symbols before implementation. File links intentionally omit stale line numbers.
+- P1 cards are **new feature proposals**, not promises that the feature already works or authorization to execute it. Gates requiring a product/trust decision need an intentional [design-rule](docs/DESIGN_RULES.md) update first. A research result of unavailable keeps dependent implementation blocked.
+- Acceptance is future work: behavior regression plus actual changed CLI/tool/PTY surface. A mock can validate safety/parsing, never certify a real SDK/device/backend. Xcode/device acceptance is manual, disposable and separately approved; CI does not silently boot devices or install dependencies.
+- Reuse existing ownership, cancellation, approval and artifact paths. No automatic model/tool replay, global device authority, borrowed credentials, implicit SDK/helper/package install, signing, physical deployment or hosted relay. Portal's explicitly approved setup is its existing narrow exception, not permission for mobile installs.
+- Remove a completed checkbox only after recording its real verification. Commit per session; maintain the checkpoint. This planning-only refresh changed no implementation or product safety contract.
+
+## P0 — Source-confirmed safety and reliability
 
 - [ ] **AU01 — Cancel in-turn credential refresh**
-  **Evidence:** [refresh transport](lib/auth/oauth_flow.ml#L313-L360) blocks on read/wait; [credential resolution](bin/cli_auth.ml#L275-L296) has no turn-cancellation parameter. **Deliver:** propagate cancellation through refresh and reap its owned subprocess; define the outcome of ambiguous remote token rotation without automatic retry.
+  **Evidence:** [refresh transport](lib/auth/oauth_flow.ml) blocks on read/wait; [credential resolution](bin/cli_auth.ml) has no turn-cancellation parameter. **Deliver:** propagate cancellation through refresh and reap its owned subprocess; define the outcome of ambiguous remote token rotation without automatic retry.
   **Accept:** one successful refresh retains account/grant binding; cancelling a stalled refresh promptly releases ownership and sends zero inference requests, without logging tokens.
   **Depends:** none.
   **Gate:** none; controlled token endpoint.
 
 - [ ] **AU02 — Bound credential-lock acquisition**
-  **Evidence:** [store locking](lib/auth/oauth_store.ml#L404-L435) uses blocking mutex/file locks. **Deliver:** interruptible, deadline-bounded acquisition while retaining nested locking and atomic refresh guarantees.
+  **Evidence:** [store locking](lib/auth/oauth_store.ml) uses blocking mutex/file locks. **Deliver:** interruptible, deadline-bounded acquisition while retaining nested locking and atomic refresh guarantees.
   **Accept:** two processes serialize updates without losing accounts; a cancelled/expired waiter exits without refreshing, unlocking another holder or replacing credentials.
   **Depends:** AU01.
   **Gate:** none.
 
 - [ ] **WK07 — Report recoverable partial LSP application**
-  **Evidence:** [apply_edit_preview](lib/tools/workspace_lsp.ml#L807-L850) prechecks then writes sequentially, with per-file callbacks but no structured partial result. **Deliver:** reproduce a later-target failure and expose exact applied/unchanged targets plus existing guarded recovery records; do not claim whole-batch atomicity.
+  **Evidence:** [apply_edit_preview](lib/tools/workspace_lsp.ml) prechecks then writes sequentially, with per-file callbacks but no structured partial result. **Deliver:** reproduce a later-target failure and expose exact applied/unchanged targets plus existing guarded recovery records; do not claim whole-batch atomicity.
   **Accept:** two successful files record once; a forced second-write failure reports the first change, preserves later concurrent user edits and permits only hash-checked, approved recovery.
   **Depends:** none.
   **Gate:** none; controlled filesystem fault, not user files.
 
 - [ ] **PL04a — Bound queued prompt admission**
-  **Evidence:** [follow-up/steering queues](lib/ui/turn_runner.ml#L247-L299) admit submissions without aggregate item/byte limits. **Deliver:** bounded admission counting retained prompts and attachments, including dequeue/reinsert handling.
+  **Evidence:** [follow-up/steering queues](lib/ui/turn_runner.ml) admit submissions without aggregate item/byte limits. **Deliver:** bounded admission counting retained prompts and attachments, including dequeue/reinsert handling.
   **Accept:** a held-turn PTY preserves queue order; overflow retains the draft/attachments, drops no accepted work and does not cancel the active turn for rejected steering.
   **Depends:** none.
   **Gate:** none; local streaming fixture.
 
 - [ ] **PL04b — Bound event backlog and terminal starvation**
-  **Evidence:** [runner notices](lib/ui/turn_runner.ml#L119-L149) and [UI queue](bin/ui/tui.ml#L153-L215) have unbounded aggregate admission; delta batching already exists. **Deliver:** first measure sustained-stream latency/retention, then enforce a documented queue capacity and per-pump fairness bound.
+  **Evidence:** [runner notices](lib/ui/turn_runner.ml) and [UI queue](bin/ui/tui.ml) have unbounded aggregate admission; delta batching already exists. **Deliver:** first measure sustained-stream latency/retention, then enforce a documented queue capacity and per-pump fairness bound.
   **Accept:** a sustained-stream PTY keeps ordered output and one settlement within the recorded input/resize latency bound; saturated cancellation/shutdown cannot deadlock producers or lose tool outcomes.
   **Depends:** none.
   **Gate:** none; starvation magnitude is diagnostic, not yet reproduced.
 
 - [ ] **PL06 — Bound installer asset transfers**
-  **Evidence:** [fetch](install.sh#L83-L89) has no connect/total deadline or byte cap. **Deliver:** distinct manifest/archive transfer budgets used by standalone install and the embedded updater, retaining HTTPS/checksum/executable-last publication.
+  **Evidence:** [fetch](install.sh) has no connect/total deadline or byte cap. **Deliver:** distinct manifest/archive transfer budgets used by standalone install and the embedded updater, retaining HTTPS/checksum/executable-last publication.
   **Accept:** valid controlled assets install; stalled/oversized transfers fail within bounds, preserve the previous executable hash and remove staging files. Download caps do not imply an extracted-size cap.
   **Depends:** none.
   **Gate:** none; disposable install directories.
 
 - [ ] **PL03a — Enforce complete packaged dependency policy**
-  **Evidence:** [release dependency check](.github/workflows/release.yml#L101-L110) rejects libzstd specifically, not every forbidden library. **Deliver:** target-specific allowed-system-library checks for executable/helper artifacts on the four current targets.
+  **Evidence:** [release dependency check](.github/workflows/release.yml) rejects libzstd specifically, not every forbidden library. **Deliver:** target-specific allowed-system-library checks for executable/helper artifacts on the four current targets.
   **Accept:** extracted artifacts launch without toolchain runtime paths; a deliberately linked non-system library other than zstd and a missing dependency both fail packaging with clear diagnostics.
   **Depends:** none.
   **Gate:** native current-target CI runners; no current broken artifact is asserted.
 
 - [ ] **PL07 — Automate installed updater transactions in CI**
-  **Evidence:** [release smoke](.github/workflows/release.yml#L89-L135) extracts/runs binaries, but does not exercise an installed updater transaction. **Deliver:** a disposable controlled-release harness for actual install/check/update/uninstall, invoked by CI.
+  **Evidence:** [release smoke](.github/workflows/release.yml) extracts/runs binaries, but does not exercise an installed updater transaction. **Deliver:** a disposable controlled-release harness for actual install/check/update/uninstall, invoked by CI.
   **Accept:** custom-directory upgrade preserves unrelated files and user state; corrupt checksum, link/unexpected archive member, invalid marker and failed publication preserve the executable. Verify metadata state on partial publication; inherited destination/version overrides cannot redirect update.
   **Depends:** PL06.
   **Gate:** packaged current-target binaries; no public release required.
 
+## P1 — Proposed mobile-specialized features
 
-## P2 — Mobile completion and focused existing-product improvements
+Prioritize platform gaps (MX01–MX04), accessibility/visual review (MX05–MX08), scenario depth (MX09–MX11), diagnosis/performance (MX12–MX16), framework workflows (MX17–MX18) and evidence/dashboard integration (MX19–MX20). Independent cards can proceed without unavailable iOS tooling. Extend existing tools, not a second mobile agent loop.
 
-M01–M24 are satisfied prerequisites. The remaining mobile core capabilities are delivered end-to-end here; their active acceptance contracts live in the [mobile plan](docs/MOBILE_DEVELOPMENT_PLAN.md).
-AS01, AO01, UI01, BR01, LD01, FV01, VR01 and MD01 are complete, delivering session-bound app lifecycles, bounded observation, verified controls, persisted replay, approved diagnostics, guarded verification, screenshot comparison and TUI workflows.
+- [ ] **MX01 — Owned emulator/simulator boot and shutdown**
+  **Evidence:** [lib/tools/workspace_android_devices.ml](lib/tools/workspace_android_devices.ml) — Inventory does not manage device lifetime. **Deliver:** Add separately approved boot, readiness and shutdown for one explicitly selected existing AVD/simulator; record process/device ownership.
+  **Accept:** A disposable device becomes ready and shuts down only when owned; cancellation reaps owned launchers, and pre-existing devices survive.
+  **Depends:** none.
+  **Gate:** Installed runtime/image; no SDK/image download, erase or physical device support.
+
+- [ ] **MX02 — iOS accessibility backend contract**
+  **Evidence:** [lib/tools/workspace_mobile_observe.ml](lib/tools/workspace_mobile_observe.ml) — iOS accessibility capture is explicitly unavailable. **Deliver:** Select and document a real XCTest/accessibility backend, helper provenance, permissions, deployment effects and bounded tree schema before advertising support.
+  **Accept:** An available backend reads only the selected disposable app; absent backend yields explicit unavailable, never a fabricated tree.
+  **Depends:** none.
+  **Gate:** Real supported macOS/Xcode backend and explicit design-rule amendment.
+
+- [ ] **MX03 — Approved iOS semantic UI actions**
+  **Evidence:** [lib/tools/workspace_mobile_control.ml](lib/tools/workspace_mobile_control.ml) — Control currently supports Android only. **Deliver:** Implement app-bound tap, text and scroll through the MX02 backend with fresh semantic identifiers and exact per-action approval.
+  **Accept:** One approved action changes the selected simulator app; stale/ambiguous targets, denial and cancellation cause no input; separately observe the result.
+  **Depends:** MX02.
+  **Gate:** Real simulator/backend; no implicit helper installation or physical-device input.
+
+- [ ] **MX04 — iOS bug-scenario replay**
+  **Evidence:** [lib/tools/workspace_mobile_scenario.ml](lib/tools/workspace_mobile_scenario.ml) — Stored scenarios and accessibility assertions are Android-only. **Deliver:** Extend versioned scenario identity and one-step replay to the verified iOS backend, preserving failure-stop and separate fresh observation approval.
+  **Accept:** A disposable iOS scenario reaches its asserted state; platform/build mismatch and first failed assertion stop without retry.
+  **Depends:** MX03.
+  **Gate:** Real iOS app/backend; existing Android records remain valid.
+
+- [ ] **MX05 — Accessibility findings from Android trees**
+  **Evidence:** [lib/tools/workspace_mobile_observe.ml](lib/tools/workspace_mobile_observe.ml) — Parsed nodes are observations, not accessibility findings. **Deliver:** Add bounded rule-based findings for evidenced missing labels, duplicate ambiguous controls and undersized touch targets when density is known; retain node/rule provenance.
+  **Accept:** A seeded fixture produces exact rule/node findings and a corrected fixture clears them; unknown density, contrast, focus order and screen-reader behavior remain unknown.
+  **Depends:** none.
+  **Gate:** Current approved Android tree; runtime capture still asks separately.
+
+- [ ] **MX06 — Portable visual comparison on Linux**
+  **Evidence:** [lib/tools/workspace_mobile_visual.ml](lib/tools/workspace_mobile_visual.ml) — PNG decoding currently depends on macOS Swift/ImageIO. **Deliver:** Provide a bounded maintained decoder usable on supported Linux packages, with dependency/license review, retaining current masks and metadata checks.
+  **Accept:** The same PNG pairs compare identically on macOS/Linux; malformed/oversized images fail without changing baselines, and packaged decoder runs on native targets.
+  **Depends:** none.
+  **Gate:** Reviewed decoder dependency and native Linux package smoke.
+
+- [ ] **MX07 — Reviewable visual regression reports**
+  **Evidence:** [lib/tools/workspace_mobile_visual.ml](lib/tools/workspace_mobile_visual.ml) — Current comparison reports exact masked pixel differences, not a review report. **Deliver:** Return bounded baseline/current/difference artifacts with differing regions and explicit operator-selected tolerance; version comparison settings.
+  **Accept:** A seeded layout defect yields the expected region; identical images pass, mismatched environments fail, and tolerances never silently hide changes.
+  **Depends:** none.
+  **Gate:** Validated captures; Linux execution depends on MX06.
+
+- [ ] **MX08 — Explicit locale/theme/orientation experiments**
+  **Evidence:** [lib/tools/workspace_mobile_visual.ml](lib/tools/workspace_mobile_visual.ml) — Baseline environment fields are operator-declared; no controlled environment transition exists. **Deliver:** Preview and separately approve one supported simulator/emulator setting change, record observed capability/state and restore only owned changes without overwriting later user changes.
+  **Accept:** A disposable app is captured under the selected setting and restored safely; unsupported setting or failed restore is reported, not assumed.
+  **Depends:** none.
+  **Gate:** Platform-specific documented commands; design amendment for device-setting effects.
+
+- [ ] **MX09 — Selected-app deep-link exercises**
+  **Evidence:** [lib/tools/workspace_mobile_run.ml](lib/tools/workspace_mobile_run.ml) — Launch uses normal app launch, not a deep-link action. **Deliver:** Add exact URL/component preview and separate approval for a verified selected-app deep link; reject implicit external-app delegation.
+  **Accept:** A disposable app handles its declared URL and fresh observation verifies the destination; invalid/foreign handler or denied action opens nothing.
+  **Depends:** none.
+  **Gate:** Known app link registration and real selected emulator/simulator.
+
+- [ ] **MX10 — App lifecycle and state-restoration scenarios**
+  **Evidence:** [lib/tools/workspace_mobile_run.ml](lib/tools/workspace_mobile_run.ml) — App stop/launch exists, but background/resume/process-recreation experiments do not. **Deliver:** Add individually approved supported background/resume/process-death steps with explicit data-loss consequences and scenario records.
+  **Accept:** A disposable app restores or visibly loses seeded state after the chosen transition; denied/destructive reset has no effect and foreign apps are untouched.
+  **Depends:** none.
+  **Gate:** Platform capability evidence; no implicit data clear or uninstall.
+
+- [ ] **MX11 — Permission-state test scenarios**
+  **Evidence:** [lib/tools/workspace_sensitive.ml](lib/tools/workspace_sensitive.ml) — Source permission guards do not grant runtime permission-test authority. **Deliver:** Inventory supported selected-app permission states and separately approve one exact grant/revoke transition with prior-state evidence.
+  **Accept:** A disposable app handles denial/grant as observed; unsupported permissions stay unavailable, and restore cannot overwrite a later user change.
+  **Depends:** none.
+  **Gate:** Reviewed runtime-permission contract and emulator-only acceptance.
+
+- [ ] **MX12 — Android crash deobfuscation**
+  **Evidence:** [lib/tools/workspace_mobile_diagnostics.ml](lib/tools/workspace_mobile_diagnostics.ml) — Mapping presence is reported without deobfuscation. **Deliver:** Bind crash/build identity to an existing verified mapping and approved installed retrace tool; preserve raw and transformed provenance.
+  **Accept:** A seeded obfuscated crash resolves expected frames; mismatched/missing mapping refuses attribution and no tool/dependency is downloaded.
+  **Depends:** none.
+  **Gate:** Real compatible retrace runtime and build-bound mapping.
+
+- [ ] **MX13 — iOS crash retrieval and symbolication**
+  **Evidence:** [lib/tools/workspace_mobile_diagnostics.ml](lib/tools/workspace_mobile_diagnostics.ml) — iOS captures log excerpts and dSYM presence, not actual crash retrieval/symbolication. **Deliver:** Retrieve one bounded selected-app simulator crash and separately approve symbolication with matching binary/dSYM UUID and architecture.
+  **Accept:** A disposable crash resolves known frames; foreign report, UUID/architecture mismatch or absent symbols remains unresolved with raw provenance.
+  **Depends:** none.
+  **Gate:** Real macOS crash artifact, matching dSYM and supported symbolicator.
+
+- [ ] **MX14 — Measured Android launch/frame/memory profile**
+  **Evidence:** [lib/tools/workspace_mobile_diagnostics.ml](lib/tools/workspace_mobile_diagnostics.ml) — Diagnostics lack a performance measurement workflow. **Deliver:** Add separately approved bounded app-scoped measurements using documented available Android tools; record units, warm/cold conditions, sample window and completeness.
+  **Accept:** A disposable known-slow fixture exposes the measured regression; unsupported counters, truncated samples and unrelated PID data cannot become a pass.
+  **Depends:** none.
+  **Gate:** Real ready emulator and available platform tools; no inferred battery/energy scores.
+
+- [ ] **MX15 — Measured iOS Simulator performance capture**
+  **Evidence:** [lib/tools/workspace_mobile_diagnostics.ml](lib/tools/workspace_mobile_diagnostics.ml) — No app-scoped Instruments/xctrace workflow exists. **Deliver:** Select installed supported trace templates and bound one approved simulator capture/export with app/process identity and raw artifact provenance.
+  **Accept:** A disposable workload yields actual supported counters; missing templates/failed exports report unavailable, and simulator values are not physical-device energy claims.
+  **Depends:** none.
+  **Gate:** Installed Xcode trace tool, supported template and real simulator.
+
+- [ ] **MX16 — Offline and network-failure mobile experiments**
+  **Evidence:** [lib/tools/workspace_mobile_scenario.ml](lib/tools/workspace_mobile_scenario.ml) — Scenarios currently cover input and tree assertions, not network conditions. **Deliver:** Define one explicit emulator-only network control boundary and separately approved transition/restore; avoid adopting personal proxies or trusting installed certificates.
+  **Accept:** A disposable app demonstrates its offline recovery with fresh observations; cancellation restores only owned settings and no credentials/traffic are captured implicitly.
+  **Depends:** none.
+  **Gate:** Reviewed platform network-control contract; supported commands, no implicit MITM.
+
+- [ ] **MX17 — Flutter device integration tests**
+  **Evidence:** [lib/tools/workspace_flutter_focus.ml](lib/tools/workspace_flutter_focus.ml) — Flutter checks support analysis and targeted test/*.dart, not device integration_test. **Deliver:** Discover an existing integration test and bind an exact installed Flutter device identity to the selected app session; preview separate approved execution without pub get.
+  **Accept:** A real disposable integration test executes on the selected device and reports actual assertions; absent dependencies/test/device stays failure, not a unit-test substitute.
+  **Depends:** none.
+  **Gate:** Installed Flutter/dependencies, ready emulator; cross-framework device identity contract.
+
+- [ ] **MX18 — Owned React Native/Expo development server**
+  **Evidence:** [lib/tools/workspace_node_scripts.ml](lib/tools/workspace_node_scripts.ml) — RN/Expo supports declared test/lint scripts, not a managed Metro lifecycle. **Deliver:** Start an existing declared development script after approval as a session-owned process, verify readiness, show host exposure and provide approved stop.
+  **Accept:** A disposable existing project serves through the owned process; cancel/session exit stops it, port conflict is explicit, and no npx/install/prebuild runs.
+  **Depends:** none.
+  **Gate:** Installed dependencies and declared script; public publishing is separately approved via Portal.
+
+- [ ] **MX19 — Build-bound mobile verification report**
+  **Evidence:** [lib/tools/workspace_mobile_run.ml](lib/tools/workspace_mobile_run.ml) — Lifecycle/verification/visual/scenario evidence exists in separate stores and outputs. **Deliver:** Assemble a bounded local report for one exact source/build/app/device identity, retaining failed/skipped/incomplete checks and links to owned artifacts.
+  **Accept:** A report distinguishes passed/failed/not-run checks and refuses cross-build evidence; no screenshot bytes, unknown secrets or private logs are exported without consent.
+  **Depends:** SH01a.
+  **Gate:** Explicit local export consent; no hosted service or quality score.
+
+- [ ] **MX20 — Mobile dashboard capability-aware actions**
+  **Evidence:** [bin/main.ml](bin/main.ml) — The dashboard routes existing workflows, but newer platform-specific capabilities need accurate discovery and presentation. **Deliver:** Integrate only completed MX actions into /mobile using existing runner approvals; show unsupported/gated actions with exact reason and keep drafts on cancel.
+  **Accept:** Actual Android/iOS PTYs expose only usable actions; selecting an unavailable backend executes nothing and every device effect retains its own approval.
+  **Depends:** none.
+  **Gate:** Implement incrementally after each corresponding MX card, not an empty new dashboard.
+
+## P2 — Focused existing-product improvements
+
+Retained unfinished scopes are not all fresh runtime diagnoses. Provider-specific evidence gates remain binding; existing timing, pruning, jobs, JSONL and editing features are prerequisites, not missing systems.
 
 - [ ] **PG02 — Diagnose reserved-slot permission failures**
   **Evidence:** [Singularity reserved route](lib/provider/transports/singularity_tech_api.ml) lacks slot-specific classification; [HTTP errors](lib/provider/provider.ml) already have generic permission handling. **Deliver:** distinguish documented inactive-reservation denial from a bad key on this exact route only.
@@ -73,49 +211,49 @@ AS01, AO01, UI01, BR01, LD01, FV01, VR01 and MD01 are complete, delivering sessi
   **Gate:** identifiable reservation error evidence; do not classify every 403 as an inactive slot.
 
 - [ ] **PG03 — Accept the Hugging Face fallback key**
-  **Evidence:** [CLI key resolution](bin/cli_auth.ml#L143-L174) lacks `HUGGINGFACE_HUB_TOKEN`. **Deliver:** reuse primary-first resolution for inference and pinned listing.
+  **Evidence:** [CLI key resolution](bin/cli_auth.ml) lacks `HUGGINGFACE_HUB_TOKEN`. **Deliver:** reuse primary-first resolution for inference and pinned listing.
   **Accept:** `HF_TOKEN` wins; fallback alone works, missing keys fail, and neither credential reaches an unrelated origin.
   **Depends:** none.
   **Gate:** none; fixtures only.
 
 - [ ] **PG04 — Accept the Beijing Token Plan fallback key**
-  **Evidence:** [CLI key resolution](bin/cli_auth.ml#L143-L174) lacks `BAILIAN_TOKEN_PLAN_API_KEY`. **Deliver:** use it only when `ALIBABA_TOKEN_PLAN_API_KEY` is absent on the existing Beijing route.
+  **Evidence:** [CLI key resolution](bin/cli_auth.ml) lacks `BAILIAN_TOKEN_PLAN_API_KEY`. **Deliver:** use it only when `ALIBABA_TOKEN_PLAN_API_KEY` is absent on the existing Beijing route.
   **Accept:** the primary wins; fallback cannot redirect to Coding Plan/workspace hosts and no-key failure remains explicit.
   **Depends:** none.
   **Gate:** none; fixtures only.
 
 - [ ] **CT03 — Protect recent results in existing request pruning**
-  **Evidence:** [trim_tool_results](lib/agent/context_budget.ml#L111-L132) already makes request-only copies but trims every oversized text result. **Deliver:** prioritize old eligible results and protect latest-turn call/result payloads; preserve signed replay and images.
+  **Evidence:** [trim_tool_results](lib/agent/context_budget.ml) already makes request-only copies but trims every oversized text result. **Deliver:** prioritize old eligible results and protect latest-turn call/result payloads; preserve signed replay and images.
   **Accept:** older text measurably shrinks requests while latest results and resumed journal bytes remain intact; protected context that cannot fit is refused rather than silently truncated.
   **Depends:** none.
   **Gate:** none; existing pruning is not missing and does not depend on a new recovery UI.
 
 - [ ] **WK08 — Forward typed MCP image results**
-  **Evidence:** [MCP validation](lib/extensions/mcp_client.ml#L480-L497) accepts images, but [CLI integration](bin/main.ml#L1220-L1234) rejects all nontext blocks. **Deliver:** preserve bounded validated Text/Image blocks through existing canonical tool-result handling.
+  **Evidence:** [MCP validation](lib/extensions/mcp_client.ml) bounds structurally valid image blocks but does not establish MIME/magic agreement; [CLI integration](bin/main.ml) rejects all nontext blocks. **Deliver:** preserve bounded validated Text/Image blocks through existing canonical tool-result handling.
   **Accept:** approved text/image order survives a supported route and history; bad base64/MIME/magic or unsupported route is rejected before provider network, without payloads in UI/logs.
   **Depends:** none.
   **Gate:** none; controlled MCP/provider peers.
 
 - [ ] **SJ05 — Persist child usage under its original identity**
-  **Evidence:** [child workflow](bin/main.ml#L1727-L1759) puts usage in a success string, not durable typed markers. **Deliver:** owner-thread, idempotent delivery of each validated child usage record tied to original job/provider/account/route/model.
+  **Evidence:** [child workflow](bin/main.ml) puts usage in a success string, not durable typed markers. **Deliver:** owner-thread, idempotent delivery of each validated child usage record tied to original job/provider/account/route/model.
   **Accept:** usage survives child failure/cancellation and resume exactly once, even after parent model/session switch; no inferred counts or attribution to the new active identity.
   **Depends:** none.
   **Gate:** none.
 
 - [ ] **CT02 — Recover explicitly after provider context rejection**
-  **Evidence:** [pre-request compaction](bin/main.ml#L1598-L1722) already exists; post-rejection recovery is not a distinct action. **Deliver:** an explicit user recovery path reusing compaction with unchanged ancestry and signed-state validation, not automatic replay.
+  **Evidence:** [pre-request compaction](bin/main.ml) already exists; post-rejection recovery is not a distinct action. **Deliver:** an explicit user recovery path reusing compaction with unchanged ancestry and signed-state validation, not automatic replay.
   **Accept:** a controlled context-size rejection can be compacted then resumed only by explicit action; interruption, unresolved calls or signed mismatch preserve original history and duplicate no tool/request.
   **Depends:** CT03.
   **Gate:** none; local near-limit fixture, not live account inference.
 
 - [ ] **RC01a — Correlate public tool events with opaque IDs**
-  **Evidence:** [JSONL events](bin/main.ml#L1053-L1078) publish name/state but omit per-call correlation; [CLI tests](test/test_cli_prompt.ml#L330-L369) correctly prohibit raw provider IDs. **Deliver:** a bounded public local tool-instance ID across start/update/settle/abort, preserving current one-shot JSONL behavior.
+  **Evidence:** [JSONL events](bin/main.ml) publish name/state but omit per-call correlation; [CLI tests](test/test_cli_prompt.ml) correctly prohibit raw provider IDs. **Deliver:** a bounded public local tool-instance ID across start/update/settle/abort, preserving current one-shot JSONL behavior.
   **Accept:** two same-name shared reads each correlate with one terminal event; raw IDs, arguments/results, credentials, attachments and opaque replay remain absent.
   **Depends:** none.
   **Gate:** none.
 
 - [ ] **RC01b — Define multi-turn local event ownership**
-  **Evidence:** [current emitter](bin/main.ml#L23-L59) is one-shot and uses process-local `turn-1`. **Deliver:** versioned local session/turn/approval-request ownership and redaction, reusing the typed runner rather than a second lifecycle.
+  **Evidence:** [current emitter](bin/main.ml) is one-shot and uses process-local `turn-1`. **Deliver:** versioned local session/turn/approval-request ownership and redaction, reusing the typed runner rather than a second lifecycle.
   **Accept:** two turns and a cancelled approval have distinct ordered owners; late events cannot attach to the next turn, and an event alone never grants an effect.
   **Depends:** RC01a.
   **Gate:** none; non-TTY prompt-required effects still deny.
@@ -133,19 +271,19 @@ AS01, AO01, UI01, BR01, LD01, FV01, VR01 and MD01 are complete, delivering sessi
   **Gate:** none.
 
 - [ ] **WK06 — Read owner-scoped typed child-result URIs**
-  **Evidence:** [reader dispatch](lib/tools/workspace_reader.ml#L832-L845) has artifact/HTTPS support, not `agent://`. **Deliver:** bounded nested field access to owned typed child results, reusing private artifact ownership.
+  **Evidence:** [reader dispatch](lib/tools/workspace_reader.ml) has artifact/HTTPS support, not `agent://`. **Deliver:** bounded nested field access to owned typed child results, reusing private artifact ownership.
   **Accept:** valid nested values retain types; foreign-session, missing, oversized and invalid selectors fail closed without leaking artifact content.
   **Depends:** AG01a.
   **Gate:** none.
 
 - [ ] **WK01a — Add single-file hashline anchors**
-  **Evidence:** [snapshot editor](lib/tools/workspace_edit.ml#L118-L170) uses exact text and whole-file SHA256, not line anchors. **Deliver:** bounded content-hash anchors on the existing guarded writer.
+  **Evidence:** [snapshot editor](lib/tools/workspace_edit.ml) uses exact text and whole-file SHA256, not line anchors. **Deliver:** bounded content-hash anchors on the existing guarded writer.
   **Accept:** a unique current anchor changes only its intended span; stale/ambiguous anchors preserve the file and do not fall back to approximate matching.
   **Depends:** none.
   **Gate:** none.
 
 - [ ] **WK01b — Define and enforce multi-file anchor commit safety**
-  **Evidence:** [LSP application](lib/tools/workspace_lsp.ml#L807-L850) is sequential, so generic multi-file atomicity is not an existing guarantee. **Deliver:** a guarded multi-file edit transaction with explicit crash/failure semantics; no second unguarded writer.
+  **Evidence:** [LSP application](lib/tools/workspace_lsp.ml) is sequential, so generic multi-file atomicity is not an existing guarantee. **Deliver:** a guarded multi-file edit transaction with explicit crash/failure semantics; no second unguarded writer.
   **Accept:** a conflict in any target prevents the planned batch; injected publication failure has documented recoverable state without overwriting concurrent user edits. Never advertise crash-atomic filesystem rename across files unless actually established.
   **Depends:** WK01a, WK07.
   **Gate:** reviewed transaction/rollback contract before advertising all-or-none edits.
@@ -163,7 +301,7 @@ AS01, AO01, UI01, BR01, LD01, FV01, VR01 and MD01 are complete, delivering sessi
   **Gate:** none.
 
 - [ ] **WK04a — Plan exact commit hunks without staging**
-  **Evidence:** [worktree commits](lib/tools/workspace_git.ml#L295-L335) operate on whole approved paths. **Deliver:** inert snapshot-bound hunk plans with explicit dependencies and cycle rejection.
+  **Evidence:** [worktree commits](lib/tools/workspace_git.ml) operate on whole approved paths. **Deliver:** inert snapshot-bound hunk plans with explicit dependencies and cycle rejection.
   **Accept:** a valid plan orders only selected hunks; cyclic, stale or overlapping plans leave index/worktree untouched.
   **Depends:** none.
   **Gate:** none.
@@ -192,36 +330,36 @@ AS01, AO01, UI01, BR01, LD01, FV01, VR01 and MD01 are complete, delivering sessi
   **Depends:** SH01a.
   **Gate:** none.
 
-- [ ] **LD01 — Record exact completion timing**
-  **Evidence:** [usage markers](lib/session/session.ml#L42-L45) contain usage/provenance, not start/first-text/finish/error timing. **Deliver:** optional measured timing markers for the exact request identity.
+- [ ] **ST01 — Record exact completion timing**
+  **Evidence:** [usage markers](lib/session/session.ml) contain usage/provenance. Stage and tool elapsed durations already persist; exact request start/first-text/finish/error timing is still absent. **Deliver:** optional measured timing markers for the exact request identity.
   **Accept:** streamed TTFT and terminal timestamps survive resume; buffered first-text and unreported token counts remain unknown, with no timing inferred from transcript length.
   **Depends:** none.
   **Gate:** none.
 
 - [ ] **LD02 — Aggregate cross-session local statistics**
-  **Evidence:** [usage_by_route](lib/session/session.ml#L703-L731) already totals selected-branch usage. **Deliver:** private project/model/day CLI/JSON aggregation with explicit fork/off-branch semantics and optional timing, not a second per-session usage command.
+  **Evidence:** [usage_by_route](lib/session/session.ml) already totals selected-branch usage. **Deliver:** private project/model/day CLI/JSON aggregation with explicit fork/off-branch semantics and optional timing, not a second per-session usage command.
   **Accept:** reference sessions aggregate without duplicate billing; absent usage/prices/premium counts stay unknown and another project's private data is not exposed by default.
-  **Depends:** SJ05, LD01.
+  **Depends:** SJ05, ST01.
   **Gate:** none.
 
 - [ ] **PL04c — Measure long-session manager retention**
-  **Evidence:** [session managers](bin/main.ml#L947-L1008) live until shutdown; transcript bounds already exist. **Deliver:** measure repeated session switching, owned subprocess cleanup, idle CPU and retained memory in a real PTY; repair only demonstrated unbounded retention.
+  **Evidence:** [session managers](bin/main.ml) live until shutdown; transcript bounds already exist. **Deliver:** measure repeated session switching, owned subprocess cleanup, idle CPU and retained memory in a real PTY; repair only demonstrated unbounded retention.
   **Accept:** record reproducible numeric limits and enforce them under sustained switching/resize/cancel; dirty jobs/user sessions are not destroyed merely to reduce memory.
   **Depends:** PL04a, PL04b.
   **Gate:** none; **diagnostic**, not a proven memory leak.
 
 - [ ] **PL03b — Verify packaged capability advertising**
-  **Evidence:** [release helper smoke](.github/workflows/release.yml#L114-L134) already covers conditional Apple support, but not a complete target capability matrix. **Deliver:** exact packaged availability checks for existing terminal imaging/LSP/DAP/native helper capabilities per current target.
+  **Evidence:** [release helper smoke](.github/workflows/release.yml) already covers conditional Apple support, but not a complete target capability matrix. **Deliver:** exact packaged availability checks for existing terminal imaging/LSP/DAP/native helper capabilities per current target.
   **Accept:** available helpers execute from an extracted package; unavailable capabilities are not advertised as ready, without removing ordinary tools solely because optional servers are not configured.
   **Depends:** PL03a.
   **Gate:** native current-target runners; do not reopen completed Apple packaging.
 
-## P3 — Incremental optional local capabilities
+## P3 — Optional local capabilities
 
-These are retained product plans, not source-proven defects. No new effect surface is enabled before its own approval/ownership acceptance passes.
+Retained product plans. None is enabled before its own ownership, approval and changed-surface acceptance passes. Editing children, personal-tab access and native desktop control require separate trust decisions.
 
 - [ ] **WK02a — Read bounded explicit public GitHub references**
-  **Evidence:** [reader URI dispatch](lib/tools/workspace_reader.ml#L832-L845) rejects issue/PR schemes. **Deliver:** explicit repository-scoped issue/PR/diff resolution with pinned provenance and bounded pagination, reusing network approval.
+  **Evidence:** [reader URI dispatch](lib/tools/workspace_reader.ml) rejects issue/PR schemes. **Deliver:** explicit repository-scoped issue/PR/diff resolution with pinned provenance and bounded pagination, reusing network approval.
   **Accept:** the requested public issue/PR is read exactly; malformed/foreign refs, incomplete pages and private unauthorized refs stay unavailable without credential forwarding.
   **Depends:** none.
   **Gate:** controlled GitHub fixture for implementation; network approval for real reads.
@@ -251,7 +389,7 @@ These are retained product plans, not source-proven defects. No new effect surfa
   **Gate:** approved merge policy; no automatic commit.
 
 - [ ] **AG03 — Inspect and steer a live owned child**
-  **Evidence:** [job commands](bin/main.ml#L2634-L2673) already list/wait/cancel; bounded live transcript/steering is residual. **Deliver:** owner-scoped TUI inspection with exact reported usage and steering of the selected active child.
+  **Evidence:** [job commands](bin/main.ml) already list/wait/cancel; bounded live transcript/steering is residual. **Deliver:** owner-scoped TUI inspection with exact reported usage and steering of the selected active child.
   **Accept:** parent inspects/cancels the intended child; stale or foreign job IDs cannot steer a new session or expose hidden effects.
   **Depends:** AG01b, SJ05.
   **Gate:** none; children remain read-only unless AG02 is independently authorized.
@@ -269,7 +407,7 @@ These are retained product plans, not source-proven defects. No new effect surfa
   **Gate:** explicit product decision to enable automatic matching; guidance alone is not authorization.
 
 - [ ] **RC02a — Parse bounded correlated stdio RPC frames**
-  **Evidence:** [one-shot CLI JSONL](bin/main.ml#L23-L59) is output, not a command transport. **Deliver:** versioned bounded input framing/correlation and read-only session/model inspection.
+  **Evidence:** [one-shot CLI JSONL](bin/main.ml) is output, not a command transport. **Deliver:** versioned bounded input framing/correlation and read-only session/model inspection.
   **Accept:** valid IDs receive matching responses; malformed/oversized frames recover locally without merging accounts or invoking a tool.
   **Depends:** RC01b.
   **Gate:** none.
@@ -307,7 +445,7 @@ These are retained product plans, not source-proven defects. No new effect surfa
 - [ ] **BR02 — Attach only explicitly selected relay tabs**
   **Evidence:** no existing tool in [tool dispatch](lib/tools/tools.ml) authorizes access to personal browser tabs. **Deliver:** opt-in loopback-authenticated user-installed relay with exact selected-tab identity and detach.
   **Accept:** only a selected tab is inspectable; unrelated logged-in tabs, revoked pairing and disconnected relay cannot be adopted.
-  **Depends:** BR01b.
+  **Depends:** none; the isolated headless browser is an implemented baseline.
   **Gate:** actual reviewed relay implementation and explicit installation/pairing.
 
 - [ ] **BR03a — Establish native window-control consent**
@@ -364,9 +502,9 @@ These are retained product plans, not source-proven defects. No new effect surfa
   **Depends:** LD05a.
   **Gate:** speaker/runtime and authorized supported speech route.
 
-## P4 — Contract, service and platform gates
+## P4 — External contract, service and platform gates
 
-Preserve these scopes without inventing availability. Research cards can conclude **unavailable**, which keeps dependent implementation blocked; it does not constitute delivered inference, OAuth, sharing or platform support.
+Research can establish precise unavailability. Undocumented vendor endpoints, absent registered clients, unavailable native runners or imaginary services are not implementation claims. These cards are lower priority than local mobile workflows.
 
 - [ ] **CT01a — Verify one exact-route tokenizer contract**
   **Evidence:** [context budget](lib/agent/context_budget.ml) is a byte proxy; [discovery](lib/provider/model_discovery.ml) already supplies several exact-route window limits. **Deliver:** select one named supported route/model and document an independently sourced tokenizer/version mapping and freshness boundary.
@@ -381,7 +519,7 @@ Preserve these scopes without inventing availability. Research cards can conclud
   **Gate:** verified tokenizer assets/license and route mapping.
 
 - [ ] **PG01a — Establish reserved-lane roster authority**
-  **Evidence:** [Singularity .tech adapter](lib/provider/transports/singularity_tech_api.ml#L1-L6) has no documented model-list contract. **Deliver:** find a documented pinned per-key roster or record precise unavailability.
+  **Evidence:** [Singularity .tech adapter](lib/provider/transports/singularity_tech_api.ml) has no documented model-list contract. **Deliver:** find a documented pinned per-key roster or record precise unavailability.
   **Accept:** evidence distinguishes two reservation identities; a .dev/global roster or inactive-slot 403 cannot prove .tech access.
   **Depends:** none.
   **Gate:** provider documentation and authorized attributable samples.
@@ -393,7 +531,7 @@ Preserve these scopes without inventing availability. Research cards can conclud
   **Gate:** positive roster contract and authorized live acceptance account.
 
 - [ ] **PG05a — Verify Cline suggested-catalog provenance**
-  **Evidence:** [provider inventory](docs/PROVIDER_MODEL_DISCOVERY_INVENTORY.md#L22) records manual full router IDs and no model-list API. **Deliver:** establish a current pinned `recommended-models` contract or explicit unavailable result.
+  **Evidence:** [provider inventory](docs/PROVIDER_MODEL_DISCOVERY_INVENTORY.md) records manual full router IDs and no model-list API. **Deliver:** establish a current pinned `recommended-models` contract or explicit unavailable result.
   **Accept:** provenance distinguishes suggestions from account entitlement; no guessed `/v1/models` endpoint or borrowed provider list.
   **Depends:** none.
   **Gate:** current documented source.
@@ -405,7 +543,7 @@ Preserve these scopes without inventing availability. Research cards can conclud
   **Gate:** documented pinned source.
 
 - [ ] **PG06a — Verify attributable Copilot premium usage**
-  **Evidence:** [usage type](lib/core/protocol.ml#L3-L12) has token/cache/modality fields, not a verified premium counter. **Deliver:** document the exact reported field/header, semantics and personal account/route attribution with a redacted sample.
+  **Evidence:** [usage type](lib/core/protocol.ml) has token/cache/modality fields, not a verified premium counter. **Deliver:** document the exact reported field/header, semantics and personal account/route attribution with a redacted sample.
   **Accept:** a genuine count is distinguishable from token usage/quota; missing field, Enterprise identity and price remain unknown.
   **Depends:** none.
   **Gate:** documented provider field and authorized attributable evidence.
@@ -459,7 +597,7 @@ Preserve these scopes without inventing availability. Research cards can conclud
   **Gate:** verified old/new package versions and trust policy.
 
 - [ ] **EX12 — Support one required legacy-SSE MCP server**
-  **Evidence:** [MCP HTTP](lib/extensions/mcp_http.ml#L125-L158) handles Streamable HTTP SSE responses, not the legacy endpoint-event transport. **Deliver:** only the pinned legacy transport required by a documented real server.
+  **Evidence:** [MCP HTTP](lib/extensions/mcp_http.ml) handles Streamable HTTP SSE responses, not the legacy endpoint-event transport. **Deliver:** only the pinned legacy transport required by a documented real server.
   **Accept:** that server initializes/calls; disconnect settles once, foreign endpoint events leak no credential and no redirected-host reconnect occurs.
   **Depends:** none.
   **Gate:** actual legacy-SSE-only server and documented protocol need; otherwise do not add it.
@@ -531,7 +669,7 @@ Preserve these scopes without inventing availability. Research cards can conclud
   **Gate:** supported authenticated provider/runtime and microphone permission.
 
 - [ ] **PL01a — Establish native Windows feasibility**
-  **Evidence:** [installer targets](install.sh) and [release matrix](.github/workflows/release.yml#L21-L32) are POSIX-only. **Deliver:** native x64 OCaml/dependency, terminal and approved-process compatibility evidence on Windows, naming required changes.
+  **Evidence:** [installer targets](install.sh) and [release matrix](.github/workflows/release.yml) are POSIX-only. **Deliver:** native x64 OCaml/dependency, terminal and approved-process compatibility evidence on Windows, naming required changes.
   **Accept:** a native build/launch baseline or precise blockers are recorded; WSL execution is not Windows support and unsupported effects remain unavailable.
   **Depends:** none.
   **Gate:** actual Windows x64 runner/toolchain.
@@ -549,7 +687,7 @@ Preserve these scopes without inventing availability. Research cards can conclud
   **Gate:** native Windows release runner and reviewed installer format.
 
 - [ ] **PL02a — Build and execute a real musl x64 artifact**
-  **Evidence:** [Linux release jobs](.github/workflows/release.yml#L21-L32) use GNU/Linux runners. **Deliver:** separate musl toolchain/native execution and dependency evidence for x64; keep the artifact unadvertised until distribution selection is ready.
+  **Evidence:** [Linux release jobs](.github/workflows/release.yml) use GNU/Linux runners. **Deliver:** separate musl toolchain/native execution and dependency evidence for x64; keep the artifact unadvertised until distribution selection is ready.
   **Accept:** it launches on a clean musl target with truthful library diagnostics; a GNU-linked binary is never labeled musl.
   **Depends:** PL03a.
   **Gate:** actual musl x64 build and runtime environment.
@@ -561,25 +699,16 @@ Preserve these scopes without inventing availability. Research cards can conclud
   **Gate:** actual musl arm64 build and runtime environment.
 
 - [ ] **PL02c — Migrate libc selection and release manifests safely**
-  **Evidence:** [manifest validation](install.sh#L91-L110) and release publication assume exactly four assets. **Deliver:** explicit GNU/musl selection and compatible manifest/update transition, preserving old embedded installers.
+  **Evidence:** [manifest validation](install.sh) and release publication assume exactly four assets. **Deliver:** explicit GNU/musl selection and compatible manifest/update transition, preserving old embedded installers.
   **Accept:** each libc selects its verified artifact; legacy four-entry clients keep working, unsupported hosts fail closed and checksum/update/uninstall checks pass before advertising musl.
   **Depends:** PL02a, PL02b, PL07.
   **Gate:** verified musl artifacts and reviewed backward-compatible publication layout.
 
-## Audit coverage and scope disposition
+## Scope reconciliation and next work
 
-| Surveyed area | Evidence inspected | Backlog result |
-| --- | --- | --- |
-| Provider/auth/discovery/context | `lib/provider/`, `lib/auth/`, `bin/cli_auth.ml`, context integration and provider/auth fixtures | AU01–AU02; retained PG scopes; narrowed CT01–CT03 to actual residuals; IO01 verified and removed |
-| Agent/journal/config/core | `lib/agent/`, `lib/session/`, `lib/config/`, `lib/core/` and lifecycle/usage/artifact fixtures | SJ05; typed/cancelled child residuals, not replacement job storage; SJ01–SJ04 verified and removed |
-| Workspace/mobile/extensions | `lib/tools/`, `lib/extensions/`, tool/local-content fixtures and mobile plan | WK07–WK08, MB01; smaller mobile/edit/device cards; external MCP gates retained |
-| CLI/TUI/distribution | `bin/`, `lib/ui/`, UI/CLI fixtures, installer/updater and CI/release workflows | queue/fairness and release-boundary cards; correlated events rather than duplicate JSONL |
-| Product/maintainer docs | README, contributor/security/design rules, discovery inventory, changelog/checkpoint | canonical backlog links and implemented-feature wording corrected; historical evidence retained |
-
-This was a source-and-fixture survey, not a line-by-line security certification, live provider test, device acceptance run or proof that every proposed risk reproduces. File links identify the audit baseline; re-read current code before implementation.
-
-**PL05 retired:** the old “final dependency cutover” umbrella had no bounded independently useful deliverable. Do not schedule a whole-project rewrite. Make only the module-boundary changes required by a named behavioral card, migrating every caller/test/build rule/document together; behavior and packaged smoke remain that card's acceptance. This retirement is not a claim that maintainability work is complete.
-
-**Implemented portions removed, residual scope retained:** CT01 already has exact-route window discovery; CT02 already has guarded proactive compaction and conservative recovery; CT03 already has request-only pruning; AG01 already has bounded concurrent jobs/idempotent delivery; AG03 already has list/wait/cancel; RC01 already has ordered redacted one-shot JSONL; PL03 already has conditional Apple packaging. Their remaining cards above are narrower, not blanket reimplementations.
-
-**Not queued as fake integrations:** `web` is search, `typesafe` is a judge route and `local` is a catalog seed. Existing configurable compatible endpoints already cover user-owned LiteLLM. Cursor SDK and GitLab Duo Agent require separate agent-runtime contracts, not generic completion aliases. Do not add prohibited Antigravity OAuth or undocumented/unregistered Gemini CLI, Qwen Portal, Kimi device, xAI subscription, Zhipu plan or Muse login choices. Personal Copilot is not Enterprise. Missing vendor registration, entitlement, model-list API or hosted relay remains a gate, not a guessed endpoint or placeholder implementation.
+- Preserved all 90 existing unfinished cards; renamed general timing `LD01` to `ST01` and migrated its `LD02` dependency. Added 20 mobile proposals, `MX01`–`MX20`.
+- Removed obsolete line anchors and the dangling active `BR01b` prerequisite; BR02 references the completed isolated-browser baseline. Removed the stale MB01 coverage reference and misleading “remaining mobile core” introduction.
+- Fresh audit confirmed blocking credential refresh/locks, unbounded aggregate prompt/event admission, sequential LSP application, unbounded installer fetch budgets and incomplete package dependency/update smoke. Existing stage timing, text coalescing, request-only pruning and job ownership were not relisted as absent.
+- **Default next implementation:** AU01. **First mobile-specific implementation:** MX01; MX02 backend research can proceed independently. This refresh does not start either task.
+- PL05 remains retired: no whole-project rewrite or unbounded dependency cutover. Make only module changes required by a named behavior card.
+- No fake integration backlog: configurable compatible endpoints cover user-operated LiteLLM; Cursor SDK/GitLab Duo Agent need distinct runtime contracts. No prohibited Antigravity OAuth, undocumented subscription login, borrowed provider catalog or guessed remote service. Missing entitlement/registration remains a gate.

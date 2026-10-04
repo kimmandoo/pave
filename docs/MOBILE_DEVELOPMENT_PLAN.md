@@ -1,6 +1,6 @@
 # Mobile development specialization plan
 
-**Status:** M01–M24, AS01, AO01, UI01, BR01, LD01, FV01, VR01 and MD01 completed; historical platform acceptance below records prerequisite work.
+**Status:** M01–M24, AS01, AO01, UI01, BR01, LD01, FV01, VR01 and MD01 completed; historical platform acceptance below records prerequisite work. Proposed next mobile capabilities are tracked only as MX01–MX20 in [`task.md`](../task.md); this document does not imply those proposals are implemented.
 
 **M08 acceptance:** An opt-in manual macOS arm64 Xcode 27 run generated a disposable project, called the separately approved `xcode_preflight` scheme, destination and build phases, and reported `Xcode build: exit 0` for a discovered iOS Simulator UUID with signing disabled. Xcode 27 uses `Destinations compatible/incompatible with ...` headings; the parser now supports them alongside the older `Available/Ineligible destinations` headings. A simulator placeholder, physical device and incompatible UUID cannot become a build destination. No simulator was booted or app deployed; CI still runs only fake-Xcode safety regressions and never installs xcodegen or runs a real simulator build.
 
@@ -79,4 +79,4 @@ Inventory is not authorization to boot, install, launch, sign or deploy. Device 
 
 ## Sequencing and completion
 
-M01 → M02–M06 → M07 → M08–M12 → M13–M16. M17–M18 can follow discovery independently; M19–M20 need both a platform command and a real selected device. M21–M22 can ship after their respective manifest maps; M23–M24 follow the corresponding framework test path. The remaining cards and their exact execution order live in [`task.md`](../task.md); an M-number with letter suffixes completes only when every slice and this plan's end-to-end acceptance pass. Completed M01–M18 are prerequisites already satisfied, not open checkboxes. Missing platform tooling blocks its execution/device acceptance, never justifies weakened approval, and does not block independent discovery or safety work.
+M01 → M02–M06 → M07 → M08–M12 → M13–M16. M17–M18 supply device inventory; M19–M20 require a platform command and a real selected device. M21–M22 cover sensitive configuration; M23–M24 cover framework consistency. All M01–M24 and the completed app-session/observation/control/scenario/diagnostic/verification/visual/dashboard slices above are satisfied baseline prerequisites, not open checkboxes. New mobile proposals and their dependencies live in [`task.md`](../task.md), P1 (MX01–MX20); general request timing uses ST01 to avoid collision with completed mobile LD01. Missing platform tooling blocks the affected real execution/device acceptance, never justifies weakened approval, and does not block independent discovery or safety work.
