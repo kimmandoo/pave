@@ -571,7 +571,7 @@ let close_stdin_job job =
       fd) in
     Option.iter close_fd fd)
 
-let write_stdin_job job data =
+let write_stdin_job ?cancel job data =
   if String.length data > max_stdin_bytes then fail "stdin data exceeds its size limit";
   with_lock job.input_lock (fun () ->
     let fd = with_lock job.owner.lock (fun () ->
@@ -580,7 +580,9 @@ let write_stdin_job job data =
     let bytes = Bytes.unsafe_of_string data in
     let deadline = Unix.gettimeofday () +. 1.0 in
     let rec loop offset =
-      if offset < Bytes.length bytes then (
+      if offset >= Bytes.length bytes then true
+      else if Option.fold ~none:false ~some:(fun callback -> callback ()) cancel then false
+      else (
         let remaining = deadline -. Unix.gettimeofday () in
         if remaining <= 0. then fail "process stdin write timed out";
         let _, writable, _ = Unix.select [] [fd] [] (min 0.05 remaining) in
@@ -877,7 +879,7 @@ let close_stdin manager ~id =
 let write_stdin manager ~id ~data =
   validate_id id;
   let job = with_lock manager.lock (fun () -> lookup manager id) in
-  write_stdin_job job data
+  ignore (write_stdin_job job data)
 
 let port_accepting port =
   if port < 1 || port > 65_535 then fail "readiness port must be between 1 and 65535";
@@ -969,10 +971,12 @@ let run ?cancel ?on_progress ?timeout_seconds ?(output_limit = default_output_li
     start_internal manager ~id:"run" ?cwd ?environment ?inherit_environment
       ~timeout_seconds ~output_limit ~pty_mode:pty ~program ~arguments ();
     let job = with_lock manager.lock (fun () -> lookup manager "run") in
-    if stdin <> "" then write_stdin_job job stdin;
+    let cancel_requested = ref false in
+    if stdin <> "" && not (write_stdin_job ?cancel job stdin) then (
+      cancel_requested := true;
+      request_termination manager ~id:"run" Cancelled);
     close_stdin_job job;
     let last_progress = ref (-1) in
-    let cancel_requested = ref false in
     let rec wait () =
       let status, received, worker_done =
         with_lock manager.lock (fun () -> job.status, job.bytes_received, job.worker_done) in

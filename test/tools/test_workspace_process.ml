@@ -123,6 +123,25 @@ let () =
   let cancelled = Process.run ~cancel:(fun () -> Unix.gettimeofday () -. began > 0.1)
       ~program:"/bin/sleep" ~arguments:["5"] () in
   assert (cancelled.termination = Process.Cancelled);
+  let cancel_marker = Filename.temp_file "pave-cancelled-stdin-" "" in
+  Sys.remove cancel_marker;
+  Fun.protect ~finally:(fun () ->
+    if Sys.file_exists cancel_marker then Sys.remove cancel_marker) (fun () ->
+    let cancellation_deadline = Unix.gettimeofday () +. 0.5 in
+    let cancelled_stdin =
+      Process.run ~stdin:"write-before-cancel\n"
+        ~cancel:(fun () ->
+          let rec wait () =
+            if Sys.file_exists cancel_marker ||
+               Unix.gettimeofday () >= cancellation_deadline then true
+            else (Thread.delay 0.01; wait ()) in
+          wait ())
+        ~program:python3
+        ~arguments:["-c";
+          "import pathlib,sys; data=sys.stdin.buffer.read(); data and pathlib.Path(sys.argv[1]).write_bytes(data)";
+          cancel_marker] () in
+    assert (cancelled_stdin.termination = Process.Cancelled);
+    assert (not (Sys.file_exists cancel_marker)));
 
   let descendant_output = Process.run_shell ~timeout_seconds:1
       ~command:"sleep 30 & echo $!; wait" () in

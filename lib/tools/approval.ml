@@ -179,7 +179,7 @@ let shell_expansion_safe command =
           (match character with
            | '\'' | '"' -> quote := Some character
            | '\\' -> escaped := true
-           | '$' | '`' | '<' | '>' | '*' | '?' | '[' | ']' | '~' ->
+           | '$' | '`' | '<' | '>' | '*' | '?' | '[' | ']' | '~' | '{' | '}' ->
                safe := false
            | _ -> ())) command;
   !safe && !quote = None && not !escaped

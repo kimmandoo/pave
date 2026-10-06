@@ -153,126 +153,33 @@ let adler32 data =
   String.iter (fun c -> a := (!a + Char.code c) mod 65521; b := (!b + !a) mod 65521) data;
   Int32.logor (Int32.shift_left (Int32.of_int !b) 16) (Int32.of_int !a)
 
-type bit_reader = { input : string; mutable bit : int; limit : int }
-let read_bits reader count =
-  if count < 0 || count > 24 || reader.bit > reader.limit * 8 - count then fail "truncated PNG deflate stream";
-  let value = ref 0 in
-  for i = 0 to count - 1 do
-    let pos = reader.bit + i in
-    value := !value lor (((Char.code reader.input.[pos lsr 3] lsr (pos land 7)) land 1) lsl i)
+let inflate_zlib compressed expected =
+  let input_length = String.length compressed in
+  let input = De.bigstring_create input_length
+  and output = De.bigstring_create expected in
+  for i = 0 to input_length - 1 do
+    Bigarray.Array1.set input i compressed.[i]
   done;
-  reader.bit <- reader.bit + count;
-  !value
+  match Zl.Inf.Ns.inflate input output with
+  | Ok (read, written) when read = input_length && written = expected ->
+      let raw = Bytes.create expected in
+      for i = 0 to expected - 1 do
+        Bytes.set raw i (Bigarray.Array1.get output i)
+      done;
+      Bytes.unsafe_to_string raw
+  | Ok _ -> fail "PNG zlib stream did not consume and produce the expected data"
+  | Error error ->
+      fail
+        ("invalid PNG zlib stream: " ^
+         Format.asprintf "%a" Zl.Inf.Ns.pp_error error)
 
 let reverse_bits value count =
   let result = ref 0 in
   for i = 0 to count - 1 do result := (!result lsl 1) lor ((value lsr i) land 1) done;
   !result
 
-let huffman lengths =
-  let counts = Array.make 16 0 in
-  Array.iter (fun length -> if length < 0 || length > 15 then fail "invalid PNG Huffman code"; if length > 0 then counts.(length) <- counts.(length) + 1) lengths;
-  let available=ref 1 in
-  for bits=1 to 15 do
-    available := (!available lsl 1) - counts.(bits);
-    if !available < 0 then fail "oversubscribed PNG Huffman table"
-  done;
-  let next = Array.make 16 0 and code = ref 0 in
-  for bits = 1 to 15 do code := (!code + counts.(bits - 1)) lsl 1; next.(bits) <- !code done;
-  let table = Hashtbl.create (Array.length lengths) in
-  Array.iteri (fun symbol length -> if length > 0 then begin
-    let reversed = reverse_bits next.(length) length in
-    Hashtbl.add table ((length lsl 16) lor reversed) symbol;
-    next.(length) <- next.(length) + 1
-  end) lengths;
-  table
-
-let huffman_symbol reader table =
-  let code = ref 0 and found = ref None and length = ref 0 in
-  while !found = None && !length < 15 do
-    code := !code lor (read_bits reader 1 lsl !length);
-    incr length;
-    found := Hashtbl.find_opt table ((!length lsl 16) lor !code)
-  done;
-  match !found with Some symbol -> symbol | None -> fail "invalid PNG Huffman symbol"
-
-let inflate_zlib compressed expected =
-  if String.length compressed < 6 then fail "truncated PNG zlib stream";
-  let cmf = Char.code compressed.[0] and flg = Char.code compressed.[1] in
-  if cmf land 15 <> 8 || cmf lsr 4 > 7 || ((cmf lsl 8) + flg) mod 31 <> 0 || flg land 32 <> 0 then
-    fail "unsupported PNG zlib header";
-  let reader = {input=compressed; bit=16; limit=String.length compressed - 4} in
-  let out = Bytes.create expected and used = ref 0 and finished = ref false in
-  let emit value = if !used >= expected then fail "oversized PNG deflate output" else (Bytes.set out !used (Char.chr (value land 255)); incr used) in
-  let length_base = [|3;4;5;6;7;8;9;10;11;13;15;17;19;23;27;31;35;43;51;59;67;83;99;115;131;163;195;227;258|] in
-  let length_extra = [|0;0;0;0;0;0;0;0;1;1;1;1;2;2;2;2;3;3;3;3;4;4;4;4;5;5;5;5;0|] in
-  let dist_base = [|1;2;3;4;5;7;9;13;17;25;33;49;65;97;129;193;257;385;513;769;1025;1537;2049;3073;4097;6145;8193;12289;16385;24577|] in
-  let dist_extra = [|0;0;0;0;1;1;2;2;3;3;4;4;5;5;6;6;7;7;8;8;9;9;10;10;11;11;12;12;13;13|] in
-  let fixed_lit = Array.init 288 (fun i -> if i <= 143 then 8 else if i <= 255 then 9 else if i <= 279 then 7 else 8) |> huffman in
-  let fixed_dist = huffman (Array.make 32 5) in
-  while not !finished do
-    finished := read_bits reader 1 = 1;
-    let kind = read_bits reader 2 in
-    let lit, dist = if kind = 1 then fixed_lit, fixed_dist else if kind = 2 then begin
-      let hlit = read_bits reader 5 + 257 in
-      let hdist = read_bits reader 5 + 1 in
-      let hclen = read_bits reader 4 + 4 in
-      let order = [|16;17;18;0;8;7;9;6;10;5;11;4;12;3;13;2;14;1;15|] in
-      let clen = Array.make 19 0 in
-      for i=0 to hclen-1 do clen.(order.(i)) <- read_bits reader 3 done;
-      let ct = huffman clen and all = ref [] in
-      while List.length !all < hlit + hdist do
-        let sym = huffman_symbol reader ct in
-        if sym <= 15 then all := sym :: !all
-        else if sym = 16 then begin
-          if !all = [] then fail "invalid PNG repeat code";
-          let n = read_bits reader 2 + 3 in
-          let value = List.hd !all in
-          for _=1 to n do all := value :: !all done
-        end else if sym = 17 then (let n=read_bits reader 3+3 in for _=1 to n do all:=0::!all done)
-        else if sym = 18 then (let n=read_bits reader 7+11 in for _=1 to n do all:=0::!all done)
-        else fail "invalid PNG code length";
-        if List.length !all > hlit + hdist then fail "PNG code lengths exceed table"
-      done;
-      let all = Array.of_list (List.rev !all) in
-      let lt = huffman (Array.sub all 0 hlit) and dt = huffman (Array.sub all hlit hdist) in
-      if Array.length all = 0 then fail "empty PNG Huffman table";
-      lt, dt
-    end else if kind = 0 then begin
-      reader.bit <- (reader.bit + 7) land (lnot 7);
-      let n=read_bits reader 16 in
-      let complement=read_bits reader 16 in
-      if n lxor complement <> 0xffff then fail "invalid PNG stored deflate block";
-      for _=1 to n do emit (read_bits reader 8) done;
-      (* Stored blocks are complete blocks and don't use Huffman symbols. *)
-      huffman [||], huffman [||]
-    end else fail "reserved PNG deflate block" in
-    if kind <> 0 then begin
-      let ended = ref false in
-      while not !ended do
-        let symbol = huffman_symbol reader lit in
-        if symbol < 256 then emit symbol
-        else if symbol = 256 then ended := true
-        else if symbol <= 285 then begin
-          let idx = symbol - 257 in
-          let len = length_base.(idx) + read_bits reader length_extra.(idx) in
-          let ds = huffman_symbol reader dist in
-          if ds >= 30 then fail "invalid PNG distance code";
-          let distance = dist_base.(ds) + read_bits reader dist_extra.(ds) in
-          if distance > !used then fail "PNG deflate distance precedes output";
-          for _=1 to len do let v=Char.code (Bytes.get out (!used-distance)) in emit v done
-        end else fail "invalid PNG length code"
-      done
-    end
-  done;
-  if (reader.bit + 7) / 8 <> reader.limit then fail "trailing PNG deflate data";
-  if !used <> expected then fail "PNG decompressed size mismatch";
-  let raw = Bytes.unsafe_to_string out in
-  let expected_adler = Int64.to_int32 (Int64.of_int (be32 compressed (String.length compressed - 4))) in
-  if expected_adler <> adler32 raw then fail "PNG zlib checksum mismatch";
-  raw
-
 let decode_png png =
+  if String.length png > max_png_bytes then fail "PNG capture exceeds size limit";
   let width, height = validate_png_header png in
   let length=String.length png and pos=ref 8 and idat=Buffer.create 4096 and ended=ref false in
   let depth=ref 0 and color=ref 0 and interlace=ref 0 and saw_header=ref false and saw_data=ref false in

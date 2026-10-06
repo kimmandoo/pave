@@ -65,16 +65,16 @@ M01–M24, AS01, AO01, UI01, mobile BR01/LD01, FV01, VR01 and MD01 are completed
   **Gate:** none; stalled and oversized local HTTPS fixture transfers preserved the prior install and removed staging.
 
 - [ ] **PL03a — Enforce complete packaged dependency policy**
-  **Evidence:** The [release workflow](.github/workflows/release.yml) checks every extracted artifact and the macOS helper with [native target dependency rules](test/distribution/check_release_dependencies.sh), then launches packaged binaries. Native linked non-system and missing-dependency fixtures passed against the macOS arm64 main binary. **Deliver:** target-specific allowed-system-library checks for executable/helper artifacts on the four current targets.
+  **Evidence:** The [release workflow](.github/workflows/release.yml) checks every extracted artifact and the macOS helper with [native target dependency rules](test/distribution/check_release_dependencies.sh), then launches packaged binaries. Native linked non-system and missing-dependency fixtures passed against the macOS arm64 main binary. Run #86 native builds passed all targets, but packaged smoke failed on macOS arm64; unauthenticated logs do not identify the failed assertion. **Deliver:** target-specific allowed-system-library checks for executable/helper artifacts on the four current targets.
   **Accept:** extracted artifacts launch without toolchain runtime paths; a deliberately linked non-system dependency and a missing dependency both fail packaging with clear diagnostics.
   **Depends:** none.
   **Gate:** Native four-target release-runner acceptance is still required. This macOS 25.6 host lacks the helper's FoundationModels framework, so local helper validation awaits the macOS 26 runner.
 
-- [x] **PL07 — Automate installed updater transactions in CI**
-  **Evidence:** [release smoke](.github/workflows/release.yml) extracts/runs binaries, but does not exercise an installed updater transaction. **Deliver:** a disposable controlled-release harness for actual install/check/update/uninstall, invoked by CI.
+- [ ] **PL07 — Automate installed updater transactions in CI**
+  **Evidence:** The [release workflow](.github/workflows/release.yml) invokes the disposable transaction harness in [installed_update.py](test/distribution/installed_update.py). Release run #86 failed that step on Linux x86_64, Linux AArch64 and macOS x86_64; macOS arm64 skipped it after packaged-binary smoke failed. Public job metadata does not expose the failing assertions. Failure-only artifacts for `package-smoke.log` and `updater-transaction.log` are now configured, but run #86 predates that change. **Deliver:** exercise native install/check/update/uninstall transactions against a controlled release in CI.
   **Accept:** custom-directory upgrade preserves unrelated files and user state; corrupt checksum, link/unexpected archive member, invalid marker and failed publication preserve the executable. Verify metadata state on partial publication; inherited destination/version overrides cannot redirect update.
   **Depends:** PL06.
-  **Gate:** packaged current-target binaries; no public release required.
+  **Gate:** Keep unchecked until the exact native failures are diagnosed and the transaction harness passes on all four packaged targets; no public release required.
 
 ## P1 — Proposed mobile-specialized features
 
@@ -112,10 +112,10 @@ Prioritize platform gaps (MX01–MX04), accessibility/visual review (MX05–MX08
   **Gate:** Current approved Android tree; runtime capture still asks separately.
 
 - [ ] **MX06 — Portable visual comparison on Linux**
-  **Evidence:** [lib/tools/workspace_mobile_visual.ml](lib/tools/workspace_mobile_visual.ml) now uses bounded in-tree PNG decoding instead of macOS Swift/ImageIO; decoder suitability review and native Linux package smoke are incomplete. **Deliver:** provide a bounded maintained decoder usable on supported Linux packages, with dependency/license review, retaining current masks and metadata checks.
+  **Evidence:** [lib/tools/workspace_mobile_visual.ml](lib/tools/workspace_mobile_visual.ml) now bounds encoded PNG input, dimensions and decompressed output; its bounded in-tree chunk/pixel parser uses pure-OCaml `decompress.zl` 1.6.0 (MIT) for Zlib/DEFLATE and retains the existing masks and metadata checks. Release notices include Decompress plus the statically linked Checkseum and Optint licenses; Optint 0.3.0's source archive says MIT while its opam metadata says ISC. Portable fixtures cover dynamic Huffman, Paeth, bad Zlib checksum and oversized dimensions/input. Run #86's native tests and package smoke predate this dependency; its macOS arm64 package smoke failed. **Deliver:** provide a bounded maintained decoder usable on supported Linux packages, with dependency/license review, retaining current masks and metadata checks.
   **Accept:** The same PNG pairs compare identically on macOS/Linux; malformed/oversized images fail without changing baselines, and packaged decoder runs on native targets.
   **Depends:** none.
-  **Gate:** Maintained-decoder/license review and native Linux package smoke; no Linux artifact acceptance is claimed.
+  **Gate:** Four-target tests and packaged smoke must validate this decoder revision; no Linux artifact acceptance is claimed until the updated native package smoke passes.
 
 - [ ] **MX07 — Reviewable visual regression reports**
   **Evidence:** [lib/tools/workspace_mobile_visual.ml](lib/tools/workspace_mobile_visual.ml) — Current comparison reports exact masked pixel differences, not a review report. **Deliver:** Return bounded baseline/current/difference artifacts with differing regions and explicit operator-selected tolerance; version comparison settings.

@@ -67,6 +67,38 @@ let () =
     expect "Paeth filter uses the previous row's upper-left sample"
       ((Visual.decode_png paeth_png).rgba =
        "\010\010\010\255\020\020\020\255");
+    let dynamic_png =
+      "\137\080\078\071\013\010\026\010\000\000\000\013\073\072\068\082\000\000\000\008\000\000\000\008\008\006\000\000\000\196\015\190\139\000\000\000\104\073\068\065\084\120\218\109\142\209\010\128\048\020\066\173\173\181\098\084\004\065\255\255\163\198\025\092\216\067\015\194\189\042\170\036\121\061\030\047\251\233\084\054\079\115\114\189\094\151\118\059\215\102\065\206\185\116\001\051\226\248\011\103\000\018\144\022\016\046\072\012\084\145\072\010\124\055\064\112\016\139\016\055\253\189\038\198\064\254\013\086\012\067\192\140\056\254\189\034\000\009\072\011\124\100\013\069\157\081\128\058\111\000\000\000\000\073\069\078\068\174\066\096\130" in
+    let dynamic_decoded = Visual.decode_png dynamic_png in
+    let expected_dynamic_pixels = Bytes.create (8 * 8 * 4) in
+    for y = 0 to 7 do
+      for x = 0 to 7 do
+        let value = (x * 7 + y * 3 + (x * y) mod 5) mod 9 in
+        let offset = (y * 8 + x) * 4 in
+        Bytes.set expected_dynamic_pixels offset (Char.chr value);
+        Bytes.set expected_dynamic_pixels (offset + 1) (Char.chr (value * 2));
+        Bytes.set expected_dynamic_pixels (offset + 2) (Char.chr (value * 3));
+        Bytes.set expected_dynamic_pixels (offset + 3) '\255'
+      done
+    done;
+    expect "dynamic-Huffman PNG decodes byte-for-byte"
+      (dynamic_decoded.rgba = Bytes.unsafe_to_string expected_dynamic_pixels);
+    let corrupted_zlib = Bytes.of_string (String.sub dynamic_png 41 104) in
+    let adler_byte = Bytes.length corrupted_zlib - 1 in
+    Bytes.set corrupted_zlib adler_byte
+      (Char.chr (Char.code (Bytes.get corrupted_zlib adler_byte) lxor 1));
+    let bad_zlib_png =
+      String.sub dynamic_png 0 33 ^
+      Visual.png_chunk "IDAT" (Bytes.unsafe_to_string corrupted_zlib) ^
+      String.sub dynamic_png (String.length dynamic_png - 12) 12 in
+    rejects "corrupt Zlib checksum with valid PNG chunk CRC"
+      (fun () -> Visual.decode_png bad_zlib_png);
+    let oversized_input = Bytes.make (Visual.max_png_bytes + 1) '\000' in
+    let oversized_error =
+      try ignore (Visual.decode_png (Bytes.unsafe_to_string oversized_input)); None
+      with Visual.Error message -> Some message in
+    expect "PNG byte limit is checked before parsing"
+      (oversized_error = Some "PNG capture exceeds size limit");
     rejects "corrupt PNG trailer" (fun () -> Visual.decode_png (original_png ^ "extra"));
     let bad_crc=Bytes.of_string original_png in
     let last=Bytes.length bad_crc-1 in Bytes.set bad_crc last (Char.chr (Char.code (Bytes.get bad_crc last) lxor 1));

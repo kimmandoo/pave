@@ -17,6 +17,7 @@ depends: [
   "uuseg"
   "uucp"
   "digestif"
+  "decompress"
   "odoc" {with-doc}
 ]
 build: [

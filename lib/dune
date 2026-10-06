@@ -2,5 +2,5 @@
 
 (library
  (name pave)
- (libraries yojson unix uutf uuseg uucp digestif str threads compiler-libs.common)
+ (libraries yojson unix uutf uuseg uucp digestif str threads compiler-libs.common decompress.zl)
 )

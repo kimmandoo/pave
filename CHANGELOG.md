@@ -2,12 +2,14 @@
 ## 2026-10-06
 
 - fix(mobile): gated dashboard actions by platform, app state, recorded evidence and completed feature acceptance; exposed exact unavailable reasons without submitting disabled workflows.
-- fix(security): required review for shell expansions in wildcard command grants and per-call approval for sensitive mutations.
+- fix(security): rejected unquoted brace expansion in wildcard shell grants and required per-call review for sensitive mutations.
 - fix(mobile): decoded Paeth rows against the prior row and accepted positive multi-digit Gradle summaries despite unrelated `NO-SOURCE` tasks.
-- fix(process): propagated incomplete stdin errors and rejected readiness evidence from exited jobs.
+- fix(mobile): bounded PNG inputs and replaced custom DEFLATE decoding with the maintained pure-OCaml Decompress implementation.
+- fix(process): polled cancellation during one-shot stdin delivery, propagated incomplete writes, and rejected readiness evidence from exited jobs.
 - fix(auth): continued Copilot device authorization on HTTP 200 pending responses.
 - fix(release): accepted Linux loader records, rolled back failed fresh installs, and replaced assets when retrying draft releases.
 - fix(release): surfaced native package and updater smoke output in CI summaries after failures.
+- fix(release): preserved native package and updater failure logs as downloadable CI artifacts.
 
 ## 2026-10-05
 - feat(mobile): added bounded Native XCTest accessibility capture for explicitly owned iOS Simulator sessions.

@@ -49,6 +49,15 @@ let () =
      "git status `touch marker`";
      "git status --short > marker";
      "git status *.log"];
+  let broad_allow = [{ A.match_text = "*git*"; policy = A.Allow;
+                       exact = false }] in
+  let brace_expansion = A.command_decision broad_allow "{rm,git} marker" in
+  expect "wildcard allow requires review for brace expansion"
+    (brace_expansion.policy <> Some A.Allow &&
+     brace_expansion.tier = A.Exec);
+  expect "quoted braces remain literal under wildcard allow"
+    ((A.command_decision broad_allow "'{rm,git}' marker").policy =
+       Some A.Allow);
   expect "single-quoted shell metacharacters remain literal"
     ((A.command_decision allow_rule "git status '$(touch marker)'").policy =
        Some A.Allow);

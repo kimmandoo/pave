@@ -1,19 +1,26 @@
 # Troubleshooting
 
 
+### [2026-10-06] Local release dependency smoke used a zstd-enabled compiler
+
+- **Context / Symptom:** The local release-profile binary failed `check_release_dependencies.sh` with `forbidden or non-system dependency ... libzstd.so.1`. The active compiler is OCaml 5.2.1; the native release workflow pins OCaml 5.5.1 with `ocaml-option-no-compression`.
+- **Root Cause:** The local compiler/toolchain differs from the release matrix and its produced executable retains `libzstd`; the artifact therefore cannot certify the release dependency policy.
+- **Solution:** Keep the dependency allowlist strict and use the existing no-compression compiler configuration for native release gates. Do not ship the local binary or add `libzstd` to the allowed-system list.
+- **Prevention / Reference:** Run `test/distribution/check_release_dependencies.sh` against binaries built by the pinned release matrix; separate a local toolchain smoke from release-acceptance evidence.
+
 ### [2026-10-06] Native release smoke failures hid their output
 
-- **Context / Symptom:** The initial release run `37407164170` exposed only generic failures. After adding per-job logs and bounded `GITHUB_STEP_SUMMARY` output, release run `37409692996` still failed: macOS arm64 packaged-binary smoke and installed-updater transactions on Linux x86_64, Linux AArch64 and macOS x86_64. All four targets passed tests and native builds; the other three packaged-binary smokes passed. The summary step succeeded, but the logged-out job page says “Sign in to view logs,” the unauthenticated logs API returned HTTP 403, and there were no run artifacts.
-- **Root Cause:** Public Actions metadata exposes step outcomes but not failure text or job summaries to this unauthenticated environment. `gh` is not installed, no GitHub token is configured or returned by Git's credential helper, and the browser relay extension is not connected. The session-only `browser.relay` setting stayed false because its approval timed out. The underlying smoke failures remain unknown.
-- **Solution:** The workflow tees smoke output and writes the last 100 lines to `GITHUB_STEP_SUMMARY`; Main CI run `37408896408` passed, but no release was published and latest remains `v0.1.81`. The relay extension is installed at `~/.omp/browser-relay/extension`; Chrome must load it as an unpacked extension and the relay setting requires approval. Once authenticated read access is available, inspect run `37409692996` and fix only confirmed causes. Do not move or retag failed tag `v0.1.83`.
-- **Prevention / Reference:** Keep the four-target native matrix and bounded failure summaries as release gates. Ensure authenticated log/summary access before release diagnosis. After a confirmed fix and passing CI, use a new `v0.1.84` tag; verify all public assets and checksums before claiming publication.
+- **Context / Symptom:** Release run `37409692996` failed on macOS arm64 packaged-binary smoke and installed-updater transactions on Linux x86_64, Linux AArch64 and macOS x86_64. All targets passed tests and native builds; the other three package smokes passed. The failure-summary step succeeded, but the unauthenticated job page requires sign-in, the logs API returned HTTP 403, and the run had no downloadable artifacts.
+- **Root Cause:** Native logs were written only to job output and `GITHUB_STEP_SUMMARY`; the archive upload step used its default success condition and was skipped after smoke failures. No `gh` or GitHub token is available here, the Git credential helper returned none, and the installed browser relay extension is not connected. Exact smoke failures remain unknown.
+- **Solution:** Added a failure-only artifact upload for `package-smoke.log` and `updater-transaction.log`, leaving release archive upload success-only. The next tagged native run can expose exact output through artifacts. Main CI run `37408896408` passed, but no release was published; latest remains `v0.1.81`. Inspect the logs before changing updater/package behavior; do not move or retag `v0.1.83`.
+- **Prevention / Reference:** Keep the four-target native matrix, bounded failure summaries and failure-log artifacts as release gates. Ensure authenticated access before diagnosing. After confirmed fixes and passing CI, use a new `v0.1.84` tag; verify all public assets and checksums before claiming publication.
 
 ### [2026-10-06] Wildcard and session grants bypassed per-action review
 
-- **Context / Symptom:** A non-exact `git status*` allow rule could match command substitutions, backticks, redirection or pathname expansion. An allow-until-exit grant for an ordinary `write_file` also covered a later sensitive entitlement mutation without its exact-content prompt.
-- **Root Cause:** Wildcard rules checked only the parsed single command segment, not shell expansion/redirection; session grants were keyed only by tool name and ignored the sensitive state on each request.
-- **Solution:** Non-exact wildcard allows now reject executable shell expansion, redirection and unquoted glob syntax while preserving literal single-quoted arguments and exact reviewed grants. Session grant eligibility now excludes sensitive requests in the cache, TUI and line-prompt paths.
-- **Prevention / Reference:** `test_approval` covers shell substitutions, redirection, globbing, quoted literals and per-request sensitive grant eligibility.
+- **Context / Symptom:** A non-exact `git status*` allow rule could match command substitutions, backticks, redirection, pathname expansion or unquoted brace expansion. An allow-until-exit grant for an ordinary `write_file` also covered a later sensitive entitlement mutation without its exact-content prompt.
+- **Root Cause:** Wildcard approval classification did not reject every shell-expansion form; in particular, braces were ignored even though Bash can use them to expand the invoked executable and arguments. Session-grant eligibility also trusted a broad tool policy instead of the individual call's sensitivity.
+- **Solution:** Non-exact wildcard rules now reject unquoted brace expansion with other executable shell expansion, redirection and pathname globbing. Sensitive mutations always require per-call exact-content approval even when a tool session grant exists.
+- **Prevention / Reference:** `test_approval` covers substitutions, redirection, globbing, unquoted brace expansion, quoted literals and per-request sensitive grant eligibility.
 
 ### [2026-10-06] Mobile screenshots and Gradle test evidence were misread
 
@@ -24,10 +31,10 @@
 
 ### [2026-10-06] Managed processes hid stdin failures and stale readiness
 
-- **Context / Symptom:** A one-shot process could report its exit after an incomplete stdin write, and a completed process with `READY` output plus a live unrelated port could be marked ready.
-- **Root Cause:** `Process.run` swallowed `Workspace_process.Error` from stdin delivery; `wait_ready` accepted output/port evidence before checking job state and did not recheck under the manager lock.
-- **Solution:** Non-empty stdin delivery errors now propagate through manager cleanup. Readiness requires a running job both before probing and while recording readiness under lock.
-- **Prevention / Reference:** `test_workspace_process` covers bounded stdin-write failure/cleanup on Linux, successful stdin, and stale log-plus-port evidence after exit.
+- **Context / Symptom:** A one-shot process could report exit after an incomplete stdin write, while cancellation becoming active during initial stdin delivery could surface as a write-timeout error instead of `Cancelled`. A completed process with `READY` output plus a live unrelated port could also be marked ready.
+- **Root Cause:** `Process.run` previously polled caller cancellation only after its synchronous stdin write returned; stdin errors were swallowed, and `wait_ready` accepted output/port evidence before checking job state and did not recheck under the manager lock.
+- **Solution:** The one-shot runner now passes cancellation into the bounded stdin-write loop and terminates as `Cancelled` when requested there. Non-empty stdin delivery errors still propagate through manager cleanup. Readiness requires a running job both before probing and while recording readiness under lock.
+- **Prevention / Reference:** `test_workspace_process` covers cancellation before stdin delivery with no child-side effect, bounded stdin-write failure/cleanup on Linux, successful stdin, and stale log-plus-port evidence after exit.
 
 ### [2026-10-06] Copilot OAuth pending responses stopped the device flow
 
