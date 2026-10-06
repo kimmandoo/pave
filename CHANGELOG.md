@@ -1,6 +1,7 @@
 # Changelog
 ## 2026-10-06
 
+- perf(tui): removed per-cluster Notty image allocation and control-byte scans for printable ASCII width measurement while retaining renderer-based Unicode/bidi widths; reduced median CLI CPU by 24.5% in paired sustained-stream PTY measurements.
 - fix(mobile): restored state-aware Build/Install/Launch/Stop dashboard workflows, recommended usable next steps, revalidated stale targets and artifacts, and rejected workflow queuing during active turns.
 - fix(tui): returned dashboard Back/Escape to parent pages, exposed exact session identity on narrow terminals, grouped unaccepted features without enabling them, and replaced filtered/truncated Control intents with a bounded Unicode/paste-capable editor.
 - test(session): measured slow-drip timeout behavior against one explicit reader deadline instead of mixing client-connect and handler-start clocks; retained rejection before the later idle timeout.

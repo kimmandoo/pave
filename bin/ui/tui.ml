@@ -384,11 +384,12 @@ let error = if no_color then A.empty else A.(fg lightred)
 let selected_attr = if no_color then A.(st bold)
   else A.(fg black ++ bg lightcyan ++ st bold)
 let measure_text chunk =
-  (* Bidi controls render as spaces; measure the same cells without allocating
-     for ordinary ASCII or Korean input. *)
-  let chunk = if String.contains chunk '\226' || String.contains chunk '\216'
-    then Transcript_view.sanitize chunk else chunk in
-  I.width (I.string text_attr chunk)
+  if Transcript_view.printable_ascii chunk 0 then String.length chunk
+  else (
+    (* Unicode and sanitized bidi controls must use the renderer's cell widths. *)
+    let chunk = if String.contains chunk '\226' || String.contains chunk '\216'
+      then Transcript_view.sanitize chunk else chunk in
+    I.width (I.string text_attr chunk))
 
 (* Measurement is fixed by this renderer; the general Composer API stays pure.
    Cursor movement does not change wrapping, and every edit installs a new string. *)
