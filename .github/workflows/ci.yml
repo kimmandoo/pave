@@ -50,7 +50,7 @@ jobs:
         run: opam exec -- dune exec pave -- --help
       - name: Provision Gradle for disposable mobile acceptance
         if: matrix.os == 'ubuntu-24.04' && matrix.ocaml == '5.5.1'
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v6
         with:
           gradle-version: '8.14'
       - name: Check real focused Gradle variant
