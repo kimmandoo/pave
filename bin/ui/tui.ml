@@ -14,6 +14,7 @@ type chooser = {
   title : string;
   intro : string array;
   plain : string list;
+  detail_rows : int;
   mutable choices : candidate array;
   allow_custom : bool;
   dynamic : bool;
@@ -33,6 +34,18 @@ type chooser = {
 }
 
 type overlay_focus = Chooser_overlay | Approval_overlay
+
+type text_form = {
+  heading : string;
+  introduction : string list;
+  composer : Pave.Composer.t;
+  byte_limit : int;
+  mutable notice : string;
+  mutable blocked : bool;
+  mutable pasting : bool;
+  paste_text : Buffer.t;
+  mutable paste_rejected : bool;
+}
 
 type submission = {
   text : string;
@@ -128,6 +141,7 @@ type t = {
   mutable chooser : chooser option;
   mutable overlays : overlay_focus list;
   mutable approval_view : approval_view option;
+  mutable text_form : text_form option;
   mutable hint_draft : string;
   mutable hint_cursor : int;
   mutable hint_results : inline_hint list;
@@ -824,7 +838,8 @@ let wrap_chooser_text ~columns ~max_rows text =
     let visible = Array.sub lines 0 count in
     if count < Array.length lines then
       visible.(count - 1) <-
-        shorten_width columns (visible.(count - 1) ^ "…");
+        shorten_width (max 0 (columns - measure_text "…"))
+          visible.(count - 1) ^ "…";
     visible
 
 let matches chooser =
@@ -949,7 +964,7 @@ let chooser_sections ~cols ~height chooser =
     if count > 0 then
       match found.(max 0 (min (count - 1) chooser.selected)).detail with
       | Some text -> wrap_chooser_text ~columns:(max 1 (cols - 4))
-          ~max_rows:(min 2 remaining) text
+          ~max_rows:(min chooser.detail_rows remaining) text
       | None -> [||]
     else [||] in
   let remaining = remaining - Array.length detail_lines in
@@ -1212,6 +1227,183 @@ let approval_screen ~cols ~rows ~activity_rows view =
       Array.make (preview_height - shown) (I.void cols 1);
       activity_rows
     ], (if activity = 0 then -1 else rows - activity)
+
+let utf8 uchar =
+  let buffer = Buffer.create 4 in
+  Buffer.add_utf_8_uchar buffer uchar;
+  Buffer.contents buffer
+
+let create_text_form ?(intro = []) ?(max_bytes = 4096) ~title () =
+  if max_bytes < 1 || max_bytes > 16_384 then
+    invalid_arg "Tui.input_text: max_bytes must be between 1 and 16384";
+  { heading = single_line title; introduction = intro;
+    composer = Pave.Composer.create (); byte_limit = max_bytes;
+    notice = ""; blocked = false; pasting = false;
+    paste_text = Buffer.create (min max_bytes 256); paste_rejected = false }
+
+let text_form_capacity form =
+  let selected = match Pave.Composer.selection form.composer with
+    | Some (start, stop) -> stop - start | None -> 0 in
+  form.byte_limit - String.length (Pave.Composer.text form.composer) + selected
+
+let text_form_insert (form : text_form) value =
+  if Pave.Composer.safe_input value <> value then (
+    form.notice <- "Control text rejected · edit or retry";
+    form.blocked <- true)
+  else if String.length value > text_form_capacity form then (
+    form.notice <- "Over byte limit · edit or retry";
+    form.blocked <- true)
+  else if value <> "" then (
+    Pave.Composer.insert form.composer value;
+    form.notice <- ""; form.blocked <- false)
+
+let text_form_can_accept ~cols ~rows = cols >= 12 && rows >= 4
+
+(* This editor is separate from the conversation Composer, including its
+   history, undo journal, selection, paste provenance and kill buffer. *)
+let text_form_event ~bindings ~columns ~can_accept form event =
+  let editor = form.composer in
+  let append value =
+    if not form.paste_rejected then
+      if String.length value > text_form_capacity form -
+          Buffer.length form.paste_text then (
+        form.paste_rejected <- true;
+        form.notice <- "Paste over byte limit · nothing inserted";
+        form.blocked <- true)
+      else Buffer.add_string form.paste_text value in
+  let edit change =
+    let before = Pave.Composer.text editor in
+    change ();
+    if before <> Pave.Composer.text editor then (
+      form.notice <- ""; form.blocked <- false);
+    `Continue in
+  match event with
+  | `Paste `Start ->
+      if not form.pasting then (
+        form.pasting <- true; Buffer.clear form.paste_text;
+        form.paste_rejected <- false);
+      `Continue
+  | `Paste `End ->
+      if form.pasting then (
+        form.pasting <- false;
+        if not form.paste_rejected then (
+          Pave.Composer.begin_paste editor;
+          Fun.protect ~finally:(fun () -> Pave.Composer.end_paste editor)
+            (fun () -> text_form_insert form (Buffer.contents form.paste_text)));
+        Buffer.clear form.paste_text);
+      `Continue
+  | `Key _ when form.pasting ->
+      (* Paste keys are data, never editing, confirmation or cancellation.
+         Unsupported terminal controls reject the whole paste, not a prefix. *)
+      (match event with
+      | `Key (`Enter, _) -> append "\n"
+      | `Key (`Tab, _) -> append "\t"
+      | `Key (`ASCII char, []) -> append (String.make 1 char)
+      | `Key (`Uchar uchar, []) -> append (utf8 uchar)
+      | _ ->
+          form.paste_rejected <- true;
+          form.notice <- "Paste contains controls · nothing inserted";
+          form.blocked <- true);
+      `Continue
+  | `Key (`Escape, _) -> `Cancel
+  | `Key _ ->
+      (match Keybindings.resolve bindings Keybindings.Composer event with
+      | Some Keybindings.Interrupt -> `Cancel
+      | Some Keybindings.Submit ->
+          if not can_accept then (
+            form.notice <- "Resize to confirm · Esc cancels"; `Continue)
+          else if form.blocked then `Continue
+          else if String.trim (Pave.Composer.text editor) = "" then (
+            form.notice <- "Enter some text first"; `Continue)
+          else `Confirm (Pave.Composer.text editor)
+      | Some (Keybindings.Insert_ascii char) ->
+          text_form_insert form (String.make 1 char); `Continue
+      | Some (Keybindings.Insert_uchar uchar) ->
+          text_form_insert form (utf8 uchar); `Continue
+      | Some Keybindings.Newline -> text_form_insert form "\n"; `Continue
+      | Some Keybindings.Move_left -> edit (fun () -> Pave.Composer.left editor)
+      | Some Keybindings.Move_right -> edit (fun () -> Pave.Composer.right editor)
+      | Some Keybindings.Home -> edit (fun () -> Pave.Composer.home editor)
+      | Some Keybindings.End -> edit (fun () -> Pave.Composer.finish editor)
+      | Some Keybindings.Beginning_of_line ->
+          edit (fun () -> Pave.Composer.beginning_of_line editor)
+      | Some Keybindings.End_of_line ->
+          edit (fun () -> Pave.Composer.end_of_line editor)
+      | Some Keybindings.Erase -> edit (fun () -> Pave.Composer.erase editor)
+      | Some Keybindings.Delete -> edit (fun () -> Pave.Composer.delete editor)
+      | Some Keybindings.Erase_word -> edit (fun () -> Pave.Composer.erase_word editor)
+      | Some Keybindings.Word_left -> edit (fun () -> Pave.Composer.word_left editor)
+      | Some Keybindings.Word_right -> edit (fun () -> Pave.Composer.word_right editor)
+      | Some Keybindings.Select_left -> edit (fun () -> Pave.Composer.select_left editor)
+      | Some Keybindings.Select_right -> edit (fun () -> Pave.Composer.select_right editor)
+      | Some Keybindings.Undo -> edit (fun () -> Pave.Composer.undo editor)
+      | Some Keybindings.Redo -> edit (fun () -> Pave.Composer.redo editor)
+      | Some Keybindings.Kill_end -> edit (fun () -> Pave.Composer.kill_to_end editor)
+      | Some Keybindings.Kill_before -> edit (fun () -> Pave.Composer.kill_before editor)
+      | Some Keybindings.Vertical_up ->
+          edit (fun () -> ignore (Pave.Composer.vertical ~columns
+            ~measure:measure_text editor (-1)))
+      | Some Keybindings.Vertical_down ->
+          edit (fun () -> ignore (Pave.Composer.vertical ~columns
+            ~measure:measure_text editor 1))
+      | _ -> `Continue)
+  | _ -> `Continue
+
+let text_form_screen ~cols ~rows (form : text_form) =
+  let cols = max 1 cols and rows = max 1 rows in
+  let line attr text = styled_line cols attr (shorten_width cols text) in
+  if not (text_form_can_accept ~cols ~rows) then
+    Array.init rows (fun row ->
+      if row = rows - 1 then line warning "Esc cancel · resize"
+      else if row = 0 then line accent form.heading
+      else line warning "Resize to edit"), None
+  else
+    let columns = composer_field_width ~cols ~rows in
+    let prefix, _ = composer_chrome ~cols ~rows in
+    let lines = Pave.Composer.layout ~columns ~measure:measure_text form.composer in
+    let caret_row, caret_col =
+      Pave.Composer.position ~measure:measure_text form.composer lines in
+    let metadata_room = max 0 (rows - 6) in
+    let metadata = wrap_chooser_text ~columns:cols ~max_rows:metadata_room
+      (String.concat " " form.introduction) in
+    let notice_height = if form.notice <> "" && rows >= 5 then 1 else 0 in
+    let start = 2 + Array.length metadata + notice_height in
+    let field_height = rows - start - 1 in
+    let first = max 0 (min (caret_row - field_height + 1)
+      (Array.length lines - field_height)) in
+    let budget = Printf.sprintf "%d/%d bytes"
+      (String.length (Pave.Composer.text form.composer)) form.byte_limit in
+    let screen = Array.init rows (fun row ->
+      if row = 0 then line accent form.heading
+      else if row = 1 then
+        line (if form.blocked then warning else muted)
+          (if notice_height = 0 && form.notice <> "" then
+             form.notice ^ " · " ^ budget else budget)
+      else if row < 2 + Array.length metadata then
+        line muted metadata.(row - 2)
+      else if row < start then line warning form.notice
+      else if row = rows - 1 then line muted
+        (if cols >= 28 then enter_key ^ " confirm · Esc cancel" else "↵ OK · Esc")
+      else
+        let index = first + row - start in
+        if index >= Array.length lines then I.void cols 1
+        else
+          let wrapped = lines.(index) in
+          let raw = String.sub (Pave.Composer.text form.composer)
+            wrapped.start (wrapped.stop - wrapped.start) in
+          let content = match Pave.Composer.selection form.composer with
+            | Some (left, right) when left < wrapped.stop && right > wrapped.start ->
+                let left = max left wrapped.start - wrapped.start
+                and right = min right wrapped.stop - wrapped.start in
+                I.(string text_attr (sanitize (String.sub raw 0 left)) <|>
+                   string selected_attr (sanitize (String.sub raw left (right - left))) <|>
+                   string text_attr (sanitize (String.sub raw right (String.length raw - right))))
+            | _ -> I.string text_attr (sanitize raw) in
+          let marker = if row = start && first > 0 then "↑ "
+            else if row = rows - 2 && index < Array.length lines - 1 then "↓ "
+            else if index = 0 then "❯ " else "  " in
+          composer_row ~cols ~rows ~marker content) in
+    screen, Some (start + caret_row - first, min (cols - 1) (prefix + caret_col))
 
 let paint t =
   let cols, rows = Notty_unix.Term.size t.term in
@@ -1682,9 +1874,14 @@ let paint t =
     else
       let candidates = Array.length activity_rows + 1 + Array.length prompt_rows in
       if candidates > rows then -1 else rows - candidates in
-  let screen, activity_row = match t.approval_view with
-    | None -> screen, activity_row
-    | Some view -> approval_screen ~cols ~rows ~activity_rows view in
+  let screen, activity_row, form_cursor = match t.approval_view, t.text_form with
+    | Some view, _ ->
+        let screen, activity_row = approval_screen ~cols ~rows ~activity_rows view in
+        screen, activity_row, None
+    | None, Some form ->
+        let screen, cursor = text_form_screen ~cols ~rows form in
+        screen, -1, cursor
+    | None, None -> screen, activity_row, None in
   let output = Buffer.create 512 in
   let dirty = ref false in
   for row = 0 to rows - 1 do
@@ -1708,8 +1905,10 @@ let paint t =
   t.previous <- Some screen;
   let y = if rows < 6 then rows - 1
     else rows - 2 - editor_height + cursor_row in
-  let position = max 0 y + 1, max 0 cursor_col + 1 in
-  if t.approval_view <> None then (
+  let position = match form_cursor with
+    | Some (row, col) -> row + 1, col + 1
+    | None -> max 0 y + 1, max 0 cursor_col + 1 in
+  if t.approval_view <> None || (t.text_form <> None && form_cursor = None) then (
     Buffer.add_string output "\027[?25l";
     t.cursor_position <- None)
   else if !dirty || t.cursor_position <> Some position then (
@@ -1863,6 +2062,7 @@ let create ?(keybinding_overrides = []) ?(version = "source")
     transcript = Transcript_view.create (); tool_groups = Hashtbl.create 8;
     draft_groups = Hashtbl.create 8; draft_decoders = Hashtbl.create 8;
     scroll = 0; chooser = None; overlays = []; approval_view = None;
+    text_form = None;
     hint_suppressed = None;
     hint_draft = ""; hint_cursor = 0; hint_results = [];
     hint_truncated = false;
@@ -2241,11 +2441,6 @@ let clear_live t =
 let alert t message =
   t.status <- single_line message;
   paint t
-
-let utf8 uchar =
-  let buffer = Buffer.create 4 in
-  Buffer.add_utf_8_uchar buffer uchar;
-  Buffer.contents buffer
 
 let repaint_after_key t =
   if (not t.paste && not (Terminal_input.pending t.input))
@@ -2743,7 +2938,8 @@ let initial_candidates ~dynamic ~details values =
     values
 
 let choose ?(allow_custom = false) ?(intro = []) ?(plain = [])
-    ?(details = []) ?initial_status ?initial_filter ?initial_selected ?initial_listing
+    ?(details = []) ?(detail_rows = 2)
+    ?initial_status ?initial_filter ?initial_selected ?initial_listing
     ?wake_fd ?on_wake ?dynamic
     ?(segmented = false) ?scope_action
     ?(empty_message = "No available models yet") ?(count_label = "available")
@@ -2753,6 +2949,7 @@ let choose ?(allow_custom = false) ?(intro = []) ?(plain = [])
     else Array.of_list choices in
   let chooser = { title = sanitize title;
     intro = Array.of_list (List.map sanitize intro); plain;
+    detail_rows = max 0 detail_rows;
     choices = initial_candidates ~dynamic ~details initial;
     allow_custom; dynamic; segmented; scope_action;
     empty_message = sanitize empty_message; count_label = single_line count_label;
@@ -2871,6 +3068,52 @@ let choose ?(allow_custom = false) ?(intro = []) ?(plain = [])
                 paint t);
               loop ()
           | _ -> loop ())
+      | _ -> loop () in
+    loop ())
+
+let input_text ?intro ?max_bytes t ~title =
+  let form = create_text_form ?intro ?max_bytes ~title () in
+  let previous_form = t.text_form and previous_chooser = t.chooser
+  and previous_approval = t.approval_view and previous_overlays = t.overlays
+  and previous_scroll = t.scroll and previous_paste = t.paste in
+  let previous_hints = t.hint_draft, t.hint_cursor, t.hint_results,
+    t.hint_truncated, t.hint_selected, t.hint_offset, t.hint_suppressed in
+  t.text_form <- Some form;
+  t.chooser <- None;
+  t.approval_view <- None;
+  t.overlays <- Chooser_overlay :: previous_overlays;
+  t.paste <- false;
+  Fun.protect ~finally:(fun () ->
+    t.text_form <- previous_form;
+    t.chooser <- previous_chooser;
+    t.approval_view <- previous_approval;
+    t.overlays <- previous_overlays;
+    t.scroll <- previous_scroll;
+    t.paste <- previous_paste;
+    let draft, cursor, results, truncated, selected, offset, suppressed =
+      previous_hints in
+    t.hint_draft <- draft; t.hint_cursor <- cursor; t.hint_results <- results;
+    t.hint_truncated <- truncated; t.hint_selected <- selected;
+    t.hint_offset <- offset; t.hint_suppressed <- suppressed;
+    t.previous <- None;
+    paint t) (fun () ->
+    paint t;
+    let rec loop () =
+      t.paste <- form.pasting;
+      match next_input t with
+      | `End -> None
+      | `Resize _ -> paint_resized t; loop ()
+      | `Tick | `Wake -> paint t; loop ()
+      | (`Key _ | `Paste _) as event ->
+          let cols, rows = Notty_unix.Term.size t.term in
+          let result = text_form_event ~bindings:t.bindings
+            ~columns:(composer_field_width ~cols ~rows)
+            ~can_accept:(text_form_can_accept ~cols ~rows) form event in
+          t.paste <- form.pasting;
+          (match result with
+          | `Cancel -> None
+          | `Confirm text -> Some text
+          | `Continue -> repaint_after_key t; loop ())
       | _ -> loop () in
     loop ())
 

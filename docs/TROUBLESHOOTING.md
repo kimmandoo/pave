@@ -1,6 +1,20 @@
 # Troubleshooting
 
 
+### [2026-10-06] Mobile Control intent was filtered, dropped or silently shortened
+
+- **Context / Symptom:** Real CLI PTYs showed that an intent ending in `/` produced “No matches,” bracketed paste disappeared, and a 304-byte typed intent reached the provider as only 256 bytes. The dashboard also lacked Build/Install/Launch/Stop, closed entirely on Back, and clipped exact target information.
+- **Root Cause:** Control reused the chooser's filter buffer and slash handling instead of a text editor. The dashboard had no lifecycle action projection or parent-page navigation, and packed identity into a single row.
+- **Solution:** Added state-aware lifecycle actions and explicit parent navigation; moved full identity to wrapped details and inspect-only field/part pages. Used an isolated Composer-backed text form with a 4,096-byte limit, visible rejection and atomic paste. Kept proposals disabled, refreshed state/artifact validation before submission, and rejected entry during active turns.
+- **Prevention / Reference:** Actual color/NO_COLOR CLI PTYs accepted a complete 333-byte Unicode intent ending in `/`, rejected a 5,000-byte paste without a request, preserved drafts on cancel, blocked a removed artifact, and separately approved lifecycle effects. These used loopback provider, Gradle and ADB fixtures, not live SDK/device acceptance.
+
+### [2026-10-06] Slow-drip regression measured different client and handler clocks
+
+- **Context / Symptom:** The first full suite failed with `test_session_hub: slow drip survived the absolute request deadline`; the dashboard-focused checks passed.
+- **Root Cause:** The fixture started its 31-second observation window immediately after client connection; production arms the 30-second deadline when the accepted handler starts. Accept/worker scheduling therefore consumed the fixture's unrelated one-second margin rather than the reader's request budget.
+- **Solution:** Exercised the actual nonblocking HTTP reader over real sockets with one explicit shared deadline and continuous byte activity. Checked HTTP 408 before the later idle timeout, keeping production deadline and admission behavior unchanged.
+- **Prevention / Reference:** Measure timeout semantics against the same clock/budget supplied to the operation; do not enlarge arbitrary scheduler margins or weaken slow-drip rejection.
+
 ### [2026-10-06] Readiness fixture exited before the native runner observed READY
 
 - **Context / Symptom:** CI #237 (`37429750171`) failed on macOS/OCaml 5.3.0 at `test_workspace_process.ml`'s successful readiness assertion. The digest-verified `test-diagnostics-macos-26-5.3.0` artifact identified the assertion; the macOS 5.5.1 job passed.

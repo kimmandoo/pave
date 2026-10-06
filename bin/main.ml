@@ -3121,212 +3121,361 @@ let () =
     let mobile_dashboard () = match !journal with
       | None -> notify "Mobile workflows need a private saved session. Start one with /new or launch with --session PATH."
       | Some session ->
+          let module Dashboard = Pave.Workspace_mobile_dashboard in
+          let module Mobile = Pave.Workspace_mobile_run in
           let context = tool_context session in
-          let sessions = Pave.Workspace_mobile_run.sessions
-              context.Pave.Tools.mobile_run_manager in
-          let rows = List.map Pave.Workspace_mobile_run.render sessions in
-          let initial_session = match rows with row :: _ -> Some row | [] -> None in
-          let launch prompt = match !ui, !runner with
-            | Some screen, Some active ->
+          let snapshots () =
+            Mobile.sessions context.Pave.Tools.mobile_run_manager
+            |> List.map (fun (mobile : Mobile.session) ->
+              { mobile with state = mobile.state }) in
+          let artifact_available (mobile : Mobile.session) =
+            try
+              ignore (Mobile.artifact_path ~must_exist:true ~root:mobile.root
+                ~platform:mobile.platform mobile.app_path);
+              true
+            with Mobile.Error _ | Pave.Workspace_path.Error _ | Unix.Unix_error _ ->
+              false in
+          let flutter_integration_reason (mobile : Mobile.session) =
+            match mobile.platform with
+            | Mobile.Ios -> None
+            | Mobile.Android ->
+                if mobile.subroot <> "android" &&
+                   not (String.ends_with ~suffix:"/android" mobile.subroot) then
+                  Some "selected Android app is not bound to a Flutter package's android/ host."
+                else if not (List.mem mobile.state [Mobile.Installed; Mobile.Running]) then
+                  Some "selected Flutter app is not recorded as installed on its session device."
+                else None in
+          let entries ~artifact_available (mobile : Mobile.session) =
+            Dashboard.entries ~platform:mobile.platform ~state:mobile.state
+              ~artifact_available
+              ~ios_accessibility_reason:(match mobile.platform with
+                | Mobile.Android -> None
+                | Mobile.Ios ->
+                    Pave.Tools.mobile_xctest_capability context ~root:mobile.root mobile)
+              ~flutter_integration_reason:(flutter_integration_reason mobile)
+              ~verification_available:
+                (Pave.Tools.mobile_verify_evidence_available context ~root:mobile.root) in
+          let session_label (mobile : Mobile.session) =
+            Printf.sprintf "%s · %s · %s · app %s" mobile.id
+              (Mobile.platform_name mobile.platform) (Mobile.state_name mobile.state)
+              mobile.app_id in
+          let session_fields (mobile : Mobile.session) = [
+              "Session", mobile.id;
+              "App", mobile.app_id;
+              "Device", mobile.device;
+              "Platform", Mobile.platform_name mobile.platform;
+              "Recorded app state", Mobile.state_name mobile.state;
+              "Workspace", mobile.root;
+              "Project", mobile.subroot;
+              "Artifact", mobile.app_path;
+            ] @
+              Option.fold ~none:[] ~some:(fun value -> ["Variant", value]) mobile.variant @
+              Option.fold ~none:[] ~some:(fun value -> ["Scheme", value]) mobile.scheme @
+              Option.fold ~none:[] ~some:(fun value -> ["Activity", value]) mobile.activity @
+              (match mobile.ios_device_binding with
+               | None -> []
+               | Some binding -> [
+                   "Lifecycle session", binding.device_session_id;
+                   "Inventory", binding.inventory_id;
+                   "Simulator", binding.simulator_id;
+                   "XCTest target", binding.target_id
+                 ]) in
+          let session_details mobile =
+            String.concat "\n" (List.map (fun (name, value) ->
+              name ^ ": " ^ value) (session_fields mobile) @ [
+                "State provenance: current-run tool context; not a live app/device health probe.";
+                "Selections are in memory; re-discover/select after restarting Pave."
+              ]) in
+          let exact_parts value =
+            let length = String.length value in
+            let rec split offset parts =
+              if offset >= length then List.rev parts else
+              let stop = ref (min length (offset + 6)) in
+              while !stop < length &&
+                Char.code value.[!stop] land 0xc0 = 0x80 do
+                incr stop
+              done;
+              split !stop (String.sub value offset (!stop - offset) :: parts) in
+            split 0 [] in
+          let listing ?preferred ?status rows : Tui.listing_update = {
+            verified = List.map (fun (value, _, _) -> value) rows;
+            labels = List.map (fun (value, label, _) -> value, label) rows;
+            details = List.map (fun (value, _, detail) -> value, detail) rows;
+            status; status_pages = []; preferred
+          } in
+          let ready_runner () = match !ui, !runner with
+            | Some _, Some active ->
+                Pave.Turn_runner.drain active;
                 if Pave.Turn_runner.busy active then
-                  notify "Mobile dashboard actions cannot be queued during an active turn."
-                else (
-                  Pave.Turn_runner.submit active prompt;
-                  Tui.alert screen "Mobile workflow submitted; tool effects still require separate approval.")
-            | _ -> notify "Mobile workflow requires the interactive session runner." in
+                  Error "Mobile dashboard actions cannot be queued during an active turn. Wait for it to finish."
+                else Ok active
+            | _ -> Error "Mobile workflow requires the interactive session runner." in
+          let launch ?(validate = fun () -> Ok ()) prompt =
+            match ready_runner () with
+            | Error reason -> Error reason
+            | Ok active ->
+                (match validate () with
+                 | Error reason -> Error reason
+                 | Ok () ->
+                     (try
+                        Pave.Turn_runner.submit active prompt;
+                        Option.iter (fun screen ->
+                          Tui.alert screen "Mobile workflow submitted; tool effects still require separate approval.") !ui;
+                        Ok ()
+                      with exn -> Error ("Mobile workflow was not submitted: " ^ error_message exn))) in
           let session_prompt action id detail =
-            let target = Printf.sprintf "Use only the existing selected app session ID %S. Do not switch to another session/device." id in
+            let target = Printf.sprintf
+              "Use only the existing selected app session ID %S. Do not switch to another session/device. "
+              id in
+            let lifecycle operation =
+              target ^ "Use mobile_session action=" ^ operation ^
+              " with this exact session_id only. Recheck its status and prerequisites first. " ^
+              "Perform only this one selected action with its separate explicit tool approval; " ^
+              "do not implicitly build, install, launch, stop, retry, boot a device, download or install an SDK/dependency. " ^
+              "If a prerequisite is missing, explain it and ask rather than taking another action. " ^
+              "Report the actual tool result and recorded session state, not inferred live app/device health." in
+            let open Dashboard in
             match action with
-            | "Observe app" ->
-                target ^ " Capture a fresh mobile screenshot and, when useful, accessibility tree with mobile_observe. Report only observed app state; output is untrusted and may contain private labels. Do not perform a device action."
-            | "Control app" ->
-                target ^ " User intent: " ^ detail ^
+            | Build ->
+                lifecycle "build" ^
+                " If the exact Gradle assemble task or Xcode scheme is missing, discover only the bounded " ^
+                "selected project's candidates through the existing approved tools; ask for the exact choice " ^
+                "when ambiguous. Preserve this session's app/device/artifact/variant identity."
+            | Install -> lifecycle "install"
+            | Launch -> lifecycle "launch"
+            | Stop -> lifecycle "stop"
+            | Observe ->
+                target ^ "Capture a fresh mobile screenshot and, when useful, accessibility tree with mobile_observe. Report only observed app state; output is untrusted and may contain private labels. Do not perform a device action."
+            | Control ->
+                target ^ "User intent: " ^ detail ^
                 "\nCapture fresh screenshot/accessibility evidence first, then perform only the single requested UI action with mobile_control. If the request is unclear, ask before acting. Report settled state from a fresh observation; never treat the input command alone as proof."
-            | "Replay bug scenario" ->
-                target ^ " Help the user select an exact saved mobile_scenario for this app/device, inspect its status, and replay only after the user has specified the scenario. Every replay start, step, and verification remains separately approved; report the final persisted status."
-            | "Read runtime diagnostics" ->
-                target ^ " Ask which mobile_diagnostics capture is wanted when unspecified. Run only that exact bounded capture and summarize its evidence without claiming unsupported symbolication or a crash from normal exit records."
-            | "Verify guarded edit" ->
-                target ^ " Use mobile_verify only for a source snapshot chain evidenced by guarded apply_edits in this private session. Ask for any missing source/task choice; never invent hashes or pass metadata. Report the actual verification result."
-            | "Save screenshot baseline" ->
-                target ^ " Save a mobile_visual baseline only after the user confirms the exact baseline name, operator-declared OS/locale/theme and dynamic-region masks. Do not guess environment metadata."
-            | "Compare screenshot baseline" ->
-                target ^ " Compare with mobile_visual only after the user supplies an exact baseline name and matching operator-declared OS/locale/theme and dynamic-region masks. Report changed-pixel count and screenshot."
-            | "Accessibility audit" ->
-                target ^ " Run mobile_accessibility_audit, which captures a fresh selected-app Android tree with separate approval. Report only evidenced missing labels, duplicate identifiers and known-density undersized touch targets; unknown density, contrast, focus order and screen-reader behavior remain unknown."
-            | "Environment experiment" ->
-                target ^ " Use mobile_environment only for one user-selected app locale, emulator-global theme or orientation change. Preview the exact pre-state, request separate approval for apply and restore, and never infer permissions/network controls or automatically restore."
-            | "Exercise deep link" ->
-                target ^ " User-specified URL and exact destination assertion: " ^ detail ^
-                "\nUse mobile_app_lifecycle to inspect the selected APK's handlers, dispatch only the exact verified selected-app handler and verify the destination from a fresh package-bound accessibility observation. Never delegate to another app."
-            | "Lifecycle scenario" ->
-                target ^ " User-specified lifecycle transition/scenario: " ^ detail ^
-                "\nUse mobile_app_lifecycle only for supported background, resume or process-recreation steps. Inspect the exact app/session first; explain data-loss risk, require separate approval per transition and verify fresh state. Never clear data, uninstall or touch a foreign app."
-            | "iOS accessibility tree" ->
-                target ^ " Capture only a fresh accessibility tree with mobile_observe action=accessibility for this exact running iOS session. Preserve the separate Native XCTest approval; do not perform a device action."
-            | "Android performance" ->
-                target ^ " Use mobile_performance only for supported app-scoped Android launch, frame or memory measurement. Ask which action and warm/cold condition; show units, exact build/PID provenance and sample completeness, and never infer energy or unsupported counters."
-            | "Flutter integration test" ->
-                target ^ " User-selected integration_test target: " ^ detail ^
-                "\nUse mobile_check stack=flutter with the exact package subroot and selected session ID. Discover and present the bounded integration_test targets first; run only the user's chosen exact target with no pub get or dependency/SDK installation. Before execution disclose that Flutter may compile, deploy and install the test runner/app on the already selected emulator; rely on the tool's separate approval and report actual test assertions."
-            | _ -> assert false in
-          let start_workflow action id =
-            let detail = match action with
-              | "Control app" -> Some ("Mobile · UI action intent",
-                  ["Describe the one UI action to perform.";
-                   "Escape cancels without submitting or changing app state."])
-              | "Exercise deep link" -> Some ("Mobile · exact deep link",
-                  ["Enter the exact registered URL and exact destination text or content description.";
-                   "The tool rejects external-app delegation; Escape submits nothing."])
-              | "Environment experiment" -> Some ("Mobile · environment intent",
-                  ["Name one supported app locale, emulator-global theme or orientation change.";
-                   "Apply and restore require separate approvals; Escape submits nothing."])
-              | "Lifecycle scenario" -> Some ("Mobile · lifecycle intent",
-                  ["Name one background, resume or process-recreation transition and exact state to verify.";
-                   "Process recreation can lose unsaved app state; Escape submits nothing."])
-              | "Flutter integration test" -> Some ("Mobile · Flutter integration test",
-                  ["Enter the exact discovered integration_test target path.";
-                   "Requires an existing Flutter runtime, dependencies, installed selected app and approved ready emulator; no pub get. Escape submits nothing."])
-              | _ -> None in
-            match detail with
-            | None -> launch (session_prompt action id "")
-            | Some (title, intro) ->
-                (match !ui with
-                 | None -> ()
-                 | Some screen ->
-                     (match Tui.choose ~allow_custom:true ~intro screen ~title ~choices:[] with
-                      | Some intent when String.trim intent <> "" ->
-                          launch (session_prompt action id (String.trim intent))
-                      | Some _ -> notify "Enter a nonempty mobile workflow intent."
-                      | None -> ())) in
+            | Replay ->
+                target ^ "Help the user select an exact saved mobile_scenario for this app/device, inspect its status, and replay only after the user has specified the scenario. Every replay start, step, and verification remains separately approved; report the final persisted status."
+            | Diagnostics ->
+                target ^ "Ask which mobile_diagnostics capture is wanted when unspecified. Run only that exact bounded capture and summarize its evidence without claiming unsupported symbolication or a crash from normal exit records."
+            | Verify ->
+                target ^ "Use mobile_verify only for a source snapshot chain evidenced by guarded apply_edits in this private session. Ask for any missing source/task choice; never invent hashes or pass metadata. Report the actual verification result."
+            | Save_baseline ->
+                target ^ "Save a mobile_visual baseline only after the user confirms the exact baseline name, operator-declared OS/locale/theme and dynamic-region masks. Do not guess environment metadata."
+            | Compare_baseline ->
+                target ^ "Compare with mobile_visual only after the user supplies an exact baseline name and matching operator-declared OS/locale/theme and dynamic-region masks. Report changed-pixel count and screenshot."
+            | Accessibility_audit | Environment | Deep_link | Lifecycle | Ios_tree
+            | Android_performance | Flutter_integration | Ios_performance
+            | Permission | Network ->
+                invalid_arg "unavailable mobile proposals cannot be submitted" in
+          let revalidate (mobile : Mobile.session) action =
+            match List.find_opt (fun (fresh : Mobile.session) ->
+                fresh.id = mobile.id) (snapshots ()) with
+            | None -> Error "The selected mobile session is no longer available; no action submitted."
+            | Some fresh ->
+                (match List.find_opt (fun (entry : Dashboard.item) ->
+                    entry.action = action)
+                    (entries ~artifact_available:(artifact_available fresh) fresh) with
+                 | None -> Error "The selected mobile action is no longer available; no action submitted."
+                 | Some { unavailable_reason = Some reason; _ } -> Error reason
+                 | Some _ when fresh.state <> mobile.state ||
+                     fresh.root <> mobile.root || fresh.subroot <> mobile.subroot ||
+                     fresh.platform <> mobile.platform || fresh.device <> mobile.device ||
+                     fresh.app_id <> mobile.app_id || fresh.app_path <> mobile.app_path ||
+                     fresh.scheme <> mobile.scheme || fresh.variant <> mobile.variant ||
+                     fresh.activity <> mobile.activity ||
+                     fresh.ios_device_binding <> mobile.ios_device_binding ->
+                     Error "The selected session changed while this page was open; review the refreshed state. No action submitted."
+                 | Some _ when Dashboard.proposed action ->
+                     Error "This proposal is unavailable; no action submitted."
+                 | Some _ -> Ok ()) in
+          let start_workflow screen mobile action =
+            match ready_runner () with
+            | Error reason -> Some (Error reason)
+            | Ok _ ->
+                (match revalidate mobile action with
+                 | Error reason -> Some (Error reason)
+                 | Ok () ->
+                     let intent = match action with
+                       | Dashboard.Control ->
+                           Tui.input_text screen ~title:"Mobile · UI action intent"
+                             ~intro:["Describe the one UI action to perform.";
+                               "Escape returns to actions without submitting or changing your draft."]
+                       | _ -> Some "" in
+                     Option.map (fun detail ->
+                       launch ~validate:(fun () -> revalidate mobile action)
+                         (session_prompt action mobile.Mobile.id detail)) intent) in
           (match !ui with
            | None ->
+               let rows = List.map Mobile.render (Mobile.sessions context.mobile_run_manager) in
                emit_lines (if rows = [] then
                  ["No mobile app sessions.";
                   "Use an interactive private session and /mobile to start a mobile workflow."]
                  else "Mobile app sessions · /mobile opens actions:" :: rows)
            | Some screen ->
-               let choices = "Create or select app session" :: rows in
-               let intro = if rows = [] then [
-                 "No app sessions yet; choose Create or select app session.";
-                 "Device/shell actions need approval; Esc cancels."]
-               else [
-                 "Newest session preselected; select a row to open its actions.";
-                 "Create/select starts discovery; effects need approval; Esc cancels."] in
-               let selected = Tui.choose ?initial_selected:initial_session
-                 ~intro screen ~title:"Mobile dashboard" ~choices in
-               match selected with
-               | None -> ()
-               | Some "Create or select app session" ->
-                  launch ("Inspect this workspace with mobile_project, then help me " ^
-                    "select or create one exact mobile app session. Show candidate evidence " ^
-                    "and ask me to choose when ambiguous. Use approved device/scheme " ^
-                    "inventories; bind an iOS session to Native XCTest only with both exact " ^
-                    "device lifecycle session and inventory IDs from an Owned Simulator. " ^
-                    "Without them, keep ordinary iOS session use and mark tree capture " ^
-                    "unavailable. Do not boot, install, launch, build or test without the " ^
-                    "existing tool's separate explicit approval. Do not invent app IDs, " ^
-                    "artifact paths, schemes, variants or device identities.")
-               | Some row ->
-                   (match List.find_opt (fun (mobile : Pave.Workspace_mobile_run.session) ->
-                       Pave.Workspace_mobile_run.render mobile = row) sessions with
-                    | None -> notify "The selected mobile session is no longer available; reopen /mobile."
-                    | Some mobile ->
-                        let flutter_integration_reason = match mobile.platform with
-                          | Pave.Workspace_mobile_run.Ios -> None
-                          | Pave.Workspace_mobile_run.Android ->
-                              let package_subroot =
-                                if mobile.subroot = "android" then Some "."
-                                else if String.ends_with ~suffix:"/android" mobile.subroot then
-                                  Some (String.sub mobile.subroot 0
-                                    (String.length mobile.subroot - String.length "/android"))
-                                else None in
-                              (match package_subroot with
-                               | None -> Some
-                                   "selected Android app is not bound to a Flutter package's android/ host."
-                               | Some package_subroot ->
-                                   let expected_host =
-                                     if package_subroot = "." then "android"
-                                     else package_subroot ^ "/android" in
-                                   let prefix =
-                                     if package_subroot = "." then ""
-                                     else package_subroot ^ "/" in
-                                   if mobile.subroot <> expected_host ||
-                                      not (String.starts_with ~prefix mobile.app_path) then
-                                     Some "selected APK does not belong to the exact Flutter package."
-                                   else if not (List.mem mobile.state [
-                                       Pave.Workspace_mobile_run.Installed;
-                                       Pave.Workspace_mobile_run.Running]) then
-                                     Some "selected Flutter app is not installed on its session device."
-                                   else
-                                     (try
-                                        let discovery =
-                                          Pave.Workspace_flutter_focus.discover_integration_tests
-                                            ~root:mobile.root ~subroot:package_subroot in
-                                        if discovery.targets = [] then
-                                          Some "no existing integration_test target is available."
-                                        else if not
-                                            (Pave.Workspace_flutter_focus.flutter_runtime_available ()) then
-                                          Some "Flutter CLI is not installed; no runtime will be downloaded."
-                                        else
-                                          let ready = Mutex.lock context.mobile_lock;
-                                          Fun.protect
-                                            ~finally:(fun () -> Mutex.unlock context.mobile_lock)
-                                            (fun () -> match context.android_inventory with
-                                              | Some inventory
-                                                when inventory.root = mobile.root &&
-                                                     inventory.subroot = mobile.subroot ->
-                                                  List.exists
-                                                    (fun (device : Pave.Workspace_android_devices.device) ->
-                                                      device.serial = mobile.device &&
-                                                      device.emulator &&
-                                                      device.state = Pave.Workspace_android_devices.Ready)
-                                                    inventory.devices
-                                              | _ -> false) in
-                                          if not ready then Some
-                                            "selected emulator is not in the current approved ready-device inventory."
-                                          else None
-                                      with Pave.Workspace_flutter_focus.Error message ->
-                                        Some message)) in
-                        let ios_accessibility_reason =
-                          match mobile.platform with
-                          | Pave.Workspace_mobile_run.Android -> None
-                          | Pave.Workspace_mobile_run.Ios ->
-                              Pave.Tools.mobile_xctest_capability
-                                context ~root:mobile.root mobile in
-                        let action_entries = Pave.Workspace_mobile_dashboard.entries
-                          ~platform:mobile.platform ~state:mobile.state
-                          ~ios_accessibility_reason ~flutter_integration_reason
-                          ~verification_available:
-                            (Pave.Tools.mobile_verify_evidence_available
-                              context ~root:mobile.root) in
-                        let label (entry : Pave.Workspace_mobile_dashboard.item) =
-                          match entry.unavailable_reason with
-                          | None -> entry.action
-                          | Some _ -> entry.action ^ " — unavailable" in
-                        let choices = List.map label action_entries @ ["Back"] in
-                        let details = List.filter_map
-                          (fun (entry : Pave.Workspace_mobile_dashboard.item) ->
-                            Option.map (fun reason ->
-                              label entry, reason) entry.unavailable_reason)
-                          action_entries in
-                        let action = Tui.choose ~details
-                          ~intro:[row;
-                            "Disabled actions show their exact reason; device effects still need separate approval."]
-                          screen ~title:("Mobile · " ^ mobile.id) ~choices in
-                        (match action with
-                         | None | Some "Back" -> ()
-                         | Some selected ->
-                             (match List.find_opt
-                                 (fun (entry : Pave.Workspace_mobile_dashboard.item) ->
-                                   label entry = selected) action_entries with
-                              | None ->
-                                  notify "Mobile action changed; reopen /mobile to refresh its capabilities."
-                              | Some { unavailable_reason = Some reason; _ } ->
-                                  notify (selected ^ ": " ^ reason)
-                              | Some { action; unavailable_reason = None } ->
-                                  start_workflow action mobile.id))
-                        )) in
+               let action_row mobile recommended (entry : Dashboard.item) =
+                 let label = Dashboard.label entry.action ^
+                   (match entry.unavailable_reason with None -> "" | Some _ -> " — unavailable") ^
+                   (if entry.action = recommended then " · next" else "") in
+                 let detail = entry.description ^ "\n" ^
+                   (match entry.unavailable_reason with
+                    | None -> "Requires separate approval for tool effects."
+                    | Some reason -> "Unavailable: " ^ reason) ^
+                   "\n" ^ session_details mobile in
+                 Dashboard.key entry.action, label, detail in
+               let action_selections = Hashtbl.create 8 in
+               let rec root_page ?preferred ?status () =
+                 let sessions = snapshots () in
+                 let preferred = match preferred, sessions with
+                   | Some _, _ -> preferred
+                   | None, mobile :: _ -> Some mobile.Mobile.id
+                   | None, [] -> None in
+                 let rows = ("create", "Create or select app session",
+                   "Discover exact app/device candidates; ask when ambiguous. Effects require separate approval. No implicit build/install/launch/boot or SDK download.") ::
+                   List.map (fun mobile ->
+                     mobile.Mobile.id, session_label mobile, session_details mobile) sessions in
+                 match Tui.choose screen ~title:"Mobile dashboard" ~choices:[]
+                   ~detail_rows:10 ~count_label:"sessions"
+                   ~initial_listing:(listing ?preferred ?status rows)
+                   ~intro:["Current-run selections; re-discover/select after restarting Pave.";
+                     "Recorded app state is not live device health. Escape closes the dashboard."] with
+                 | None -> ()
+                 | Some "create" ->
+                     (match launch ("Inspect this workspace with mobile_project, then help me " ^
+                       "select or create one exact mobile app session. Show candidate evidence " ^
+                       "and ask me to choose when ambiguous. Use approved device/scheme " ^
+                       "inventories; bind an iOS session to Native XCTest only with both exact " ^
+                       "device lifecycle session and inventory IDs from an Owned Simulator. " ^
+                       "Without them, keep ordinary iOS session use and mark tree capture " ^
+                       "unavailable. Do not boot, install, launch, build or test without the " ^
+                       "existing tool's separate explicit approval. Do not invent app IDs, " ^
+                       "artifact paths, schemes, variants or device identities.") with
+                      | Ok () -> ()
+                      | Error status -> root_page ~preferred:"create" ~status ())
+                 | Some id ->
+                     if actions_page id () then ()
+                     else root_page ~preferred:id ()
+               and actions_page id ?preferred ?status () =
+                 match List.find_opt (fun (mobile : Mobile.session) ->
+                     mobile.id = id) (snapshots ()) with
+                 | None ->
+                     Tui.alert screen "The selected mobile session is no longer available.";
+                     false
+                 | Some mobile ->
+                     let artifact_available = artifact_available mobile in
+                     let action_entries = entries ~artifact_available mobile in
+                     let recommended = Dashboard.recommended ~state:mobile.state
+                       ~artifact_available in
+                     let rows = action_entries
+                       |> List.filter (fun (entry : Dashboard.item) ->
+                         not (Dashboard.proposed entry.action))
+                       |> List.map (action_row mobile recommended) in
+                     let rows = rows @ [
+                       "identity", "Session identity · exact fields",
+                       "Inspect complete app/device/project/artifact and lifecycle IDs, in ordered parts when needed.\n" ^
+                         session_details mobile;
+                       "unavailable", "Unavailable features · inspect only",
+                       "Acceptance/platform-gated proposals are inspectable but never submit a workflow.\n" ^
+                         session_details mobile;
+                       "back", "Back to sessions", "Return to the session list without submitting."
+                     ] in
+                     let preferred = match preferred with
+                       | Some value -> value
+                       | None -> Option.value (Hashtbl.find_opt action_selections id)
+                           ~default:(Dashboard.key recommended) in
+                     Hashtbl.replace action_selections id preferred;
+                     match Tui.choose screen ~title:("Mobile · " ^ id) ~choices:[]
+                       ~detail_rows:10 ~count_label:"actions"
+                       ~initial_listing:(listing ~preferred ?status rows)
+                       ~intro:["Recorded app state: " ^ Mobile.state_name mobile.state ^
+                         " · next: " ^ Dashboard.label recommended;
+                         "Selected app/device identity is in details. Back/Escape returns to sessions."] with
+                     | None | Some "back" -> false
+                     | Some "identity" ->
+                         identity_page id ();
+                         actions_page id ~preferred:"identity" ()
+                     | Some "unavailable" ->
+                         proposals_page id ();
+                         actions_page id ~preferred:"unavailable" ()
+                     | Some selected ->
+                         (match List.find_opt (fun (entry : Dashboard.item) ->
+                             Dashboard.key entry.action = selected) action_entries with
+                          | None ->
+                              actions_page id ~preferred:selected
+                                ~status:"The selected action changed; no action submitted." ()
+                          | Some { unavailable_reason = Some reason; _ } ->
+                              actions_page id ~preferred:selected ~status:reason ()
+                          | Some entry ->
+                              (match start_workflow screen mobile entry.action with
+                               | Some (Ok ()) -> true
+                               | None -> actions_page id ~preferred:selected ()
+                               | Some (Error status) ->
+                                   actions_page id ~preferred:selected ~status ()))
+               and proposals_page id ?preferred ?status () =
+                 match List.find_opt (fun (mobile : Mobile.session) ->
+                     mobile.id = id) (snapshots ()) with
+                 | None -> ()
+                 | Some mobile ->
+                     let artifact_available = artifact_available mobile in
+                     let proposals = entries ~artifact_available mobile |> List.filter
+                       (fun (entry : Dashboard.item) -> Dashboard.proposed entry.action) in
+                     let recommended = Dashboard.recommended ~state:mobile.state
+                       ~artifact_available in
+                     let rows = List.map (action_row mobile recommended) proposals @ [
+                       "back", "Back to actions", "Return without submitting."
+                     ] in
+                     match Tui.choose screen ~title:"Mobile · unavailable features"
+                       ~choices:[] ~detail_rows:10 ~count_label:"proposals"
+                       ~initial_listing:(listing ?preferred ?status rows)
+                       ~intro:["Inspect only: these features cannot submit a model request.";
+                         "Select a feature for its exact reason. Back/Escape returns to actions."] with
+                     | None | Some "back" -> ()
+                     | Some selected ->
+                         let reason = match List.find_opt (fun (entry : Dashboard.item) ->
+                             Dashboard.key entry.action = selected) proposals with
+                           | Some { unavailable_reason = Some reason; _ } -> reason
+                           | _ -> "This proposal is unavailable; no action submitted." in
+                         proposals_page id ~preferred:selected ~status:reason ()
+               and identity_page id ?preferred () =
+                 match List.find_opt (fun (mobile : Mobile.session) ->
+                     mobile.id = id) (snapshots ()) with
+                 | None -> ()
+                 | Some mobile ->
+                     let fields = session_fields mobile in
+                     let rows = List.map (fun (name, value) ->
+                       name, name, value) fields @ [
+                       "back", "Back to actions", "Return without submitting."
+                     ] in
+                     (match Tui.choose screen ~title:"Mobile · exact session identity"
+                       ~choices:[] ~detail_rows:10 ~count_label:"fields"
+                       ~initial_listing:(listing ?preferred rows)
+                       ~intro:["Current-run session values; recorded state is not a live health probe.";
+                         "Select a field to read every ordered part. Escape returns to actions."] with
+                      | None | Some "back" -> ()
+                      | Some field ->
+                          identity_parts_page id field ();
+                          identity_page id ~preferred:field ())
+               and identity_parts_page id field ?preferred () =
+                 match List.find_opt (fun (mobile : Mobile.session) ->
+                     mobile.id = id) (snapshots ()) with
+                 | None -> ()
+                 | Some mobile ->
+                     (match List.assoc_opt field (session_fields mobile) with
+                      | None -> ()
+                      | Some value ->
+                          let parts = exact_parts value in
+                          let count = List.length parts in
+                          let rows = List.mapi (fun index part ->
+                            string_of_int index, part, part) parts @ [
+                            "back", "Back to identity fields", "Return without submitting."
+                          ] in
+                          match Tui.choose screen
+                            ~title:(Printf.sprintf "Mobile identity · %s · %d parts" field count)
+                            ~choices:[] ~detail_rows:10 ~count_label:"parts"
+                            ~initial_listing:(listing ?preferred rows)
+                            ~intro:["Exact value in ordered UTF-8-safe parts; join with no added spaces.";
+                              "Inspect only. Back/Escape returns to identity fields."] with
+                          | None | Some "back" -> ()
+                          | Some selected ->
+                              identity_parts_page id field ~preferred:selected ()) in
+               (match ready_runner () with
+                | Error message -> Tui.alert screen message
+                | Ok _ -> root_page ())) in
     let show_job manager id =
       match Pave.Session_jobs.find manager ~id with
       | None -> notify "Error: no such job in the active session"

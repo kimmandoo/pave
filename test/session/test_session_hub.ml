@@ -301,24 +301,33 @@ let () =
         with Unix.Unix_error _ -> true) in
   check refused "connection accepted after close";
 
-  (* A slow drip has activity within the idle timeout but must not hold a
-     connection past the absolute request deadline. *)
-  let drip_hub = Hub.create ~port:0 ~token ~session_id ~read_title:(fun () -> title)
-      ~read_entries:(fun () -> []) ~read_pending:(fun () -> 0)
-      ~submit:(fun _ -> Ok ()) () in
-  let fd = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
-  Fun.protect ~finally:(fun () -> Unix.close fd; Hub.close drip_hub) (fun () ->
-    Unix.connect fd (Unix.ADDR_INET (Unix.inet_addr_loopback, Hub.port drip_hub));
-    write_all fd (Bytes.of_string "GET /healthz HTTP/1.1\r\nx-drip: ");
-    let deadline = Unix.gettimeofday () +. Hub.request_deadline +. 1. in
-    let rec drip () =
-      let readable, _, _ = Unix.select [fd] [] [] 0.25 in
-      if readable <> [] then ()
-      else if Unix.gettimeofday () >= deadline then
-        fail "slow drip survived the absolute request deadline"
-      else (write_all fd (Bytes.of_string "a"); drip ()) in
-    drip ();
-    let response = read_all fd in
-    check (contains response "408") "slow drip must receive request timeout");
+  (* Exercise the reader with an explicit shared deadline: a client-connect
+     timestamp predates accept/worker scheduling and cannot measure the
+     production handler's budget. Activity must not refresh this deadline. *)
+  let reader, writer = Unix.socketpair Unix.PF_UNIX Unix.SOCK_STREAM 0 in
+  Fun.protect ~finally:(fun () -> Unix.close reader; Unix.close writer) (fun () ->
+    Unix.set_nonblock reader;
+    let deadline = Unix.gettimeofday () +. 0.5 in
+    let outcome = ref None in
+    let worker = Thread.create (fun () ->
+      let status = try ignore (Hub.read_request ~deadline reader); None
+        with Hub.Http_error (status, _) -> Some status in
+      outcome := Some (status, Unix.gettimeofday ())) () in
+    Fun.protect ~finally:(fun () ->
+      Unix.shutdown writer Unix.SHUTDOWN_SEND;
+      Thread.join worker) (fun () ->
+      write_all writer (Bytes.of_string "GET /healthz HTTP/1.1\r\nx-drip: ");
+      let rec drip () =
+        if Unix.gettimeofday () < deadline then (
+          write_all writer (Bytes.of_string "a");
+          Thread.delay 0.025;
+          drip ()) in
+      drip ();
+      Thread.join worker;
+      check (match !outcome with
+        | Some (Some 408, finished) ->
+            finished -. deadline < Hub.io_timeout /. 2.
+        | _ -> false)
+        "slow drip must reach the shared absolute deadline, not the later idle timeout"));
 
   print_endline "test_session_hub: ok"

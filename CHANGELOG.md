@@ -1,6 +1,9 @@
 # Changelog
 ## 2026-10-06
 
+- fix(mobile): restored state-aware Build/Install/Launch/Stop dashboard workflows, recommended usable next steps, revalidated stale targets and artifacts, and rejected workflow queuing during active turns.
+- fix(tui): returned dashboard Back/Escape to parent pages, exposed exact session identity on narrow terminals, grouped unaccepted features without enabling them, and replaced filtered/truncated Control intents with a bounded Unicode/paste-capable editor.
+- test(session): measured slow-drip timeout behavior against one explicit reader deadline instead of mixing client-connect and handler-start clocks; retained rejection before the later idle timeout.
 - fix(mobile): gated dashboard actions by platform, app state, recorded evidence and completed feature acceptance; exposed exact unavailable reasons without submitting disabled workflows.
 - fix(security): rejected unquoted brace expansion in wildcard shell grants and required per-call review for sensitive mutations.
 - fix(mobile): decoded Paeth rows against the prior row and accepted positive multi-digit Gradle summaries despite unrelated `NO-SOURCE` tasks.

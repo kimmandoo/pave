@@ -7,6 +7,7 @@ let chooser : Tui.chooser = {
   title = "Model";
   intro = [||];
   plain = ["Back · authentication"; "Skip setup"];
+  detail_rows = 2;
   choices = [| model "unverified/suggestion" "Suggestion" |];
   allow_custom = true;
   dynamic = true;
@@ -145,6 +146,25 @@ let () =
       ~cols ~height:6 detailed in
     assert (String.concat "" (Array.to_list detail) = detail_a && page >= 3))
     [24; 36; 80];
+  let expanded = { detailed with detail_rows = 6;
+    choices = [| { a with detail = Some (String.make 180 'x') };
+      b; model "third" "Third" |]; selected = 0; filtered = None } in
+  let _, _, _, default_detail, _ =
+    Tui.chooser_sections ~cols:24 ~height:12
+      { expanded with detail_rows = 2; filtered = None } in
+  let _, _, _, expanded_detail, expanded_page =
+    Tui.chooser_sections ~cols:24 ~height:12 expanded in
+  assert (Array.length default_detail = 2 &&
+    Array.length expanded_detail = 6 && expanded_page >= 3);
+  assert (String.ends_with ~suffix:"…" expanded_detail.(5));
+  List.iter (fun height ->
+    let intro, status, empty, detail, page =
+      Tui.chooser_sections ~cols:24 ~height expanded in
+    assert (Array.length detail <= 6 && page >= min 3 (max 0 (height - 1)) &&
+      intro + Array.length status + empty + Array.length detail + page =
+        max 0 (height - 1));
+    assert (Array.for_all (fun line -> measure line <= 20) detail))
+    [1; 2; 3; 4; 6; 8; 12];
   let review : Tui.approval_view = {
     heading = "Tool permission"; context = "One action";
     lines = ["Tool: write_file"; "Tier: WRITE"; "Path: reviewed.txt"; "Content: exact"];

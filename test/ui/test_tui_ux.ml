@@ -19,6 +19,7 @@ let () =
     title = "Mobile";
     intro = [||];
     plain = [];
+    detail_rows = 2;
     choices = Tui.initial_candidates ~dynamic:false
       ~details:[blocked_label, blocked_reason]
       [|blocked_label; "Back"|];
@@ -42,6 +43,101 @@ let () =
       ~cols:100 ~height:8 blocked_chooser in
   expect "static chooser carries an exact gated-action reason"
     (Array.to_list selected_detail = [blocked_reason]);
+  let form = Tui.create_text_form ~title:"Intent"
+    ~intro:["Describe the app interaction without changing your message draft"] () in
+  let key key = `Key (key, []) in
+  let handle ?(can_accept = true) event =
+    Tui.text_form_event ~bindings:Keybindings.bindings ~columns:18
+      ~can_accept form event in
+  expect "empty form cannot confirm" (handle (key `Enter) = `Continue);
+  expect "blank text is not a completed intent"
+    (handle (key (`ASCII ' ')) = `Continue &&
+     handle (key `Enter) = `Continue);
+  ignore (handle (key `Backspace));
+  let intent = String.make 304 'x' ^ " 한글/" in
+  ignore (handle (`Paste `Start));
+  Uutf.String.fold_utf_8 (fun () _ -> function
+    | `Uchar uchar -> ignore (handle (key (`Uchar uchar)))
+    | `Malformed _ -> fail "test intent is valid UTF-8") () intent;
+  expect "paste data is not committed until its closing delimiter"
+    (Pave.Composer.text form.composer = "");
+  ignore (handle (`Paste `End));
+  expect "long Unicode and trailing slash survive as complete intent text"
+    (handle (key `Enter) = `Confirm intent);
+  ignore (handle (key `Home));
+  ignore (handle (key `Delete));
+  ignore (handle (key (`ASCII 'y')));
+  ignore (handle (key `End));
+  ignore (handle (key `Backspace));
+  expect "home, delete, end and backspace edit rather than select a model"
+    (Pave.Composer.text form.composer = "y" ^ String.sub intent 1
+      (String.length intent - 2));
+  ignore (handle (key (`Arrow `Left)));
+  let cursor = Pave.Composer.cursor form.composer in
+  ignore (handle (key (`Uchar (Uchar.of_int 0x754c))));
+  expect "Unicode insertion follows the movable cursor"
+    (Pave.Composer.cursor form.composer = cursor + String.length "界");
+  expect "small-screen confirmation is disabled even with complete text"
+    (handle ~can_accept:false (key `Enter) = `Continue);
+  expect "escape cancels a text form" (handle (key `Escape) = `Cancel);
+  ignore (handle (`Paste `Start));
+  ignore (handle (key `Enter));
+  expect "pasted newline cannot confirm" (form.pasting);
+  ignore (handle (`Paste `End));
+  expect "pasted newline remains editable text"
+    (String.contains (Pave.Composer.text form.composer) '\n');
+  let bounded = Tui.create_text_form ~max_bytes:8 ~title:"Intent" () in
+  let bound event = Tui.text_form_event ~bindings:Keybindings.bindings
+    ~columns:18 ~can_accept:true bounded event in
+  ignore (bound (key (`Uchar (Uchar.of_int 0x754c))));
+  ignore (bound (`Paste `Start));
+  List.iter (fun char -> ignore (bound (key (`ASCII char))))
+    ['1'; '2'; '3'; '4'; '5'; '6'];
+  ignore (bound (`Paste `End));
+  expect "over-budget paste rejects atomically and reports failure"
+    (Pave.Composer.text bounded.composer = "界" && bounded.notice <> "" &&
+     bound (key `Enter) = `Continue);
+  ignore (bound (`Paste `Start));
+  List.iter (fun char -> ignore (bound (key (`ASCII char))))
+    ['1'; '2'; '3'; '4'; '5'];
+  ignore (bound (`Paste `End));
+  expect "a complete retry can consume the exact byte budget"
+    (bound (key `Enter) = `Confirm "界12345");
+  ignore (bound (key (`Uchar (Uchar.of_int 0x754c))));
+  expect "Unicode over the boundary is never shortened or accepted"
+    (Pave.Composer.text bounded.composer = "界12345" &&
+     bound (key `Enter) = `Continue);
+  ignore (bound (key `Backspace));
+  expect "editing recovers from over-limit feedback"
+    (bound (key `Enter) = `Confirm "界1234");
+  ignore (bound (`Paste `Start));
+  ignore (bound (key `Escape));
+  expect "pasted Escape is data, not modal cancellation"
+    (bounded.pasting && bounded.blocked);
+  ignore (bound (`Paste `End));
+  expect "unsupported controls never silently change a pasted intent"
+    (Pave.Composer.text bounded.composer = "界1234" &&
+     bound (key `Enter) = `Continue);
+  let default_limit = Tui.create_text_form ~title:"Intent" () in
+  let limit event = Tui.text_form_event ~bindings:Keybindings.bindings
+    ~columns:18 ~can_accept:true default_limit event in
+  ignore (limit (`Paste `Start));
+  for _ = 1 to 4096 do ignore (limit (key (`ASCII 'a'))) done;
+  ignore (limit (`Paste `End));
+  expect "default budget accepts the whole 4096-byte paste"
+    (limit (key `Enter) = `Confirm (String.make 4096 'a'));
+  List.iter (fun cols -> List.iter (fun rows ->
+    let screen, cursor = Tui.text_form_screen ~cols ~rows form in
+    expect "text form rows and widths stay inside every viewport"
+      (Array.length screen = rows &&
+       Array.for_all (fun image -> Notty.I.width image <= cols &&
+         Notty.I.height image <= 1) screen);
+    expect "text form confirmation requires a visible editor and controls"
+      (Option.is_some cursor = Tui.text_form_can_accept ~cols ~rows);
+    Option.iter (fun (row, col) ->
+      expect "text form caret remains inside the resized viewport"
+        (row >= 0 && row < rows && col >= 0 && col < cols)) cursor)
+    [1; 2; 3; 4; 5; 8; 24]) [1; 4; 9; 12; 24; 80];
   let reflow = Transcript_view.create () in
   let paragraph = "abcdefghijklmnopqrstuvwx" in
   Transcript_view.assistant reflow paragraph;
