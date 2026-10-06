@@ -11,7 +11,7 @@ This is the single active backlog. It separates source-confirmed remaining work 
 | Mobile project understanding | Swift/Xcode/SwiftPM, Android Gradle, Flutter, RN/Expo inventory; focused separately approved checks; checked source diagnostics; sensitive mobile-config review | Dynamic build/config evidence is not inferred; dependencies/toolchains are not installed implicitly |
 | Mobile app sessions | Private selected app/device identity; build/install/launch/stop; `/mobile` dashboard; emulator/simulator inventory and tests; separately approved owned AVD/Simulator boot, readiness, cancellation and shutdown are implemented | No physical devices or runtime/image downloads; real disposable-device acceptance requires separate approval; Flutter/RN device workflows are not equivalent to native app-session support |
 | Observe/control/replay | Android screenshots/accessibility, tap/swipe/text/back and persisted one-step scenarios; iOS screenshots | iOS accessibility/control/replay remains unavailable |
-| Diagnostics and verification | App-scoped logs/crashes/Android ANR, guarded-source verification, strict masked screenshot baselines | Symbol-file presence is not symbolication; visual decoding uses a bounded in-tree PNG implementation, but native Linux packaging remains unverified |
+| Diagnostics and verification | App-scoped logs/crashes/Android ANR, guarded-source verification, strict masked screenshot baselines | Symbol-file presence is not symbolication; bounded PNG decoding uses maintained pure-OCaml Decompress; native packages passed launch/dependency checks, but direct packaged PNG comparison acceptance remains open |
 | Web previews | `publish_web` and `/publish`, per-prefix private identities, official Portal auto-setup after approval | Local app server must already listen; no alternate tunnel, automatic public exposure or shell-profile modification |
 | General agent tools | Guarded file edits, LSP/DAP, approved owned processes/eval/network/browser tools, local plugins/MCP, read-only child jobs, journal/branch/compaction, redacted one-shot JSONL | Do not schedule these entire subsystems as new features; only residual cards below |
 
@@ -64,17 +64,17 @@ M01–M24, AS01, AO01, UI01, mobile BR01/LD01, FV01, VR01 and MD01 are completed
   **Depends:** none.
   **Gate:** none; stalled and oversized local HTTPS fixture transfers preserved the prior install and removed staging.
 
-- [ ] **PL03a — Enforce complete packaged dependency policy**
-  **Evidence:** The [release workflow](.github/workflows/release.yml) validates extracted executables with [native target dependency rules](test/distribution/check_release_dependencies.sh). Run #88 passed tests/builds on all four targets and package/updater gates on both Linux targets and macOS Intel. Apple Foundation Models and its Swift helper were subsequently removed at the user's request; all targets now package the plain executable. Generic native framework-loader validation and linked forbidden/missing-library controls remain. **Deliver:** target-specific allowed-system-library checks for executable artifacts on the four current targets.
+- [x] **PL03a — Enforce complete packaged dependency policy**
+  **Evidence:** [Release #89](https://github.com/kimmandoo/pave/actions/runs/37433173423) (`v0.1.86`, `5135ac8`) passed native dependency validation and extracted-executable smokes on Linux/macOS × arm64/x86_64. [Target dependency rules](test/distribution/check_release_dependencies.sh) retained generic native framework-loader validation and actually linked forbidden/missing-library rejection controls. All four public archive checksums/members and the published Linux x86_64 executable's dependency policy were verified. Apple Foundation Models and its helper were removed; every target packaged the plain executable.
   **Accept:** extracted artifacts launch without toolchain runtime paths; a deliberately linked non-system dependency and a missing dependency both fail packaging with clear diagnostics.
   **Depends:** none.
-  **Gate:** Native four-target release-runner acceptance must pass with the loader-based framework check before completion.
+  **Gate:** Passed on all four native release targets; no toolchain-runtime allowance was added.
 
-- [ ] **PL07 — Automate installed updater transactions in CI**
-  **Evidence:** The [release workflow](.github/workflows/release.yml) invokes [installed_update.py](test/distribution/installed_update.py). Run #87's three updater failures came from the controlled server's missing latest-release API route. The repaired harness serves controlled metadata, deliberately tests fallback lookup and checks unchanged installed hashes. Local complete transactions passed; run #88 passed native transactions on Linux x86_64/AArch64 and macOS Intel. All four targets must pass again after removal of the Apple helper. **Deliver:** exercise native install/check/update/uninstall transactions against a controlled release in CI.
+- [x] **PL07 — Automate installed updater transactions in CI**
+  **Evidence:** [Release #89](https://github.com/kimmandoo/pave/actions/runs/37433173423) passed [installed_update.py](test/distribution/installed_update.py) transactions on Linux/macOS × arm64/x86_64. The repaired controlled server served latest-release API metadata; forced fallback checks and unchanged installation hashes passed alongside the upgrade/rollback/uninstall boundaries. No production discovery route was weakened.
   **Accept:** custom-directory upgrade preserves unrelated files and user state; corrupt checksum, link/unexpected archive member, invalid marker and failed publication preserve the executable. Verify metadata state on partial publication; inherited destination/version overrides cannot redirect update.
   **Depends:** PL06.
-  **Gate:** The repaired transaction harness must pass on all four native targets before completion; no public release required.
+  **Gate:** Passed on all four native targets.
 
 ## P1 — Proposed mobile-specialized features
 
@@ -112,10 +112,10 @@ Prioritize platform gaps (MX01–MX04), accessibility/visual review (MX05–MX08
   **Gate:** Current approved Android tree; runtime capture still asks separately.
 
 - [ ] **MX06 — Portable visual comparison on Linux**
-  **Evidence:** [lib/tools/workspace_mobile_visual.ml](lib/tools/workspace_mobile_visual.ml) bounds encoded PNG input, dimensions and decompressed output; its bounded in-tree chunk/pixel parser uses pure-OCaml `decompress.zl` 1.6.0 (MIT) and retains masks/metadata checks. Release notices include Decompress, Checkseum and Optint; Optint 0.3.0's source license says MIT despite ISC opam metadata. Dynamic-Huffman, Paeth, checksum and size-limit fixtures passed in run #87 on all four native targets. Linux and macOS Intel package smokes passed; macOS arm64 package smoke exposed the separately repaired dyld-cache dependency check. **Deliver:** provide a bounded maintained decoder usable on supported Linux packages, with dependency/license review, retaining current masks and metadata checks.
+  **Evidence:** [lib/tools/workspace_mobile_visual.ml](lib/tools/workspace_mobile_visual.ml) bounds encoded PNG input, dimensions and decompressed output; its bounded in-tree chunk/pixel parser uses pure-OCaml `decompress.zl` 1.6.0 (MIT) and retains masks/metadata checks. Release notices include Decompress, Checkseum and Optint; Optint 0.3.0's source license says MIT despite ISC opam metadata. Dynamic-Huffman, Paeth, checksum and size-limit source fixtures passed on all four targets; [release #89](https://github.com/kimmandoo/pave/actions/runs/37433173423) also passed native package launch/dependency smokes and published checksum-verified Linux/macOS archives. Direct PNG comparison through the extracted packages was not exercised, so this card remains open. **Deliver:** provide a bounded maintained decoder usable on supported Linux packages, with dependency/license review, retaining current masks and metadata checks.
   **Accept:** The same PNG pairs compare identically on macOS/Linux; malformed/oversized images fail without changing baselines, and packaged decoder runs on native targets.
   **Depends:** none.
-  **Gate:** Four-target tests and packaged smoke must validate this decoder revision; no Linux artifact acceptance is claimed until the updated native package smoke passes.
+  **Gate:** Four-target source fixtures and package launch/dependency checks passed; directly exercise the decoder through extracted native packages before completing this card.
 
 - [ ] **MX07 — Reviewable visual regression reports**
   **Evidence:** [lib/tools/workspace_mobile_visual.ml](lib/tools/workspace_mobile_visual.ml) — Current comparison reports exact masked pixel differences, not a review report. **Deliver:** Return bounded baseline/current/difference artifacts with differing regions and explicit operator-selected tolerance; version comparison settings.

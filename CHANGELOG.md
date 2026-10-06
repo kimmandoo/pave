@@ -14,6 +14,7 @@
 - fix(distribution): served controlled latest-release API metadata in updater fixtures and verified fallback checks preserved installation files.
 - feat(provider): removed Apple Foundation Models support, its Swift helper, embedded-helper extraction and runtime-default selection; unified native release packaging across all four targets. Existing Apple selections required a supported provider/model.
 - test(process): synchronized readiness and completion with owned stdin instead of a 150 ms lifetime, eliminating a native runner race without accepting exited jobs as ready.
+- release(distribution): published v0.1.86 after all four native test/build/package/updater gates passed; verified all public asset digests, archive checksums/members, helper-free binaries and Linux CLI execution.
 
 ## 2026-10-05
 - feat(mobile): added bounded Native XCTest accessibility capture for explicitly owned iOS Simulator sessions.

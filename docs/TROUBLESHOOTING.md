@@ -6,14 +6,14 @@
 - **Context / Symptom:** CI #237 (`37429750171`) failed on macOS/OCaml 5.3.0 at `test_workspace_process.ml`'s successful readiness assertion. The digest-verified `test-diagnostics-macos-26-5.3.0` artifact identified the assertion; the macOS 5.5.1 job passed.
 - **Root Cause:** The successful fixture printed READY, slept only 150 ms and exited. A delayed runner could first inspect it after exit; the corrected product readiness policy properly refuses an exited job's retained output.
 - **Solution:** Kept the child alive on its owned stdin until the parent observed READY, then explicitly closed stdin and verified normal completion and DONE output. Kept the independent exited-job rejection regression unchanged.
-- **Prevention / Reference:** Synchronize readiness/completion fixtures with explicit handshakes rather than assuming a scheduler latency. Run `opam exec -- dune exec test/test_workspace_process.exe` and require fresh native CI.
+- **Prevention / Reference:** Synchronize readiness/completion fixtures with explicit handshakes rather than assuming scheduler latency. The focused process test passed locally; CI #239 (`37432011818`) and release #89 (`37433173423`) passed all native test jobs after this change.
 
 ### [2026-10-06] Apple helper dependency policy omitted the system Swift runtime
 
 - **Context / Symptom:** After the cached-framework repair, release #88 (`37425653169`) passed package/updater gates on both Linux targets and macOS Intel, but macOS arm64 rejected `/usr/lib/swift/libswiftCore.dylib` as non-system.
 - **Root Cause:** The helper's native Swift runtime is supplied by macOS, but the strict policy recognized only selected C/C++ libraries and system frameworks.
 - **Solution:** The initial repair recognized loader-validated `/usr/lib/swift/libswift*.dylib` install names and added a linked missing-runtime fixture. The user subsequently removed Apple Foundation Models support entirely; the helper, its Swift allowance and its fixture were deleted. All architectures now package the plain OCaml executable, retaining strict non-system dependency rejection.
-- **Prevention / Reference:** Run all four native package/updater gates after the removal. Do not restore helper-specific dependencies or weaken the no-compression release policy.
+- **Prevention / Reference:** Release #89 passed all four native package/updater gates after Apple removal. Do not restore helper-specific dependencies or weaken the no-compression release policy.
 
 ### [2026-10-06] Native updater fixtures lacked the latest-release API fallback
 
