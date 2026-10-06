@@ -22,6 +22,7 @@ ASSET = "pave-" + ("darwin-arm64" if sys.platform == "darwin" and os.uname().mac
 class ReleaseHandler(http.server.BaseHTTPRequestHandler):
     mode = "good"
     archive = b""
+    redirect_latest = True
     def log_message(self, *_args):
         pass
     def write_body(self, body):
@@ -31,6 +32,18 @@ class ReleaseHandler(http.server.BaseHTTPRequestHandler):
             pass
 
     def do_GET(self):
+        if self.path == "/releases/latest" and not self.redirect_latest:
+            self.send_response(200)
+            self.end_headers()
+            return
+        if self.path == "/repos/kimmandoo/pave/releases/latest":
+            body = ('{"tag_name":"' + TAG + '"}').encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.write_body(body)
+            return
         if self.path == "/releases/latest":
             self.send_response(302)
             self.send_header("Location", BASE + "/releases/tag/" + TAG)
@@ -134,6 +147,7 @@ def main():
                         "-addext", "subjectAltName=IP:127.0.0.1"], check=True,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         ReleaseHandler.mode = "good"
+        ReleaseHandler.redirect_latest = True
         ReleaseHandler.archive = make_archive(binary, "good")
         server = http.server.ThreadingHTTPServer(("127.0.0.1", 18443), ReleaseHandler)
         tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -231,6 +245,16 @@ def main():
                               license_dir / ".native-install")}
             if checked_before != checked_after:
                 raise RuntimeError("update --check changed installation files")
+            ReleaseHandler.redirect_latest = False
+            fallback_output = run([str(pave), "update", "--check"], env)
+            if TAG not in fallback_output:
+                raise RuntimeError("API fallback did not report the controlled release")
+            fallback_after = {str(path): digest(path) for path in
+                              (pave, license_dir / "LICENSE", license_dir / "THIRD_PARTY_NOTICES",
+                               license_dir / ".native-install")}
+            if checked_before != fallback_after:
+                raise RuntimeError("API fallback update --check changed installation files")
+            ReleaseHandler.redirect_latest = True
             # An update must publish into the installer-owned destination and
             # preserve unrelated files and per-user state.
             ReleaseHandler.archive = make_archive(binary, "good", b"updated license\n")

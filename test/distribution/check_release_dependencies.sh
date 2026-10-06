@@ -16,6 +16,28 @@ tmp_base=${TMPDIR:-/tmp}
 tmp=$(mktemp -d "${tmp_base%/}/pave-deps.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 
+if [ "$os" = darwin ]; then
+    cat > "$tmp/load-system-framework.c" <<'EOF'
+#include <dlfcn.h>
+#include <stdio.h>
+
+int main(int argc, char **argv) {
+    if (argc != 2) {
+        fprintf(stderr, "usage: load-system-framework INSTALL_NAME\n");
+        return 2;
+    }
+    void *handle = dlopen(argv[1], RTLD_NOW | RTLD_LOCAL);
+    if (handle == NULL) {
+        fprintf(stderr, "%s\n", dlerror());
+        return 1;
+    }
+    dlclose(handle);
+    return 0;
+}
+EOF
+    cc "$tmp/load-system-framework.c" -o "$tmp/load-system-framework"
+fi
+
 is_linux_loader() {
     case "$1" in
         /lib64/ld-linux-x86-64.so.2|"/lib64/ld-linux-x86-64.so.2 "*) return 0 ;;
@@ -43,8 +65,13 @@ check_dependencies() {
             case "$dependency" in
                 /usr/lib/libSystem.B.dylib|/usr/lib/libobjc.A.dylib|/usr/lib/libc++.1.dylib|/usr/lib/libiconv.2.dylib) ;;
                 /System/Library/Frameworks/*)
-                    if [ ! -e "$dependency" ]; then
+                    # System frameworks can exist only in the dyld shared cache.
+                    # Probe the native loader without inherited DYLD overrides.
+                    if ! /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin \
+                        "$tmp/load-system-framework" "$dependency" \
+                        > "$tmp/loader-output" 2>&1; then
                         echo "missing system dependency in $artifact: $dependency" >&2
+                        cat "$tmp/loader-output" >&2
                         return 1
                     fi
                     ;;
@@ -123,6 +150,11 @@ int main(void) { return pave_fixture_value(); }
 EOF
 
 if [ "$os" = darwin ]; then
+    # Exercise allowed frameworks even when the release artifacts use only libSystem.
+    cc "$tmp/main.c" "$tmp/dependency.c" -framework Foundation \
+        -o "$tmp/system-framework"
+    check_dependencies "$tmp/system-framework"
+
     cc -dynamiclib "$tmp/dependency.c" \
         -Wl,-install_name,"$tmp/libpavefixture.dylib" \
         -o "$tmp/libpavefixture.dylib"

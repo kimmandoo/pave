@@ -1,6 +1,20 @@
 # Troubleshooting
 
 
+### [2026-10-06] Native updater fixtures lacked the latest-release API fallback
+
+- **Context / Symptom:** Release run #87 (`37422176272`) failed `pave update --check` on Linux x86_64/AArch64 and macOS Intel with `curl: (22) The requested URL returned error: 404`.
+- **Root Cause:** The updater supports a validated redirect lookup plus a REST metadata fallback, but the controlled HTTPS server implemented only redirects and release assets. The fallback's `/repos/kimmandoo/pave/releases/latest` request received 404.
+- **Solution:** Served controlled `tag_name` metadata at that route. Added a forced non-redirect response to exercise fallback lookup and verify the reported tag and unchanged installed executable/metadata hashes. The missing-route error failed locally before the fix; all local installed updater transactions passed afterward.
+- **Prevention / Reference:** Keep both discovery paths inside the controlled server. Build with `PAVE_RELEASE_VERSION=v0.0.1 PAVE_TEST_RELEASE_BASE_URL=https://127.0.0.1:18443` before running the harness; production updater routing was not weakened.
+
+### [2026-10-06] Packaged macOS helper framework lived in the dyld shared cache
+
+- **Context / Symptom:** Release run #87 rejected `/System/Library/Frameworks/FoundationModels.framework/Versions/A/FoundationModels` as a missing system dependency despite the helper's preceding `--help` succeeding on macOS 26.
+- **Root Cause:** The dependency policy checked framework file existence; macOS can supply that install name exclusively through dyld's shared cache.
+- **Solution:** Replaced file-existence checking with a compiled `dlopen` probe under `env -i`, without inherited DYLD overrides. Kept the system allowlist and real linked forbidden/missing-library fixtures; added a linked Foundation positive fixture.
+- **Prevention / Reference:** Native macOS package smoke must validate this change. A Linux syntax/policy smoke cannot certify dyld behavior.
+
 ### [2026-10-06] Local release dependency smoke used a zstd-enabled compiler
 
 - **Context / Symptom:** The local release-profile binary failed `check_release_dependencies.sh` with `forbidden or non-system dependency ... libzstd.so.1`. The active compiler is OCaml 5.2.1; the native release workflow pins OCaml 5.5.1 with `ocaml-option-no-compression`.
@@ -12,8 +26,8 @@
 
 - **Context / Symptom:** Release run `37409692996` failed on macOS arm64 packaged-binary smoke and installed-updater transactions on Linux x86_64, Linux AArch64 and macOS x86_64. All targets passed tests and native builds; the other three package smokes passed. The failure-summary step succeeded, but the unauthenticated job page requires sign-in, the logs API returned HTTP 403, and the run had no downloadable artifacts.
 - **Root Cause:** Native logs were written only to job output and `GITHUB_STEP_SUMMARY`; the archive upload step used its default success condition and was skipped after smoke failures. No `gh` or GitHub token is available here, the Git credential helper returned none, and the installed browser relay extension is not connected. Exact smoke failures remain unknown.
-- **Solution:** Added a failure-only artifact upload for `package-smoke.log` and `updater-transaction.log`, leaving release archive upload success-only. The next tagged native run can expose exact output through artifacts. Main CI run `37408896408` passed, but no release was published; latest remains `v0.1.81`. Inspect the logs before changing updater/package behavior; do not move or retag `v0.1.83`.
-- **Prevention / Reference:** Keep the four-target native matrix, bounded failure summaries and failure-log artifacts as release gates. Ensure authenticated access before diagnosing. After confirmed fixes and passing CI, use a new `v0.1.84` tag; verify all public assets and checksums before claiming publication.
+- **Solution:** Added failure-only artifact uploads for `package-smoke.log` and `updater-transaction.log`, leaving archive upload success-only. Run #87 preserved all four diagnostics. Public downloads via `https://nightly.link/kimmandoo/pave/actions/artifacts/ARTIFACT_ID.zip` matched GitHub's SHA-256 digests and exposed the exact framework and updater-fixture failures documented above.
+- **Prevention / Reference:** Anonymous GitHub artifact API downloads require authentication (HTTP 401); public artifact metadata plus digest-verified downloads resolved the access gap. Keep immutable failed tags `v0.1.83`/`v0.1.84`; use a new version only after repairs and verification.
 
 ### [2026-10-06] Wildcard and session grants bypassed per-action review
 
