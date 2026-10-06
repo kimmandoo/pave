@@ -44,32 +44,6 @@ let () =
     "Model listing connection failed or is offline:"
     (message (Transport_error "network unavailable")));
 
-  let apple_descriptor : Pave.Provider_catalog.descriptor = {
-    id = "apple"; display_name = "Apple Foundation Models (on-device)";
-    routes = [{ name = "chat"; wire = Pave.Provider.Apple_foundation_models;
-      endpoint = "" }];
-    default_route = "chat"; api_key_env = None; oauth = None;
-  } in
-  let apple_registry : Pave.Provider_catalog.registry = {
-    providers = [apple_descriptor]; custom_providers = [];
-  } in
-  let apple_listing = discover ~registry:apple_registry ~provider:"apple" () in
-  expect_models ["default"] apple_listing;
-  (match apple_listing with
-   | Error _ -> assert false
-   | Ok listing ->
-       assert (listing.source.id_source = Pave.Model_catalog.Runtime_default);
-       assert (listing.source.endpoint = None &&
-         listing.source.retrieved_at = None);
-       let model = List.hd listing.models in
-       assert (model.identity.provider = "apple");
-       assert (model.identity.route = "chat");
-       assert (model.identity.upstream_id = "default");
-       assert (model.identity.account_id = None));
-  expect_error wrong_credential
-    (discover ~registry:apple_registry ~provider:"apple"
-      ~credential:(Api_key "unused") ());
-
   let openai_key = "private-openai" and gemini_key = "private-gemini" in
   let github_token = "ghu_private-oauth" in
   let openai_headers = ["Authorization", "Bearer " ^ openai_key] in

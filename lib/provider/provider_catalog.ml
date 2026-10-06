@@ -410,13 +410,6 @@ let builtins = [
     default_route = "chat";
     api_key_env = None; oauth = Some "github-copilot" };
 ]
-@ (if Apple_foundation_models.helper_available () then [
-  { id = "apple"; display_name = "Apple Foundation Models (on-device)";
-    routes = [ { name = "chat"; wire = Provider.Apple_foundation_models;
-      endpoint = "" } ];
-    default_route = "chat";
-    api_key_env = None; oauth = None }
-] else [])
 
 let builtin_registry = { providers = builtins; custom_providers = [] }
 

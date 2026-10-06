@@ -16,16 +16,3 @@
   main cli_auth task_cli cli_completion tui transcript_view terminal_input
   keybindings settings_view setup_view model_picker update embedded_installer)
  (libraries pave unix notty-community notty-community.unix uutf yojson threads))
-
-(rule
- (target pave-apple-foundation-models)
- (enabled_if (and (= %{system} macosx) (= %{architecture} arm64)))
- (deps apple_foundation_models.swift)
- (action
-  (run swiftc -parse-as-library -O -target arm64-apple-macosx15.0 -framework FoundationModels
-   %{dep:apple_foundation_models.swift} -o %{target})))
-
-(install
- (section bin)
- (files pave-apple-foundation-models)
- (enabled_if (and (= %{system} macosx) (= %{architecture} arm64))))

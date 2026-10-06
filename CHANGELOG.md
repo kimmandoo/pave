@@ -12,6 +12,7 @@
 - fix(release): preserved native package and updater failure logs as downloadable CI artifacts.
 - fix(release): validated macOS system frameworks and system Swift runtimes through the native loader instead of requiring files outside the dyld shared cache.
 - fix(distribution): served controlled latest-release API metadata in updater fixtures and verified fallback checks preserved installation files.
+- feat(provider): removed Apple Foundation Models support, its Swift helper, embedded-helper extraction and runtime-default selection; unified native release packaging across all four targets. Existing Apple selections required a supported provider/model.
 
 ## 2026-10-05
 - feat(mobile): added bounded Native XCTest accessibility capture for explicitly owned iOS Simulator sessions.

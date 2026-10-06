@@ -1545,26 +1545,6 @@ let discover_azure ?cancel ~route ~account_id ?credential () =
                discovered.deployments in
              Ok { models; source })
 
-
-let discover_apple ~route ~account_id ?credential () =
-  if route.Provider_catalog.wire <> Provider.Apple_foundation_models then
-    Error (Unsupported_route ("apple", route.name))
-  else if account_id <> None || Option.is_some credential then
-    Error Invalid_credential
-  else
-    let source : Model_catalog.provenance = {
-      id_source = Model_catalog.Runtime_default;
-      capability_source = None; endpoint = None; retrieved_at = None;
-    } in
-    let model : Model_catalog.model = {
-      identity = Model_identity.make ~provider:"apple" ~route:route.name
-        ~upstream_id:"default" ();
-      display_name = Some "On-device default";
-      capabilities = Model_catalog.empty_capabilities;
-      provenance = source;
-    } in
-    Ok { models = [model]; source }
-
 let discover ?http ?cancel ?route_name ?account_id ?registry
     ~provider ?credential () =
   let registry = Option.value ~default:Provider_catalog.builtin_registry registry in
@@ -1581,9 +1561,7 @@ let discover ?http ?cancel ?route_name ?account_id ?registry
                 discover_custom ?http ?cancel ~provider ~route:custom_route
                   ~account_id ?credential ()
             | None ->
-                if provider = "apple" then
-                  discover_apple ~route ~account_id ?credential ()
-                else if provider = "azure" then
+                if provider = "azure" then
                   discover_azure ?cancel ~route ~account_id ?credential ()
                 else
                   (match adapter_for ~provider ~route with

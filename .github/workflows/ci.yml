@@ -48,15 +48,6 @@ jobs:
         run: opam exec -- dune build @install
       - name: Smoke CLI help
         run: opam exec -- dune exec pave -- --help
-      - name: Smoke Apple Foundation Models helper
-        if: runner.os == 'macOS'
-        run: |
-          _build/default/bin/pave-apple-foundation-models --help
-          providers="$(opam exec -- dune exec pave -- --providers)"
-          case "$providers" in
-            *apple*) ;;
-            *) echo "macOS arm64 binary did not list Apple Foundation Models" >&2; exit 1 ;;
-          esac
       - name: Provision Gradle for disposable mobile acceptance
         if: matrix.os == 'ubuntu-24.04' && matrix.ocaml == '5.5.1'
         uses: gradle/actions/setup-gradle@v4

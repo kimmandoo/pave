@@ -110,7 +110,7 @@ Long model labels are abbreviated only to fit the terminal; the picker still sea
 - GitHub Copilot and Kilo use device approval: `pave --login PROVIDER`, then open the shown verification URL and enter its code. `--login-manual` is not supported for either; Kilo's public models do not certify Chat/tool support.
 - OpenAI Codex also supports `pave --login-device openai-codex`: it prints the fixed verification URL and code, then polls the official device-approval endpoints for up to 15 minutes. The authorization code is exchanged through the same pinned OAuth token endpoint; the stored grant remains bound to the same Codex account and Responses route, with locked refresh. No loopback browser callback is opened.
 - `pave --logout PROVIDER` removes every saved sign-in for that provider; add `--account "$ID"` to remove only one. The private store at `${XDG_CONFIG_HOME:-~/.config}/pave/oauth.json` is **unencrypted** (0700 directory, 0600 file); OpenRouter's browser exchange stores an API key. Environment keys take precedence where available. Browser/device-derived credentials cannot be sent to a custom `--endpoint`.
-- Google Vertex and Bedrock Converse/ConverseStream use scoped Google ADC or the AWS credential chain; Azure public-cloud routes use a resource API key or the current Azure CLI Entra identity. Apple Foundation Models is local and uses no provider credential.
+- Google Vertex and Bedrock Converse/ConverseStream use scoped Google ADC or the AWS credential chain; Azure public-cloud routes use a resource API key or the current Azure CLI Entra identity.
 
 **Account IDs and local secret masking**
 
@@ -126,7 +126,7 @@ On launch, an exact account in the selected model (including a saved session or 
 - `--api NAME` selects a registered wire route. OpenAI defaults to Responses; `--api chat` selects Chat Completions.
 - `--endpoint URL` works only for routes allowing custom hosts. Bound bearer/ADC/SigV4 routes—including xAI, NVIDIA, Ollama Cloud and Bedrock Mantle—reject untrusted overrides; `--models` rejects custom endpoints so private gateway keys never reach a public listing.
 - Completion requests require HTTPS except for loopback or explicitly validated local engines. Credentialed `--endpoint http://remote-host` fails before a request; loopback HTTP remains available for development.
-- No remote provider bundles a model ID. Apple Foundation Models uses the OS-managed local ID `default`; other noninteractive prompts need `--model ID` or a saved selection. First-run setup can query supported listings or accept a known manual ID. Personal Copilot needs an account-supported Chat model on its pinned public route. Redirected stdin supplies one literal prompt, not interactive slash commands or full-screen terminal input.
+- No provider bundles a model ID. Noninteractive prompts need `--model ID` or a saved selection. First-run setup can query supported listings or accept a known manual ID. Personal Copilot needs an account-supported Chat model on its pinned public route. Redirected stdin supplies one literal prompt, not interactive slash commands or full-screen terminal input.
 - Completion requests are sent once; rate limits, server errors and transport failures are reported without automatic request replay. SSE accepts a fragmented leading UTF-8 BOM, but incomplete event framing or conflicting terminal/tool-call state is rejected rather than promoted to an answer.
 - Thinking controls remain model-specific: Gemini 2.5 uses a budget while Gemini 3 uses levels; Ollama `gpt-oss` uses `low`/`medium`/`high`, and supported Qwen3/DeepSeek models use boolean thinking. Anthropic uses documented manual/adaptive controls with valid output budgets. Unsupported models/routes receive no invented control; missing provider usage and AWS region remain unknown or unavailable.
 
@@ -135,11 +135,11 @@ On launch, an exact account in the selected model (including a saved session or 
 Without an explicit provider/model/session or configured default, an interactive launch opens keyboard-operated **SETUP** before the editor:
 
 1. Pick a provider and access method. OAuth-capable providers offer real sign-in; API-key providers show the environment variable without collecting or echoing its value.
-2. Choose an account-listed model or enter a known route-compatible ID, then confirm the default; or skip—including a missing-key step—and return later with `/setup`. Apple Foundation Models uses `default` without a listing. A skipped key is unusable until its environment variable is set.
+2. Choose an account-listed model or enter a known route-compatible ID, then confirm the default; or skip—including a missing-key step—and return later with `/setup`. A skipped key is unusable until its environment variable is set.
 
 User defaults and the versioned setup state are private under `${XDG_CONFIG_HOME:-~/.config}/pave/`. Configured defaults, explicit CLI choices, resumed `--session` and noninteractive `--prompt` bypass onboarding. `/settings` edits project defaults.
 
-The searchable setup picker queries the chosen provider asynchronously. Use Up/Down and Enter; `[listed · API unverified]` does not certify Chat or tools. On listing failure, type a route-compatible `PROVIDER/MODEL_ID`; for Apple Foundation Models the ID is `default`. Resize keeps the active choice.
+The searchable setup picker queries the chosen provider asynchronously. Use Up/Down and Enter; `[listed · API unverified]` does not certify Chat or tools. On listing failure, type a route-compatible `PROVIDER/MODEL_ID`. Resize keeps the active choice.
 
 - **Sign-in listings:** Devin's native roster and signed-in Codex, Copilot and OpenRouter are account-scoped. Anthropic OAuth needs `ANTHROPIC_API_KEY` to list models; GitLab Duo has no authoritative non-agentic upstream-model listing and needs an explicit model/API.
 - **Key-backed listings:** OpenAI, Google, DeepSeek, Groq, Mistral, Together, Cerebras, Venice, DeepInfra, Fireworks, Baseten, Hugging Face, NanoGPT, AIML API, ai&, Sakana, Abliteration, GMI Cloud, Moonshot, Ollama Cloud, xAI, NVIDIA, Novita, SiliconFlow, CoreWeave, StepFun, local engines and other registered routes. Listings never prove invocation/tool entitlement unless that metadata is supplied. Bounded cursor pages fail closed instead of showing incomplete IDs.

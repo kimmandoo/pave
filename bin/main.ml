@@ -369,8 +369,6 @@ let () =
                env ^ " (optional; local)"
            | Some env, None -> env
            | None, Some _ -> "OAuth login required"
-           | None, None when entry.id = "apple" ->
-               "Apple on-device model (macOS 26+; no key)"
            | None, None when entry.id = "google-vertex" ->
                "Google ADC + project/location required"
            | None, None when entry.id = "amazon-bedrock" ->
@@ -735,8 +733,6 @@ let () =
                  "pinned account listing"
              | Pave.Model_catalog.Provider_listing -> "provider listing"
              | Pave.Model_catalog.Capability_response -> "capability response"
-             | Pave.Model_catalog.Runtime_default ->
-                 "OS-managed runtime default"
              | Pave.Model_catalog.Explicit_user_input -> "explicit user input" in
            let retrieved = match listing.source.retrieved_at with
              | None -> "freshness timestamp unavailable"
@@ -749,11 +745,8 @@ let () =
            Printf.printf "%s %s from %s · %s\n"
              (if listing.source.retrieved_at = None then "Configured" else "Fresh")
              source_name
-             (match listing.source.id_source with
-              | Pave.Model_catalog.Runtime_default ->
-                  "macOS Foundation Models"
-              | _ -> Option.value ~default:"user settings"
-                  listing.source.endpoint) retrieved;
+             (Option.value ~default:"user settings"
+                listing.source.endpoint) retrieved;
            List.iter (fun (model : Pave.Model_discovery.model) ->
              let capabilities = model.capabilities in
              let endpoints = match capabilities.supported_endpoints with
@@ -767,9 +760,6 @@ let () =
                         then Some route.name else None)) descriptor.routes in
              let status =
                if listing.source.id_source =
-                   Pave.Model_catalog.Runtime_default then
-                 "OS-managed default; availability is checked during invocation"
-               else if listing.source.id_source =
                    Pave.Model_catalog.Explicit_user_input ||
                   Pave.Provider_catalog.unclassified_models ~registry descriptor.id then
                  "listed; inference compatibility unverified"

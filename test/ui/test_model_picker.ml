@@ -112,9 +112,6 @@ let () =
   assert (ids routed chat (listing ~provider:"abliteration" ~route:"chat"
     ~account_id:"team-a" ~ids:["configured"]
     ~source:Catalog.Explicit_user_input ()) = []);
-  assert (ids routed chat (listing ~provider:"abliteration" ~route:"chat"
-    ~account_id:"team-a" ~ids:["OS-default"]
-    ~source:Catalog.Runtime_default ()) = []);
   let wrong_provider = listing ~provider:"unknown" ~route:"chat"
     ~account_id:"team-a" ~ids:["fake"] () in
   assert (ids routed chat wrong_provider = []);

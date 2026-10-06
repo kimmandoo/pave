@@ -5,7 +5,6 @@ type source_kind =
   | Provider_listing
   | Capability_response
   | Explicit_user_input
-  | Runtime_default
 
 type provenance = {
   id_source : source_kind;

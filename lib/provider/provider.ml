@@ -1,7 +1,6 @@
 type api = Openai_completions | Local_chat | Anthropic_messages | Openai_responses
   | Azure_responses | Azure_chat | Bedrock_mantle_responses | Ollama_chat | Gemini_direct
   | Vertex_generate | Vertex_anthropic | Bedrock_converse | Bedrock_converse_stream
-  | Apple_foundation_models
   | Xai_chat | Nvidia_chat
   | Novita_chat | Siliconflow_chat | Siliconflow_cn_chat
   | Stepfun_chat | Coreweave_chat | Synthetic_chat | Zai_chat
@@ -704,11 +703,11 @@ let supports_user_media = function
   | Openrouter_chat | Umans_chat | Umans_messages | Cline_pass_chat
   | Alibaba_token_plan_chat | Kimi_code_chat | Kimi_code_cn_chat
   | Kimi_code_messages | Kimi_code_cn_messages | Fireworks_chat -> true
-  | Vertex_anthropic | Devin_connect | Apple_foundation_models -> false
+  | Vertex_anthropic | Devin_connect -> false
 
 let complete ?(authentication = Api_key) ?resolve_credential
     ?resolve_credential_cancel ?on_text ?on_usage ?on_tool_arguments ?thinking
-    ?max_output_tokens ?cancel ?apple_helper_path config messages tools =
+    ?max_output_tokens ?cancel config messages tools =
   check_cancel cancel;
   let on_text = match on_text, on_tool_arguments with
     | None, Some _ -> Some (fun _ -> ())
@@ -738,8 +737,6 @@ let complete ?(authentication = Api_key) ?resolve_credential
         raise (Provider_error ("invalid transcript: " ^ reason)) in
   let config = if config.api = Local_chat then
     { config with endpoint = local_endpoint config.endpoint } else config in
-  if config.api = Apple_foundation_models && authentication <> Api_key then
-    raise (Provider_error "Apple Foundation Models does not accept provider credentials");
   if authentication = Cloud_identity &&
      config.api <> Vertex_generate && config.api <> Vertex_anthropic &&
      config.api <> Bedrock_converse && config.api <> Bedrock_converse_stream &&
@@ -810,15 +807,6 @@ let complete ?(authentication = Api_key) ?resolve_credential
      otherwise keep the conservative default. *)
   let output_tokens = Option.value ~default:4096 max_output_tokens in
   let result = match config.api with
-  | Apple_foundation_models ->
-      if authentication <> Api_key then
-        raise (Provider_error "Apple Foundation Models does not accept provider credentials");
-      (try
-        Apple_foundation_models.complete ?helper_path:apple_helper_path ?on_text
-          ?cancel ~endpoint:config.endpoint ~model:config.model
-          ~api_key messages
-       with Apple_foundation_models.Cancelled -> raise Cancelled
-          | Apple_foundation_models.Error message -> raise (Provider_error message))
   | Openai_completions | Local_chat | Copilot_chat | Azure_chat ->
       let fields = [ "model", `String config.model;
                      "messages", Protocol.chat_messages_to_json messages ] in

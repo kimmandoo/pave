@@ -185,14 +185,14 @@ On macOS, use `Return` and `Option` in place of `Enter` and `Alt`. See the [full
 
 ## Providers
 
-Linux and macOS Intel builds expose **71** built-in provider IDs; macOS arm64 adds Apple Foundation Models for **72**.
+Linux and macOS builds expose **71** built-in provider IDs on both architectures.
 
 | Category | Examples |
 | --- | --- |
 | Major APIs | OpenAI, Anthropic, Google Gemini, xAI, Mistral, DeepSeek, Groq |
 | Subscriptions | OpenAI Codex, GitHub Copilot, Kimi Code, Alibaba / Xiaomi / MiniMax plans, Devin |
 | Clouds & gateways | Azure OpenAI, Google Vertex, Amazon Bedrock, OpenRouter, Cloudflare, Vercel |
-| Local | Ollama, LM Studio, llama.cpp, vLLM, Apple Foundation Models |
+| Local | Ollama, LM Studio, llama.cpp, vLLM |
 
 See [docs/PROVIDERS.md](docs/PROVIDERS.md) for every route, credential, CLI flag and caveat, including [custom OpenAI-compatible providers](docs/PROVIDERS.md#user-defined-openai-compatible-providers).
 

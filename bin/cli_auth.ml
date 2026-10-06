@@ -177,11 +177,6 @@ let resolve_builtin_authentication ?account_id
     ~(route : Pave.Provider_catalog.route) ~endpoint () =
     Pave.Provider.validate_endpoint_override ~api:route.wire
       ~pinned_endpoint:route.endpoint ~requested:endpoint;
-    if route.wire = Pave.Provider.Apple_foundation_models then (
-      if descriptor.id <> "apple" || endpoint <> "" then
-        failwith "Apple Foundation Models requires its registered local route";
-      Pave.Provider.Api_key, "", None)
-    else
     if route.wire = Pave.Provider.Local_chat then (
       if not (List.mem descriptor.id ["lm-studio"; "llama.cpp"; "vllm"]) ||
          descriptor.oauth <> None then

@@ -117,7 +117,7 @@ let account_listing (descriptor : Pave.Provider_catalog.descriptor) =
   | _ -> false
 
 (* A successful listing is not an inference authorization check. In particular,
-   configured IDs, OS defaults and unclassified catalogues are not evidence
+   configured IDs and unclassified catalogues are not evidence
    that a model works on this route. The coordinator has already checked the
    credential and attached its resolved account to the snapshot. *)
 let eligible_models ?registry (descriptor : Pave.Provider_catalog.descriptor)
@@ -137,7 +137,6 @@ let eligible_models ?registry (descriptor : Pave.Provider_catalog.descriptor)
        | Pave.Model_catalog.Pinned_account_listing
        | Pave.Model_catalog.Provider_listing
        | Pave.Model_catalog.Capability_response -> true
-       | Pave.Model_catalog.Runtime_default
        | Pave.Model_catalog.Explicit_user_input -> false) &&
       Option.is_some listing.source.retrieved_at ->
       List.filter (fun (model : Pave.Model_discovery.model) ->
@@ -165,9 +164,6 @@ let scope_title (descriptor : Pave.Provider_catalog.descriptor) scope =
 let listing_status ?registry (descriptor : Pave.Provider_catalog.descriptor)
     _scope (listing : Pave.Model_discovery.listing) models =
   if listing.source.id_source =
-      Pave.Model_catalog.Runtime_default then
-    "OS-managed model; readiness is not verified by discovery"
-  else if listing.source.id_source =
       Pave.Model_catalog.Explicit_user_input then
     "Configured IDs; not verified by a live listing"
   else if Pave.Provider_catalog.unclassified_models ?registry descriptor.id then
@@ -264,7 +260,6 @@ let model_detail ?registry (descriptor : Pave.Provider_catalog.descriptor)
     | Pave.Model_catalog.Pinned_account_listing -> "IDs from pinned account listing"
     | Pave.Model_catalog.Provider_listing -> "IDs from provider listing"
     | Pave.Model_catalog.Capability_response -> "IDs from capability response"
-    | Pave.Model_catalog.Runtime_default -> "OS-managed runtime default"
     | Pave.Model_catalog.Explicit_user_input -> "explicit user input") in
   let capability_source = Some (match model.provenance.capability_source with
     | None -> "capabilities not reported"
@@ -275,9 +270,7 @@ let model_detail ?registry (descriptor : Pave.Provider_catalog.descriptor)
     | Some Pave.Model_catalog.Capability_response ->
         "capabilities provider-reported"
     | Some Pave.Model_catalog.Explicit_user_input ->
-        "capabilities from explicit user input"
-    | Some Pave.Model_catalog.Runtime_default ->
-        "capabilities from the local runtime contract") in
+        "capabilities from explicit user input") in
   let listing_endpoint = Option.map
     (fun endpoint -> "listing endpoint " ^ endpoint)
     model.provenance.endpoint in
@@ -320,7 +313,6 @@ let configure_model_effort screen ~current_thinking
     | Some Pave.Model_catalog.Provider_listing -> "fresh provider listing"
     | Some Pave.Model_catalog.Capability_response -> "fresh capability response"
     | Some Pave.Model_catalog.Explicit_user_input -> "explicit configuration"
-    | Some Pave.Model_catalog.Runtime_default -> "local runtime"
     | None -> "fresh model listing; effort metadata not reported" in
   let explanation = match model.capabilities.effort_levels, options with
     | None, _ ->

@@ -5,8 +5,8 @@
 
 - **Context / Symptom:** After the cached-framework repair, release #88 (`37425653169`) passed package/updater gates on both Linux targets and macOS Intel, but macOS arm64 rejected `/usr/lib/swift/libswiftCore.dylib` as non-system.
 - **Root Cause:** The helper's native Swift runtime is supplied by macOS, but the strict policy recognized only selected C/C++ libraries and system frameworks.
-- **Solution:** Recognized only `/usr/lib/swift/libswift*.dylib` runtime install names, still requiring the native loader probe to succeed without inherited DYLD overrides. Added an actually linked nonexistent system Swift runtime fixture to enforce missing-library rejection; non-system/toolchain paths remain forbidden.
-- **Prevention / Reference:** Native macOS arm64 helper/package execution remains mandatory before publication; Linux policy and shell syntax smoke passed after this repair.
+- **Solution:** The initial repair recognized loader-validated `/usr/lib/swift/libswift*.dylib` install names and added a linked missing-runtime fixture. The user subsequently removed Apple Foundation Models support entirely; the helper, its Swift allowance and its fixture were deleted. All architectures now package the plain OCaml executable, retaining strict non-system dependency rejection.
+- **Prevention / Reference:** Run all four native package/updater gates after the removal. Do not restore helper-specific dependencies or weaken the no-compression release policy.
 
 ### [2026-10-06] Native updater fixtures lacked the latest-release API fallback
 
