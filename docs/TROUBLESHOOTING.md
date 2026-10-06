@@ -1,5 +1,48 @@
 # Troubleshooting
 
+
+### [2026-10-06] Wildcard and session grants bypassed per-action review
+
+- **Context / Symptom:** A non-exact `git status*` allow rule could match command substitutions, backticks, redirection or pathname expansion. An allow-until-exit grant for an ordinary `write_file` also covered a later sensitive entitlement mutation without its exact-content prompt.
+- **Root Cause:** Wildcard rules checked only the parsed single command segment, not shell expansion/redirection; session grants were keyed only by tool name and ignored the sensitive state on each request.
+- **Solution:** Non-exact wildcard allows now reject executable shell expansion, redirection and unquoted glob syntax while preserving literal single-quoted arguments and exact reviewed grants. Session grant eligibility now excludes sensitive requests in the cache, TUI and line-prompt paths.
+- **Prevention / Reference:** `test_approval` covers shell substitutions, redirection, globbing, quoted literals and per-request sensitive grant eligibility.
+
+### [2026-10-06] Mobile screenshots and Gradle test evidence were misread
+
+- **Context / Symptom:** Paeth-filtered PNGs reconstructed the upper-left sample from the row being overwritten. Gradle summaries such as `10 tests completed` were mistaken for zero tests, and an unrelated `NO-SOURCE` task vetoed a positive selected-suite result.
+- **Root Cause:** The PNG decoder reused one row for both current and previous samples; test-output rejection used the substring `0 tests` and a global `NO-SOURCE` veto.
+- **Solution:** PNG reconstruction now swaps two reusable row buffers. Gradle test counts use numeric token boundaries; a positive selected-suite summary remains mandatory, while unrelated `NO-SOURCE` output does not veto it.
+- **Prevention / Reference:** The portable visual fixture independently encodes a Paeth row; `test_tools` covers 10/20/100 tests, zero tests and unrelated `NO-SOURCE`.
+
+### [2026-10-06] Managed processes hid stdin failures and stale readiness
+
+- **Context / Symptom:** A one-shot process could report its exit after an incomplete stdin write, and a completed process with `READY` output plus a live unrelated port could be marked ready.
+- **Root Cause:** `Process.run` swallowed `Workspace_process.Error` from stdin delivery; `wait_ready` accepted output/port evidence before checking job state and did not recheck under the manager lock.
+- **Solution:** Non-empty stdin delivery errors now propagate through manager cleanup. Readiness requires a running job both before probing and while recording readiness under lock.
+- **Prevention / Reference:** `test_workspace_process` covers bounded stdin-write failure/cleanup on Linux, successful stdin, and stale log-plus-port evidence after exit.
+
+### [2026-10-06] Copilot OAuth pending responses stopped the device flow
+
+- **Context / Symptom:** GitHub Copilot's token endpoint returned `authorization_pending` or `slow_down` with HTTP 200, causing the first poll to fail instead of waiting for the user.
+- **Root Cause:** The shared OAuth device poller accepted those known error codes only for 4xx responses.
+- **Solution:** Recognized pending responses now continue polling for 2xx and 4xx statuses; 5xx and unknown errors remain failures.
+- **Prevention / Reference:** `test_github_copilot_oauth` verifies HTTP 200 pending/slow-down responses, polling delays and final token acceptance.
+
+### [2026-10-06] Linux release dependency smoke rejected loader records
+
+- **Context / Symptom:** `check_release_dependencies.sh` rejected indented `linux-vdso.so.1` output as unrecognized, then rejected the absolute ELF loader path because it has no `=>` separator. The local OCaml 5.2.1 source executable also linked `libzstd.so.1`, which the release contract intentionally forbids.
+- **Root Cause:** The parser matched untrimmed `ldd` records and recognized only arrow-form dependencies. The local executable was built with a different compiler than the release workflow's OCaml 5.5.1 no-compression toolchain.
+- **Solution:** The checker trims leading whitespace, permits only the known x86_64/AArch64 system loader records, and retains the non-system/missing dependency rejection fixtures. The local `libzstd` rejection remains unchanged; the release workflow's native artifact check remains the authority for its pinned toolchain.
+- **Prevention / Reference:** Run the checker on the actual packaged target in native release CI. A local libc-only executable smoke verifies parser behavior but does not certify the Pave release binary.
+
+### [2026-10-06] Failed fresh installation left staging files
+
+- **Context / Symptom:** When publishing the executable failed during a fresh install, cleanup stopped with an unset `had_binary` under `set -u`, leaving staged files in the install prefix and temporary directory.
+- **Root Cause:** `had_binary` was initialized only when an existing executable was present.
+- **Solution:** Initialize the rollback state to zero before publication; the disposable HTTPS updater harness now injects a one-shot final-rename failure into an empty prefix and verifies that no executable, metadata or staging files remain.
+- **Prevention / Reference:** Keep both fresh-install and existing-install publication failures in `test/distribution/installed_update.py`.
+
 ### [2026-10-04] macOS dependency check confused cached libraries with missing files
 
 - **Context / Symptom:** The native dependency-policy smoke rejected `/usr/lib/libSystem.B.dylib` because that path did not exist on this macOS 25.6 host. After adjusting the check, the local Apple helper check found `FoundationModels.framework` absent.

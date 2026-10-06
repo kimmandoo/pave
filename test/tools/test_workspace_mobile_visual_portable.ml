@@ -62,6 +62,11 @@ let () =
       "\137PNG\r\n\026\n\000\000\000\rIHDR\000\000\000\001\000\000\000\001\008\004\000\000\000\181\028\012\002\000\000\000\011IDATx\218c\252\255\031\000\003\003\002\000\239\162\167\091\000\000\000\000IEND\174B`\130" in
     let compressed_image=Visual.decode_png compressed_png in
     expect "normal fixed-Huffman PNG decodes" (compressed_image.width=1 && String.length compressed_image.rgba=4);
+    let paeth_png =
+      "\137\080\078\071\013\010\026\010\000\000\000\013\073\072\068\082\000\000\000\002\000\000\000\001\008\000\000\000\000\209\073\032\086\000\000\000\011\073\068\065\084\120\156\099\225\226\002\000\000\045\000\025\084\194\022\075\000\000\000\000\073\069\078\068\174\066\096\130" in
+    expect "Paeth filter uses the previous row's upper-left sample"
+      ((Visual.decode_png paeth_png).rgba =
+       "\010\010\010\255\020\020\020\255");
     rejects "corrupt PNG trailer" (fun () -> Visual.decode_png (original_png ^ "extra"));
     let bad_crc=Bytes.of_string original_png in
     let last=Bytes.length bad_crc-1 in Bytes.set bad_crc last (Char.chr (Char.code (Bytes.get bad_crc last) lxor 1));

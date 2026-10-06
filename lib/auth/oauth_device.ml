@@ -161,7 +161,8 @@ let login ?http ?(now = Unix.gettimeofday) ?(sleep = fun seconds ->
     match member "error" json with
     | `Null when status >= 200 && status < 300 -> credential ~now:current policy json
     | `String ("authorization_pending" | "slow_down" as error)
-      when status >= 400 && status < 500 ->
+      when (status >= 200 && status < 300) ||
+           (status >= 400 && status < 500) ->
         let delay = if error = "slow_down" then delay +. 5. else delay in
         let remaining = min deadline expiry -. current in
         if remaining <= 0. || polls_left <= 1 then fail "OAuth device authorization timed out";

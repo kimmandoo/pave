@@ -41,6 +41,17 @@ let () =
                       exact = false }] in
   expect "allow recognizes one simple command"
     ((A.command_decision allow_rule "git status --short").policy = Some A.Allow);
+  List.iter (fun command ->
+    let decision = A.command_decision allow_rule command in
+    expect ("wildcard allow requires review for shell expansion: " ^ command)
+      (decision.policy <> Some A.Allow && decision.tier = A.Exec))
+    ["git status \"$(touch marker)\"";
+     "git status `touch marker`";
+     "git status --short > marker";
+     "git status *.log"];
+  expect "single-quoted shell metacharacters remain literal"
+    ((A.command_decision allow_rule "git status '$(touch marker)'").policy =
+       Some A.Allow);
   let compound_allow = A.command_decision allow_rule
     "git status --short && touch marker" in
   expect "allow cannot promote a compound command"
@@ -95,6 +106,17 @@ let () =
      not (A.session_grantable "run_command") && not (A.session_grantable "start_shell") &&
      not (A.session_grantable "task") && not (A.session_grantable "mcp:server") &&
      not (A.session_grantable "workspace_rewind"));
+  let ordinary_write : A.request = {
+    tool_name = "write_file"; tier = A.Write; trigger = A.Tool_call;
+    impact = "changes a workspace file"; details = []; reason = None;
+    sensitive = None } in
+  let sensitive_write = { ordinary_write with sensitive = Some {
+    A.effects = [{ A.effect_path = "App/App.entitlements";
+                   effect_summary = "add an entitlement" }];
+    unresolved = []; targets = [] } } in
+  expect "sensitive exact-content requests cannot reuse session grants"
+    (A.session_grantable_request ordinary_write &&
+     not (A.session_grantable_request sensitive_write));
   expect "line answers map a/all/ㅁ to a session grant only where offered"
     (A.answer_of_line ~session:true (Some " A ") = A.Allow_for_session &&
      A.answer_of_line ~session:true (Some "\xe3\x85\x81") = A.Allow_for_session &&

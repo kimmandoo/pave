@@ -914,15 +914,22 @@ let wait_ready manager ~id ?cancel ?(timeout_seconds = 10) ?log_regex ?port () =
     check_wait_cancel cancel;
     let status, content = with_lock manager.lock (fun () ->
       let job = lookup manager id in job.status, job.output) in
-    let log_ready = match regex with
-      | None -> true
-      | Some regex -> (try ignore (Str.search_forward regex content 0); true with Not_found -> false) in
-    let port_ready = match port with None -> true | Some value -> port_accepting value in
-    if log_ready && port_ready then (
-      with_lock manager.lock (fun () -> (lookup manager id).ready <- true);
-      true)
-    else if status <> Running || Unix.gettimeofday () >= deadline then false
-    else (Thread.delay 0.05; loop ())
+    if status <> Running then false
+    else
+      let log_ready = match regex with
+        | None -> true
+        | Some regex ->
+            (try ignore (Str.search_forward regex content 0); true
+             with Not_found -> false) in
+      let port_ready =
+        match port with None -> true | Some value -> port_accepting value in
+      if log_ready && port_ready then
+        with_lock manager.lock (fun () ->
+          let job = lookup manager id in
+          if job.status = Running then (job.ready <- true; true)
+          else false)
+      else if Unix.gettimeofday () >= deadline then false
+      else (Thread.delay 0.05; loop ())
   in
   loop ()
 
@@ -962,7 +969,7 @@ let run ?cancel ?on_progress ?timeout_seconds ?(output_limit = default_output_li
     start_internal manager ~id:"run" ?cwd ?environment ?inherit_environment
       ~timeout_seconds ~output_limit ~pty_mode:pty ~program ~arguments ();
     let job = with_lock manager.lock (fun () -> lookup manager "run") in
-    (try write_stdin_job job stdin with Error _ -> ());
+    if stdin <> "" then write_stdin_job job stdin;
     close_stdin_job job;
     let last_progress = ref (-1) in
     let cancel_requested = ref false in

@@ -16,6 +16,24 @@ tmp_base=${TMPDIR:-/tmp}
 tmp=$(mktemp -d "${tmp_base%/}/pave-deps.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 
+is_linux_loader() {
+    case "$1" in
+        /lib64/ld-linux-x86-64.so.2|"/lib64/ld-linux-x86-64.so.2 "*) return 0 ;;
+        /usr/lib64/ld-linux-x86-64.so.2|"/usr/lib64/ld-linux-x86-64.so.2 "*) return 0 ;;
+        /lib/ld-linux-x86-64.so.2|"/lib/ld-linux-x86-64.so.2 "*) return 0 ;;
+        /usr/lib/ld-linux-x86-64.so.2|"/usr/lib/ld-linux-x86-64.so.2 "*) return 0 ;;
+        /lib/x86_64-linux-gnu/ld-linux-x86-64.so.2|"/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2 "*) return 0 ;;
+        /usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2|"/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2 "*) return 0 ;;
+        /lib/ld-linux-aarch64.so.1|"/lib/ld-linux-aarch64.so.1 "*) return 0 ;;
+        /usr/lib/ld-linux-aarch64.so.1|"/usr/lib/ld-linux-aarch64.so.1 "*) return 0 ;;
+        /lib64/ld-linux-aarch64.so.1|"/lib64/ld-linux-aarch64.so.1 "*) return 0 ;;
+        /usr/lib64/ld-linux-aarch64.so.1|"/usr/lib64/ld-linux-aarch64.so.1 "*) return 0 ;;
+        /lib/aarch64-linux-gnu/ld-linux-aarch64.so.1|"/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1 "*) return 0 ;;
+        /usr/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1|"/usr/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1 "*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 check_dependencies() {
     artifact=$1
     if [ "$os" = darwin ]; then
@@ -39,12 +57,17 @@ check_dependencies() {
     else
         ldd "$artifact" > "$tmp/ldd-output"
         while IFS= read -r line; do
+            leading_whitespace=${line%%[![:space:]]*}
+            line=${line#"$leading_whitespace"}
+            if is_linux_loader "$line"; then
+                continue
+            fi
             case "$line" in
                 *"not found"*)
                     echo "missing dependency in $artifact: $line" >&2
                     return 1
                     ;;
-                linux-vdso.so.1\ *) ;;
+                linux-vdso.so.1|linux-vdso.so.1\ *) ;;
                 *"=>"*)
                     dependency=${line%%=>*}
                     dependency=$(printf '%s' "$dependency" | tr -d '[:space:]')

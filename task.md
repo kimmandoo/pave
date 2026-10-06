@@ -197,8 +197,9 @@ Prioritize platform gaps (MX01–MX04), accessibility/visual review (MX05–MX08
   **Depends:** SH01a.
   **Gate:** Explicit local export consent; no hosted service or quality score.
 
-- [ ] **MX20 — Mobile dashboard capability-aware actions**
-  **Evidence:** [bin/main.ml](bin/main.ml) — The dashboard routes existing workflows, but newer platform-specific capabilities need accurate discovery and presentation. **Deliver:** Integrate only completed MX actions into /mobile using existing runner approvals; show unsupported/gated actions with exact reason and keep drafts on cancel.
+- [x] **MX20 — Mobile dashboard capability-aware actions**
+  **Evidence:** [bin/main.ml](bin/main.ml), [lib/tools/workspace_mobile_dashboard.ml](lib/tools/workspace_mobile_dashboard.ml), and [test/tools/test_workspace_mobile_dashboard.ml](test/tools/test_workspace_mobile_dashboard.ml). The dashboard enables only baseline-complete actions; MX02/05/08/09/10/14/17 proposals remain visibly disabled until their live-platform acceptance is recorded, with the exact current session or acceptance reason. `opam exec -- dune build bin/main.exe test/test_workspace_mobile_dashboard.exe test/test_tui_ux.exe && opam exec -- dune exec test/test_workspace_mobile_dashboard.exe && opam exec -- dune exec test/test_tui_ux.exe` passed. Actual Android/iOS Pave PTYs used a fixture provider and fake inventory executables: selecting Android Accessibility audit showed the MX05 gate without another provider request or device command; selecting iOS accessibility tree showed the MX02 and not-running reasons without another provider request, Xcode test or Simulator effect. The fake inventory commands were limited to `adb devices`, Xcode list/destinations and `simctl list`; this verifies dashboard behavior only, not native SDK/device acceptance.
+  **Deliver:** Integrate only completed MX actions into /mobile using existing runner approvals; show unsupported/gated actions with exact reason and keep drafts on cancel.
   **Accept:** Actual Android/iOS PTYs expose only usable actions; selecting an unavailable backend executes nothing and every device effect retains its own approval.
   **Depends:** none.
   **Gate:** Implement incrementally after each corresponding MX card, not an empty new dashboard.

@@ -2735,8 +2735,15 @@ let update_choices t ~verified
   enqueue_ui_event t (Listing_event {
     verified; details; labels; status; status_pages; preferred })
 
+let initial_candidates ~dynamic ~details values =
+  Array.map (fun value ->
+    { value; label = value; custom = false; verified = false;
+      action = dynamic;
+      detail = if dynamic then None else List.assoc_opt value details })
+    values
+
 let choose ?(allow_custom = false) ?(intro = []) ?(plain = [])
-    ?initial_status ?initial_filter ?initial_selected ?initial_listing
+    ?(details = []) ?initial_status ?initial_filter ?initial_selected ?initial_listing
     ?wake_fd ?on_wake ?dynamic
     ?(segmented = false) ?scope_action
     ?(empty_message = "No available models yet") ?(count_label = "available")
@@ -2746,9 +2753,7 @@ let choose ?(allow_custom = false) ?(intro = []) ?(plain = [])
     else Array.of_list choices in
   let chooser = { title = sanitize title;
     intro = Array.of_list (List.map sanitize intro); plain;
-    choices = Array.map (fun value ->
-      { value; label = value; custom = false; verified = false;
-        action = dynamic; detail = None }) initial;
+    choices = initial_candidates ~dynamic ~details initial;
     allow_custom; dynamic; segmented; scope_action;
     empty_message = sanitize empty_message; count_label = single_line count_label;
     status = initial_status;
@@ -3098,8 +3103,7 @@ let confirm_tool ?(always = true) t (request : Pave.Approval.request) =
     let prefix = "Command: " in
     String.starts_with ~prefix detail &&
     String.length detail - String.length prefix > 4096) request.details in
-  let session = request.sensitive = None &&
-    Pave.Approval.session_grantable request.tool_name in
+  let session = Pave.Approval.session_grantable_request request in
   let always = always && Pave.Approval.always_grantable request.tool_name &&
     List.exists (fun detail ->
       let prefix = "Command: " in

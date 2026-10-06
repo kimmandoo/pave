@@ -27,7 +27,7 @@ class ReleaseHandler(http.server.BaseHTTPRequestHandler):
     def write_body(self, body):
         try:
             self.wfile.write(body)
-        except (BrokenPipeError, ConnectionResetError):
+        except (BrokenPipeError, ConnectionResetError, ssl.SSLEOFError):
             pass
 
     def do_GET(self):
@@ -113,7 +113,8 @@ def digest(path):
 
 
 def check_staging(prefix, license_dir, temporary, label):
-    leftovers = [path for directory in (prefix, license_dir) for path in directory.iterdir()
+    leftovers = [path for directory in (prefix, license_dir) if directory.exists()
+                 for path in directory.iterdir()
                  if path.name.startswith(".") and path.name != ".native-install"]
     leftovers.extend(temporary.iterdir())
     if leftovers:
@@ -154,6 +155,36 @@ def main():
             installer = root / "install.sh"
             installer.write_text(install_source.replace(
                 "https://github.com/kimmandoo/pave/releases", BASE + "/releases"))
+            fresh_prefix = root / "fresh" / "tools" / "bin"
+            fresh_prefix.mkdir(parents=True)
+            fresh_temporary = root / "fresh-tmp"
+            fresh_temporary.mkdir()
+            fresh_wrapper_dir = root / "fresh-wrapper"
+            fresh_wrapper_dir.mkdir()
+            fail_mv = fresh_wrapper_dir / "mv"
+            fail_once = fresh_wrapper_dir / "failed-once"
+            fail_mv.write_text(
+                "#!/bin/sh\n"
+                "for last do :; done\n"
+                "if [ \"$last\" = \"$PAVE_TEST_FAIL_PUBLISH\" ] && "
+                "[ ! -e \"$PAVE_TEST_FAIL_ONCE\" ]; then "
+                ": > \"$PAVE_TEST_FAIL_ONCE\"; exit 76; fi\n"
+                "exec /bin/mv \"$@\"\n")
+            fail_mv.chmod(0o755)
+            fresh_env = env | {
+                "PAVE_INSTALL_DIR": str(fresh_prefix),
+                "TMPDIR": str(fresh_temporary),
+                "PATH": str(fresh_wrapper_dir) + os.pathsep + env.get("PATH", ""),
+                "PAVE_TEST_FAIL_PUBLISH": str(fresh_prefix / "pave"),
+                "PAVE_TEST_FAIL_ONCE": str(fail_once)}
+            fresh_license_dir = fresh_prefix.parent / "share" / "licenses" / "pave"
+            run(["/bin/sh", str(installer)], fresh_env, expect=1)
+            if (fresh_prefix / "pave").exists() or any(
+                    (fresh_license_dir / name).exists() for name in
+                    ("LICENSE", "THIRD_PARTY_NOTICES", ".native-install")):
+                raise RuntimeError("failed fresh publication left installed files")
+            check_staging(fresh_prefix, fresh_license_dir, fresh_temporary,
+                          "failed fresh publication")
             run(["/bin/sh", str(installer)], env)
             stalled_installer = root / "stalled-install.sh"
             installer_source = installer.read_text()

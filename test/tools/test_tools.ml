@@ -1659,7 +1659,7 @@ printf '%s\n' 'Test Suite Selected tests passed. Executed 0 tests, with 0 failur
       create "focus/bin/gradle" {|#!/bin/sh
 case " $* " in
   *" tasks --all "*) printf '%s\n' "Tasks runnable from root project 'Fixture'" '------------------------------------------------------------' 'Build tasks' '-----------' 'app:assembleDebug - selected variant' 'app:connectedDebugAndroidTest - selected instrumented test' '' 'BUILD SUCCESSFUL in 1s' ;;
-  *" :app:connectedDebugAndroidTest "*) if [ -n "$ANDROID_SERIAL" ]; then if [ -f truncate-output ]; then head -c 70000 /dev/zero; printf '%s\n' '1 tests completed'; elif [ -f zero-tests ]; then printf '%s\n' '0 tests completed'; elif [ -f timeout-output ] || [ -f cancel-output ]; then sleep 2; printf '%s\n' '1 tests completed'; elif [ -f mutate-source ]; then printf '%s\n' 'fun main() = changed()' > app/src/Main.kt; printf '%s\n' '1 tests completed'; elif grep -q 'missing()' app/src/Main.kt; then printf '%s\n' '1 tests completed, 1 failed' 'e: app/src/Main.kt: (1, 14): Unresolved reference'; exit 8; else printf '%s\n' "instrumented-test-ok $ANDROID_SERIAL" '1 tests completed'; fi; else printf '%s\n' 'instrumented ran without a serial'; exit 3; fi ;;
+  *" :app:connectedDebugAndroidTest "*) if [ -f summary-tests ]; then if [ -f no-source ]; then printf '%s\n' 'Task :app:unrelatedTest NO-SOURCE'; fi; cat summary-tests; elif [ -n "$ANDROID_SERIAL" ]; then if [ -f truncate-output ]; then head -c 70000 /dev/zero; printf '%s\n' '1 tests completed'; elif [ -f zero-tests ]; then printf '%s\n' '0 tests completed'; elif [ -f timeout-output ] || [ -f cancel-output ]; then sleep 2; printf '%s\n' '1 tests completed'; elif [ -f mutate-source ]; then printf '%s\n' 'fun main() = changed()' > app/src/Main.kt; printf '%s\n' '1 tests completed'; elif grep -q 'missing()' app/src/Main.kt; then printf '%s\n' '1 tests completed, 1 failed' 'e: app/src/Main.kt: (1, 14): Unresolved reference'; exit 8; else printf '%s\n' "instrumented-test-ok $ANDROID_SERIAL" '1 tests completed'; fi; else printf '%s\n' 'instrumented ran without a serial'; exit 3; fi ;;
   *" :app:assembleDebug "*) printf '%s\n' 'e: app/src/Main.kt: (1, 14): Unresolved reference' 'other/Other.kt:1:2: error: unrelated' 'selected variant failed'; exit 7 ;;
   *) exit 9 ;;
 esac
@@ -1906,6 +1906,21 @@ esac
       assert (contains verified "VERIFIED test for mobile-1" &&
         contains verified repaired.sha256 &&
         contains verified "instrumented-test-ok emulator-5554");
+      List.iter (fun summary ->
+        create "focus/gradle/summary-tests" (summary ^ "\n");
+        let result = verify "test" (verify_fields repaired) in
+        if not (contains result "VERIFIED test for mobile-1") then
+          failwith ("positive Gradle summary rejected: " ^ summary ^ "\n" ^ result))
+        ["10 tests completed"; "20 tests completed"; "100 tests completed"];
+      create "focus/gradle/summary-tests" "1 tests completed\n";
+      create "focus/gradle/no-source" "";
+      let no_source_summary = verify "test" (verify_fields repaired) in
+      assert (contains no_source_summary "VERIFIED test for mobile-1");
+      List.iter (fun path ->
+        let path = Filename.concat root path in
+        Sys.remove path;
+        files := List.filter (( <> ) path) !files)
+        ["focus/gradle/summary-tests"; "focus/gradle/no-source"];
       let stale_fields = verify_fields defective in
       assert (contains (verify "test" stale_fields)
         "changed since the supplied post-edit snapshot");

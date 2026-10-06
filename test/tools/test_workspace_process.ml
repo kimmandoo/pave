@@ -76,6 +76,42 @@ let () =
   let input_data = "provided input\n\000" in
   let input = Process.run ~stdin:input_data ~program:"/bin/cat" ~arguments:[] () in
   assert (input.output = input_data);
+  let delayed_input = String.make 65_536 'x' in
+  if Sys.file_exists "/proc/sys/fs/pipe-max-size" then (
+    let capacity = Process.run ~program:python3 ~arguments:["-c";
+      "import fcntl,os; r,w=os.pipe(); print(fcntl.fcntl(r,fcntl.F_GETPIPE_SZ)); os.close(r); os.close(w)"] () in
+    assert (capacity.termination = Process.Exited 0);
+    if int_of_string (String.trim capacity.output) < String.length delayed_input then (
+      let marker = Filename.temp_file "pave-stdin-delivery-" "" in
+      Sys.remove marker;
+      Fun.protect ~finally:(fun () ->
+        if Sys.file_exists marker then Sys.remove marker) (fun () ->
+        expect_error (fun () ->
+          ignore (Process.run ~stdin:delayed_input ~program:"/bin/sh"
+            ~arguments:["-c"; "sleep 2; cat >/dev/null; printf leaked > " ^
+              Filename.quote marker] ()));
+        assert (not (Sys.file_exists marker))));
+  );
+  if Sys.file_exists "/proc/sys/fs/pipe-max-size" then (
+    let marker = Filename.temp_file "pave-stdin-cleanup-" "" in
+    Sys.remove marker;
+    let manager = Process.create_manager () in
+    Fun.protect ~finally:(fun () ->
+      Process.close_manager manager;
+      if Sys.file_exists marker then Sys.remove marker) (fun () ->
+      Process.start manager ~id:"blocked-stdin" ~timeout_seconds:5
+        ~program:python3
+        ~arguments:["-c";
+          "import fcntl,sys,time; sys.stdin.buffer.readline(); fcntl.fcntl(0,fcntl.F_SETPIPE_SZ,4096); print('READY',flush=True); time.sleep(2); open(sys.argv[1],'w').write('leaked')";
+          marker] ();
+      Process.write_stdin manager ~id:"blocked-stdin" ~data:"shrink\n";
+      assert (Process.wait_ready manager ~id:"blocked-stdin"
+        ~timeout_seconds:2 ~log_regex:"READY" ());
+      expect_error (fun () -> Process.write_stdin manager ~id:"blocked-stdin"
+        ~data:(String.make 65_536 'x'));
+      Process.close_manager manager;
+      assert (not (Sys.file_exists marker)));
+  );
   let failed = Process.run_shell ~command:"exit 7" () in
   assert (failed.termination = Process.Exited 7);
 
@@ -237,6 +273,20 @@ let () =
   assert (not (Process.wait_ready not_ready ~id:"short" ~timeout_seconds:1
     ~log_regex:"never" ~port:(fresh_port ()) ()));
   Process.close_manager not_ready;
+  let readiness_socket = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
+  Unix.bind readiness_socket (Unix.ADDR_INET (Unix.inet_addr_loopback, 0));
+  Unix.listen readiness_socket 1;
+  let readiness_port = match Unix.getsockname readiness_socket with
+    | Unix.ADDR_INET (_, port) -> port
+    | _ -> failwith "unexpected readiness socket address" in
+  let exited_ready = Process.create_manager () in
+  Process.start_shell exited_ready ~id:"exited-ready"
+    ~command:"printf READY; exit 7" ();
+  assert (wait_for_exit exited_ready "exited-ready" = Process.Exited 7);
+  assert (not (Process.wait_ready exited_ready ~id:"exited-ready"
+    ~log_regex:"READY" ~port:readiness_port ()));
+  Process.close_manager exited_ready;
+  Unix.close readiness_socket;
 
   let port = fresh_port () in
   let port_manager = Process.create_manager () in

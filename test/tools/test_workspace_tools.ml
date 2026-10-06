@@ -109,8 +109,8 @@ let () =
       expect "process output exposes absolute paging metadata"
         (contains output "output page offset 0; earliest retained 0; next");
       let ready_start = tool ~context ~approved:true ~root "start_process" [
-        "id", `String "ready"; "program", `String "/usr/bin/printf";
-        "arguments", `List [`String "PAVE_READY\n"]] in
+        "id", `String "ready"; "program", `String "/bin/sh";
+        "arguments", `List [`String "-c"; `String "printf 'PAVE_READY\\n'; sleep 5"]] in
       expect "readiness fixture started" (contains ready_start "Started process job");
       let ready = tool ~context ~root "process_ready" [
         "id", `String "ready"; "log_regex", `String "PAVE_READY";

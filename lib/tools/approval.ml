@@ -163,6 +163,27 @@ let shell_segments command =
   if !quote <> None || !escaped then None
   else (push (); Some (List.rev !segments))
 
+let shell_expansion_safe command =
+  let quote = ref None and escaped = ref false and safe = ref true in
+  String.iter (fun character ->
+    if !escaped then escaped := false
+    else match !quote with
+      | Some '\'' ->
+          if character = '\'' then quote := None
+      | Some '"' ->
+          if character = '"' then quote := None
+          else if character = '\\' then escaped := true
+          else if character = '$' || character = '`' then safe := false
+      | Some _ -> ()
+      | None ->
+          (match character with
+           | '\'' | '"' -> quote := Some character
+           | '\\' -> escaped := true
+           | '$' | '`' | '<' | '>' | '*' | '?' | '[' | ']' | '~' ->
+               safe := false
+           | _ -> ())) command;
+  !safe && !quote = None && not !escaped
+
 let command_rule_matches command segments rule =
   let pattern = normalize rule.match_text in
   match rule.policy with
@@ -172,7 +193,8 @@ let command_rule_matches command segments rule =
            (* Segment parsing is only the compound-command guard. Compare the
               original spelling, retaining quotes and escaped whitespace. *)
            pattern = normalize command
-       | [segment] -> glob_matches pattern segment
+       | [segment] ->
+           shell_expansion_safe command && glob_matches pattern segment
        | _ -> false)
   | Prompt ->
       glob_matches pattern (normalize command) ||
@@ -181,6 +203,7 @@ let command_rule_matches command segments rule =
       glob_matches pattern (normalize command) ||
       List.exists (fun segment -> contains_glob pattern segment) segments ||
       contains_glob pattern command
+
 
 let command_decision rules command =
   let segments = Option.value ~default:[] (shell_segments command) in
@@ -249,6 +272,10 @@ let session_grantable tool_name =
   List.mem tool_name [
     "web_search"; "web_fetch"; "write_file"; "edit_file"; "apply_edits";
     "ast_edit"; "image_ocr"; "memory" ]
+
+(* Sensitive mutations always require their per-call exact-content review. *)
+let session_grantable_request (request : request) =
+  request.sensitive = None && session_grantable request.tool_name
 
 (* Only an exact, fully reviewed shell command may be remembered across runs;
    the persisted rule matches the literal normalized command text. *)

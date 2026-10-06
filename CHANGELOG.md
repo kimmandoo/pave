@@ -1,4 +1,12 @@
 # Changelog
+## 2026-10-06
+
+- fix(mobile): gated dashboard actions by platform, app state, recorded evidence and completed feature acceptance; exposed exact unavailable reasons without submitting disabled workflows.
+- fix(security): required review for shell expansions in wildcard command grants and per-call approval for sensitive mutations.
+- fix(mobile): decoded Paeth rows against the prior row and accepted positive multi-digit Gradle summaries despite unrelated `NO-SOURCE` tasks.
+- fix(process): propagated incomplete stdin errors and rejected readiness evidence from exited jobs.
+- fix(auth): continued Copilot device authorization on HTTP 200 pending responses.
+- fix(release): accepted Linux loader records, rolled back failed fresh installs, and replaced assets when retrying draft releases.
 
 ## 2026-10-05
 - feat(mobile): added bounded Native XCTest accessibility capture for explicitly owned iOS Simulator sessions.

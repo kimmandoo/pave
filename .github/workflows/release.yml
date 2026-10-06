@@ -176,7 +176,7 @@ jobs:
           else
             gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes --draft
           fi
-          gh release upload "$GITHUB_REF_NAME" \
+          gh release upload "$GITHUB_REF_NAME" --clobber \
             pave-darwin-arm64.tar.gz \
             pave-darwin-x86_64.tar.gz \
             pave-linux-aarch64.tar.gz \

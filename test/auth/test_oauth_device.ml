@@ -100,7 +100,7 @@ let () =
   expect_error "OAuth device authorization expired" run;
   let run, _, _, _ = fixture [500, {|{"error":"internal","debug":"private-token"}|}] in
   expect_error "OAuth device token request rejected" run;
-  let run, _, _, _ = fixture [200, {|{"error":"authorization_pending"}|}] in
+  let run, _, _, _ = fixture [500, {|{"error":"authorization_pending"}|}] in
   expect_error "OAuth device token request rejected" run;
   let run, _, _, _ = fixture [200, {|{"access_token":""}|}] in
   expect_error "OAuth device response missing required field" run;

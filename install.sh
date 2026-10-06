@@ -146,6 +146,7 @@ backup_license=
 backup_notices=
 backup_marker=
 backup_binary=
+had_binary=0
 had_license=0
 had_notices=0
 had_marker=0

@@ -300,28 +300,32 @@ let decode_png png =
   let stride=width*channels in
   let raw=inflate_zlib (Buffer.contents idat) ((stride+1)*height) in
   let rgba=Bytes.create (width*height*4) in
-  let prev=Bytes.make stride '\000' in
+  let previous=ref (Bytes.make stride '\000') in
+  let current=ref (Bytes.create stride) in
   for y=0 to height-1 do
     let filter=Char.code raw.[y*(stride+1)] in
     if filter>4 then fail "invalid PNG row filter";
     for x=0 to stride-1 do
       let v=Char.code raw.[y*(stride+1)+1+x] in
-      let left=if x>=channels then Char.code (Bytes.get prev (x-channels)) else 0 in
-      let up=Char.code (Bytes.get prev x) in
-      let ul=if x>=channels then Char.code (Bytes.get prev (x-channels)) else 0 in
+      let left=if x>=channels then Char.code (Bytes.get !current (x-channels)) else 0 in
+      let up=Char.code (Bytes.get !previous x) in
+      let ul=if x>=channels then Char.code (Bytes.get !previous (x-channels)) else 0 in
       let paeth a b c =
         let p=a+b-c in
         let pa=abs (p-a) and pb=abs (p-b) and pc=abs (p-c) in
         if pa<=pb && pa<=pc then a else if pb<=pc then b else c in
       let predictor=match filter with 0->0|1->left|2->up|3->(left+up)/2|_->paeth left up ul in
-      Bytes.set prev x (Char.chr ((v+predictor) land 255))
+      Bytes.set !current x (Char.chr ((v+predictor) land 255))
     done;
     for x=0 to width-1 do
       let src=x*channels and dst=(y*width+x)*4 in
-      let c i=Char.code (Bytes.get prev (src+i)) in
+      let c i=Char.code (Bytes.get !current (src+i)) in
       let r,g,b,a=match !color with 0->let q=c 0 in q,q,q,255|2->c 0,c 1,c 2,255|4->let q=c 0 in q,q,q,c 1|_->c 0,c 1,c 2,c 3 in
       Bytes.set rgba dst (byte r); Bytes.set rgba (dst+1) (byte g); Bytes.set rgba (dst+2) (byte b); Bytes.set rgba (dst+3) (byte a)
-    done
+    done;
+    let row = !previous in
+    previous := !current;
+    current := row
   done;
   {width;height;rgba=Bytes.unsafe_to_string rgba}
 

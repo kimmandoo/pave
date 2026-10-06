@@ -1263,10 +1263,11 @@ let () =
                 (try Some (read_line ()) with End_of_file -> None) in
         approved_answer command answer in
     (* "Allow all" grants last until this process exits and cover only
-       tools that Approval.session_grantable admits. *)
+       ordinary requests admitted by the approval policy. *)
     let session_grants = Hashtbl.create 8 and session_grants_lock = Mutex.create () in
     let with_session_grant ask (request : Pave.Approval.request) =
-      let grantable = Pave.Approval.session_grantable request.tool_name in
+      let grantable =
+        Pave.Approval.session_grantable_request request in
       let granted () = Mutex.protect session_grants_lock (fun () ->
         Hashtbl.mem session_grants request.tool_name) in
       if grantable && granted () then true
@@ -1290,7 +1291,8 @@ let () =
       else match !ui with
         | Some screen -> Tui.confirm_tool ~always:(not !mask_secrets) screen request
         | None ->
-            let session = Pave.Approval.session_grantable request.tool_name in
+            let session =
+              Pave.Approval.session_grantable_request request in
             let always = not !mask_secrets &&
               Pave.Approval.always_grantable request.tool_name &&
               List.exists (fun detail ->
@@ -3170,6 +3172,8 @@ let () =
             | "Lifecycle scenario" ->
                 target ^ " User-specified lifecycle transition/scenario: " ^ detail ^
                 "\nUse mobile_app_lifecycle only for supported background, resume or process-recreation steps. Inspect the exact app/session first; explain data-loss risk, require separate approval per transition and verify fresh state. Never clear data, uninstall or touch a foreign app."
+            | "iOS accessibility tree" ->
+                target ^ " Capture only a fresh accessibility tree with mobile_observe action=accessibility for this exact running iOS session. Preserve the separate Native XCTest approval; do not perform a device action."
             | "Android performance" ->
                 target ^ " Use mobile_performance only for supported app-scoped Android launch, frame or memory measurement. Ask which action and warm/cold condition; show units, exact build/PID provenance and sample completeness, and never infer energy or unsupported counters."
             | "Flutter integration test" ->
@@ -3238,15 +3242,8 @@ let () =
                        Pave.Workspace_mobile_run.render mobile = row) sessions with
                     | None -> notify "The selected mobile session is no longer available; reopen /mobile."
                     | Some mobile ->
-                        let common = [
-                          "Observe app";
-                          "Read runtime diagnostics";
-                          "Verify guarded edit";
-                          "Save screenshot baseline";
-                          "Compare screenshot baseline"] in
-                        let flutter_integration = match mobile.platform with
-                          | Pave.Workspace_mobile_run.Ios ->
-                              None, "Flutter device integration requires an Android app session."
+                        let flutter_integration_reason = match mobile.platform with
+                          | Pave.Workspace_mobile_run.Ios -> None
                           | Pave.Workspace_mobile_run.Android ->
                               let package_subroot =
                                 if mobile.subroot = "android" then Some "."
@@ -3255,7 +3252,8 @@ let () =
                                     (String.length mobile.subroot - String.length "/android"))
                                 else None in
                               (match package_subroot with
-                               | None -> None, "selected Android app is not bound to a Flutter package's android/ host."
+                               | None -> Some
+                                   "selected Android app is not bound to a Flutter package's android/ host."
                                | Some package_subroot ->
                                    let expected_host =
                                      if package_subroot = "." then "android"
@@ -3265,21 +3263,21 @@ let () =
                                      else package_subroot ^ "/" in
                                    if mobile.subroot <> expected_host ||
                                       not (String.starts_with ~prefix mobile.app_path) then
-                                     None, "selected APK does not belong to the exact Flutter package."
+                                     Some "selected APK does not belong to the exact Flutter package."
                                    else if not (List.mem mobile.state [
                                        Pave.Workspace_mobile_run.Installed;
                                        Pave.Workspace_mobile_run.Running]) then
-                                     None, "selected Flutter app is not installed on its session device."
+                                     Some "selected Flutter app is not installed on its session device."
                                    else
                                      (try
                                         let discovery =
                                           Pave.Workspace_flutter_focus.discover_integration_tests
                                             ~root:mobile.root ~subroot:package_subroot in
                                         if discovery.targets = [] then
-                                          None, "no existing integration_test target is available."
+                                          Some "no existing integration_test target is available."
                                         else if not
                                             (Pave.Workspace_flutter_focus.flutter_runtime_available ()) then
-                                          None, "Flutter CLI is not installed; no runtime will be downloaded."
+                                          Some "Flutter CLI is not installed; no runtime will be downloaded."
                                         else
                                           let ready = Mutex.lock context.mobile_lock;
                                           Fun.protect
@@ -3295,75 +3293,50 @@ let () =
                                                       device.state = Pave.Workspace_android_devices.Ready)
                                                     inventory.devices
                                               | _ -> false) in
-                                          if not ready then None,
+                                          if not ready then Some
                                             "selected emulator is not in the current approved ready-device inventory."
-                                          else Some (), ""
+                                          else None
                                       with Pave.Workspace_flutter_focus.Error message ->
-                                        None, message)) in
-                        let supported, unavailable_actions, capability_details =
+                                        Some message)) in
+                        let ios_accessibility_reason =
                           match mobile.platform with
-                          | Pave.Workspace_mobile_run.Android ->
-                              let flutter_action, flutter_reason = flutter_integration in
-                              let flutter_details = match flutter_action with
-                                | Some () ->
-                                    ["Flutter integration is available for this exact installed app and approved ready emulator.";
-                                     "Target discovery and execution stay separately approved; no pub get or SDK install."]
-                                | None ->
-                                    ["Flutter integration unavailable: " ^ flutter_reason;
-                                     "It is offered only for the exact installed Flutter app, existing test target/runtime and current approved ready emulator; no pub get or SDK install."] in
-                              common @ [
-                                "Control app";
-                                "Replay bug scenario";
-                                "Accessibility audit";
-                                "Environment experiment";
-                                "Exercise deep link";
-                                "Lifecycle scenario";
-                                "Android performance"] @
-                              (if flutter_action = None then [] else ["Flutter integration test"]),
-                              [], flutter_details
+                          | Pave.Workspace_mobile_run.Android -> None
                           | Pave.Workspace_mobile_run.Ios ->
-                              let unavailable = [
-                                "iOS semantic control — unavailable";
-                                "iOS scenario replay — unavailable";
-                                "iOS performance counters — unavailable";
-                                "iOS permission-state experiments — unavailable";
-                                "iOS network-disruption experiments — unavailable"] in
-                              (match Pave.Tools.mobile_xctest_capability
-                                  context ~root:mobile.root mobile with
-                               | None ->
-                                   common, unavailable,
-                                   ["Native XCTest accessibility observation is available for this exact running app and Owned Simulator lifecycle binding.";
-                                    "Semantic control and scenario replay remain unavailable.";
-                                    "Permission-state and network-disruption experiments are intentionally unsupported."]
-                               | Some reason ->
-                                   common,
-                                   ["iOS accessibility tree — unavailable"] @ unavailable,
-                                   ["Native XCTest unavailable for this session: " ^ reason;
-                                    "The selected app must be running on the exact owned Simulator lifecycle target.";
-                                    "Semantic control and scenario replay remain unavailable.";
-                                    "Permission-state and network-disruption experiments are intentionally unsupported."])
-                        in
-                        let actions = supported @ unavailable_actions @ ["Back"] in
-                        let unavailable_details = capability_details in
-                        let action = Tui.choose ~intro:([row;
-                          "Results appear in the transcript; reopen /mobile to refresh lifecycle state.";
-                          "Every device effect retains separate tool approval."] @ unavailable_details)
-                          screen ~title:("Mobile · " ^ mobile.id) ~choices:actions in
-                        match action with
-                        | Some "iOS accessibility tree — unavailable" ->
-                            notify "iOS accessibility backend unavailable: this session lacks a supported Native XCTest runner and exact Owned Simulator lifecycle binding."
-                        | Some "iOS semantic control — unavailable" ->
-                            notify "iOS semantic control unavailable: it requires the selected running app and exact Owned Simulator lifecycle binding."
-                        | Some "iOS scenario replay — unavailable" ->
-                            notify "iOS scenario replay unavailable: it requires gated iOS semantic controls and fresh accessibility observations."
-                        | Some "iOS performance counters — unavailable" ->
-                            notify "iOS performance counters unavailable: xctrace output remains raw; no validated counter parser is installed."
-                        | Some ("iOS permission-state experiments — unavailable" |
-                               "iOS network-disruption experiments — unavailable") ->
-                            notify "iOS permission-state and network-disruption experiments remain intentionally unavailable."
-                        | Some action when List.mem action supported ->
-                            start_workflow action mobile.id
-                        | _ -> ())) in
+                              Pave.Tools.mobile_xctest_capability
+                                context ~root:mobile.root mobile in
+                        let action_entries = Pave.Workspace_mobile_dashboard.entries
+                          ~platform:mobile.platform ~state:mobile.state
+                          ~ios_accessibility_reason ~flutter_integration_reason
+                          ~verification_available:
+                            (Pave.Tools.mobile_verify_evidence_available
+                              context ~root:mobile.root) in
+                        let label (entry : Pave.Workspace_mobile_dashboard.item) =
+                          match entry.unavailable_reason with
+                          | None -> entry.action
+                          | Some _ -> entry.action ^ " — unavailable" in
+                        let choices = List.map label action_entries @ ["Back"] in
+                        let details = List.filter_map
+                          (fun (entry : Pave.Workspace_mobile_dashboard.item) ->
+                            Option.map (fun reason ->
+                              label entry, reason) entry.unavailable_reason)
+                          action_entries in
+                        let action = Tui.choose ~details
+                          ~intro:[row;
+                            "Disabled actions show their exact reason; device effects still need separate approval."]
+                          screen ~title:("Mobile · " ^ mobile.id) ~choices in
+                        (match action with
+                         | None | Some "Back" -> ()
+                         | Some selected ->
+                             (match List.find_opt
+                                 (fun (entry : Pave.Workspace_mobile_dashboard.item) ->
+                                   label entry = selected) action_entries with
+                              | None ->
+                                  notify "Mobile action changed; reopen /mobile to refresh its capabilities."
+                              | Some { unavailable_reason = Some reason; _ } ->
+                                  notify (selected ^ ": " ^ reason)
+                              | Some { action; unavailable_reason = None } ->
+                                  start_workflow action mobile.id))
+                        )) in
     let show_job manager id =
       match Pave.Session_jobs.find manager ~id with
       | None -> notify "Error: no such job in the active session"

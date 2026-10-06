@@ -106,6 +106,14 @@ let starts_with text prefix =
   String.length text >= String.length prefix &&
   String.sub text 0 (String.length prefix) = prefix
 
+let mobile_verify_evidence_available context ~root =
+  let root = Workspace_path.root_path root in
+  let prefix = root ^ "\000" in
+  Mutex.lock context.mobile_lock;
+  Fun.protect ~finally:(fun () -> Mutex.unlock context.mobile_lock) (fun () ->
+    Hashtbl.fold (fun key _ found -> found || starts_with key prefix)
+      context.guarded_edit_evidence false)
+
 let resolve_file_location ?cancel ?context ~root path =
   let lower = String.lowercase_ascii path in
   if starts_with lower "local://" then
@@ -2520,7 +2528,7 @@ let mobile_verify_android_task session args =
 let mobile_test_executed output =
   let text = String.lowercase_ascii output in
   let has fragment = includes text fragment in
-  let positive_count_before marker =
+  let count_before marker predicate =
     let rec find from =
       match Str.search_forward (Str.regexp_string marker) text from with
       | position ->
@@ -2531,12 +2539,17 @@ let mobile_test_executed output =
             else 0 in
           let first = digits (position - 1) in
           if first < position &&
-             (try int_of_string (String.sub text first (position - first)) > 0
+             (try predicate (int_of_string
+                (String.sub text first (position - first)))
               with _ -> false)
           then true
           else find (position + String.length marker)
       | exception Not_found -> false in
     find 0 in
+  let positive_count_before marker =
+    count_before marker (fun count -> count > 0) in
+  let zero_count_before marker =
+    count_before marker (fun count -> count = 0) in
   let positive_count_after marker =
     let rec find from =
       match Str.search_forward (Str.regexp_string marker) text from with
@@ -2559,9 +2572,9 @@ let mobile_test_executed output =
           else find (position + String.length marker)
       | exception Not_found -> false in
     find 0 in
-  not (has "0 tests" || has "zero tests" || has "executed 0" ||
-       has "tests run: 0" || has "no tests found" || has "no matching tests" ||
-       has "no-source") &&
+  not (has "zero tests" || has "executed 0" ||
+       has "tests run: 0" || has "no tests found" ||
+       has "no matching tests" || zero_count_before " test") &&
   (List.exists positive_count_before
      [" test"; " tests completed"; " tests passed"] ||
    List.exists positive_count_after ["tests run:"; "tests found:"])

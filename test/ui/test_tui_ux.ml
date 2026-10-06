@@ -12,6 +12,36 @@ let delta turn_id text =
   Tui.Agent_event (Pave.Turn_runner.Text_delta { turn_id; text })
 
 let () =
+  let blocked_label = "Observe app — unavailable" in
+  let blocked_reason =
+    "requires a running selected app; current app state is selected." in
+  let blocked_chooser : Tui.chooser = {
+    title = "Mobile";
+    intro = [||];
+    plain = [];
+    choices = Tui.initial_candidates ~dynamic:false
+      ~details:[blocked_label, blocked_reason]
+      [|blocked_label; "Back"|];
+    allow_custom = false;
+    dynamic = false;
+    segmented = false;
+    empty_message = "No choices";
+    count_label = "available";
+    scope_action = None;
+    status = None;
+    status_pages = [||];
+    status_page = 0;
+    filter = "";
+    selected = 0;
+    offset = 0;
+    touched = false;
+    filtered = None;
+    matched_models = 0;
+  } in
+  let _, _, _, selected_detail, _ = Tui.chooser_sections
+      ~cols:100 ~height:8 blocked_chooser in
+  expect "static chooser carries an exact gated-action reason"
+    (Array.to_list selected_detail = [blocked_reason]);
   let reflow = Transcript_view.create () in
   let paragraph = "abcdefghijklmnopqrstuvwx" in
   Transcript_view.assistant reflow paragraph;

@@ -34,8 +34,8 @@ let () =
   assert (policy.scopes = ["read:user"]);
   assert (policy.device_body = Device.Form && policy.token_body = Device.Form);
   let run, requests, sleeps, callback = fixture [
-    400, {|{"error":"authorization_pending"}|};
-    400, {|{"error":"slow_down"}|};
+    200, {|{"error":"authorization_pending"}|};
+    200, {|{"error":"slow_down"}|};
     200, {|{"access_token":"ghu_fixture-token"}|} ] in
   let credential = run () in
   assert (credential.access = "ghu_fixture-token" && credential.refresh = None);
