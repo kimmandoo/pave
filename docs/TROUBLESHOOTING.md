@@ -3,10 +3,10 @@
 
 ### [2026-10-06] Native release smoke failures hid their output
 
-- **Context / Symptom:** Release run `37407164170` failed on Linux x86_64, Linux AArch64 and macOS x86_64 during the installed-updater transaction, and on macOS arm64 during packaged-binary smoke. The logged-out GitHub run page exposed only generic exit-code annotations; raw job logs required sign-in, so the underlying failure messages were not observable.
-- **Root Cause:** Native smoke output was sent only to job logs; the workflow did not publish failure diagnostics in the public run summary.
-- **Solution:** Tee packaged-binary and installed-updater smoke output to per-job logs and expose the last 100 lines in `GITHUB_STEP_SUMMARY` when a smoke step fails. A follow-up tagged run is still required to reveal the underlying test failures and certify the release.
-- **Prevention / Reference:** Keep the four-target native matrix and its bounded failure summaries as release gates; do not treat local smoke as native release certification.
+- **Context / Symptom:** The initial release run `37407164170` exposed only generic failures. After adding per-job logs and bounded `GITHUB_STEP_SUMMARY` output, release run `37409692996` still failed: macOS arm64 packaged-binary smoke and installed-updater transactions on Linux x86_64, Linux AArch64 and macOS x86_64. All four targets passed tests and native builds; the other three packaged-binary smokes passed. The summary step succeeded, but the logged-out job page says “Sign in to view logs,” the unauthenticated logs API returned HTTP 403, and there were no run artifacts.
+- **Root Cause:** Public Actions metadata exposes step outcomes but not the failure text or job summary to this unauthenticated environment. `gh` is not installed, and neither `GH_TOKEN` nor `GITHUB_TOKEN` is configured. The underlying smoke failures remain unknown.
+- **Solution:** The workflow now tees smoke output and writes the last 100 lines to `GITHUB_STEP_SUMMARY`. Main CI run `37408896408` passed, but no release was published; latest remains `v0.1.81`. Obtain authenticated read access to run `37409692996`, inspect exact failures, and fix only confirmed causes. Do not move or retag failed tag `v0.1.83`.
+- **Prevention / Reference:** Keep the four-target native matrix and bounded failure summaries as release gates. After a confirmed fix and passing CI, use a new immutable `v0.1.84` tag; verify all public assets and checksums before claiming publication.
 
 ### [2026-10-06] Wildcard and session grants bypassed per-action review
 
