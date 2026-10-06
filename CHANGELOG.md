@@ -10,7 +10,7 @@
 - fix(release): accepted Linux loader records, rolled back failed fresh installs, and replaced assets when retrying draft releases.
 - fix(release): surfaced native package and updater smoke output in CI summaries after failures.
 - fix(release): preserved native package and updater failure logs as downloadable CI artifacts.
-- fix(release): validated macOS system frameworks through the native loader instead of requiring files outside the dyld shared cache.
+- fix(release): validated macOS system frameworks and system Swift runtimes through the native loader instead of requiring files outside the dyld shared cache.
 - fix(distribution): served controlled latest-release API metadata in updater fixtures and verified fallback checks preserved installation files.
 
 ## 2026-10-05

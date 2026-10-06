@@ -64,8 +64,8 @@ check_dependencies() {
         while IFS= read -r dependency; do
             case "$dependency" in
                 /usr/lib/libSystem.B.dylib|/usr/lib/libobjc.A.dylib|/usr/lib/libc++.1.dylib|/usr/lib/libiconv.2.dylib) ;;
-                /System/Library/Frameworks/*)
-                    # System frameworks can exist only in the dyld shared cache.
+                /System/Library/Frameworks/*|/usr/lib/swift/libswift*.dylib)
+                    # System frameworks and Swift runtimes can live only in dyld's cache.
                     # Probe the native loader without inherited DYLD overrides.
                     if ! /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin \
                         "$tmp/load-system-framework" "$dependency" \
@@ -160,6 +160,13 @@ if [ "$os" = darwin ]; then
         -o "$tmp/libpavefixture.dylib"
     cc "$tmp/main.c" "$tmp/libpavefixture.dylib" -o "$tmp/forbidden"
     expect_rejected "$tmp/forbidden" "forbidden or non-system dependency" "non-system"
+
+    cc -dynamiclib "$tmp/dependency.c" \
+        -Wl,-install_name,/usr/lib/swift/libswiftPaveFixtureMissing.dylib \
+        -o "$tmp/libpaveswiftmissing.dylib"
+    cc "$tmp/main.c" "$tmp/libpaveswiftmissing.dylib" -o "$tmp/missing-swift"
+    rm "$tmp/libpaveswiftmissing.dylib"
+    expect_rejected "$tmp/missing-swift" "missing system dependency" "missing Swift runtime"
 
     cc -dynamiclib "$tmp/dependency.c" \
         -Wl,-install_name,/System/Library/Frameworks/PaveFixtureMissing.framework/PaveFixtureMissing \

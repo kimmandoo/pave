@@ -1,6 +1,13 @@
 # Troubleshooting
 
 
+### [2026-10-06] Apple helper dependency policy omitted the system Swift runtime
+
+- **Context / Symptom:** After the cached-framework repair, release #88 (`37425653169`) passed package/updater gates on both Linux targets and macOS Intel, but macOS arm64 rejected `/usr/lib/swift/libswiftCore.dylib` as non-system.
+- **Root Cause:** The helper's native Swift runtime is supplied by macOS, but the strict policy recognized only selected C/C++ libraries and system frameworks.
+- **Solution:** Recognized only `/usr/lib/swift/libswift*.dylib` runtime install names, still requiring the native loader probe to succeed without inherited DYLD overrides. Added an actually linked nonexistent system Swift runtime fixture to enforce missing-library rejection; non-system/toolchain paths remain forbidden.
+- **Prevention / Reference:** Native macOS arm64 helper/package execution remains mandatory before publication; Linux policy and shell syntax smoke passed after this repair.
+
 ### [2026-10-06] Native updater fixtures lacked the latest-release API fallback
 
 - **Context / Symptom:** Release run #87 (`37422176272`) failed `pave update --check` on Linux x86_64/AArch64 and macOS Intel with `curl: (22) The requested URL returned error: 404`.
