@@ -152,9 +152,11 @@ let () =
   wait_until_gone descendant_pid;
 
   let manager = Process.create_manager () in
-  Process.start_shell manager ~id:"background"
-    ~command:"printf READY; sleep 0.15; printf DONE" ();
+  Process.start manager ~id:"background" ~program:python3
+    ~arguments:["-c";
+      "import sys; print('READY',flush=True); sys.stdin.buffer.read(); print('DONE',flush=True)"] ();
   assert (Process.wait_ready manager ~id:"background" ~log_regex:"READY" ());
+  Process.close_stdin manager ~id:"background";
   assert (wait_for_exit manager "background" = Process.Exited 0);
   let background_output = output manager "background" in
   assert (contains background_output "READY");

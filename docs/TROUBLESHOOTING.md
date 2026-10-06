@@ -1,6 +1,13 @@
 # Troubleshooting
 
 
+### [2026-10-06] Readiness fixture exited before the native runner observed READY
+
+- **Context / Symptom:** CI #237 (`37429750171`) failed on macOS/OCaml 5.3.0 at `test_workspace_process.ml`'s successful readiness assertion. The digest-verified `test-diagnostics-macos-26-5.3.0` artifact identified the assertion; the macOS 5.5.1 job passed.
+- **Root Cause:** The successful fixture printed READY, slept only 150 ms and exited. A delayed runner could first inspect it after exit; the corrected product readiness policy properly refuses an exited job's retained output.
+- **Solution:** Kept the child alive on its owned stdin until the parent observed READY, then explicitly closed stdin and verified normal completion and DONE output. Kept the independent exited-job rejection regression unchanged.
+- **Prevention / Reference:** Synchronize readiness/completion fixtures with explicit handshakes rather than assuming a scheduler latency. Run `opam exec -- dune exec test/test_workspace_process.exe` and require fresh native CI.
+
 ### [2026-10-06] Apple helper dependency policy omitted the system Swift runtime
 
 - **Context / Symptom:** After the cached-framework repair, release #88 (`37425653169`) passed package/updater gates on both Linux targets and macOS Intel, but macOS arm64 rejected `/usr/lib/swift/libswiftCore.dylib` as non-system.
