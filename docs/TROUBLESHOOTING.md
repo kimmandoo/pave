@@ -1,6 +1,13 @@
 # Troubleshooting
 
 
+### [2026-10-06] Native release smoke failures hid their output
+
+- **Context / Symptom:** Release run `37407164170` failed on Linux x86_64, Linux AArch64 and macOS x86_64 during the installed-updater transaction, and on macOS arm64 during packaged-binary smoke. The logged-out GitHub run page exposed only generic exit-code annotations; raw job logs required sign-in, so the underlying failure messages were not observable.
+- **Root Cause:** Native smoke output was sent only to job logs; the workflow did not publish failure diagnostics in the public run summary.
+- **Solution:** Tee packaged-binary and installed-updater smoke output to per-job logs and expose the last 100 lines in `GITHUB_STEP_SUMMARY` when a smoke step fails. A follow-up tagged run is still required to reveal the underlying test failures and certify the release.
+- **Prevention / Reference:** Keep the four-target native matrix and its bounded failure summaries as release gates; do not treat local smoke as native release certification.
+
 ### [2026-10-06] Wildcard and session grants bypassed per-action review
 
 - **Context / Symptom:** A non-exact `git status*` allow rule could match command substitutions, backticks, redirection or pathname expansion. An allow-until-exit grant for an ordinary `write_file` also covered a later sensitive entitlement mutation without its exact-content prompt.

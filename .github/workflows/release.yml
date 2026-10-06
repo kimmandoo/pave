@@ -87,56 +87,73 @@ jobs:
           OS: ${{ matrix.os }}
           ARCH: ${{ matrix.arch }}
         run: |
-          set -eu
-          unpacked="$(mktemp -d)"
-          trap 'rm -rf "$unpacked"' EXIT
-          archive_members="$(tar -tzf "$ASSET")"
-          expected_members="$(printf 'pave\nLICENSE\nTHIRD_PARTY_NOTICES')"
-          if [ "$archive_members" != "$expected_members" ]; then
-            echo "release archive member set changed unexpectedly: $archive_members" >&2
-            exit 1
-          fi
-          tar -xzf "$ASSET" -C "$unpacked"
-          test -x "$unpacked/pave"
-          if [ "$OS" = "darwin" ] && [ "$ARCH" = "arm64" ]; then
-            sh test/distribution/check_release_dependencies.sh "$OS" "$unpacked/pave" _build/default/bin/pave-apple-foundation-models
-          else
-            sh test/distribution/check_release_dependencies.sh "$OS" "$unpacked/pave"
-          fi
-          "$unpacked/pave" --help >/dev/null
-          providers="$("$unpacked/pave" --providers)"
-          case "$providers" in
-            *ollama*) ;;
-            *) echo "packaged binary did not list the Ollama provider" >&2; exit 1 ;;
-          esac
-          if [ "$OS" = "darwin" ] && [ "$ARCH" = "arm64" ]; then
+          set -o pipefail
+          {
+            set -eu
+            unpacked="$(mktemp -d)"
+            trap 'rm -rf "$unpacked"' EXIT
+            archive_members="$(tar -tzf "$ASSET")"
+            expected_members="$(printf 'pave\nLICENSE\nTHIRD_PARTY_NOTICES')"
+            if [ "$archive_members" != "$expected_members" ]; then
+              echo "release archive member set changed unexpectedly: $archive_members" >&2
+              exit 1
+            fi
+            tar -xzf "$ASSET" -C "$unpacked"
+            test -x "$unpacked/pave"
+            if [ "$OS" = "darwin" ] && [ "$ARCH" = "arm64" ]; then
+              sh test/distribution/check_release_dependencies.sh "$OS" "$unpacked/pave" _build/default/bin/pave-apple-foundation-models
+            else
+              sh test/distribution/check_release_dependencies.sh "$OS" "$unpacked/pave"
+            fi
+            "$unpacked/pave" --help >/dev/null
+            providers="$("$unpacked/pave" --providers)"
             case "$providers" in
-              *apple*) ;;
-              *) echo "packaged Apple-silicon binary did not list Apple Foundation Models" >&2; exit 1 ;;
+              *ollama*) ;;
+              *) echo "packaged binary did not list the Ollama provider" >&2; exit 1 ;;
             esac
-            set +e
-            apple_output="$("$unpacked/pave" --provider apple --model default --prompt "Reply with OK." 2>&1)"
-            apple_status=$?
-            set -e
-            if [ "$apple_status" -ne 0 ]; then
-              case "$apple_output" in
-                *"Apple Intelligence is disabled"*|*"Apple Foundation Models is unavailable"*|*"Apple Foundation Models requires"*|*"model is not ready"*|*"Apple Intelligence-eligible Apple-silicon Mac"*) ;;
-                *) echo "packaged Apple route failed without an availability diagnostic: $apple_output" >&2; exit 1 ;;
+            if [ "$OS" = "darwin" ] && [ "$ARCH" = "arm64" ]; then
+              case "$providers" in
+                *apple*) ;;
+                *) echo "packaged Apple-silicon binary did not list Apple Foundation Models" >&2; exit 1 ;;
+              esac
+              set +e
+              apple_output="$("$unpacked/pave" --provider apple --model default --prompt "Reply with OK." 2>&1)"
+              apple_status=$?
+              set -e
+              if [ "$apple_status" -ne 0 ]; then
+                case "$apple_output" in
+                  *"Apple Intelligence is disabled"*|*"Apple Foundation Models is unavailable"*|*"Apple Foundation Models requires"*|*"model is not ready"*|*"Apple Intelligence-eligible Apple-silicon Mac"*) ;;
+                  *) echo "packaged Apple route failed without an availability diagnostic: $apple_output" >&2; exit 1 ;;
+                esac
+              fi
+            elif [ "$OS" = "darwin" ] && [ "$ARCH" = "x86_64" ]; then
+              case "$providers" in
+                *apple*) echo "macOS Intel archive unexpectedly listed Apple Foundation Models" >&2; exit 1 ;;
+                *) ;;
               esac
             fi
-          elif [ "$OS" = "darwin" ] && [ "$ARCH" = "x86_64" ]; then
-            case "$providers" in
-              *apple*) echo "macOS Intel archive unexpectedly listed Apple Foundation Models" >&2; exit 1 ;;
-              *) ;;
-            esac
-          fi
+          } 2>&1 | tee package-smoke.log
       - name: Exercise disposable installed updater transactions
         env:
           PAVE_RELEASE_VERSION: v0.0.1
           PAVE_TEST_RELEASE_BASE_URL: https://127.0.0.1:18443
         run: |
-          opam exec -- dune build --profile release bin/main.exe
-          python3 test/distribution/installed_update.py _build/default/bin/main.exe install.sh
+          set -o pipefail
+          opam exec -- dune build --profile release bin/main.exe 2>&1 | tee updater-transaction.log
+          python3 test/distribution/installed_update.py _build/default/bin/main.exe install.sh 2>&1 | tee -a updater-transaction.log
+      - name: Expose native smoke failure diagnostics
+        if: failure()
+        run: |
+          for log in package-smoke.log updater-transaction.log; do
+            if [ -f "$log" ]; then
+              {
+                echo "### Native smoke output ($log)"
+                echo '```text'
+                tail -n 100 "$log"
+                echo '```'
+              } >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
       - uses: actions/upload-artifact@v4
         with:
           name: pave-${{ matrix.os }}-${{ matrix.arch }}

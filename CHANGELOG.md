@@ -7,6 +7,7 @@
 - fix(process): propagated incomplete stdin errors and rejected readiness evidence from exited jobs.
 - fix(auth): continued Copilot device authorization on HTTP 200 pending responses.
 - fix(release): accepted Linux loader records, rolled back failed fresh installs, and replaced assets when retrying draft releases.
+- fix(release): surfaced native package and updater smoke output in CI summaries after failures.
 
 ## 2026-10-05
 - feat(mobile): added bounded Native XCTest accessibility capture for explicitly owned iOS Simulator sessions.
