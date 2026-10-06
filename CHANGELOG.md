@@ -1,6 +1,7 @@
 # Changelog
 ## 2026-10-06
 
+- release(distribution): published v0.1.87 after four-target native test/build/package/updater gates passed; verified every public asset digest and archive checksum/member, helper-free binaries, Linux CLI dependencies, color/NO_COLOR dashboard interactions and Unicode streaming from the extracted public package.
 - perf(tui): removed per-cluster Notty image allocation and control-byte scans for printable ASCII width measurement while retaining renderer-based Unicode/bidi widths; reduced median CLI CPU by 24.5% in paired sustained-stream PTY measurements.
 - fix(mobile): restored state-aware Build/Install/Launch/Stop dashboard workflows, recommended usable next steps, revalidated stale targets and artifacts, and rejected workflow queuing during active turns.
 - fix(tui): returned dashboard Back/Escape to parent pages, exposed exact session identity on narrow terminals, grouped unaccepted features without enabling them, and replaced filtered/truncated Control intents with a bounded Unicode/paste-capable editor.
