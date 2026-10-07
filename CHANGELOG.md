@@ -1,6 +1,7 @@
 # Changelog
 ## 2026-10-07
 
+- chore(release): published v0.1.92 after all five branch CI jobs and four native release gates passed, verified every public asset and exercised the real v0.1.87-to-v0.1.92 installed upgrade without changing private user-data bytes.
 - fix(process): refused pre-cancelled command effects, included native/PTY launcher startup in cancellation and timeout budgets, and prevented failed startup from closing unrelated reused descriptors.
 - fix(distribution): added the exact macOS ARM64 native compiler variant to branch CI and preserved evaluator request, elapsed-time and backtrace diagnostics without increasing timeouts or retrying failed tests.
 - fix(mobile): completed MX01 readiness cancellation and shared deadline handling, preserved boot ownership on observation timeout, and restored target-free read-only lifecycle status through the shared approval path.
