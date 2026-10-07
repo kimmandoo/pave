@@ -1,5 +1,14 @@
 # Work checkpoint
 
+## Current session — Bare slash menu cleanup
+
+- **Date / request:** 2026-10-07. Remove unnecessary tool entries from `/`.
+- **Starting point:** `3df2902`, main synchronized with origin; public v0.1.92 remains unchanged.
+- **Implementation:** `Interaction.suggestions` hides generated `A_tool_call` entries only for the bare `/` prefix. User-facing workflows and discovered skills/prompt commands remain visible; explicitly typed tool prefixes, `/tools`, schema inspection and exact invocation remain available. Model tool availability and approvals are unchanged.
+- **Changed paths:** `lib/ui/interaction.ml`, `test/ui/test_interaction.ml`, `CHANGELOG.md`, `docs/{DESIGN_RULES,USAGE,WORK_CHECKPOINT}.md`.
+- **Verification:** Final `opam exec -- dune build @install`, `test_interaction.exe` and `test_tui_ux.exe` passed in 5.73 s. Regression covers bare-menu exclusion, retained `/mobile`/`/publish`, explicit tool discovery and existing direct parsing. Actual 110×36 NO_COLOR CLI/PTY showed no `read_file` match in the bare-slash chooser and `/read_file` discovery after typing `/read_f`; no inference or tool execution occurred. Disposable session/home state was removed.
+- **Completion / next action:** This source repair is complete; no further implementation action for this request. Commit the owned paths together with this record. No new release or installed-binary replacement was performed. MX01 remains blocked at its separately recorded real-runtime acceptance gate below.
+
 ## Current session — v0.1.92 published; MX01 real-runtime acceptance blocked
 
 - **Date / request:** 2026-10-07. Continued the existing-feature reliability release and implemented reachable repairs for the first remaining `task.md` item, MX01.

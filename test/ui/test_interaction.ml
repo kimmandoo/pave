@@ -44,6 +44,16 @@ let () =
   let tool_commands = tool_commands
     (Pave.Tools.available_for ~allow_shell:true ~enabled:(fun name ->
       List.mem name ["mobile_project"; "mobile_session"; "publish_web"])) in
+  let bare_slash = suggestions ~external_commands:tool_commands "/" in
+  if List.exists (fun item -> match item.action with
+      A_tool_call _ -> true | _ -> false) bare_slash then
+    fail "bare slash menu exposed low-level tool calls";
+  if not (List.exists (fun item -> item.name = "/mobile") bare_slash) ||
+     not (List.exists (fun item -> item.name = "/publish") bare_slash) then
+    fail "bare slash menu lost user-facing workflows";
+  (match suggestions ~external_commands:tool_commands "/publish_w" with
+   | [{ action = A_tool_call "publish_web"; _ }] -> ()
+   | _ -> fail "explicit tool prefix lost direct-call discovery");
   (match parse ~external_commands:tool_commands
       {|/publish_web {"action":"list"}|},
       parse ~external_commands:tool_commands "/mobile_project" with

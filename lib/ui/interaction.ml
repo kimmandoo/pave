@@ -185,9 +185,12 @@ let tool_commands definitions =
 let suggestions ?(session = true) ?(interactive = true) ?(subagents = false)
     ?(external_commands = []) prefix =
   if not (String.starts_with ~prefix:"/" prefix) then []
-  else List.filter (fun item ->
-    available ~session ~interactive ~subagents item &&
-    String.starts_with ~prefix item.name) (commands @ external_commands)
+  else
+    let include_tools = String.length prefix > 1 in
+    List.filter (fun item ->
+      available ~session ~interactive ~subagents item &&
+      (include_tools || match item.action with A_tool_call _ -> false | _ -> true) &&
+      String.starts_with ~prefix item.name) (commands @ external_commands)
 
 let group_order = ["general"; "model"; "session"; "control"; "jobs";
   "extensions"; "remote"]
