@@ -2718,7 +2718,7 @@ let mobile_session ~approved ?cancel ?on_progress ?context root args =
       let output = Workspace_mobile_run.execute context.mobile_run_manager
         ~approved ~run ~action ~id in
       "Mobile " ^ action ^ " completed for " ^ id ^ ".\n" ^ output
-  | _ -> fail "mobile session action must be list, select, status, install, launch or stop"
+  | _ -> fail "mobile session action must be list, select, status, build, install, launch or stop"
 
 let mobile_xctest_build_hash root session =
   try (Workspace_mobile_report.build_identity root session).build_hash
@@ -5291,7 +5291,7 @@ let mobile_session_preview ~context ~root args =
         "Artifact: " ^ app_path] @ binding_details)
   | "list" | "status" ->
       ("Reads session-owned mobile app state; no device command is executed.", [])
-  | _ -> fail "mobile session action must be list, select, status, install, launch or stop"
+  | _ -> fail "mobile session action must be list, select, status, build, install, launch or stop"
 
 let string_list name args =
   match field name args with
@@ -5750,12 +5750,13 @@ let publish_web_tool ~approved ?cancel ?context args =
   check_session_context context;
   let action = required_string "action" args in
   let manager = context.process_manager in
-  let relay = match optional_string "relay" "" args with
+  let publish_relay () = match optional_string "relay" "" args with
     | "" -> None | value -> Some (Workspace_portal.https_origin value) in
   let tunnel_id = Workspace_portal.job_id in
   let json = match action with
     | "publish" ->
         require_explicit_approval approved;
+        let relay = publish_relay () in
         let port = optional_int "port" 0 ~minimum:1 ~maximum:65535 args in
         if port = 0 then fail "publish requires a loopback port";
         let name = match optional_string "name" "" args with
@@ -5772,6 +5773,7 @@ let publish_web_tool ~approved ?cancel ?context args =
     | "list" -> Workspace_portal.list manager
     | "attach" ->
         require_explicit_approval approved;
+        let relay = publish_relay () in
         (match context.hub_port with
          | None -> fail "attach requires an interactive session hub"
          | Some resolve ->
@@ -6267,7 +6269,8 @@ let is_shell_tool = function
   | "mobile_check" | "android_devices" | "mobile_session" | "mobile_verify"
   | "mobile_observe" | "mobile_control" | "mobile_scenario"
   | "mobile_diagnostics" | "mobile_visual" | "mobile_accessibility_audit"
-  | "mobile_performance" | "mobile_device_lifecycle" -> true
+  | "mobile_performance" | "mobile_device_lifecycle" | "mobile_environment"
+  | "mobile_app_lifecycle" | "mobile_dev_server" -> true
   | _ -> false
 
 
@@ -6330,6 +6333,9 @@ let non_reversible_tool ~name ~args =
   | "mobile_session" ->
       List.mem (optional_string "action" "" args)
         ["build"; "install"; "launch"; "stop"]
+  | "mobile_control" -> true
+  | "mobile_environment" ->
+      List.mem (optional_string "action" "" args) ["apply"; "restore"]
   | "mobile_scenario" ->
       not (List.mem (optional_string "action" "" args) ["list"; "status"])
   | "mobile_dev_server" ->
@@ -6533,6 +6539,8 @@ let definitions = [
      "scheme", bounded_string_field "Exact Xcode scheme already discovered for this bundle" 256;
      "device_session_id", bounded_string_field "Exact returned device session ID" 64;
      "inventory_id", bounded_string_field "Exact returned device inventory ID" 64;
+     "target_name", bounded_string_field "Exact configured Android AVD name from this inventory; required for Android device effects" 128;
+     "port", integer_field "Exact Android emulator console port (even, 5554..5682); required for Android device effects" 5554 5682;
      "simulator_id", bounded_string_field "Exact compatible iOS Simulator UUID" 36;
      "readiness_timeout_seconds", integer_field "Readiness deadline (default 60 seconds)" 1 300]
     ["action"];
@@ -6784,7 +6792,7 @@ let definitions = [
   schema "publish_web" "Publish an already-running localhost web server through gosuda/portal-tunnel relays. publish starts a session-owned portal expose process; name is an optional hostname prefix (random when omitted). If Portal is unavailable, the official CLI is downloaded, SHA-256-verified, and installed privately after publication approval. stop ends one tunnel; list inspects owned tunnels; attach publishes the session hub. No other tunnel service is used. The local server and tunnel must remain running; the hostname is publicly relay-listed."
     ["action", enum_string_field "Tunnel operation" ["publish"; "stop"; "list"; "attach"];
      "port", integer_field "Loopback port to publish (required for publish)" 1 65535;
-     "name", bounded_string_field "Lowercase DNS hostname prefix; randomly generated when omitted; required for stop" 63;
+     "name", bounded_string_field "Lowercase DNS hostname prefix (1–22 bytes, alphanumeric ends); randomly generated when omitted; required for stop" Workspace_portal.max_name_length;
      "relay", bounded_string_field "Optional HTTPS relay origin; pins this relay and disables discovery when provided" 2048]
     ["action"];
 ]
@@ -6836,6 +6844,9 @@ let approval_decision ~command_patterns ~name ~args =
        | `String "disconnect" when
            not (optional_bool "terminate_debuggee" false args) -> tier Approval.Read
        | _ -> tier Approval.Exec)
+  | "mobile_session" when
+      List.mem (optional_string "action" "" args) ["list"; "status"] ->
+      tier Approval.Read
   | "mobile_observe" -> tier Approval.Read
   | "mobile_accessibility_audit" -> tier Approval.Read
   | "mobile_diagnostics" -> tier Approval.Read
@@ -7503,7 +7514,7 @@ let approval_request ?cancel ?context ?(env = Sys.getenv_opt)
          ["Working directory: " ^ Printf.sprintf "%S" session.root;
           "Device: " ^ session.device ^ " · app: " ^ session.app_id;
           "Exact command: " ^ command;
-          "A successful action invalidates the screenshot coordinate reference. Capture a new screenshot and accessibility tree to verify the UI transition."])
+          "The screenshot coordinate reference is invalidated before execution, even if the command fails. Capture a new screenshot and accessibility tree to verify the UI transition."])
     | "mobile_scenario" ->
         let context = require_session_context context in
         mobile_scenario_preview ~context ~root:base_root args
@@ -7954,7 +7965,8 @@ let session_tool_names = [
   "lsp_start"; "lsp"; "workspace_eval";
   "ssh_open"; "ssh_close"; "ssh_read"; "ssh_write"; "ssh_command";
   "dap_start"; "dap"; "xcode_preflight"; "mobile_check"; "android_devices";
-  "mobile_session"; "mobile_verify"; "mobile_observe"; "mobile_diagnostics";
+  "mobile_session"; "mobile_verify"; "mobile_observe"; "mobile_accessibility_audit";
+  "mobile_diagnostics";
   "mobile_visual"; "mobile_control"; "mobile_scenario"; "mobile_dev_server";
   "mobile_environment"; "mobile_app_lifecycle"; "mobile_performance";
   "mobile_device_lifecycle";
@@ -7978,6 +7990,7 @@ let error_message = function
   | Workspace_ssh.Error message | Native_tokenizer.Error message
   | Workspace_xcode.Error message | Workspace_swiftpm_focus.Error message
   | Workspace_gradle_focus.Error message | Workspace_flutter_focus.Error message
+  | Workspace_mobile_run.Error message
   | Workspace_mobile_control.Error message
   | Workspace_mobile_scenario.Error message
   | Workspace_mobile_diagnostics.Error message
@@ -8034,7 +8047,10 @@ let prepare ?cancel ?context ~root ~name ~args () =
           (if optional_string "action" "" args = "attach" then
             let context = require_session_context context in
             if context.hub_port = None then fail "attach requires an interactive session hub")
-      | "stop" -> ignore (Workspace_portal.publish_name (required_string "name" args))
+      | "stop" ->
+          (match optional_string "name" "" args with
+           | "" -> fail "stop requires a tunnel name"
+           | value -> ignore (Workspace_portal.publish_name value))
       | _ -> ());
     if name = "start_process" then (
       Workspace_process.validate_id (required_string "id" args);

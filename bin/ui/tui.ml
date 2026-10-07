@@ -3265,7 +3265,7 @@ let decide t ~title ?(context = "") ?(body = "") ~options () =
   let _, label, _ = List.assoc chosen indexed in
   label
 
-let deny_option = "n", "Deny", "Nothing runs · the model is told you declined"
+let deny_option = "n", "Deny", "Nothing runs · this action is declined"
 let allow_once_option = "y", "Allow once", "Runs this call only · later calls ask again"
 
 let persistent_command_grant command =

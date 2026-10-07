@@ -560,6 +560,7 @@ let () =
           not referenced || List.mem name (category snapshot.active) in
     let all_external_commands = !external_commands in
     let mcp_shortcuts = ref [] in
+    let tool_shortcuts = ref [] in
     let refresh_external_commands () =
       external_commands := List.filter (fun (item : Pave.Interaction.shortcut) ->
         match item.action with
@@ -569,7 +570,7 @@ let () =
         | Pave.Interaction.A_prompt_command name ->
             plugin_allows (fun (refs : Pave.Plugin_registry.capabilities) ->
               refs.commands) name
-        | _ -> true) all_external_commands @ !mcp_shortcuts in
+        | _ -> true) all_external_commands @ !mcp_shortcuts @ !tool_shortcuts in
     refresh_external_commands ();
     let activated_skills = ref [] in
     (* A skill's "ACTION REQUIRED" heading (agy convention) declares steps to
@@ -2141,27 +2142,13 @@ let () =
     let remember_model identity =
       try Pave.Recent_model.save ~root identity with exn ->
         worker_event ("Recent model was not saved: " ^ error_message exn) in
-    let make_agent () =
-      let provider, authentication, resolve_credential,
-          resolve_credential_cancel = resolve_provider () in
-      let used_identity = !active_identity in
-      let secret_mask = current_secret_mask () in
-      (match !journal, !active_identity with
-       | Some session, Some identity -> Pave.Session.set_model ~registry session identity
-       | _ -> ());
-      let history = match !journal with
-        | Some session -> Pave.Session.context session
-        | None -> !retained_history in
-      let history = Pave.Interaction.history_for_model
-        ~provider:!active_descriptor.id ~route:!active_route.name
-        ~wire:provider.api ~model:provider.model history in
+    let tool_available name =
       let custom_tools_enabled = match Pave.Provider_catalog.custom_model registry
           ~provider:!active_descriptor.id ~route:!active_route.name
           ~model:!active_model with
         | Some { tools = Some true; _ } -> true
         | Some _ -> false
         | None -> true in
-      let tool_available name =
         let enabled = custom_tools_enabled &&
           not (List.mem name !disabled_tools) &&
           plugin_allows (fun (refs : Pave.Plugin_registry.capabilities) ->
@@ -2173,6 +2160,38 @@ let () =
         else if List.mem name Pave.Tools.session_tool_names then
           enabled && Option.is_some !journal
         else enabled in
+    let external_tool_definitions () =
+      let external_tools = Option.fold ~none:[] ~some:Pave.Local_tools.definitions
+        local_tools in
+      let external_tools = external_tools @ List.map
+        (fun (alias, server, remote, schema) ->
+          `Assoc ["type", `String "function"; "function", `Assoc [
+            "name", `String alias;
+            "description", `String ("MCP " ^ server ^ "/" ^ remote ^
+              " (untrusted external server; requires approval)");
+            "parameters", schema]]) !mcp_tools in
+      List.filter (fun definition ->
+        match Pave.Protocol.member "name" (Pave.Protocol.member "function" definition) with
+        | `String name -> tool_available name
+        | _ -> false) external_tools in
+    let make_agent ?(tools_only = false) () =
+      let provider, authentication, resolve_credential,
+          resolve_credential_cancel = if tools_only then
+        ({ Pave.Provider.endpoint = !active_route.endpoint;
+           model = !active_model; api_key = ""; api = !active_route.wire },
+         Pave.Provider.Api_key, None, None)
+        else resolve_provider () in
+      let used_identity = !active_identity in
+      let secret_mask = current_secret_mask () in
+      (match !journal, !active_identity with
+       | Some session, Some identity -> Pave.Session.set_model ~registry session identity
+       | _ -> ());
+      let history = match !journal with
+        | Some session -> Pave.Session.context session
+        | None -> !retained_history in
+      let history = Pave.Interaction.history_for_model
+        ~provider:!active_descriptor.id ~route:!active_route.name
+        ~wire:provider.api ~model:provider.model history in
       let delegate_task ~cancel ~label ~task ~model =
         if cancel () then raise Pave.Provider.Cancelled;
         match !journal with
@@ -2227,15 +2246,7 @@ let () =
                     (tool_name ^ " effects are non-reversible; /rewind will report but not undo them.")) in
       let workspace_context : Pave.Tools.session_context option =
         Option.map tool_context !journal in
-      let external_tools = Option.fold ~none:[] ~some:Pave.Local_tools.definitions
-        local_tools in
-      let external_tools = external_tools @ List.map
-        (fun (alias, server, remote, schema) ->
-          `Assoc ["type", `String "function"; "function", `Assoc [
-            "name", `String alias;
-            "description", `String ("MCP " ^ server ^ "/" ^ remote ^
-              " (untrusted external server; requires approval)");
-            "parameters", schema]]) !mcp_tools in
+      let external_tools = external_tool_definitions () in
       let execute_external ~name ~args ~cancel =
         if List.exists (fun (alias, _, _, _) -> alias = name) !mcp_tools then
           mcp_call_tool ~name ~args ~cancel
@@ -2348,6 +2359,17 @@ let () =
       | Some current -> current
       | None -> let current = make_agent () in
           agent := Some current; live_agent := Some current; current in
+    let refresh_tool_commands () =
+      let definitions = Pave.Tools.available_for ~allow_shell:!allow_shell
+        ~enabled:tool_available in
+      let definitions = definitions @ external_tool_definitions () @
+        (if tool_available "task" then [Pave.Agent.task_definition] else []) in
+      tool_shortcuts := Pave.Interaction.tool_commands definitions
+        |> List.filter (fun (item : Pave.Interaction.shortcut) ->
+          not (List.exists (fun (other : Pave.Interaction.shortcut) ->
+            other.name = item.name) (all_external_commands @ !mcp_shortcuts)));
+      refresh_external_commands ();
+      Option.iter (fun screen -> Tui.set_external_commands screen !external_commands) !ui in
     let record_prompt text =
       record_frame `Input "prompt"
         (`Assoc ["text", `String (mask_text (current_secret_mask ()) text)]) in
@@ -3949,6 +3971,7 @@ let () =
             { Tui.text = read_line (); paste_ranges = [] } in
       try while true do
         (try
+        refresh_tool_commands ();
         let input = input () in
         let line = input.text and paste_ranges = input.paste_ranges in
          let command = Pave.Interaction.parse ~external_commands:!external_commands
@@ -4611,6 +4634,42 @@ let () =
                | _ -> notify
                    "Usage: /memory [list]|get NAME|forget NAME|add NAME TEXT")
              with exn -> report_error exn)
+        | Pave.Interaction.Tool_call { name; args = None } ->
+            let definitions = Pave.Tools.available_for ~allow_shell:!allow_shell
+              ~enabled:tool_available in
+            let definition = List.find_opt (fun definition ->
+              Pave.Protocol.member "name" (Pave.Protocol.member "function" definition) = `String name)
+              (definitions @ external_tool_definitions () @
+               (if tool_available "task" then [Pave.Agent.task_definition] else [])) in
+            (match definition with
+             | None -> notify ("Tool unavailable: " ^ name)
+             | Some definition ->
+                 let fn = Pave.Protocol.member "function" definition in
+                 let lines = ("/" ^ name ^ " JSON · explicit tool call, no model request") ::
+                   String.split_on_char '\n'
+                     (Yojson.Basic.pretty_to_string (Pave.Protocol.member "parameters" fn)) in
+                 (match !ui with
+                  | Some screen -> Tui.events screen lines
+                  | None -> List.iter on_event lines))
+        | Pave.Interaction.Tool_call { name; args = Some args } ->
+            (try
+              let current = match !agent with
+                | Some current -> current
+                | None when name = "task" -> get_agent ()
+                | None -> make_agent ~tools_only:true () in
+              let run ~cancel =
+                let result = Pave.Agent.call_tool ~cancel current ~name ~args in
+                retained_history := Pave.Agent.messages current;
+                if Option.is_none !ui then worker_event result in
+              match !runner, !ui with
+              | Some active, Some screen ->
+                  Tui.publish_prompt screen ~attachments:[]
+                    (mask_text (current_secret_mask ()) ("/" ^ name ^ " " ^ Yojson.Basic.to_string args));
+                  record_prompt ("/" ^ name ^ " " ^ Yojson.Basic.to_string args);
+                  Tui.set_activity screen (Some ("Tool: " ^ name));
+                  Pave.Turn_runner.start_work active ~run ()
+              | _ -> run ~cancel:(fun () -> false)
+            with exn -> report_error exn)
         | Pave.Interaction.Tools selected ->
           let current = get_agent () in
           let definitions = Pave.Tools.available_for ~allow_shell:!allow_shell
@@ -4656,6 +4715,16 @@ let () =
                          "Unavailable; restart with --allow-shell"
                        else "Disabled on this branch");
                       description] @
+                     (if List.exists (fun (item : Pave.Interaction.shortcut) ->
+                        item.name = "/" ^ name) !tool_shortcuts then
+                        ["/" ^ name ^ " JSON executes directly; omit JSON to inspect arguments"] else []) @
+                     (match List.find_opt (fun definition ->
+                        Pave.Protocol.member "name" (Pave.Protocol.member "function" definition) = `String name)
+                          all_definitions with
+                      | None -> []
+                      | Some definition ->
+                          String.split_on_char '\n' (Yojson.Basic.pretty_to_string
+                            (Pave.Protocol.member "parameters" (Pave.Protocol.member "function" definition)))) @
                      (if name = "run_command" then
                        ["Requires per-command approval; shell is not sandboxed"]
                       else [])) in

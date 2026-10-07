@@ -74,9 +74,10 @@ let test_prefixes_and_lifecycle () = with_dir (fun dir ->
 
 let test_dns_boundaries () =
   List.iter (fun name -> assert (Portal.publish_name name = name))
-    ["a"; "my-app-1"; String.make 63 'a'];
+    ["a"; "my-app-1"; String.make Portal.max_name_length 'a'];
   List.iter (fun name -> rejected (fun () -> Portal.publish_name name))
-    [""; "-bad"; "bad-"; "bad name"; "bad.name"; "BAD"; String.make 64 'a'];
+    [""; "-bad"; "bad-"; "bad name"; "bad.name"; "BAD";
+     String.make (Portal.max_name_length + 1) 'a'; String.make 63 'a'];
   let first = Portal.fresh_name () and second = Portal.fresh_name () in
   assert (first <> second);
   assert (Portal.publish_name first = first && Portal.publish_name second = second)
@@ -86,6 +87,8 @@ let test_ready_records () =
   assert (Portal.public_url "INF service ready at https://demo.relay.example" = None);
   assert (Portal.public_url "INF service ready at https://demo.relay.example\n" = Some "https://demo.relay.example");
   assert (Portal.public_url "{ \"public_url\": \"https://demo.relay.example\", \"message\": \"service ready at https://demo.relay.example\" }\n" = Some "https://demo.relay.example");
+  assert (Portal.public_url "{\"public_url\":\"https://demo.relay.example\",\"message\":\"service ready at https://other.relay.example\"}\n" = None);
+  assert (Portal.public_url "{\"public_url\":\"https://demo.relay.example\",\"message\":\"service ready at https://user:secret@relay.example\"}\n" = None);
   assert (Portal.public_url "{\"public_url\":\"https://admin.relay.example\",\"message\":\"relay discovered\"}\n" = None);
   assert (Portal.public_url "INF service ready at https://user:secret@relay.example\n" = None);
   assert (Portal.public_url "INF service ready at https://demo.relay.example/evil\n" = None)
@@ -107,6 +110,11 @@ let test_failed_start_and_cleanup () = with_dir (fun dir ->
     rejected (fun () -> Portal.publish ~env:(env bad) ~state_dir:dir manager
       ~id:"portal:demo" ~port ~name:"demo");
     assert (List.for_all (fun (job : Process.job_summary) -> job.status <> Process.Running) (Process.jobs manager));
+    let inconsistent = script dir "inconsistent-portal"
+      "echo '{\"message\":\"service ready at https://wrong.relay.example\",\"public_url\":\"https://demo.relay.example\"}'\nwhile true; do sleep 1; done\n" in
+    rejected (fun () -> Portal.publish ~env:(env inconsistent) ~state_dir:dir manager
+      ~id:"portal:demo" ~port ~name:"demo");
+    assert (Process.job_status manager ~id:"portal:demo" <> Process.Running);
     let good = identity_portal dir in
     assert (field "url" (Portal.publish ~env:(env good) ~state_dir:dir manager
       ~id:"portal:demo" ~port ~name:"demo") = `String "https://demo.relay.example"))))
@@ -136,6 +144,8 @@ let test_absent_server_and_backend () = with_dir (fun dir ->
 
 let test_relay_validation () =
   assert (Portal.https_origin "https://relay.example:8443/" = "https://relay.example:8443");
+  let long_host = "https://" ^ String.make 63 'a' ^ ".example" in
+  assert (Portal.https_origin long_host = long_host);
   List.iter (fun relay -> rejected (fun () -> Portal.https_origin relay))
     ["http://relay.example"; "https://user@relay.example"; "https://relay.example/path";
      "https://relay.example?token=secret"; "https://relay.example:0"; "https://-bad.example"]
@@ -204,9 +214,108 @@ let test_automatic_setup_rejects_bad_checksum () = with_dir (fun dir ->
     assert (not (Sys.file_exists installed));
     assert (Process.jobs manager = []))))
 
+let test_cancelled_readiness_cleanup () = with_dir (fun dir ->
+  let portal = identity_portal dir in
+  with_listener (fun port -> with_manager (fun manager ->
+    let seen_ready = ref 0 in
+    let cancel () =
+      (match Process.jobs manager with
+       | [] -> ()
+       | _ ->
+           assert (Process.wait_ready manager ~id:"portal:cancel"
+             ~timeout_seconds:5 ~log_regex:"service ready at https://[^\n]*\n" ());
+           incr seen_ready);
+      !seen_ready >= 2 in
+    (match Portal.publish ~cancel ~env:(env portal) ~state_dir:dir manager
+        ~id:"portal:cancel" ~port ~name:"cancel" with
+     | _ -> assert false
+     | exception Process.Error message -> assert (message = "process wait cancelled"));
+    assert (!seen_ready = 2);
+    assert (Process.job_status manager ~id:"portal:cancel" <> Process.Running);
+    assert (field "status" (Portal.publish ~env:(env portal) ~state_dir:dir manager
+      ~id:"portal:cancel" ~port ~name:"cancel") = `String "published"))))
+
+let test_stop_scope () = with_manager (fun manager ->
+  Process.start manager ~id:"ordinary" ~program:"/bin/sleep" ~arguments:["30"] ();
+  rejected (fun () -> Portal.stop manager ~id:"ordinary");
+  assert (Process.job_status manager ~id:"ordinary" = Process.Running);
+  List.iter (fun id -> rejected (fun () -> Portal.stop manager ~id))
+    ["portal:"; "portal:-bad"; "portal:" ^ String.make 23 'a'];
+  Process.kill_job manager ~id:"ordinary")
+
+let with_environment overrides body =
+  let previous = List.map (fun (key, _) -> key, Sys.getenv_opt key) overrides in
+  Fun.protect ~finally:(fun () ->
+    List.iter (fun (key, value) -> Unix.putenv key (Option.value value ~default:"")) previous)
+    (fun () ->
+      List.iter (fun (key, value) -> Unix.putenv key value) overrides;
+      body ())
+
+let test_tool_registration_and_lifecycle () = with_dir (fun dir ->
+  let module Tools = Pave.Tools in
+  let portal = identity_portal dir in
+  with_environment ["PAVE_PORTAL", portal; "PAVE_TUNNELS", "on";
+    "XDG_STATE_HOME", Filename.concat dir "state"] (fun () ->
+    with_listener (fun port -> with_manager (fun manager ->
+      with_manager (fun other_manager ->
+        let context = Tools.create_session_context ~owner:"portal-owner" ~root:dir
+          ~hub_port:(fun () -> port) ~process_manager:manager
+          ~read_artifact:(fun _ -> None)
+          ~record_file_change:(fun ~path:_ ~before:_ ~after:_ -> ()) () in
+        let other_context = Tools.create_session_context ~owner:"other-owner" ~root:dir
+          ~process_manager:other_manager ~read_artifact:(fun _ -> None)
+          ~record_file_change:(fun ~path:_ ~before:_ ~after:_ -> ()) () in
+        Fun.protect ~finally:(fun () ->
+          Tools.close_session_context context;
+          Tools.close_session_context other_context) (fun () ->
+          let definitions = Tools.available_for ~allow_shell:false
+            ~enabled:(fun name -> name = "publish_web") in
+          assert (List.length definitions = 1);
+          let execute ?context ?(approved = false) fields =
+            Tools.execute ?context ~approved ~root:dir ~name:"publish_web"
+              ~args:(`Assoc fields) () in
+          let result = function
+            | Ok [Pave.Protocol.Text text] -> Yojson.Basic.from_string text
+            | Ok _ -> assert false
+            | Error message -> failwith message in
+          let denied = function Error _ -> () | Ok _ -> assert false in
+          denied (execute ["action", `String "list"]);
+          let publish = ["action", `String "publish"; "port", `Int port;
+            "name", `String "tool-preview"] in
+          assert (Tools.requires_explicit_approval ~name:"publish_web"
+            ~args:(`Assoc publish));
+          denied (execute ~context publish);
+          assert (Process.jobs manager = []);
+          denied (execute ~context ~approved:true
+            ["action", `String "publish"; "port", `Int port;
+             "name", `String (String.make 23 'a')]);
+          assert (field "url" (result (execute ~context ~approved:true publish))
+            = `String "https://tool-preview.relay.example");
+          let list = ["action", `String "list"; "relay", `String "http://unused.invalid"] in
+          assert (not (Tools.requires_explicit_approval ~name:"publish_web"
+            ~args:(`Assoc list)));
+          assert (field "tunnels" (result (execute ~context:other_context list)) = `List []);
+          let stop = ["action", `String "stop"; "name", `String "tool-preview";
+            "relay", `String "http://unused.invalid"] in
+          denied (execute ~context:other_context ~approved:true stop);
+          denied (execute ~context stop);
+          assert (Process.job_status manager ~id:"portal:tool-preview" = Process.Running);
+          assert (field "status" (result (execute ~context ~approved:true stop))
+            = `String "stopped");
+          let attach = ["action", `String "attach"; "name", `String "tool-hub"] in
+          denied (execute ~context:other_context ~approved:true attach);
+          denied (execute ~context attach);
+          assert (field "attach" (result (execute ~context ~approved:true attach)) = `Bool true);
+          Tools.close_session_context context;
+          Process.close_manager manager;
+          assert (Process.job_status manager ~id:"portal:tool-hub" <> Process.Running);
+          denied (execute ~context list)))))))
+
 let () =
   test_dns_boundaries (); test_ready_records (); test_identity_safety ();
   test_prefixes_and_lifecycle (); test_failed_start_and_cleanup ();
   test_absent_server_and_backend (); test_relay_validation ();
   test_automatic_setup_and_publish (); test_automatic_setup_rejects_bad_checksum ();
+  test_cancelled_readiness_cleanup (); test_stop_scope ();
+  test_tool_registration_and_lifecycle ();
   print_endline "workspace_portal: ok"

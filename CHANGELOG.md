@@ -1,4 +1,11 @@
 # Changelog
+## 2026-10-07
+
+- feat(tools): exposed enabled built-in, local and connected MCP tool schemas as searchable direct slash calls; reused validation, approvals, cancellation, transcript events and guarded rewind without requesting model inference.
+- fix(tui): displayed complete argument schemas in scrollable transcript rows, preserved existing command syntax and filtered disabled tools from help and inline hints.
+- fix(mobile): registered Android lifecycle target/port arguments, aligned shell and private-session admission, classified session inspection as read-only and recorded control/environment effects as non-reversible.
+- fix(portal): enforced the upstream 22-byte prefix limit, rejected contradictory readiness URLs, cleaned up cancellation after readiness and prevented tunnel stop from targeting unrelated processes.
+
 ## 2026-10-06
 
 - release(distribution): published v0.1.87 after four-target native test/build/package/updater gates passed; verified every public asset digest and archive checksum/member, helper-free binaries, Linux CLI dependencies, color/NO_COLOR dashboard interactions and Unicode streaming from the extracted public package.

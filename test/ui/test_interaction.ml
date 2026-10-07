@@ -41,6 +41,21 @@ let () =
   if not (has_help (help ~subagents:true ()) "/delegate") ||
      not (has_help (help ()) "/jobs") || not (has_help (help ()) "/mobile") then
     fail "opt-in delegation or session-owned dashboards disappeared";
+  let tool_commands = tool_commands
+    (Pave.Tools.available_for ~allow_shell:true ~enabled:(fun name ->
+      List.mem name ["mobile_project"; "mobile_session"; "publish_web"])) in
+  (match parse ~external_commands:tool_commands
+      {|/publish_web {"action":"list"}|},
+      parse ~external_commands:tool_commands "/mobile_project" with
+   | Tool_call { name = "publish_web"; args = Some (`Assoc ["action", `String "list"]) },
+     Tool_call { name = "mobile_project"; args = None } -> ()
+   | _ -> fail "direct tool slash parsing lost exact JSON or schema inspection");
+  invalid "direct tool malformed JSON" (fun () ->
+    parse ~external_commands:tool_commands "/publish_web [1]");
+  invalid "direct tool non-JSON" (fun () ->
+    parse ~external_commands:tool_commands "/mobile_session list");
+  (match parse "/publish_web" with
+   | Unknown _ -> () | _ -> fail "unregistered tool shortcut remained callable");
   let external_commands = [
     command "/skill:review" No_arguments "Review [user skill]" (A_skill "review");
     command "/summarize" No_arguments "Summarize [project command]"

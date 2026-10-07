@@ -291,157 +291,7 @@ let queue_scope t path text =
   if size > max_scoped_context_bytes then false
   else (t.scoped_pending <- (path, text) :: pending; true)
 
-let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
-  if String.trim text = "" then invalid_arg "empty prompt";
-  if max_turns <= 0 then invalid_arg "max_turns must be positive";
-  Provider.check_cancel cancel;
-  append t (Protocol.user ~attachments text);
-  let rec turn remaining =
-    Provider.check_cancel cancel;
-    if remaining = 0 then failwith "tool-call limit reached; inspect workspace before continuing";
-    let visible = t.scoped_pending in
-    let scoped = List.rev visible |> List.map (fun (path, text) ->
-      Printf.sprintf "For workspace file %S:\n%s" path text) in
-    let system_text = if scoped = [] then t.system else
-      t.system ^ "\n\nPath-scoped project instructions (lower priority than mobile safety):\n" ^
-      String.concat "\n\n" scoped in
-    let definitions = Tools.available_for ~allow_shell:t.allow_shell
-      ~enabled:t.tool_available in
-    let definitions = match t.delegate_task with
-      | Some _ when t.tool_available "task" -> definitions @ [task_definition]
-      | _ -> definitions in
-    let definitions = definitions @ List.filter (fun definition ->
-      match Protocol.member "function" definition with
-      | `Assoc fields -> (match List.assoc_opt "name" fields with
-          | Some (`String name) -> t.tool_available name
-          | _ -> false)
-      | _ -> false) t.external_tools in
-    let system : Protocol.message =
-      { role = "system"; content = Some system_text; tool_calls = [];
-        tool_call_id = None; tool_result_content = None; provider_state = None;
-        attachments = [] } in
-    (match t.on_phase with None -> () | Some notify -> notify Model);
-    Option.iter (fun prepare ->
-      Provider.check_cancel cancel;
-      let credential = prepare ~cancel:(fun () -> match cancel with
-        | Some cancelled -> cancelled () | None -> false) () in
-      t.prepared_credential := Some credential) t.prepare_credential_cancel;
-    let mask = match t.secret_mask with
-      | Some mask -> Secret_mask.mask mask
-      | None -> Fun.id in
-    let mask_message (message : Protocol.message) =
-      let content = Option.map mask message.content in
-      let tool_result_content = Option.map (List.map (function
-        | Protocol.Text text -> Protocol.Text (mask text)
-        | Protocol.Image _ as image -> image)) message.tool_result_content in
-      let tool_calls = Option.fold ~none:message.tool_calls
-        ~some:(fun secret_mask -> mask_tool_calls secret_mask message.tool_calls)
-        t.secret_mask in
-      { message with content; tool_result_content; tool_calls } in
-    let request_messages = match t.before_request with
-      | None -> messages t
-      | Some prepare ->
-          let current = List.map mask_message (messages t) in
-          (match prepare ~cancel ~system:(mask system_text)
-            ~messages:current ~tools:definitions with
-           | None -> current
-           | Some replacement ->
-               let replacement = List.map mask_message replacement in
-               t.history_rev <- List.rev replacement;
-               replacement) in
-    let transcript = { system with content = Option.map mask system.content } ::
-      List.map mask_message request_messages in
-    let streamed_text = Buffer.create 128 in
-    let on_text = match t.secret_mask with
-      | Some _ when t.stream -> fun text -> Buffer.add_string streamed_text text
-      | _ -> t.on_delta in
-    let drafts =
-      if t.stream && t.preview_tools && Option.is_some t.on_tool_event &&
-        Option.is_none t.secret_mask then Some (Hashtbl.create 4)
-      else None in
-    let request = t.request_serial in
-    t.request_serial <- request + 1;
-    let on_tool_arguments = Option.map (fun drafts ->
-      fun (delta : Protocol.tool_argument_delta) ->
-        let metadata = match Hashtbl.find_opt drafts delta.key with
-          | Some metadata -> Some metadata
-          | None when Hashtbl.length drafts < 128 ->
-              let metadata = {
-                scoped_key = Printf.sprintf "%d:%s" request delta.key;
-                draft_call_id = delta.call_id; draft_name = delta.name } in
-              Hashtbl.add drafts delta.key metadata; Some metadata
-          | None -> None in
-        Option.iter (fun metadata ->
-          if Option.is_some delta.call_id then metadata.draft_call_id <- delta.call_id;
-          metadata.draft_name <- delta.name;
-          emit_tool_event t (Tool_draft { delta with key = metadata.scoped_key }))
-          metadata) drafts in
-    let end_drafts calls = Option.iter (fun drafts ->
-      Hashtbl.iter (fun _ metadata ->
-        let call = Option.bind metadata.draft_call_id (fun id ->
-          List.find_opt (fun (call : Protocol.tool_call) ->
-            call.id = id && call.name = metadata.draft_name) calls) in
-        let valid = match call with
-          | Some call when call.name = "write_file" ->
-              (try Tools.validate_arguments ~name:call.name
-                  ~args:(Tools.normalize_tool_arguments ~name:call.name ~args:call.arguments);
-                true with Tools.Tool_error _ -> false)
-          | Some _ -> true | None -> false in
-        emit_tool_event t (Tool_draft_ended {
-          key = metadata.scoped_key;
-          call_id = Option.map (fun (call : Protocol.tool_call) -> call.id) call;
-          valid })) drafts;
-      Hashtbl.clear drafts) drafts in
-    let model_started = Unix.gettimeofday () in
-    let reply =
-      try
-        let reply =
-          if t.stream then Provider.complete ~authentication:t.authentication
-            ?resolve_credential:t.resolve_credential
-            ?resolve_credential_cancel:t.resolve_credential_cancel
-            ?thinking:(t.thinking ())
-            ?max_output_tokens:t.max_output_tokens
-            ~on_text ?on_tool_arguments ?on_usage:t.on_usage ?cancel
-            t.provider transcript definitions
-          else Provider.complete ~authentication:t.authentication
-            ?resolve_credential:t.resolve_credential
-            ?resolve_credential_cancel:t.resolve_credential_cancel
-            ?thinking:(t.thinking ())
-            ?max_output_tokens:t.max_output_tokens
-            ?on_usage:t.on_usage ?cancel t.provider transcript definitions in
-        Provider.check_cancel cancel;
-        end_drafts reply.tool_calls;
-        emit_stage t "model" ~since:model_started ();
-        reply
-      with exn ->
-        end_drafts [];
-        emit_stage t "model" ~since:model_started
-          ~detail:(Printexc.to_string exn) ();
-        raise exn in
-    (match t.secret_mask with
-     | Some _ when t.stream && Buffer.length streamed_text > 0 ->
-         t.on_delta (Buffer.contents streamed_text)
-     | _ -> ());
-    t.scoped_pending <- [];
-    (match reply.content with
-     | Some s when s <> "" ->
-         if t.stream then t.on_delta "\n" else t.on_event s
-     | _ -> ());
-    Provider.check_cancel cancel;
-    match reply.tool_calls with
-    | [] ->
-        (* An empty assistant turn is rejected when history is replayed
-           (Anthropic, Responses, Chat Completions), so it is not retained. *)
-        if Option.value ~default:"" reply.content = "" then
-          t.on_event "The model finished without a reply."
-        else append t reply;
-        (match reply.content with
-         | Some text -> (match t.secret_mask with
-             | Some mask -> Secret_mask.redact mask text
-             | None -> text)
-         | None -> "")
-    | calls ->
-        append t reply;
+let execute_tool_calls ?cancel ~visible t calls =
         let cancellation_result =
           "Error: turn cancelled before this tool ran; do not assume it executed" in
         let abort ?elapsed_ms (call : Protocol.tool_call) result side_effects_may_have_occurred =
@@ -884,7 +734,209 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
              match !scheduler_failure with
              | Some exn -> raise exn
              | None when !cancellation_requested -> raise Provider.Cancelled
-             | None -> turn (remaining - 1))
+             | None -> ())
+
+(* Direct slash calls share validation, approval, cancellation and effect
+   tracking with model calls, but never make a completion request. *)
+let call_tool ?cancel t ~name ~args =
+  if not (t.tool_available name) ||
+     (Tools.is_shell_tool name && not t.allow_shell) then
+    invalid_arg ("Tool unavailable: " ^ name);
+  let args = match List.find_opt (fun definition ->
+    Protocol.member "name" (Protocol.member "function" definition) = `String name)
+      (task_definition :: t.external_tools) with
+    | Some definition ->
+        let args = Tools.normalize_arguments args
+          ~schema:(Protocol.member "parameters" (Protocol.member "function" definition)) in
+        (match t.validate_external_tool with
+         | Some validate when name <> "task" ->
+             (match validate ~name ~args with Ok () -> () | Error text -> invalid_arg text)
+         | _ -> ());
+        args
+    | None ->
+        let args = Tools.normalize_tool_arguments ~name ~args in
+        Tools.validate_arguments ~name ~args;
+        args in
+  Provider.check_cancel cancel;
+  let id = "direct-" ^ Session.fresh_id () in
+  let call : Protocol.tool_call = { id; name; arguments = args } in
+  let visible =
+    if List.mem name ["write_file"; "edit_file"; "read_file"; "workspace_snapshot";
+      "apply_edits"; "ast_edit"] || (name = "lsp" &&
+      (Protocol.member "path" args <> `Null ||
+       Protocol.member "action" args = `String "apply_preview")) then
+      match file_scope ?cancel t call with
+      | Error text -> invalid_arg text
+      | Ok scopes ->
+          List.iter (fun (path, text, _) ->
+            if text <> "" then (
+              if not (queue_scope t path text) then
+                invalid_arg "Path-scoped instructions exceed the direct-call context limit";
+              t.on_event ("Path-scoped instructions for " ^ path ^ ":\n" ^ text))) scopes;
+          t.scoped_pending
+    else t.scoped_pending in
+  append t (Protocol.user ("/" ^ name ^ " " ^ Yojson.Basic.to_string args));
+  append t { (Protocol.user "") with role = "assistant"; content = None;
+    tool_calls = [call] };
+  execute_tool_calls ?cancel ~visible t [call];
+  match t.history_rev with
+  | result :: _ when result.Protocol.tool_call_id = Some id ->
+      Protocol.display_content_blocks (Protocol.content_blocks_of_tool_result result)
+  | _ -> failwith "direct tool call did not settle"
+
+let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
+  if String.trim text = "" then invalid_arg "empty prompt";
+  if max_turns <= 0 then invalid_arg "max_turns must be positive";
+  Provider.check_cancel cancel;
+  append t (Protocol.user ~attachments text);
+  let rec turn remaining =
+    Provider.check_cancel cancel;
+    if remaining = 0 then failwith "tool-call limit reached; inspect workspace before continuing";
+    let visible = t.scoped_pending in
+    let scoped = List.rev visible |> List.map (fun (path, text) ->
+      Printf.sprintf "For workspace file %S:\n%s" path text) in
+    let system_text = if scoped = [] then t.system else
+      t.system ^ "\n\nPath-scoped project instructions (lower priority than mobile safety):\n" ^
+      String.concat "\n\n" scoped in
+    let definitions = Tools.available_for ~allow_shell:t.allow_shell
+      ~enabled:t.tool_available in
+    let definitions = match t.delegate_task with
+      | Some _ when t.tool_available "task" -> definitions @ [task_definition]
+      | _ -> definitions in
+    let definitions = definitions @ List.filter (fun definition ->
+      match Protocol.member "function" definition with
+      | `Assoc fields -> (match List.assoc_opt "name" fields with
+          | Some (`String name) -> t.tool_available name
+          | _ -> false)
+      | _ -> false) t.external_tools in
+    let system : Protocol.message =
+      { role = "system"; content = Some system_text; tool_calls = [];
+        tool_call_id = None; tool_result_content = None; provider_state = None;
+        attachments = [] } in
+    (match t.on_phase with None -> () | Some notify -> notify Model);
+    Option.iter (fun prepare ->
+      Provider.check_cancel cancel;
+      let credential = prepare ~cancel:(fun () -> match cancel with
+        | Some cancelled -> cancelled () | None -> false) () in
+      t.prepared_credential := Some credential) t.prepare_credential_cancel;
+    let mask = match t.secret_mask with
+      | Some mask -> Secret_mask.mask mask
+      | None -> Fun.id in
+    let mask_message (message : Protocol.message) =
+      let content = Option.map mask message.content in
+      let tool_result_content = Option.map (List.map (function
+        | Protocol.Text text -> Protocol.Text (mask text)
+        | Protocol.Image _ as image -> image)) message.tool_result_content in
+      let tool_calls = Option.fold ~none:message.tool_calls
+        ~some:(fun secret_mask -> mask_tool_calls secret_mask message.tool_calls)
+        t.secret_mask in
+      { message with content; tool_result_content; tool_calls } in
+    let request_messages = match t.before_request with
+      | None -> messages t
+      | Some prepare ->
+          let current = List.map mask_message (messages t) in
+          (match prepare ~cancel ~system:(mask system_text)
+            ~messages:current ~tools:definitions with
+           | None -> current
+           | Some replacement ->
+               let replacement = List.map mask_message replacement in
+               t.history_rev <- List.rev replacement;
+               replacement) in
+    let transcript = { system with content = Option.map mask system.content } ::
+      List.map mask_message request_messages in
+    let streamed_text = Buffer.create 128 in
+    let on_text = match t.secret_mask with
+      | Some _ when t.stream -> fun text -> Buffer.add_string streamed_text text
+      | _ -> t.on_delta in
+    let drafts =
+      if t.stream && t.preview_tools && Option.is_some t.on_tool_event &&
+        Option.is_none t.secret_mask then Some (Hashtbl.create 4)
+      else None in
+    let request = t.request_serial in
+    t.request_serial <- request + 1;
+    let on_tool_arguments = Option.map (fun drafts ->
+      fun (delta : Protocol.tool_argument_delta) ->
+        let metadata = match Hashtbl.find_opt drafts delta.key with
+          | Some metadata -> Some metadata
+          | None when Hashtbl.length drafts < 128 ->
+              let metadata = {
+                scoped_key = Printf.sprintf "%d:%s" request delta.key;
+                draft_call_id = delta.call_id; draft_name = delta.name } in
+              Hashtbl.add drafts delta.key metadata; Some metadata
+          | None -> None in
+        Option.iter (fun metadata ->
+          if Option.is_some delta.call_id then metadata.draft_call_id <- delta.call_id;
+          metadata.draft_name <- delta.name;
+          emit_tool_event t (Tool_draft { delta with key = metadata.scoped_key }))
+          metadata) drafts in
+    let end_drafts calls = Option.iter (fun drafts ->
+      Hashtbl.iter (fun _ metadata ->
+        let call = Option.bind metadata.draft_call_id (fun id ->
+          List.find_opt (fun (call : Protocol.tool_call) ->
+            call.id = id && call.name = metadata.draft_name) calls) in
+        let valid = match call with
+          | Some call when call.name = "write_file" ->
+              (try Tools.validate_arguments ~name:call.name
+                  ~args:(Tools.normalize_tool_arguments ~name:call.name ~args:call.arguments);
+                true with Tools.Tool_error _ -> false)
+          | Some _ -> true | None -> false in
+        emit_tool_event t (Tool_draft_ended {
+          key = metadata.scoped_key;
+          call_id = Option.map (fun (call : Protocol.tool_call) -> call.id) call;
+          valid })) drafts;
+      Hashtbl.clear drafts) drafts in
+    let model_started = Unix.gettimeofday () in
+    let reply =
+      try
+        let reply =
+          if t.stream then Provider.complete ~authentication:t.authentication
+            ?resolve_credential:t.resolve_credential
+            ?resolve_credential_cancel:t.resolve_credential_cancel
+            ?thinking:(t.thinking ())
+            ?max_output_tokens:t.max_output_tokens
+            ~on_text ?on_tool_arguments ?on_usage:t.on_usage ?cancel
+            t.provider transcript definitions
+          else Provider.complete ~authentication:t.authentication
+            ?resolve_credential:t.resolve_credential
+            ?resolve_credential_cancel:t.resolve_credential_cancel
+            ?thinking:(t.thinking ())
+            ?max_output_tokens:t.max_output_tokens
+            ?on_usage:t.on_usage ?cancel t.provider transcript definitions in
+        Provider.check_cancel cancel;
+        end_drafts reply.tool_calls;
+        emit_stage t "model" ~since:model_started ();
+        reply
+      with exn ->
+        end_drafts [];
+        emit_stage t "model" ~since:model_started
+          ~detail:(Printexc.to_string exn) ();
+        raise exn in
+    (match t.secret_mask with
+     | Some _ when t.stream && Buffer.length streamed_text > 0 ->
+         t.on_delta (Buffer.contents streamed_text)
+     | _ -> ());
+    t.scoped_pending <- [];
+    (match reply.content with
+     | Some s when s <> "" ->
+         if t.stream then t.on_delta "\n" else t.on_event s
+     | _ -> ());
+    Provider.check_cancel cancel;
+    match reply.tool_calls with
+    | [] ->
+        (* An empty assistant turn is rejected when history is replayed
+           (Anthropic, Responses, Chat Completions), so it is not retained. *)
+        if Option.value ~default:"" reply.content = "" then
+          t.on_event "The model finished without a reply."
+        else append t reply;
+        (match reply.content with
+         | Some text -> (match t.secret_mask with
+             | Some mask -> Secret_mask.redact mask text
+             | None -> text)
+         | None -> "")
+    | calls ->
+        append t reply;
+        execute_tool_calls ?cancel ~visible t calls;
+        turn (remaining - 1)
   in
   let turn_started = Unix.gettimeofday () in
   try

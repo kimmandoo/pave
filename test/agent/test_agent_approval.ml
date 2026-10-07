@@ -135,6 +135,48 @@ let remove_root root =
   Unix.rmdir root
 
 let () =
+  let root = new_root () in
+  let socket = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
+  Fun.protect ~finally:(fun () -> Unix.close socket; remove_root root) (fun () ->
+    Unix.bind socket (Unix.ADDR_INET (Unix.inet_addr_loopback, 0));
+    Unix.listen socket 1;
+    let port = match Unix.getsockname socket with
+      | Unix.ADDR_INET (_, port) -> port | _ -> assert false in
+    let provider : Pave.Provider.config = {
+      endpoint = Printf.sprintf "http://127.0.0.1:%d/v1/chat/completions" port;
+      api_key = ""; model = "direct"; api = Pave.Provider.Openai_completions } in
+    let approved = ref false and prompts = ref 0 and effects = ref [] in
+    let agent = Pave.Agent.create ~provider ~root ~system:"direct tools"
+      ~approval_mode:Pave.Approval.Ask_writes
+      ~approve_tool:(fun _ -> incr prompts; !approved)
+      ~on_workspace_effect:(fun effect -> effects := effect :: !effects)
+      ~on_event:(fun _ -> ()) () in
+    let write = `Assoc ["path", `String "direct.txt"; "content", `String "actual direct content"] in
+    let denied = Pave.Agent.call_tool agent ~name:"write_file" ~args:write in
+    expect "direct denied write has no effect"
+      (contains denied "denied" && !prompts = 1 &&
+       not (Sys.file_exists (Filename.concat root "direct.txt")));
+    approved := true;
+    ignore (Pave.Agent.call_tool agent ~name:"write_file" ~args:write);
+    expect "direct approved mutation records real snapshots"
+      (!prompts = 2 && List.exists (function
+        | Pave.Session_rewind.File_change { path = "direct.txt"; before; after; _ } ->
+            before <> after
+        | _ -> false) !effects);
+    let result = Pave.Agent.call_tool agent ~name:"read_file"
+      ~args:(`Assoc ["path", `String "direct.txt"]) in
+    expect "direct read returns actual approved content"
+      (contains result "actual direct content");
+    let history = Pave.Agent.messages agent in
+    (try ignore (Pave.Agent.call_tool agent ~name:"read_file" ~args:(`Assoc []));
+       failwith "invalid direct arguments accepted"
+     with Pave.Tools.Tool_error _ -> ());
+    expect "invalid direct arguments leave no orphan transcript"
+      (Pave.Agent.messages agent = history);
+    expect "direct tools never contact completion provider"
+      (let ready, _, _ = Unix.select [socket] [] [] 0. in ready = []))
+
+let () =
   let module A = Pave.Approval in
   let root = new_root () in
   Fun.protect ~finally:(fun () -> remove_root root) (fun () ->

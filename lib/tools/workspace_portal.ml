@@ -2,6 +2,7 @@ exception Error of string
 let fail message = raise (Error message)
 let portal_variable = "PAVE_PORTAL"
 let tunnels_variable = "PAVE_TUNNELS"
+let max_name_length = 22
 let job_id name = "portal:" ^ name
 
 let executable_path path =
@@ -190,14 +191,16 @@ let ensure_portal ?cancel ?transfer ?(env = Sys.getenv_opt) () =
       else (
         install_portal ?cancel ?transfer path;
         path)
-let publish_name name =
+let dns_label ~max_length name =
   let length = String.length name in
   let alnum = function 'a'..'z' | '0'..'9' -> true | _ -> false in
-  if length = 0 || length > 63 || not (alnum name.[0]) ||
+  if length = 0 || length > max_length || not (alnum name.[0]) ||
      not (alnum name.[length - 1]) ||
      not (String.for_all (fun c -> alnum c || c = '-') name) then
-    fail "prefix must be a 1-63 character lowercase DNS label, starting and ending with a letter or digit";
+    fail (Printf.sprintf "prefix must be a 1-%d character lowercase DNS label, starting and ending with a letter or digit" max_length);
   name
+
+let publish_name name = dns_label ~max_length:max_name_length name
 
 let fresh_name () = "pave-" ^ String.sub (Session.fresh_id ()) 0 16
 
@@ -213,7 +216,7 @@ let https_origin value =
     | _ -> fail "relay must be an HTTPS hostname with an optional port" in
   if host = "" || String.length host > 253 ||
      not (List.for_all (fun label ->
-       try ignore (publish_name label); true with Error _ -> false)
+       try ignore (dns_label ~max_length:63 label); true with Error _ -> false)
        (String.split_on_char '.' host)) then
     fail "relay has an invalid hostname";
   Option.iter (fun port -> match int_of_string_opt port with
@@ -242,7 +245,12 @@ let public_url output =
         let json = Yojson.Basic.from_string line in
         match Protocol.member "message" json, Protocol.member "public_url" json with
         | `String message, `String url when
-            String.starts_with ~prefix:"service ready at https://" message -> valid url
+            String.starts_with ~prefix:"service ready at " message ->
+            let advertised = String.sub message (String.length "service ready at ")
+              (String.length message - String.length "service ready at ") in
+            (match valid advertised, valid url with
+             | Some announced, Some endpoint when announced = endpoint -> Some endpoint
+             | _ -> None)
         | _ -> None
       with Yojson.Json_error _ -> None
     else
@@ -307,6 +315,7 @@ let publish ?cancel ?transfer ?(env = Sys.getenv_opt) ?state_dir ?relay
   let identity = identity_path ~env ?state_dir ~name () in
   let executable = ensure_portal ?cancel ?transfer ~env () in
   let arguments = portal_arguments ~port ~name ~identity ?relay () in
+  Workspace_process.check_wait_cancel cancel;
   Workspace_process.start manager ~id ~cwd:(Some (Filename.dirname identity))
     ~environment:["NO_COLOR", "1"] ~program:executable ~arguments ();
   try
@@ -315,9 +324,8 @@ let publish ?cancel ?transfer ?(env = Sys.getenv_opt) ?state_dir ?relay
     let output = (Workspace_process.read_output manager ~id ()).output in
     if not ready then fail
       ("Portal did not publish a public URL within 45 s: " ^ String.trim output);
-    if not (List.exists (fun (job : Workspace_process.job_summary) ->
-        job.id = id && job.status = Workspace_process.Running)
-        (Workspace_process.jobs manager)) then
+    Workspace_process.check_wait_cancel cancel;
+    if Workspace_process.job_status manager ~id <> Workspace_process.Running then
       fail "Portal exited before publication completed";
     let url = match public_url output with
       | Some url -> url
@@ -335,6 +343,9 @@ let publish ?cancel ?transfer ?(env = Sys.getenv_opt) ?state_dir ?relay
     raise exn
 
 let stop manager ~id =
+  if not (String.starts_with ~prefix:"portal:" id) then
+    fail "stop requires a Portal tunnel ID";
+  ignore (publish_name (String.sub id 7 (String.length id - 7)));
   Workspace_process.kill_job manager ~id;
   `Assoc ["status", `String "stopped"; "id", `String id]
 

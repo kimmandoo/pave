@@ -121,6 +121,54 @@ let () =
     Sys.remove outside;
     (try Sys.remove outside_manifest with Sys_error _ -> ());
     Unix.rmdir outside_mobile; Unix.rmdir root) (fun () ->
+    let tool_names definitions = List.filter_map (fun definition ->
+      match Pave.Tools.function_name definition with
+      | `String name -> Some name | _ -> None) definitions in
+    let mobile_shell_tools = [
+      "xcode_preflight"; "mobile_check"; "android_devices"; "mobile_session";
+      "mobile_verify"; "mobile_observe"; "mobile_accessibility_audit";
+      "mobile_control"; "mobile_scenario"; "mobile_diagnostics"; "mobile_visual";
+      "mobile_environment"; "mobile_app_lifecycle"; "mobile_performance";
+      "mobile_dev_server"; "mobile_device_lifecycle"] in
+    let published = tool_names (Pave.Tools.available_for
+      ~allow_shell:true ~enabled:(fun _ -> true)) in
+    let without_shell = tool_names (Pave.Tools.available_for
+      ~allow_shell:false ~enabled:(fun _ -> true)) in
+    List.iter (fun name ->
+      assert (Pave.Tools.is_shell_tool name);
+      assert (List.mem name published && not (List.mem name without_shell));
+      assert (List.mem name Pave.Tools.session_tool_names);
+      assert (not (List.mem name (tool_names (Pave.Tools.available_for
+        ~allow_shell:true ~enabled:(fun candidate -> candidate <> name))))))
+      mobile_shell_tools;
+    assert (List.mem "mobile_project" without_shell);
+    List.iter (fun action ->
+      let fields = `Assoc ["action", `String action] in
+      assert ((Pave.Tools.approval_decision ~command_patterns:[]
+        ~name:"mobile_session" ~args:fields).tier = Pave.Approval.Read);
+      assert (not (Pave.Tools.requires_explicit_approval
+        ~name:"mobile_session" ~args:fields))) ["list"; "status"];
+    List.iter (fun action ->
+      let fields = `Assoc ["action", `String action] in
+      assert ((Pave.Tools.approval_decision ~command_patterns:[]
+        ~name:"mobile_session" ~args:fields).tier = Pave.Approval.Exec);
+      assert (Pave.Tools.requires_explicit_approval
+        ~name:"mobile_session" ~args:fields))
+      ["build"; "install"; "launch"; "stop"];
+    assert (contains (execute_text ~root ~name:"mobile_accessibility_audit"
+      ~args:(`Assoc ["session_id", `String "mobile-1"]) ())
+      "private saved session");
+    assert (execute_text ~root ~context:tool_context ~name:"mobile_session"
+      ~args:(`Assoc ["action", `String "status";
+        "session_id", `String "mobile-foreign"]) () = "Error: unknown mobile session ID");
+    assert (Pave.Tools.non_reversible_tool ~name:"mobile_control"
+      ~args:(`Assoc ["action", `String "tap"]));
+    List.iter (fun action ->
+      assert (Pave.Tools.requires_explicit_approval ~name:"mobile_environment"
+        ~args:(`Assoc ["action", `String action]));
+      assert (Pave.Tools.non_reversible_tool ~name:"mobile_environment"
+        ~args:(`Assoc ["action", `String action]) = (action <> "preview")))
+      ["preview"; "apply"; "restore"];
     create "App.swift" "one\none\n";
     create "snapshot.txt" "alpha beta\n";
     let snapshot = Pave.Workspace_edit.read_snapshot ~root ~path:"snapshot.txt" in
@@ -1684,6 +1732,42 @@ esac
       assert (Pave.Tools.is_shell_tool "android_devices" &&
         Pave.Tools.requires_explicit_approval ~name:"android_devices"
           ~args:(`Assoc ["action", `String "avds"]));
+      let device_inventory = Pave.Workspace_mobile_device_lifecycle.create_inventory
+        ~session_id:"device-session-registry" ~inventory_id:"device-inventory-registry"
+        ~configured_avds:["Pixel_8_API_35"] ~android_devices:[] ~avd_bindings:[]
+        ~android_bindings_complete:true ~configured_simulator_ids:[]
+        ~ios_destinations:[] ~compatible_simulators:[] in
+      Hashtbl.add tool_context.mobile_device_inventories "device-inventory-registry"
+        { Pave.Tools.device_root = root; device_platform = Pave.Workspace_mobile_run.Android;
+          device_subroot = "focus/gradle"; device_scheme = "";
+          device_inventory };
+      let device_args action port = `Assoc [
+        "action", `String action; "device_session_id", `String "device-session-registry";
+        "inventory_id", `String "device-inventory-registry";
+        "target_name", `String "Pixel_8_API_35"; "port", `Int port] in
+      List.iter (fun action ->
+        let fields = device_args action 5554 in
+        Pave.Tools.validate_arguments ~name:"mobile_device_lifecycle" ~args:fields;
+        assert (Pave.Tools.requires_explicit_approval
+          ~name:"mobile_device_lifecycle" ~args:fields);
+        assert (contains (execute_text ~root ~context:tool_context ~approved:false
+          ~name:"mobile_device_lifecycle" ~args:fields ()) "explicit interactive approval"))
+        ["boot"; "readiness"; "shutdown"; "abort_boot"];
+      let boot_fields = device_args "boot" 5554 in
+      let boot_preview = Pave.Tools.approval_request ~root ~context:tool_context
+        ~name:"mobile_device_lifecycle" ~args:boot_fields
+        (Pave.Tools.approval_decision ~command_patterns:[]
+          ~name:"mobile_device_lifecycle" ~args:boot_fields) in
+      assert (contains (String.concat "\n" boot_preview.details)
+        "emulator -avd 'Pixel_8_API_35' -port 5554");
+      let invalid_port_fields = device_args "boot" 5555 in
+      assert (rejected (fun () ->
+        let request = Pave.Tools.approval_request ~root ~context:tool_context
+          ~name:"mobile_device_lifecycle" ~args:invalid_port_fields
+          (Pave.Tools.approval_decision ~command_patterns:[]
+            ~name:"mobile_device_lifecycle" ~args:invalid_port_fields) in
+        String.concat "\n" request.details));
+      Hashtbl.remove tool_context.mobile_device_inventories "device-inventory-registry";
       let avd_preview = Pave.Tools.approval_request ~root
         ~name:"android_devices"
         ~args:(`Assoc ["action", `String "avds";

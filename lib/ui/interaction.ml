@@ -22,6 +22,7 @@ type command =
   | Branch of string
   | Fork of { path : string option; until : int option }
   | Tools of string option
+  | Tool_call of { name : string; args : Yojson.Basic.t option }
   | Context
   | Usage
   | Hotkeys
@@ -68,6 +69,7 @@ type action =
   | A_publish
   | A_hub
   | A_memory
+  | A_tool_call of string
 
 type grammar =
   | No_arguments
@@ -168,6 +170,17 @@ let available ?(session = true) ?(interactive = true) ?(subagents = false) item 
   (subagents || match item.action with
     | A_delegate | A_plan | A_advisor | A_watchdog | A_loop | A_autoresearch -> false
     | _ -> true)
+
+let tool_commands definitions =
+  List.filter_map (fun definition ->
+    let fn = Protocol.member "function" definition in
+    match Protocol.member "name" fn with
+    | `String name when not (List.exists (fun item -> item.name = "/" ^ name) commands) ->
+        let description = match Protocol.member "description" fn with
+          | `String text -> text | _ -> "Execute tool" in
+        Some (command ~group:"tools" ("/" ^ name) (Optional_text "JSON")
+          description (A_tool_call name))
+    | _ -> None) definitions
 
 let suggestions ?(session = true) ?(interactive = true) ?(subagents = false)
     ?(external_commands = []) prefix =
@@ -363,6 +376,14 @@ let parse ?(session = true) ?(interactive = true) ?(subagents = false)
         | A_publish, Optional_argument text -> Publish text
         | A_hub, Optional_argument text -> Hub text
         | A_memory, Optional_argument text -> Memory text
+        | A_tool_call name, Optional_argument text ->
+            let args = Option.map (fun text ->
+              let json = try Yojson.Basic.from_string text with Yojson.Json_error _ ->
+                invalid_arg ("Use /" ^ name ^ " with one JSON object; /tools " ^ name ^ " shows its schema") in
+              match json with
+              | `Assoc _ -> json
+              | _ -> invalid_arg ("Tool arguments must be a JSON object: /" ^ name)) text in
+            Tool_call { name; args }
         | A_mcp_connect name, No_argument -> Mcp (Some ("connect " ^ name))
         | A_thinking, Optional_argument value -> Thinking value
         | A_tool, Pair_argument (operation, tool_name) ->

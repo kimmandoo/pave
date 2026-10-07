@@ -1,5 +1,12 @@
 # Troubleshooting
 
+### [2026-10-07] Tool registration, slash discovery and Portal readiness diverged
+
+- **Context / Symptom:** `publish_web` and mobile tool names could not be invoked as slash commands. Android lifecycle `target_name`/`port` were required by dispatch but rejected by the advertised schema. Initial actual TUI smoke also revealed argument help clipped into one footer line and direct local calls blocked by unrelated provider endpoint resolution.
+- **Root Cause:** Slash discovery only included hand-written workflows and extension commands, with no tool-schema projection. Mobile schema, shell/session admission and approval/effect lists had drifted. Schema help used the one-line notifier; direct execution constructed an authenticated inference agent unnecessarily. Portal allowed prefixes longer than its upstream CLI supports and trusted disagreeing readiness fields.
+- **Solution:** Generated direct shortcuts from enabled tool definitions and reused the existing agent tool scheduler/approval/effect path without completion requests. Displayed schemas as scrollable transcript events and deferred provider authentication for local-only execution. Registered missing lifecycle fields and admission/effect classifications. Bound Portal prefix length to 22, required consistent readiness URLs, rechecked cancellation and restricted stop to owned Portal IDs.
+- **Prevention / Reference:** Focused tool/Portal/interaction/agent approval regressions passed. Actual offline TUI calls inspected a mobile project, listed private app sessions/tunnels, exercised denied/approved writes with rewind checkpoints and denied/approved fixture Portal publication/list/stop. Disabled tools disappeared from inline hints; 100×30 and 30×10 `NO_COLOR` surfaces were observed. These were isolated local fixtures, not real device/SDK or public relay acceptance. Upstream prefix contract: [Portal v2.6.1 CLI](https://github.com/gosuda/portal-tunnel/blob/v2.6.1/cmd/portal-tunnel/main.go).
+
 
 ### [2026-10-06] Mobile Control intent was filtered, dropped or silently shortened
 
