@@ -532,6 +532,7 @@ let resolve_model ?registry ?current_route ?current_account_id
 let history_for_model ~provider:active_provider ~route:active_route
     ~wire ~model messages =
   let retain (message : Protocol.message) =
+    if Protocol.is_direct_tool_message message then true else
     match message.provider_state with
     | None -> true
     | Some state ->

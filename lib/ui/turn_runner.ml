@@ -211,11 +211,45 @@ let reserved_notice_bytes = 1_048_576
 (* Keep terminal-input work responsive when a worker streams continuously. *)
 let max_drain_events = 128
 
+let optional_string_bytes = function
+  | None -> 0
+  | Some text -> String.length text
+
+let approval_bytes (request : Approval.request) =
+  let bytes = String.length request.tool_name + String.length request.impact +
+    optional_string_bytes request.reason +
+    List.fold_left (fun bytes detail -> bytes + String.length detail) 0 request.details in
+  bytes + Option.fold ~none:0 ~some:(fun (review : Approval.sensitive_review) ->
+    List.fold_left (fun bytes (effect : Approval.sensitive_effect) ->
+      bytes + String.length effect.effect_path + String.length effect.effect_summary)
+      0 review.effects +
+    List.fold_left (fun bytes path -> bytes + String.length path) 0 review.unresolved +
+    List.fold_left (fun bytes (target : Approval.sensitive_target) ->
+      bytes + String.length target.target_path + String.length target.original_sha256 +
+      String.length target.result_sha256) 0 review.targets) request.sensitive
+
+let tool_event_bytes = function
+  | Agent.Tool_started { call_id; name; target; write_content } ->
+      String.length call_id + String.length name + optional_string_bytes target +
+      optional_string_bytes write_content
+  | Agent.Tool_settled { call_id; name; result; _ }
+  | Agent.Tool_aborted { call_id; name; result; _ } ->
+      String.length call_id + String.length name + String.length result
+  | Agent.Tool_executing { call_id; name }
+  | Agent.Tool_updated { call_id; name; _ } ->
+      String.length call_id + String.length name
+  | Agent.Tool_draft delta ->
+      String.length delta.key + optional_string_bytes delta.call_id +
+      String.length delta.name + String.length delta.fragment
+  | Agent.Tool_draft_ended { key; call_id; _ } ->
+      String.length key + optional_string_bytes call_id
+
 let notice_bytes = function
   | Enqueue queued -> submission_bytes queued.submission
   | Message (_, text) | Delta (_, text) | External text -> String.length text
-  | Tool (_, Agent.Tool_settled { result; _ })
-  | Tool (_, Agent.Tool_aborted { result; _ }) -> String.length result + 64
+  | Tool (_, event) -> tool_event_bytes event + 64
+  | Approve (_, command, _, _) -> String.length command + 64
+  | Approve_tool (_, request, _, _) -> approval_bytes request + 64
   | _ -> 64
 
 let critical_notice = function
@@ -458,9 +492,11 @@ let cancel_local t =
 
 let cancel t =
   if remote t then (
-    let turn_id = with_guard t (fun () ->
-      Option.map (fun turn -> turn.id) t.active_turn) in
-    post_notice t (Cancel_remote turn_id))
+    let turn = with_guard t (fun () -> t.active_turn) in
+    Option.iter (fun turn ->
+      (* Cancellation is an admitted control, not a best-effort background
+         notice: backpressure must never silently discard it. *)
+      notify t turn (Cancel_remote (Some turn.id))) turn)
   else cancel_local t
 
 let steer t ?display_prompt ?(attachments = []) ?(paste_ranges = []) text =
@@ -706,8 +742,6 @@ let close t =
       Atomic.set t.pending 0;
       Atomic.set t.dequeued_count 0);
     cancel_local t;
-    (match t.worker with Some worker -> Thread.join worker | None -> ());
-    t.worker <- None;
     Fun.protect ~finally:(fun () ->
       with_guard t (fun () ->
         t.active_turn <- None;
@@ -716,9 +750,16 @@ let close t =
         t.notice_bytes <- 0);
       Unix.close t.read_fd;
       Unix.close t.write_fd) (fun () ->
+        (* Terminal notices may be waiting for bounded backlog capacity.
+           Keep consuming them until Finished joins the worker; joining
+           first would deadlock that producer against this owner thread. *)
         let rec drain_pending () =
           drain t;
           let pending = with_guard t (fun () -> not (Queue.is_empty t.notices)) in
-          if pending then drain_pending ()
+          if busy t then (
+            if not pending then
+              ignore (Unix.select [t.read_fd] [] [] 0.05);
+            drain_pending ())
+          else if pending then drain_pending ()
         in
         drain_pending ()))

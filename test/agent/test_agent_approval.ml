@@ -149,7 +149,7 @@ let () =
     let agent = Pave.Agent.create ~provider ~root ~system:"direct tools"
       ~approval_mode:Pave.Approval.Ask_writes
       ~approve_tool:(fun _ -> incr prompts; !approved)
-      ~on_workspace_effect:(fun effect -> effects := effect :: !effects)
+      ~on_workspace_effect:(fun workspace_effect -> effects := workspace_effect :: !effects)
       ~on_event:(fun _ -> ()) () in
     let write = `Assoc ["path", `String "direct.txt"; "content", `String "actual direct content"] in
     let denied = Pave.Agent.call_tool agent ~name:"write_file" ~args:write in
