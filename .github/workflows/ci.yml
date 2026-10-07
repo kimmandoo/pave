@@ -27,7 +27,7 @@ jobs:
             ocaml: '5.5.1-native'
             compiler: 'ocaml-variants.5.5.1+options,ocaml-option-no-compression'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: ocaml/setup-ocaml@v3
         with:
           ocaml-compiler: ${{ matrix.compiler || matrix.ocaml }}
