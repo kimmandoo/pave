@@ -38,6 +38,17 @@ type sourced = { server : string; source : Mcp_config.source; value : Yojson.Bas
 type request = method_name:string -> params:Yojson.Basic.t ->
   timeout_seconds:float -> cancelled:(unit -> bool) -> Yojson.Basic.t
 let with_lock lock fn = Mutex.lock lock; Fun.protect ~finally:(fun () -> Mutex.unlock lock) fn
+let with_request_lock lock ~deadline ~cancelled fn =
+  let rec acquire () =
+    let wait = remaining deadline cancelled in
+    if Mutex.try_lock lock then
+      Fun.protect ~finally:(fun () -> Mutex.unlock lock) (fun () ->
+        ignore (remaining deadline cancelled);
+        fn ())
+    else (
+      ignore (Unix.select [] [] [] wait);
+      acquire ()) in
+  acquire ()
 let dispose_client c =
   if not c.closed then (
     c.closed <- true; close_fd c.input; close_fd c.output;
@@ -209,9 +220,8 @@ let initialize c ~deadline ~cancelled =
   ignore (string "MCP server version" (get "version" info));
   let notice = "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}" in
   write_all c (notice ^ "\n") ~deadline ~cancelled
-let connect session ~server ~timeout_seconds ~cancelled =
-  let deadline = timeout timeout_seconds in
-  with_lock session.lock (fun () ->
+let connect_until session ~server ~deadline ~cancelled =
+  with_request_lock session.lock ~deadline ~cancelled (fun () ->
     ensure session;
     let config = match Mcp_config.find session.snapshot server with
       | Some config -> config | None -> fail "MCP server is not enabled" in
@@ -228,14 +238,17 @@ let connect session ~server ~timeout_seconds ~cancelled =
         let c, status = spawn config in
         (try
            wait_ready status ~deadline ~cancelled;
-           with_lock c.lock (fun () -> initialize c ~deadline ~cancelled);
+           with_request_lock c.lock ~deadline ~cancelled
+             (fun () -> initialize c ~deadline ~cancelled);
            session.clients <- (server, c) :: List.remove_assoc server session.clients;
            c
          with exn -> close_fd status; dispose_client c; raise exn))
+let connect session ~server ~timeout_seconds ~cancelled =
+  connect_until session ~server ~deadline:(timeout timeout_seconds) ~cancelled
 let call session ~server ~method_name ~params ~timeout_seconds ~cancelled =
-  let c = connect session ~server ~timeout_seconds ~cancelled in
   let deadline = timeout timeout_seconds in
-  with_lock c.lock (fun () ->
+  let c = connect_until session ~server ~deadline ~cancelled in
+  with_request_lock c.lock ~deadline ~cancelled (fun () ->
     try
       ensure session; check_cancel cancelled;
       result c ~method_name ~params ~deadline ~cancelled
@@ -338,6 +351,10 @@ let validate_schema json =
   validate_schema_node 0 json;
   if get "type" (obj "MCP inputSchema" json) <> `String "object" then
     fail "MCP tool inputSchema must describe an object"
+let string_length text =
+  Uutf.String.fold_utf_8 (fun count _ -> function
+    | `Uchar _ -> count + 1
+    | `Malformed _ -> fail "MCP tool argument string must contain valid UTF-8") 0 text
 let rec validate_arguments_node schema value =
   let fields = obj "MCP argument schema" schema in
   let kind = get "type" fields in
@@ -374,8 +391,9 @@ let rec validate_arguments_node schema value =
        let schema = get "items" fields in
        List.iter (validate_arguments_node schema) values
    | `String text ->
+       let length = string_length text in
        (match List.assoc_opt "maxLength" fields with
-        | Some (`Int maximum) when String.length text > maximum ->
+        | Some (`Int maximum) when length > maximum ->
             fail "MCP tool argument string exceeds limit"
         | _ -> ())
    | `Int number ->

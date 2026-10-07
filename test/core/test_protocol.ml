@@ -11,10 +11,55 @@ let () =
                     tool_calls = [ call ]; tool_call_id = None; tool_result_content = None; provider_state = None; attachments = [] } in
   let restored = message_from_json (message_to_json assistant) in
   assert (restored = assistant);
+  let direct = direct_tool_message call in
+  assert (is_direct_tool_message direct);
+  assert (message_from_json (message_to_json ~stored:true direct) = direct);
+  let direct_result = tool_result_blocks call.id [
+    Text "before"; Image { mime_type = "image/png"; data = "aGVsbG8=" };
+    Text "after"] in
+  let local_history = [user "/read_file"; direct; direct_result; user "continue"] in
+  let projected = replay_messages local_history in
+  assert (replay_messages projected == projected);
+  assert (sanitize_messages local_history = local_history);
+  (match projected with
+   | command :: before :: image :: after :: follow_up :: [] ->
+       assert (command = user "/read_file" && follow_up = user "continue");
+       assert (List.for_all (fun message ->
+         message.role = "user" && message.tool_calls = [] &&
+         message.tool_call_id = None && message.provider_state = None) projected);
+       assert (String.ends_with ~suffix:"\"before\"" (Option.get before.content));
+       assert (String.ends_with ~suffix:"\"after\"" (Option.get after.content));
+       assert (image.attachments = [{
+         name = "direct-tool-image-2"; mime_type = "image/png"; data = "aGVsbG8=" }]);
+       assert (not (String.contains (Option.get image.content) '='))
+   | _ -> failwith "direct results lost canonical text/image order");
+  expect_invalid (fun () -> replay_messages [direct]);
+  expect_invalid (fun () -> replay_messages [direct; tool_result "wrong" "output"]);
+  expect_invalid (fun () -> replay_messages [
+    { direct with tool_calls = [{ call with name = "write_file" }] };
+    tool_result call.id "output"]);
+  let forged_id = { assistant with tool_calls = [{ call with id = "direct-forged" }] } in
+  let model_history = [forged_id; tool_result "direct-forged" "output"] in
+  assert (replay_messages model_history == model_history);
   let completed = `Assoc [ "choices", `List [ `Assoc [
     "finish_reason", `String "tool_calls";
     "message", message_to_json assistant ] ] ] in
   assert (parse_completion completed = assistant);
+  let text_completion content = `Assoc ["choices", `List [`Assoc [
+    "finish_reason", `String "stop";
+    "message", `Assoc ["role", `String "assistant"; "content", content]]]] in
+  expect_invalid (fun () -> parse_completion (text_completion `Null));
+  expect_invalid (fun () -> parse_completion (text_completion (`String "")));
+  assert ((parse_completion (text_completion (`String "answer"))).content =
+    Some "answer");
+  assert (decode_tool_arguments "\"\"" = `Assoc []);
+  assert (decode_tool_arguments "\"   \"" = `Assoc []);
+  assert (decode_tool_arguments (Yojson.Basic.to_string (`String "{}")) = `Assoc []);
+  List.iter (fun raw ->
+    assert (member invalid_arguments_key (decode_tool_arguments raw) <> `Null))
+    ["\"not arguments\""; Yojson.Basic.to_string (`String "\"still not arguments\"");
+     Yojson.Basic.to_string (`String (Yojson.Basic.to_string
+       (`String (Yojson.Basic.to_string (`String "{}")))))];
   let counted = `Assoc [ "usage", `Assoc [
     "prompt_tokens", `Int 19; "completion_tokens", `Int 7;
     "prompt_tokens_details", `Assoc [ "cached_tokens", `Int 5 ];

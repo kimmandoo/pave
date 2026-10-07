@@ -43,11 +43,19 @@ let adb session remote =
 let check_session session =
   if session.Run.platform <> Run.Android then fail "mobile environment experiments are Android-emulator only";
   if not (Workspace_android_devices.emulator_serial session.Run.device) then
-    fail "mobile environment experiments require the exact selected Android emulator"
+    fail "mobile environment experiments require the exact selected Android emulator";
+  if session.Run.state <> Run.Running then
+    fail "mobile environment experiments require the selected running app"
 
 let valid_locale value =
   String.length value <= 64 &&
-  String.for_all (function 'a'..'z' | 'A'..'Z' | '0'..'9' | '-' | '_' -> true | _ -> false) value
+  (value = "" ||
+   List.for_all (fun tag ->
+     tag <> "" &&
+     (match tag.[0] with 'a'..'z' | 'A'..'Z' -> true | _ -> false) &&
+     String.for_all (function
+       | 'a'..'z' | 'A'..'Z' | '0'..'9' | '-' | '_' -> true | _ -> false) tag)
+     (String.split_on_char ',' value))
 
 let setting_plan session ~setting ~before =
   check_session session;
@@ -57,9 +65,9 @@ let setting_plan session ~setting ~before =
     | Locale desired, Locale_value previous when valid_locale desired && valid_locale previous ->
         let locale = Filename.quote desired and old = Filename.quote previous in
         (setting, Locale_value desired,
-         adb session ("cmd locale get-app-locales --user current " ^ app),
-         adb session ("cmd locale set-app-locales --user current " ^ app ^ " --locales " ^ locale),
-         adb session ("cmd locale set-app-locales --user current " ^ app ^ " --locales " ^ old))
+         adb session ("cmd locale get-app-locales " ^ app ^ " --user current"),
+         adb session ("cmd locale set-app-locales " ^ app ^ " --user current --locales " ^ locale),
+         adb session ("cmd locale set-app-locales " ^ app ^ " --user current --locales " ^ old))
     | Theme desired, Theme_value previous ->
         let set = function Light -> "no" | Dark -> "yes" in
         (setting, Theme_value desired, adb session "cmd uimode night",
@@ -80,19 +88,26 @@ let setting_plan session ~setting ~before =
 
 let parse plan output =
   let output = ensure_output output in
-  let lines = String.split_on_char '\n' output |> List.map String.trim in
+  let lines = String.split_on_char '\n' (String.trim output) |> List.map String.trim in
   let malformed () = fail "mobile environment state was not an exact supported value" in
   match plan.setting with
   | Locale _ ->
-      let prefix = "Locales for app " ^ plan.app_id ^ ":" in
+      let prefix = "Locales for " ^ plan.app_id ^ " for user " in
       let value = match lines with
         | [line] when String.starts_with ~prefix line ->
-            let raw = String.sub line (String.length prefix) (String.length line - String.length prefix) |> String.trim in
-            if raw = "[]" then "" else
-            if String.length raw >= 2 && raw.[0] = '[' && raw.[String.length raw - 1] = ']' then
-              String.sub raw 1 (String.length raw - 2)
-            else malformed ()
-        | [""] -> "" | _ -> malformed () in
+            let rest = String.sub line (String.length prefix)
+              (String.length line - String.length prefix) in
+            (match String.index_opt rest ' ' with
+             | Some offset ->
+                 let user = String.sub rest 0 offset in
+                 let raw = String.sub rest offset (String.length rest - offset) in
+                 if user = "" || String.length user > 10 ||
+                    not (String.for_all (function '0'..'9' -> true | _ -> false) user) ||
+                    not (String.starts_with ~prefix:" are [" raw) ||
+                    not (String.ends_with ~suffix:"]" raw) then malformed ();
+                 String.sub raw 6 (String.length raw - 7)
+             | None -> malformed ())
+        | _ -> malformed () in
       if not (valid_locale value) then malformed ();
       Locale_value value
   | Theme _ ->

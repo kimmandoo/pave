@@ -332,6 +332,21 @@ if not (List.exists (fun item -> item.name = "/rewind")
   if state same <> Some native || state other_model <> None ||
      state other_protocol <> None || state history <> Some native then
     fail "opaque Codex state crossed the model or protocol boundary";
+  let direct_call : Pave.Protocol.tool_call = {
+    id = "local-operation"; name = "read_file"; arguments = `Assoc [] } in
+  let direct_history = [Pave.Protocol.user "/read_file";
+    Pave.Protocol.direct_tool_message direct_call;
+    Pave.Protocol.tool_result direct_call.id "local output"] in
+  List.iter (fun (provider, route, wire) ->
+    let selected = history_for ~provider ~route ~wire ~model:"another-model"
+      direct_history in
+    if selected <> direct_history then
+      fail "model switch discarded local direct-tool provenance";
+    ignore (Pave.Gemini_wire.request ~model:"gemini-model"
+      (Pave.Protocol.replay_messages selected) []))
+    ["google", "generate", Pave.Provider.Gemini_direct;
+     "openai-codex", "responses", Pave.Provider.Codex_responses;
+     "openai", "chat", Pave.Provider.Openai_completions];
   let signed = `Assoc [
     "provider", `String "google"; "model", `String "gemini-3-pro";
     "parts", `List [] ] in

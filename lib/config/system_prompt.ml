@@ -22,7 +22,7 @@ let read_file path =
   let fd = Unix.openfile path [Unix.O_RDONLY; Unix.O_NONBLOCK; Unix.O_CLOEXEC] 0 in
   Fun.protect ~finally:(fun () -> Unix.close fd) (fun () ->
     let current = Unix.lstat path and stats = Unix.fstat fd in
-    if stats.Unix.st_kind <> Unix.S_REG ||
+    if stats.Unix.st_kind <> Unix.S_REG || stats.Unix.st_size > max_file_bytes ||
        stats.Unix.st_dev <> before.Unix.st_dev ||
        stats.Unix.st_ino <> before.Unix.st_ino ||
        current.Unix.st_dev <> stats.Unix.st_dev ||
@@ -41,18 +41,25 @@ let render_template ~root source =
   let marker = "{{root}}" in
   let marker_length = String.length marker in
   let n = String.length source in
-  let output = Buffer.create n in
+  let output = Buffer.create (min n max_prompt_bytes) in
+  let reserve bytes =
+    if bytes > max_prompt_bytes - Buffer.length output then
+      invalid_arg "rendered system prompt exceeds 256 KiB" in
   let rec render index =
     if index < n then
       if index + marker_length <= n &&
          String.sub source index marker_length = marker then (
+        reserve (String.length root);
         Buffer.add_string output root;
         render (index + marker_length))
       else if index + 1 < n &&
               (String.sub source index 2 = "{{" ||
                String.sub source index 2 = "}}") then
         invalid_arg "template has an unknown placeholder"
-      else (Buffer.add_char output source.[index]; render (index + 1)) in
+      else (
+        reserve 1;
+        Buffer.add_char output source.[index];
+        render (index + 1)) in
   render 0;
   let result = Buffer.contents output in
   if String.trim result = "" then invalid_arg "template is empty";

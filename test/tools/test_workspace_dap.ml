@@ -71,6 +71,7 @@ type mock = {
   transport : Dap.transport;
   sent_frames : string list ref;
   close_count : int ref;
+  push_event : string -> Yojson.Basic.t -> unit;
 }
 
 let mock ?(fragment = false) responder =
@@ -103,7 +104,9 @@ let mock ?(fragment = false) responder =
       if cancelled () || Queue.is_empty chunks then None else Some (Queue.take chunks));
     close = (fun () -> incr close_count);
   } in
-  { transport; sent_frames; close_count }
+  { transport; sent_frames; close_count;
+    push_event = (fun name body ->
+      push [emit ("event", ["event", `String name; "body", body])]) }
 
 let response emit request_seq command ?(success = true) ?message body =
   emit ("response", [
@@ -545,7 +548,111 @@ let test_frame_boundaries_across_chunks () =
       session.receive_buffer <- String.make (Dap.max_header_bytes + 4) ' ';
       expect_error "oversized unterminated header" (fun () -> Dap.take_frame session)))
 
+let test_deferred_startup_configuration () =
+  List.iter (fun (start_command, startup_first, startup_success) ->
+    let fixture = root_with_target () in
+    Fun.protect ~finally:(fun () -> cleanup_root fixture) (fun () ->
+      let root, _ = fixture in
+      let configuration_allowed = ref false in
+      let dap_manager = Dap.create_manager ~owner:"deferred" ~workspace_root:root
+        ~authorize:(function
+          | Dap.Debug_execution when not !configuration_allowed ->
+              raise (Dap.Not_approved "configuration denied")
+          | _ -> ()) in
+      Fun.protect ~finally:(fun () -> Dap.close_manager dap_manager) (fun () ->
+        let startup_sequence = ref None in
+        let responder ~emit ~request ~outgoing_seq ~command =
+          match command with
+          | "initialize" ->
+              [response emit outgoing_seq command
+                (`Assoc ["supportsConfigurationDoneRequest", `Bool true])]
+          | command when command = start_command ->
+              startup_sequence := Some outgoing_seq;
+              [event emit "initialized" (`Assoc [])]
+          | "configurationDone" ->
+              let startup () = response emit (Option.get !startup_sequence) start_command
+                ~success:startup_success ~message:"startup rejected" (`Assoc []) in
+              let configuration () = response emit outgoing_seq command (`Assoc []) in
+              let first, second =
+                if startup_first then
+                  let first = startup () in let second = configuration () in first, second
+                else
+                  let first = configuration () in let second = startup () in first, second in
+              let stopped = event emit "stopped" (`Assoc ["reason", `String "entry"]) in
+              [first; second; stopped]
+          | _ -> standard_responder ~emit ~request ~outgoing_seq ~command in
+        let adapter = mock ~fragment:true responder in
+        let session = Dap.create_session dap_manager ~id:"deferred" ~transport:adapter.transport in
+        ignore (Dap.initialize dap_manager ~id:"deferred" ~adapter_id:"python");
+        let started =
+          if start_command = "launch" then
+            Dap.launch dap_manager ~id:"deferred" ~target:"main.py" ~arguments:[]
+          else (
+            Dap.trust_attach_host dap_manager ~id:"deferred" ~host:"localhost";
+            Dap.attach dap_manager ~id:"deferred" ~host:"localhost" ~port:5678) in
+        expect "startup returns a truthful pending configuration result"
+          (json_member "startup_pending" started = `Bool true && session.pending_start <> None);
+        let before_configuration = sent_count adapter in
+        expect_denied "deferred configuration approval" (fun () ->
+          Dap.configuration_done dap_manager ~id:"deferred");
+        expect "denied configuration sends no frame and preserves pending startup"
+          (sent_count adapter = before_configuration && session.pending_start <> None);
+        ignore (Dap.set_breakpoints dap_manager ~id:"deferred" ~source:"main.py" ~breakpoints:[]);
+        configuration_allowed := true;
+        if startup_success then (
+          ignore (Dap.configuration_done dap_manager ~id:"deferred");
+          expect "configuration waits for the correlated startup response"
+            (session.pending_start = None && session.phase = Dap.Configured);
+          ignore (Dap.stack_trace dap_manager ~id:"deferred" ~thread_id:7 ()))
+        else (
+          expect_error "deferred startup failure is not successful configuration" (fun () ->
+            Dap.configuration_done dap_manager ~id:"deferred");
+          expect "deferred startup failure closes the session" (!(adapter.close_count) = 1)))))
+    ["launch", false, true; "launch", true, true; "attach", false, true;
+     "launch", false, false]
+
+let test_asynchronous_event_availability () =
+  let fixture = root_with_target () in
+  Fun.protect ~finally:(fun () -> cleanup_root fixture) (fun () ->
+    let root, _ = fixture in
+    let dap_manager = manager root in
+    Fun.protect ~finally:(fun () -> Dap.close_manager dap_manager) (fun () ->
+      let adapter = mock ~fragment:true standard_responder in
+      ignore (Dap.create_session dap_manager ~id:"async" ~transport:adapter.transport);
+      initialize_and_launch dap_manager ~id:"async";
+      ignore (Dap.take_events dap_manager ~id:"async");
+      ignore (Dap.continue_ dap_manager ~id:"async" ~thread_id:7 ());
+      adapter.push_event "stopped" (`Assoc ["reason", `String "breakpoint"]);
+      ignore (Dap.stack_trace dap_manager ~id:"async" ~thread_id:7 ());
+      ignore (Dap.take_events dap_manager ~id:"async");
+      let before_events = sent_count adapter in
+      adapter.push_event "output" (`Assoc ["output", `String "asynchronous output"]);
+      let events = Dap.take_events dap_manager ~id:"async" in
+      expect "events drains independently arriving adapter notifications"
+        (List.exists (fun event -> json_member "event" event = `String "output") events);
+      expect "event inspection sends no control request" (sent_count adapter = before_events)))
+
+let test_operation_lock_budget () =
+  let fixture = root_with_target () in
+  Fun.protect ~finally:(fun () -> cleanup_root fixture) (fun () ->
+    let root, _ = fixture in
+    let dap_manager = manager root in
+    Fun.protect ~finally:(fun () -> Dap.close_manager dap_manager) (fun () ->
+      let adapter = mock standard_responder in
+      let session = Dap.create_session dap_manager ~id:"locked" ~transport:adapter.transport in
+      Mutex.lock session.operation_lock;
+      Fun.protect ~finally:(fun () -> Mutex.unlock session.operation_lock) (fun () ->
+        let began = Unix.gettimeofday () in
+        expect_error "request deadline includes operation lock" (fun () ->
+          Dap.initialize ~timeout_seconds:0.02 dap_manager ~id:"locked" ~adapter_id:"python");
+        expect "queued request timeout is bounded and sends no frame"
+          (Unix.gettimeofday () -. began < 1. && sent_count adapter = 0));
+      ignore (Dap.initialize dap_manager ~id:"locked" ~adapter_id:"python")))
+
 let () =
+  test_deferred_startup_configuration ();
+  test_asynchronous_event_availability ();
+  test_operation_lock_budget ();
   test_fragmented_flow_and_transitions ();
   test_frame_boundaries_across_chunks ();
   test_stdio_transport_framing_lifecycle_and_environment ();

@@ -255,6 +255,26 @@ let () =
     Store.with_lock ~path (fun () ->
       Store.with_lock ~path (fun () -> invoked := true));
     assert !invoked;
+    let contender_entered = Atomic.make false in
+    Store.with_lock ~path (fun () ->
+      let contender = Thread.create (fun () ->
+        try Store.with_lock ~path
+          ~deadline:(Unix.gettimeofday () +. 0.1)
+          (fun () -> Atomic.set contender_entered true)
+        with Store.Storage_error _ -> ()) () in
+      Thread.join contender);
+    assert (not (Atomic.get contender_entered));
+    let thread_writers = List.init 4 (fun _ ->
+      Thread.create (fun () ->
+        for _ = 1 to 12 do
+          Store.with_lock ~path (fun () ->
+            let old = find path "counter" (Some "user-1") |> Option.get in
+            Thread.yield ();
+            Store.put_account ~path ~provider:"counter" ~binding:(binding "counter")
+              { old with access = string_of_int (int_of_string old.access + 1) })
+        done) ()) in
+    List.iter Thread.join thread_writers;
+    assert ((find path "counter" (Some "user-1") |> Option.get).access = "96");
     assert (Store.accounts ~path ~provider:"beta" = []);
     assert (mode path = 0o600));
   print_endline "oauth store: ok"

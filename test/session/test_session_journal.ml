@@ -263,6 +263,22 @@ let () =
       Pave.Session.Tool_settled { is_error = false };
       Pave.Session.Tool_started;
       Pave.Session.Tool_aborted { side_effects_may_have_occurred = true }]);
+    let ordered = Pave.Session.open_file ~cwd:dir
+      (Filename.concat dir "ordered-recovery.jsonl") in
+    let calls = List.init 3 (fun index ->
+      { call with id = Printf.sprintf "ordered-call-%d" index }) in
+    ignore (Pave.Session.append ordered { role = "assistant"; content = None;
+      tool_calls = calls; tool_call_id = None; tool_result_content = None;
+      provider_state = None; attachments = [] });
+    let expected_ids = List.map (fun (call : Pave.Protocol.tool_call) -> call.id) calls in
+    assert (List.map (fun (pending : Pave.Session.pending_tool_call) -> pending.call_id)
+      (Pave.Session.pending_tool_calls ordered) = expected_ids);
+    let recovered_ordered = Pave.Session.open_file ordered.path in
+    let result_ids = List.filter_map (fun (message : Pave.Protocol.message) ->
+      if message.role = "tool" then message.tool_call_id else None)
+      (Pave.Session.history recovered_ordered) in
+    assert (result_ids = expected_ids);
+    assert (Pave.Session.pending_tool_calls recovered_ordered = []);
     let lifecycle = Pave.Session.open_file lifecycle_path in
     let lifecycle_user = Pave.Session.append lifecycle (message "lifecycle") in
     let call_message (call : Pave.Protocol.tool_call) : Pave.Protocol.message = { role = "assistant"; content = None; tool_calls = [call];
@@ -448,7 +464,11 @@ let () =
     let prior = Pave.Session.append copy (assistant "old answer") in
     ignore (Pave.Session.append copy retry_message);
     ignore (Pave.Session.append copy (assistant "first answer"));
+    ignore (Pave.Session.record_stage copy ~stage:"model" ~elapsed_ms:12 ());
+    ignore (Pave.Session.record_stage copy ~stage:"turn" ~elapsed_ms:14 ());
     assert (Pave.Session.retry_candidate copy =
+      Some (prior, retry_message));
+    assert (Pave.Session.retry_candidate (Pave.Session.open_file copy.path) =
       Some (prior, retry_message));
     Pave.Session.branch copy prior;
     ignore (Pave.Session.append copy retry_message);
@@ -649,6 +669,39 @@ let () =
       item.name = "large.png" && item.mime_type = "image/png" &&
       item.size = String.length large_data && String.length item.sha256 = 64)
       (Pave.Session.list_artifacts reopened_large));
+    let mixed = Pave.Session.open_file ~cwd:dir
+      (Filename.concat dir "mixed-attachments.jsonl") in
+    let mixed_user = Pave.Protocol.user ~attachments:[
+      large_attachment; attachment;
+      { large_attachment with name = "second-large.png" };
+      { attachment with name = "second-small.png" }
+    ] "Keep the media in this order" in
+    ignore (Pave.Session.append mixed mixed_user);
+    let mixed_json = Pave.Session.entry_json (List.hd
+      (List.rev (Pave.Session.entries mixed))) in
+    assert (Pave.Protocol.member "attachmentOrder" mixed_json =
+      `List [`Int 2; `Int 0; `Int 3; `Int 1]);
+    let reopened_mixed = Pave.Session.open_file mixed.path in
+    assert (Pave.Session.history reopened_mixed = [mixed_user]);
+    assert (Pave.Session.context reopened_mixed = [mixed_user]);
+    let mixed_fork = Pave.Session.fork reopened_mixed
+      (Filename.concat dir "mixed-attachments-fork.jsonl") in
+    assert (Pave.Session.history mixed_fork = [mixed_user]);
+    assert (Pave.Session.history (Pave.Session.open_file mixed_fork.path) = [mixed_user]);
+    List.iteri (fun index order ->
+      let fields = match mixed_json with `Assoc fields -> fields | _ -> assert false in
+      let malformed = `Assoc (("attachmentOrder", order) ::
+        List.remove_assoc "attachmentOrder" fields) in
+      let path = Filename.concat dir
+        (Printf.sprintf "bad-attachment-order-%d.jsonl" index) in
+      Pave.Session.write_new_file path
+        (Pave.Session.line mixed.header ^ Pave.Session.line malformed);
+      match Pave.Session.open_file path with
+      | exception Pave.Protocol.Invalid_response _ -> ()
+      | _ -> failwith "invalid attachment order was accepted")
+      [`List [`Int 0; `Int 0; `Int 2; `Int 3];
+       `List [`Int 0; `Int 1; `Int 2; `Int 4];
+       `List [`Int 0]; `String "invalid"];
     let jobs = Pave.Session.open_file jobs_path in
     let anchor = Pave.Session.append jobs (message "job anchor") in
     let job_owner = match Pave.Protocol.member "id" jobs.Pave.Session.header with
@@ -688,6 +741,27 @@ let () =
     let jobs_fork = Pave.Session.fork jobs_reopened jobs_fork_path in
     assert (Pave.Session.history jobs_fork = [message "job anchor"]);
     assert (Pave.Session.job_states jobs_fork = []);
+    let concurrent_jobs = Pave.Session.open_file ~cwd:dir
+      (Filename.concat dir "concurrent-jobs.jsonl") in
+    let concurrent_delivery = { delivery with
+      owner = Pave.Session.session_id concurrent_jobs } in
+    let ready = Atomic.make 0 and release = Atomic.make false in
+    let writers = List.init 16 (fun _ ->
+      Thread.create (fun () ->
+        ignore (Atomic.fetch_and_add ready 1);
+        while not (Atomic.get release) do Thread.delay 0.001 done;
+        try
+          ignore (Pave.Session.append_job_started concurrent_jobs
+            ~job_id ~label:"Build" ~job_kind:"build");
+          ignore (Pave.Session.append_job_delivery concurrent_jobs concurrent_delivery)
+        with exn -> Mutex.protect errors_lock (fun () -> errors := exn :: !errors)) ()) in
+    while Atomic.get ready < 16 do Thread.delay 0.001 done;
+    Atomic.set release true;
+    List.iter Thread.join writers;
+    assert (!errors = []);
+    assert (List.length (Pave.Session.entries concurrent_jobs) = 2);
+    assert (List.length (Pave.Session.entries
+      (Pave.Session.open_file concurrent_jobs.path)) = 2);
     let multimodal = Pave.Session.open_file multimodal_path in
     let image_call : Pave.Protocol.tool_call = {
       id = "image-call"; name = "inspect_image"; arguments = `Assoc [] } in

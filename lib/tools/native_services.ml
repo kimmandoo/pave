@@ -39,26 +39,51 @@ let run_native ~cancel ~timeout_seconds ~output_limit ~program ~arguments ~stdin
   let output_read, output_write =
     try Unix.pipe ~cloexec:true ()
     with exn -> close_noerr input_read; close_noerr input_write; raise exn in
-  let null_fd = Unix.openfile "/dev/null" [Unix.O_WRONLY] 0 in
-  let argv = Array.of_list (program :: arguments) in
-  let pid =
-    try Unix.create_process_env program argv
-        (helper_environment ()) input_read output_write null_fd
+  let null_fd =
+    try Unix.openfile "/dev/null" [Unix.O_WRONLY] 0
     with exn ->
-      close_noerr input_read; close_noerr input_write;
-      close_noerr output_read; close_noerr output_write; close_noerr null_fd;
+      List.iter close_noerr [input_read; input_write; output_read; output_write];
+      raise exn in
+  let argv = Array.of_list (program :: arguments) in
+  let environment = helper_environment () in
+  let pid =
+    try
+      match Unix.fork () with
+      | 0 ->
+          (try
+             close_noerr input_write; close_noerr output_read;
+             ignore (Unix.setsid ());
+             Unix.dup2 input_read Unix.stdin;
+             Unix.dup2 output_write Unix.stdout;
+             Unix.dup2 null_fd Unix.stderr;
+             List.iter close_noerr [input_read; output_write; null_fd];
+             Unix.execve program argv environment
+           with _ -> Unix._exit 127)
+      | pid -> pid
+    with exn ->
+      List.iter close_noerr [input_read; input_write; output_read; output_write; null_fd];
       raise exn in
   close_noerr input_read;
   close_noerr output_write;
   close_noerr null_fd;
-  Unix.set_nonblock input_write;
-  Unix.set_nonblock output_read;
+  (try Unix.set_nonblock input_write; Unix.set_nonblock output_read
+   with exn ->
+     (try Unix.kill (-pid) Sys.sigkill with Unix.Unix_error _ -> ());
+     (try Unix.kill pid Sys.sigkill with Unix.Unix_error _ -> ());
+     close_noerr input_write; close_noerr output_read;
+     (try ignore (Unix.waitpid [] pid) with Unix.Unix_error _ -> ());
+     raise exn);
   let output = Buffer.create (min output_limit 4096) in
   let input_offset = ref 0 and input_open = ref true and output_open = ref true in
   let received = ref 0 and truncated = ref false and termination = ref None in
+  let child_status = ref None and finished = ref false in
+  let kill_owned () =
+    (try Unix.kill (-pid) Sys.sigkill with Unix.Unix_error _ -> ());
+    if !child_status = None then
+      (try Unix.kill pid Sys.sigkill with Unix.Unix_error _ -> ()) in
   let deadline = Unix.gettimeofday () +. timeout_seconds in
   let stop reason =
-    (try Unix.kill pid Sys.sigkill with Unix.Unix_error _ -> ());
+    kill_owned ();
     termination := Some reason
   in
   let drain () =
@@ -96,7 +121,6 @@ let run_native ~cancel ~timeout_seconds ~output_limit ~program ~arguments ~stdin
         | Unix.Unix_error (Unix.EPIPE, _, _) ->
             input_open := false; close_noerr input_write
   in
-  let child_status = ref None in
   let poll_child () =
     if !child_status = None then
       match Unix.waitpid [Unix.WNOHANG] pid with
@@ -118,16 +142,26 @@ let run_native ~cancel ~timeout_seconds ~output_limit ~program ~arguments ~stdin
   in
   Fun.protect
     ~finally:(fun () ->
-      close_noerr input_write;
-      if !output_open then close_noerr output_read;
+      if !input_open then (input_open := false; close_noerr input_write);
+      if !output_open then (output_open := false; close_noerr output_read);
+      if not !finished then kill_owned ();
       (match !child_status with
        | Some _ -> ()
-       | None -> (try ignore (Unix.waitpid [] pid) with Unix.Unix_error _ -> ())))
+       | None ->
+           (* Exceptional I/O/callback exits must not wait on a live helper. *)
+           let rec reap () =
+             try ignore (Unix.waitpid [] pid)
+             with Unix.Unix_error (Unix.EINTR, _, _) -> reap ()
+                | Unix.Unix_error (Unix.ECHILD, _, _) -> () in
+           reap ()))
     (fun () ->
       loop ();
       let status = match !child_status with
         | Some status -> status
-        | None -> snd (Unix.waitpid [] pid) in
+        | None ->
+            let status = snd (Unix.waitpid [] pid) in
+            child_status := Some status;
+            status in
       let child_result = match status with
         | Unix.WEXITED code -> Workspace_process.Exited code
         | Unix.WSIGNALED signal -> Workspace_process.Signaled signal
@@ -138,8 +172,10 @@ let run_native ~cancel ~timeout_seconds ~output_limit ~program ~arguments ~stdin
         | Some Workspace_process.Cancelled -> Workspace_process.Cancelled
         | Some (Workspace_process.Exited _ | Workspace_process.Signaled _) -> child_result
         | None -> child_result in
-      { Workspace_process.termination = final; output = Buffer.contents output;
-        bytes_received = !received; truncated = !truncated })
+      let result = { Workspace_process.termination = final; output = Buffer.contents output;
+        bytes_received = !received; truncated = !truncated } in
+      finished := true;
+      result)
 
 let system_runner = { run = run_native }
 

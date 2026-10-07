@@ -14,10 +14,10 @@ let rec remove_tree path =
       Unix.rmdir path
   | _ -> Unix.unlink path
 
-let session ?(device = "emulator-5554") ?(state = Run.Running) () =
-  { Run.id = "mobile-1"; root = "/tmp/mobile"; subroot = "/tmp/mobile";
+let session ?(root = "/tmp/mobile") ?(device = "emulator-5554") ?(state = Run.Running) () =
+  { Run.id = "mobile-1"; root; subroot = "app";
     platform = Run.Android; device; app_id = "dev.example";
-    app_path = "app/build/app.apk"; scheme = None; variant = Some "debug";
+    app_path = "app.apk"; scheme = None; variant = Some "debug";
     activity = None; ios_device_binding = None; state; screen_size = Some (1080, 2400) }
 
 let tree description = Yojson.Basic.to_string (`Assoc [
@@ -36,6 +36,13 @@ let () =
   Unix.mkdir root 0o700;
   let root = Unix.realpath root in
   Fun.protect ~finally:(fun () -> remove_tree root) (fun () ->
+    let session ?device ?state () = session ~root ?device ?state () in
+    let artifact = Filename.concat root "app.apk" in
+    let save_artifact bytes =
+      let channel = open_out_bin artifact in
+      Fun.protect ~finally:(fun () -> close_out_noerr channel)
+        (fun () -> output_string channel bytes) in
+    save_artifact "selected-build";
     let step = Scenario.step_of_json (`Assoc [
       "action", `String "tap"; "x", `Int 120; "y", `Int 340;
       "expected_field", `String "description"; "expected_value", `String "count:1"])
@@ -50,8 +57,21 @@ let () =
       (Scenario.identity_of_session (session ())));
     expect "device mismatch detected" (not (Scenario.same_identity record.identity
       (Scenario.identity_of_session (session ~device:"emulator-5556" ()))));
-    expect "versioned JSON persisted" (String.starts_with ~prefix:"{\"version\":1"
+    expect "versioned JSON persisted" (String.starts_with ~prefix:"{\"version\":2"
       (Pave.Workspace_path.read_bounded path Scenario.max_record_bytes));
+    save_artifact "another-build";
+    expect "same artifact path with different build bytes is refused"
+      (not (Scenario.same_identity record.identity
+        (Scenario.identity_of_session (session ()))));
+    save_artifact "selected-build";
+    expect "different project is refused"
+      (not (Scenario.same_identity record.identity
+        (Scenario.identity_of_session { (session ()) with subroot = "another" })));
+    let legacy = Scenario.to_json record |> function
+      | `Assoc fields -> `Assoc (("version", `Int 1) :: List.remove_assoc "version" fields)
+      | _ -> assert false in
+    rejects "legacy record without exact build provenance" (fun () ->
+      Scenario.from_json "counter" (Yojson.Basic.to_string legacy));
     rejects "duplicate scenario names" (fun () -> Scenario.save ~root ~name:"counter"
       ~session:(session ()) [step]);
     let loaded = Scenario.load ~root "counter" in

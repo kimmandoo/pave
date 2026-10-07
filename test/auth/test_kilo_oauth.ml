@@ -27,6 +27,23 @@ let () =
   let denied ~url:_ ~headers:_ = Ok (403, "") in
   reject (fun () -> Login.poll ~get:denied ~now:(fun () -> 101.) auth);
   reject (fun () -> Login.poll ~get ~now:(fun () -> 220.) auth);
+  let expired_during_request = ref 219. in
+  reject (fun () -> Login.poll
+    ~now:(fun () -> !expired_during_request)
+    ~get:(fun ~url:_ ~headers:_ ->
+      expired_during_request := 220.;
+      Ok (200, {|{"status":"approved","token":"must-not-be-accepted"}|}))
+    auth);
+  let pending_during_request = ref 219. in
+  let slept = ref false in
+  reject (fun () -> Login.poll
+    ~now:(fun () -> !pending_during_request)
+    ~sleep:(fun _ -> slept := true)
+    ~get:(fun ~url:_ ~headers:_ ->
+      pending_during_request := 220.;
+      Ok (202, ""))
+    auth);
+  assert (not !slept);
   reject (fun () -> Login.start ~now:100.
     ~post:(fun ~url:_ ~headers:_ ~body:_ ->
       200, {|{"code":"ABC-123","verificationUrl":"https://evil.example/device","expiresIn":120}|}) ());

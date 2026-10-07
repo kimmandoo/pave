@@ -696,11 +696,14 @@ let compare_fuzzy_match left right =
 let scan_lock = Mutex.create ()
 let scan_owner = Atomic.make (-1)
 
-let scanning work =
+let scanning ?cancel work =
   let self = Thread.id (Thread.self ()) in
   if Atomic.get scan_owner = self then work ()
   else (
-    Mutex.lock scan_lock;
+    let rec acquire () =
+      (match cancel with Some cancelled when cancelled () -> raise Cancelled | _ -> ());
+      if not (Mutex.try_lock scan_lock) then (Thread.delay 0.01; acquire ()) in
+    acquire ();
     Atomic.set scan_owner self;
     Fun.protect work ~finally:(fun () ->
       Atomic.set scan_owner (-1);
@@ -749,17 +752,17 @@ let fuzzy_file_search ?cancel root args =
   ])
 
 let fuzzy_file_search ?cancel root args =
-  scanning (fun () -> fuzzy_file_search ?cancel root args)
+  scanning ?cancel (fun () -> fuzzy_file_search ?cancel root args)
 
 let append_bounded output text limit =
   if Buffer.length output + String.length text <= limit then (Buffer.add_string output text; true)
   else false
 
-let list_files root args =
+let list_files ?cancel root args =
   let relative = optional_string "path" "." args in
   let output = Buffer.create 4096 in
   let count = ref 0 and overflow = ref false in
-  let walk_limit = walk ~stop:(fun () -> !overflow) root relative (fun name _ ->
+  let walk_limit = walk ?cancel ~stop:(fun () -> !overflow) root relative (fun name _ ->
     if !count < 500 && not !overflow then
       if append_bounded output (name ^ "\n") (max_read_bytes - 128) then incr count
       else overflow := true
@@ -768,7 +771,7 @@ let list_files root args =
   if !count = 0 && not (walk_limit || !overflow) then "No files found" else Buffer.contents output
 (* Str's backtracking is not time-bounded. Limit candidate lines and allow
    only one repetition operator; reject quantified groups and backreferences. *)
-let list_files root args = scanning (fun () -> list_files root args)
+let list_files ?cancel root args = scanning ?cancel (fun () -> list_files ?cancel root args)
 
 let validate_regex pattern =
   if String.length pattern > 512 then fail "regex exceeds 512-byte limit";
@@ -797,7 +800,7 @@ let validate_regex pattern =
   scan 0 false
 
 
-let glob root args =
+let glob ?cancel root args =
   let pattern = required_string "pattern" args in
   valid_glob pattern;
   let relative = optional_string "path" "." args in
@@ -816,7 +819,7 @@ let glob root args =
         (glob_segment segments.(index) parts.(index) && fits (index + 1)) in
     Array.length segments = 1 || fits 0 in
   let wanted = matching_glob pattern in
-  let walk_limit = walk ~hidden ~stop:(fun () -> !overflow) ~descend root relative (fun name _ ->
+  let walk_limit = walk ?cancel ~hidden ~stop:(fun () -> !overflow) ~descend root relative (fun name _ ->
     if wanted name then
       if !count < limit && not !overflow then
         if append_bounded output (name ^ "\n") (max_read_bytes - 128) then incr count
@@ -825,9 +828,9 @@ let glob root args =
   if walk_limit || !overflow then Buffer.add_string output "[truncated; narrow the glob or path]\n";
   if !count = 0 && not (walk_limit || !overflow) then "No files found" else Buffer.contents output
 
-let glob root args = scanning (fun () -> glob root args)
+let glob ?cancel root args = scanning ?cancel (fun () -> glob ?cancel root args)
 
-let search_matches root args ~regex =
+let search_matches ?cancel root args ~regex =
   let query = required_string "pattern" args in
   if query = "" || String.length query > 4096 then fail "pattern must contain 1 to 4096 bytes";
   let case_sensitive = optional_bool "case_sensitive" true args in
@@ -845,8 +848,17 @@ let search_matches root args ~regex =
   let matches = ref 0 and scanned = ref 0 and truncated = ref false in
   (* Str backtracking is bounded per line; a deadline bounds the whole scan. *)
   let deadline = Unix.gettimeofday () +. regex_scan_seconds in
-  let wanted = if file_glob = "" then fun _ -> true else matching_glob file_glob in
-  let walk_limit = walk ~hidden ~stop:(fun () -> !truncated) root relative (fun name path ->
+  let scope = List.filter (fun part -> part <> "" && part <> ".")
+    (String.split_on_char '/' relative) |> String.concat "/" in
+  let prefix = if scope = "" then "" else scope ^ "/" in
+  let wanted = if file_glob = "" then fun _ -> true else
+    let matches = matching_glob file_glob in
+    fun name ->
+      let scoped = if prefix <> "" && starts_with name prefix then
+        String.sub name (String.length prefix) (String.length name - String.length prefix)
+        else name in
+      matches scoped in
+  let walk_limit = walk ?cancel ~hidden ~stop:(fun () -> !truncated) root relative (fun name path ->
     if file_glob <> "" && not (wanted name) then ()
     else
       let size = (Unix.stat path).Unix.st_size in
@@ -874,6 +886,7 @@ let search_matches root args ~regex =
               if not (String.contains match_query '\n') &&
                  find_from haystack match_query 0 <> None && not (binary ()) then (
                 let rec hits from line_start number =
+                  (match cancel with Some cancelled when cancelled () -> raise Cancelled | _ -> ());
                   if not !truncated then match find_from haystack match_query from with
                     | None -> ()
                     | Some position ->
@@ -888,6 +901,7 @@ let search_matches root args ~regex =
           | Some _ when binary () -> ()
           | Some expression ->
               let rec lines start number =
+                (match cancel with Some cancelled when cancelled () -> raise Cancelled | _ -> ());
                 if Unix.gettimeofday () > deadline then truncated := true
                 else if start < length && not !truncated then (
                   let finish = line_end start in
@@ -903,9 +917,9 @@ let search_matches root args ~regex =
   if walk_limit || !truncated then Buffer.add_string output "[truncated; narrow the path, glob or query]\n";
   if !matches = 0 && not (walk_limit || !truncated) then "No matches found" else Buffer.contents output
 
-let search root args = scanning (fun () -> search_matches root args ~regex:false)
-let grep root args = scanning (fun () -> search_matches root args ~regex:true)
-let read_text_page root relative args =
+let search ?cancel root args = scanning ?cancel (fun () -> search_matches ?cancel root args ~regex:false)
+let grep ?cancel root args = scanning ?cancel (fun () -> search_matches ?cancel root args ~regex:true)
+let read_text_page ?cancel root relative args =
   let path = Workspace_path.regular_path root relative in
   let requested_offset = optional_int "offset" 0 ~minimum:0 ~maximum:max_int args in
   let line = optional_int "line" 0 ~minimum:1 ~maximum:max_int args in
@@ -917,12 +931,16 @@ let read_text_page root relative args =
   let max_lines = optional_int "max_lines" 1000 ~minimum:1 ~maximum:1000 args in
   Workspace_path.with_fd path [Unix.O_RDONLY] 0 (fun fd ->
     let size = (Unix.fstat fd).Unix.st_size in
+    let check_cancel () =
+      match cancel with Some cancelled when cancelled () -> raise Cancelled | _ -> () in
+    check_cancel ();
     if requested_offset > size then
       fail (Printf.sprintf "offset %d exceeds file size %d" requested_offset size);
     let buffer = Bytes.create 8192 in
     let position = ref 0 and current_line = ref 1 in
     while !position < size &&
           (if line > 0 then !current_line < line else !position < requested_offset) do
+      check_cancel ();
       let available = if line > 0 then size - !position
                       else requested_offset - !position in
       let n = Unix.read fd buffer 0 (min 8192 available) in
@@ -943,6 +961,7 @@ let read_text_page root relative args =
     let bytes = Bytes.create requested in
     let rec read_at position =
       if position < requested then (
+        check_cancel ();
         let n = Unix.read fd bytes position (requested - position) in
         if n <> 0 then read_at (position + n) else position)
       else position in
@@ -1002,7 +1021,7 @@ let read_file ?cancel ?context root args =
      | None -> false) in
   if not special then (
     match location with
-    | Some location -> read_text_page location.root location.path args
+    | Some location -> read_text_page ?cancel location.root location.path args
     | None -> fail "unsupported workspace URI"
   ) else (
     let offset = field "offset" args and line = field "line" args in
@@ -1745,7 +1764,7 @@ let mobile_project ?cancel root args =
   else if !truncated then result ^ truncation_notice else result
 
 let mobile_project ?cancel root args =
-  scanning (fun () -> mobile_project ?cancel root args)
+  scanning ?cancel (fun () -> mobile_project ?cancel root args)
 
 let run_command ?cancel ?on_progress root args =
   let command = required_string "command" args in
@@ -4443,6 +4462,10 @@ let mobile_device_readiness_tool ~approved ?cancel ?on_progress ~context ~root a
               (Workspace_mobile_device_lifecycle.inventory_session_id inventory);
             "inventory_id", `String inventory.inventory_id])
 
+let mobile_device_android_stopped serial devices =
+  not (List.exists (fun (device : Workspace_android_devices.device) ->
+    device.serial = serial) devices)
+
 let mobile_device_shutdown_tool ~approved ?cancel ?on_progress ~context ~root args =
   mobile_device_check_approved approved;
   let cache = mobile_device_execution_cache context ~root args in
@@ -4484,9 +4507,7 @@ let mobile_device_shutdown_tool ~approved ?cancel ?on_progress ~context ~root ar
                  let devices = try Workspace_android_devices.adb_devices output
                    with Workspace_android_devices.Error message -> fail message in
                  let serial = Workspace_mobile_device_lifecycle.target_serial target in
-                 not (List.exists (fun (device : Workspace_android_devices.device) ->
-                   device.serial = serial && device.emulator &&
-                   device.state = Workspace_android_devices.Ready) devices)
+                 mobile_device_android_stopped serial devices
              | Some _ | None -> false)
         | Workspace_mobile_run.Ios, _ ->
             let fresh, simulators, _ = mobile_device_current_ios ?cancel ?on_progress
@@ -4542,10 +4563,8 @@ let mobile_device_abort_tool ~approved ?cancel ?on_progress ~context ~root args 
         with Workspace_process.Error message ->
           fail ("owned device launcher could not be reaped; abort ownership retained: " ^ message));
        (match mobile_device_wait_job ?cancel context job_id 10 with
-        | Some (Workspace_process.Exited _)
-        | Some (Workspace_process.Signaled _) -> ()
-        | Some Workspace_process.Timed_out | Some Workspace_process.Cancelled | None ->
-            fail "owned device launcher did not stop; abort ownership retained")
+        | Some _ -> ()
+        | None -> fail "owned device launcher did not stop; abort ownership retained")
    | Workspace_process.Completed _ -> ());
   let stopped =
     match cache.device_platform with
@@ -4554,9 +4573,7 @@ let mobile_device_abort_tool ~approved ?cancel ?on_progress ~context ~root args 
         let devices = try Workspace_android_devices.adb_devices output
           with Workspace_android_devices.Error message -> fail message in
         let serial = Workspace_mobile_device_lifecycle.target_serial target in
-        not (List.exists (fun (device : Workspace_android_devices.device) ->
-          device.serial = serial && device.emulator &&
-          device.state = Workspace_android_devices.Ready) devices)
+        mobile_device_android_stopped serial devices
     | Workspace_mobile_run.Ios ->
         let fresh, simulators, _ = mobile_device_current_ios ?cancel ?on_progress
             ~context ~root cache in
@@ -5678,6 +5695,29 @@ let clipboard_write ~approved ?cancel args =
         "message", `String message
       ])
 
+(* Called only for a prepared built-in request, never an external tool that
+   happens to use the same name. Lookup and expected identity keep a replaced
+   or unrelated browser session outside this cleanup. *)
+let cleanup_denied_call ?context ~name ~args () =
+  if name <> "browser" then Ok () else
+  try
+    match context with
+    | None -> Ok ()
+    | Some context ->
+        if Workspace_browser.owner context.browser_manager <> context.owner then
+          Error "Denied browser cleanup owner mismatch"
+        else
+          let id = match required_string "action" args with
+            | "open" -> optional_string "id" "browser" args
+            | _ -> required_string "id" args in
+          let id = Workspace_browser.valid_token "browser session id" 128 id in
+          let session = try Some (Workspace_browser.lookup context.browser_manager ~id)
+            with Workspace_browser.Error _ -> None in
+          Option.iter (fun expected ->
+            Workspace_browser.close_session ~expected context.browser_manager ~id) session;
+          Ok ()
+  with _ -> Error "Denied browser cleanup failed"
+
 let browser_tool ~approved ?cancel ?context args =
   let context = require_session_context context in
   check_session_context context;
@@ -5825,13 +5865,13 @@ let memory_tool ~approved ~root args =
       else `Assoc ["status", `String "absent"; "name", `String name]
   | _ -> fail "unsupported memory action (list|get|put|forget)"
 
-let lsp_start ~approved ?context root args =
+let lsp_start ~approved ?cancel ?context root args =
   require_explicit_approval approved;
   let context = require_session_context context in
   check_session_context context;
   let program = required_string "program" args in
   let arguments = string_list "arguments" args in
-  try Workspace_lsp.start context.lsp_manager ~owner:context.owner ~root
+  try Workspace_lsp.start ?cancel context.lsp_manager ~owner:context.owner ~root
     ~program ~args:arguments ~execution_approved:true;
     Yojson.Basic.to_string (`Assoc ["status", `String "started"])
   with Workspace_lsp.Error message -> fail message
@@ -6010,10 +6050,10 @@ let workspace_eval_bridge ?cancel ?context ~root ~deadline name arguments =
       read_file ?cancel ?context root arguments
   | "workspace_snapshot" -> workspace_snapshot ?cancel ?context root arguments
   | "fuzzy_file_search" -> fuzzy_file_search ?cancel root arguments
-  | "list_files" -> list_files root arguments
-  | "search" -> search root arguments
-  | "glob" -> glob root arguments
-  | "grep" -> grep root arguments
+  | "list_files" -> list_files ?cancel root arguments
+  | "search" -> search ?cancel root arguments
+  | "glob" -> glob ?cancel root arguments
+  | "grep" -> grep ?cancel root arguments
   | "mobile_project" -> mobile_project ?cancel root arguments
   | "process_list" -> process_list ?context root arguments
   | "process_output" -> process_output ?context root arguments
@@ -6262,7 +6302,7 @@ let repository_security_scan ?cancel root args =
   | _ -> fail "format must be summary or sarif"
 
 let repository_security_scan ?cancel root args =
-  scanning (fun () -> repository_security_scan ?cancel root args)
+  scanning ?cancel (fun () -> repository_security_scan ?cancel root args)
 
 let is_shell_tool = function
   | "run_command" | "start_process" | "start_shell" | "xcode_preflight"
@@ -6277,7 +6317,8 @@ let is_shell_tool = function
 
 let requires_explicit_approval ~name ~args =
   match name with
-  | "start_process" | "xcode_preflight" | "mobile_check" | "android_devices" | "mobile_verify"
+  | "start_process" | "start_shell" | "process_stdin" | "process_close_stdin"
+  | "process_kill" | "xcode_preflight" | "mobile_check" | "android_devices" | "mobile_verify"
   | "mobile_visual" | "mobile_observe" | "mobile_control" | "mobile_diagnostics"
   | "mobile_accessibility_audit" | "mobile_environment"
   | "mobile_performance" -> true
@@ -6404,7 +6445,7 @@ let definitions = [
     ["id", string_field "Session-local SSH session ID";
      "path", bounded_string_field "Path under the configured remote root" 4096]
     ["id"; "path"];
-  schema "ssh_write" "Atomically write a bounded workspace-relative file to a pinned SSH host. Requires explicit approval of the exact contents."
+  schema "ssh_write" "Write a bounded workspace-relative file to a pinned SSH host using SFTP; transfer failure can leave a partial remote file. Requires explicit approval of the exact contents."
     ["id", string_field "Session-local SSH session ID";
      "path", bounded_string_field "Path under the configured remote root" 4096;
      "contents", bounded_string_field "Exact file contents (maximum 2000 bytes)" 2000]
@@ -6420,7 +6461,7 @@ let definitions = [
      "program", bounded_string_field "Absolute executable path" 4096;
      "arguments", string_array_field "Exact adapter argument vector"]
     ["id"; "program"];
-  schema "dap" "Control one private DAP session. Launch/attach, breakpoints, execution, evaluation, and debuggee termination require effect-specific explicit approval; inspection is read-only."
+  schema "dap" "Control one private DAP session. Launch/attach, breakpoints, execution, evaluation, and debuggee termination require effect-specific explicit approval; inspection is read-only. Launch/attach may return startup_pending=true while awaiting separately approved breakpoint/configuration_done requests; configuration_done confirms both configuration and the deferred startup response."
     ["id", string_field "Session-local DAP session ID";
      "action", enum_string_field "DAP operation" [
        "initialize"; "launch"; "trust_host"; "attach"; "configuration_done";
@@ -6447,7 +6488,7 @@ let definitions = [
      "context", enum_string_field "DAP evaluation context" ["watch"; "hover"];
      "terminate_debuggee", boolean_field "Terminate the debuggee on disconnect (requires explicit approval)"]
     ["id"; "action"];
-  schema "browser" "Drive one session-owned isolated headless browser page over the Chrome DevTools Protocol. open launches a pinned Chromium executable with a fresh throwaway profile and loopback-only debugging; navigate, evaluate, screenshot and call_tool require separate explicit approval; observe, list_tools, tool_events and close are read-only; close releases the session. list_tools reads the page-declared modelContext catalog across all frames (name or frame filters; schemas only for exact-name reads); tool_events returns catalog transitions since a cursor; call_tool invokes one page-declared tool in its owning frame and returns a bounded result or a structured error. Page content and page-declared tools are untrusted."
+  schema "browser" "Drive one session-owned isolated headless browser page over the Chrome DevTools Protocol. open launches a pinned Chromium executable with a fresh throwaway profile and loopback-only debugging; navigate, evaluate, screenshot and call_tool require separate explicit approval; observe, list_tools, tool_events (without clear) and close are read-only; clearing tool_events requires approval; close releases the session. list_tools reads the page-declared modelContext catalog across all frames (name or frame filters; schemas only for exact-name reads); tool_events returns catalog transitions since a cursor; call_tool invokes one page-declared tool in its owning frame and returns a bounded result or a structured error. Page content and page-declared tools are untrusted."
     ["id", string_field "Session-local browser session ID (default \"browser\" for open)";
      "action", enum_string_field "Browser operation" [
        "open"; "navigate"; "evaluate"; "observe"; "screenshot";
@@ -6620,7 +6661,7 @@ let definitions = [
      "timeout_seconds", integer_field "Device action deadline (default 30 seconds)" 1 120]
     ["action"; "session_id"];
 
-  schema "mobile_scenario" "Save and explicitly replay Android bug scenarios with fresh accessibility assertions. Version-1 coordinate records are bound to the app and device; every action, observation and state transition is separately approved, and failures stop without implicit retries."
+  schema "mobile_scenario" "Save and explicitly replay Android bug scenarios with fresh accessibility assertions. Version-2 records bind exact project, build bytes, app and device; version-1 records require re-saving. Every action, observation and state transition is separately approved, and failures stop without implicit retries."
     ["action", enum_string_field "Scenario operation" ["list"; "save"; "status"; "start"; "step"; "verify"; "delete"];
      "name", bounded_string_field "Scenario identifier [a-z][a-z0-9_-]{0,47}" 48;
      "session_id", string_field "Exact running app session ID";
@@ -6672,7 +6713,7 @@ let definitions = [
      "hidden", boolean_field "Include dotfiles and hidden directories (default false)";
      "case_sensitive", boolean_field "Use ASCII-only case matching (default true)";
      "limit", integer_field "Maximum matching lines (default 100)" 1 max_matches] ["pattern"];
-  schema "web_search" "Search the public web. Uses the configured provider order (Exa, Firecrawl, Brave, Tavily, Kagi, Jina with API keys; credential-free DuckDuckGo otherwise), falling back to the next provider on failure. Requires network approval; returns source URLs, citations, and provider provenance."
+  schema "web_search" "Search the public web. Uses the configured provider order, or automatically Exa, Firecrawl, Brave, Tavily, Kagi and Jina with keys, then credential-free DuckDuckGo, then Ecosia when a local Chromium-family browser is detected. Falls back to the next approved provider on failure or an empty answer. Requires network approval; returns source URLs, citations, provider provenance and earlier provider failures."
     ["query", bounded_string_field "Search query sent to the selected provider" Web_search.max_query_bytes;
      "page", integer_field "Brave-only page/offset (default 0; nonzero pages exclude other providers)" 0 Web_search.max_page;
      "count", integer_field "Maximum results (default 5)" 1 Web_search.max_results] ["query"];
@@ -7643,7 +7684,7 @@ let approval_request ?cancel ?context ?(env = Sys.getenv_opt)
              common @ ["Path: " ^ quoted "path" "(missing)" args]
          | "ssh_write" ->
              let contents = value "contents" "" args in
-             "Writes these exact contents to the pinned SSH workspace.",
+             "Writes these exact contents to the pinned SSH workspace using SFTP; transfer failure can leave a partial remote file.",
              common @ ["Path: " ^ quoted "path" "(missing)" args;
                        Printf.sprintf "Contents (%d bytes):" (String.length contents);
                        Printf.sprintf "%S" contents]
@@ -7943,6 +7984,10 @@ let validate_arguments ~name ~args =
                 | `Bool true | `Null -> ()
                 | _ -> fail "invalid tool parameter schema")) fields
      | `List values ->
+         (match bound "maxItems" schema with
+          | Some maximum when List.length values > maximum ->
+              fail (label ^ " exceeds its maximum item count")
+          | Some _ | None -> ());
          let item_schema = Protocol.member "items" schema in
          if item_schema = `Null then fail "invalid tool parameter schema";
          List.iteri (fun index item -> validate_value
@@ -8119,11 +8164,11 @@ let prepare ?cancel ?context ~root ~name ~args () =
           | _ -> Ok [Protocol.Text (match name with
           | "read_file" -> read_file ?cancel ?context root args
           | "workspace_snapshot" -> workspace_snapshot ?cancel ?context tool_root tool_args
-          | "list_files" -> list_files tool_root tool_args
+          | "list_files" -> list_files ?cancel tool_root tool_args
           | "fuzzy_file_search" -> fuzzy_file_search ?cancel tool_root tool_args
-          | "search" -> search tool_root tool_args
-          | "glob" -> glob tool_root tool_args
-          | "grep" -> grep tool_root tool_args
+          | "search" -> search ?cancel tool_root tool_args
+          | "glob" -> glob ?cancel tool_root tool_args
+          | "grep" -> grep ?cancel tool_root tool_args
           | "write_file" -> write_file ~approved ~sensitive_review tool_root tool_args
           | "edit_file" -> edit_file ~approved ~sensitive_review tool_root tool_args
           | "apply_edits" -> apply_edits ~approved ~sensitive_review ?cancel ?context tool_root tool_args
@@ -8163,7 +8208,7 @@ let prepare ?cancel ?context ~root ~name ~args () =
           | "image_ocr" -> image_ocr ~approved ?cancel tool_root tool_args
           | "clipboard_read" -> clipboard_read ~approved ?cancel ()
           | "clipboard_write" -> clipboard_write ~approved ?cancel args
-          | "lsp_start" -> lsp_start ~approved ?context root args
+          | "lsp_start" -> lsp_start ~approved ?cancel ?context root args
           | "lsp" -> lsp_execute ~approved ~sensitive_review ?cancel ?context root args
           | "workspace_eval" -> workspace_eval ~approved ?cancel ?context root args
           | "ssh_open" -> ssh_open ~approved ?cancel ?context args

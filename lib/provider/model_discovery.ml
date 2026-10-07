@@ -169,21 +169,8 @@ let extract_field field = function
 let invalid detail = Error (Invalid_response detail)
 
 let parse_listing_json body =
-  let rec unique_fields = function
-    | `Assoc fields ->
-        let seen = Hashtbl.create (List.length fields) in
-        List.for_all (fun (name, value) ->
-          if Hashtbl.mem seen name then false
-          else (
-            Hashtbl.add seen name ();
-            unique_fields value)) fields
-    | `List values -> List.for_all unique_fields values
-    | _ -> true in
-  try
-    let json = Yojson.Basic.from_string body in
-    if unique_fields json then Ok json
-    else invalid "duplicate model listing field"
-  with Yojson.Json_error _ -> invalid "malformed or truncated JSON"
+  Result.map_error (fun detail -> Invalid_response detail)
+    (Local_compat.parse_listing_json body)
 
 let listing field json = match extract_field field json with
   | Some (`List rows) -> Ok rows
@@ -1401,15 +1388,11 @@ let parse_custom_models body =
   if String.length body > max_response_bytes then
     invalid "listing exceeds size limit"
   else
-    let json = try Ok (Yojson.Basic.from_string body)
-      with Yojson.Json_error _ -> invalid "malformed model listing JSON" in
+    let json = parse_listing_json body in
     match json with
     | Error _ as error -> error
     | Ok (`Assoc fields) ->
-        let names = List.map fst fields in
-        if List.length names <> List.length (List.sort_uniq String.compare names) then
-          invalid "duplicate model listing field"
-        else if extract_field "object" (`Assoc fields) <> Some (`String "list") then
+        if extract_field "object" (`Assoc fields) <> Some (`String "list") then
           invalid "missing or malformed model listing object"
         else
           (match extract_field "data" (`Assoc fields) with
@@ -1417,18 +1400,13 @@ let parse_custom_models body =
                let rec collect seen result = function
                  | [] -> Ok (List.rev result)
                  | `Assoc row :: rest ->
-                     let fields = List.map fst row in
                      (match extract_field "id" (`Assoc row) with
                       | Some (`String id) when checked_id id = Ok id ->
-                          if List.mem "id" fields &&
-                             List.length fields = List.length
-                               (List.sort_uniq String.compare fields) then
-                            if List.mem id seen then invalid "duplicate model ID"
-                            else collect (id :: seen)
-                              ({ id; display_name = None;
-                                 capabilities = Model_catalog.empty_capabilities } :: result)
-                              rest
-                          else invalid "duplicate model row field"
+                          if List.mem id seen then invalid "duplicate model ID"
+                          else collect (id :: seen)
+                            ({ id; display_name = None;
+                               capabilities = Model_catalog.empty_capabilities } :: result)
+                            rest
                       | _ -> invalid "missing or invalid model ID")
                  | _ :: _ -> invalid "model row must be an object" in
                collect [] [] rows

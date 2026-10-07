@@ -120,3 +120,28 @@ let () = with_fixture (fun ~user_dir ~root ~manifest ->
   check "disabled tools cannot execute"
     (match invoke ~runner:fake disabled ~name:"local_echo" ~input
        ~interactive:true ~approve with Error (Unavailable _) -> true | _ -> false))
+
+let () = with_fixture (fun ~user_dir ~root ~manifest ->
+  let parameters = assoc [
+    "type", str "object";
+    "properties", assoc ["text", assoc [
+      "type", str "string"; "minLength", `Int 1; "maxLength", `Int 1;
+      "enum", list [str "한"; str "😀"]]];
+    "required", list [str "text"]; "additionalProperties", `Bool false] in
+  save manifest [tool ~parameters ()];
+  let registry = load_registry ~user_dir ~root manifest in
+  let session = create_session ~owner:"unicode-test" ~root ~registry ~opt_in:true in
+  let approvals = ref 0 and runs = ref 0 in
+  let approve _ = incr approvals; true in
+  let runner ~cancel:_ _ = incr runs; Ok "accepted" in
+  List.iter (fun text ->
+    check "local schema and enum bounds count Unicode scalars"
+      (invoke ~runner session ~name:"local_echo" ~input:(assoc ["text", str text])
+         ~interactive:true ~approve = Ok "accepted")) ["한"; "😀"];
+  List.iter (fun text ->
+    check "invalid Unicode and out-of-bound arguments never reach approval"
+      (is_invalid (invoke ~runner session ~name:"local_echo"
+        ~input:(assoc ["text", str text]) ~interactive:true ~approve)))
+    [""; "한글"; "\255"];
+  check "only valid Unicode calls reach approval and runner"
+    (!approvals = 2 && !runs = 2))

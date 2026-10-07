@@ -10,6 +10,24 @@ let fail message = raise (Error message)
 let close_fd fd = try Unix.close fd with Unix.Unix_error _ -> ()
 let check_cancel cancelled = if (try cancelled () with _ -> true) then raise Cancelled
 let with_lock lock f = Mutex.lock lock; Fun.protect ~finally:(fun () -> Mutex.unlock lock) f
+let request_deadline seconds =
+  if not (Float.is_finite seconds) || seconds <= 0. || seconds > 60. then
+    fail "MCP HTTP deadline must be between 0 and 60 seconds";
+  Unix.gettimeofday () +. seconds
+let with_request_lock lock ~deadline ~cancelled f =
+  let rec acquire () =
+    check_cancel cancelled;
+    let remaining = deadline -. Unix.gettimeofday () in
+    if remaining <= 0. then fail "MCP HTTP request timed out";
+    if Mutex.try_lock lock then
+      Fun.protect ~finally:(fun () -> Mutex.unlock lock) (fun () ->
+        check_cancel cancelled;
+        if Unix.gettimeofday () >= deadline then fail "MCP HTTP request timed out";
+        f ())
+    else (
+      ignore (Unix.select [] [] [] (min 0.05 remaining));
+      acquire ()) in
+  acquire ()
 let visible value = value <> "" && String.length value <= 4096 &&
   String.for_all (fun ch -> let n = Char.code ch in n >= 33 && n <= 126) value
 let no_controls value = not (String.exists (fun c -> Char.code c < 32 || Char.code c = 127) value)
@@ -123,39 +141,29 @@ let headers text =
   | _ -> fail "missing MCP HTTP response headers"
 
 let sse_response id body =
-  let cursor = ref 0 and events = ref 0 in
-  let rec loop () =
-    match index_from body !cursor "\n\n" with
-    | None -> None
-    | Some stop ->
-        incr events;
-        if !events > 64 then fail "too many MCP SSE events";
-        let frame = String.sub body !cursor (stop - !cursor) in
-        cursor := stop + 2;
-        let data = Buffer.create 256 in
-        String.split_on_char '\n' frame |> List.iter (fun line ->
-          if String.starts_with ~prefix:"data:" line then (
-            if Buffer.length data > 0 then Buffer.add_char data '\n';
-            let value = String.sub line 5 (String.length line - 5) in
-            Buffer.add_string data (if String.starts_with ~prefix:" " value then
-              String.sub value 1 (String.length value - 1) else value)));
-        if Buffer.length data = 0 then loop ()
-        else
-          let fields = object_fields (try Yojson.Basic.from_string (Buffer.contents data)
-            with _ -> fail "invalid MCP SSE JSON event") in
-          match field "id" fields with
-          | Some (`Int actual) when actual = id -> Some (response_for id (Buffer.contents data))
-          | Some _ -> fail "unexpected MCP SSE JSON-RPC response ID"
-          | None ->
-              (* Notifications can precede the response. Requests from the server
-                 cannot be serviced by this request/response-only transport. *)
-              if field "jsonrpc" fields <> Some (`String "2.0") ||
-                field "result" fields <> None || field "error" fields <> None then
-                fail "invalid MCP SSE message";
-              (match field "method" fields with
-               | Some (`String method_) when method_ <> "" -> loop ()
-               | _ -> fail "unsupported MCP SSE server request")
-  in loop ()
+  let exception Response of Yojson.Basic.t in
+  let events = ref 0 in
+  let parser = Sse.create ~on_event:(fun _ data ->
+    incr events;
+    if !events > 64 then fail "too many MCP SSE events";
+    let fields = object_fields (try Yojson.Basic.from_string data
+      with _ -> fail "invalid MCP SSE JSON event") in
+    match field "id" fields with
+    | Some (`Int actual) when actual = id ->
+        raise (Response (response_for id data))
+    | Some _ -> fail "unexpected MCP SSE JSON-RPC response ID"
+    | None ->
+        (* Notifications may precede the response, but this transport cannot
+           service server requests. Preserve the shared SSE framing rules. *)
+        if field "jsonrpc" fields <> Some (`String "2.0") ||
+           field "result" fields <> None || field "error" fields <> None then
+          fail "invalid MCP SSE message";
+        (match field "method" fields with
+         | Some (`String method_) when method_ <> "" -> ()
+         | _ -> fail "unsupported MCP SSE server request")) in
+  try Sse.feed parser body; None with
+  | Response value -> Some value
+  | Protocol.Invalid_response message -> fail message
 
 type t = {
   endpoint : string; scheme : string; host : string; port : string;
@@ -214,12 +222,16 @@ let send t ~method_ ~body ~timeout_seconds ~cancelled ~expected =
     List.iter close_fd [input_read; input_write; output_read; output_write; null_fd];
     fail ("could not start MCP HTTP transport: " ^ Printexc.to_string exn) in
   List.iter close_fd [input_read; output_write; null_fd];
-  let reaped = ref false in
+  let reaped = ref false and exit_status = ref None in
   let reap kill =
     if not !reaped then (
-      reaped := true;
       if kill then (try Unix.kill pid Sys.sigkill with Unix.Unix_error _ -> ());
-      (try ignore (Unix.waitpid [] pid) with Unix.Unix_error _ -> ())) in
+      let rec wait () =
+        try Some (snd (Unix.waitpid [] pid)) with
+        | Unix.Unix_error (Unix.EINTR, _, _) -> wait ()
+        | Unix.Unix_error _ -> None in
+      exit_status := wait ();
+      reaped := true) in
   Fun.protect ~finally:(fun () -> close_fd input_write; close_fd output_read; reap true) (fun () ->
     Unix.set_nonblock input_write; Unix.set_nonblock output_read;
     let pos = ref 0 and received = Buffer.create 4096 and header = ref None in
@@ -258,8 +270,7 @@ let send t ~method_ ~body ~timeout_seconds ~cancelled ~expected =
              if content_type = "application/json" then (
                if !eof then result := Some (code, get, String.sub text start length))
              else if content_type = "text/event-stream" then (
-               let body = String.sub text start length |> String.split_on_char '\r'
-                 |> String.concat "" in
+               let body = String.sub text start length in
                match sse_response (match expected with `Response id -> id | _ -> assert false) body with
                | Some value -> result := Some (code, get, Yojson.Basic.to_string (`Assoc ["result", value]))
                | None -> if !eof then fail "MCP SSE stream ended before its response")
@@ -294,11 +305,15 @@ let send t ~method_ ~body ~timeout_seconds ~cancelled ~expected =
               Buffer.add_subbytes received chunk 0 count));
           loop ()
     in let answer = loop () in
-    if !eof then reap false;
+    if !eof then (
+      reap false;
+      if !exit_status <> Some (Unix.WEXITED 0) then
+        fail "MCP HTTP transport failed before completing its response");
     answer)
 
 let request t ~method_ ~params ~timeout_seconds ~cancelled =
-  diagnose t (fun () -> with_lock t.lock (fun () ->
+  let deadline = request_deadline timeout_seconds in
+  diagnose t (fun () -> with_request_lock t.lock ~deadline ~cancelled (fun () ->
     if t.closed then fail "MCP HTTP transport is closed";
     if t.next_id = max_int then fail "MCP HTTP request IDs exhausted";
     if method_ <> "initialize" && not t.initialized then fail "MCP HTTP server is not initialized";
@@ -308,7 +323,7 @@ let request t ~method_ ~params ~timeout_seconds ~cancelled =
       "id", `Int id; "method", `String method_; "params", params]) in
     if String.length body > max_body then fail "MCP HTTP request exceeds 1 MiB";
     let _, get, text = send t ~method_:"POST" ~body:(Some body)
-      ~timeout_seconds ~cancelled ~expected:(`Response id) in
+      ~timeout_seconds:(deadline -. Unix.gettimeofday ()) ~cancelled ~expected:(`Response id) in
     let value = match get "content-type" with
       | Some content_type when media_type content_type = "text/event-stream" ->
           let fields = object_fields (Yojson.Basic.from_string text) in
@@ -323,14 +338,15 @@ let request t ~method_ ~params ~timeout_seconds ~cancelled =
     value))
 
 let notify t ~method_ ~params ~timeout_seconds ~cancelled =
-  diagnose t (fun () -> with_lock t.lock (fun () ->
+  let deadline = request_deadline timeout_seconds in
+  diagnose t (fun () -> with_request_lock t.lock ~deadline ~cancelled (fun () ->
     if t.closed then fail "MCP HTTP transport is closed";
     if not t.initialized then fail "MCP HTTP server is not initialized";
     let body = Yojson.Basic.to_string (`Assoc ["jsonrpc", `String "2.0";
       "method", `String method_; "params", params]) in
     if String.length body > max_body then fail "MCP HTTP notification exceeds 1 MiB";
     ignore (send t ~method_:"POST" ~body:(Some body)
-      ~timeout_seconds ~cancelled ~expected:`Notification)))
+      ~timeout_seconds:(deadline -. Unix.gettimeofday ()) ~cancelled ~expected:`Notification)))
 
 let end_session t =
   if t.session_id <> None then

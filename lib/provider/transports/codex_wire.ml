@@ -210,8 +210,11 @@ let parse_completion ~model json =
         | `Null | `String _ -> ()
         | _ -> invalid "invalid encrypted reasoning")
     | _ -> invalid "unsupported Codex output item") outputs;
-  if !texts = [] && !calls = [] then invalid "completion without assistant output";
-  { role = "assistant"; content = (match List.rev !texts with [] -> None | texts -> Some (String.concat "" texts));
+  let content = match List.rev !texts with
+    | [] -> None | texts -> Some (String.concat "" texts) in
+  if !calls = [] && (content = None || content = Some "") then
+    invalid "completion without assistant output";
+  { role = "assistant"; content;
   tool_calls = List.rev !calls; tool_call_id = None; tool_result_content = None; provider_state = Some (`Assoc ["provider", `String "openai-codex";
     "model", `String model; "output", `List outputs]); attachments = [] }
 

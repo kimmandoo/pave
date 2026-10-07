@@ -41,7 +41,7 @@ let summary_projection (message : Protocol.message) =
     attachments = [] }
 
 let make_group messages =
-  let messages = List.map summary_projection messages in
+  let messages = Protocol.replay_messages messages |> List.map summary_projection in
   let encoded = List.map (fun message ->
     Yojson.Basic.to_string (Protocol.message_to_json message)) messages in
   { messages; encoded;

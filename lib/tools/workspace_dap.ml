@@ -42,6 +42,8 @@ and session = {
   state_lock : Mutex.t;
   mutable closed : bool;
   mutable phase : phase;
+  mutable initialized_event : bool;
+  mutable pending_start : (int * string) option;
   mutable next_request_seq : int;
   mutable last_adapter_seq : int;
   mutable receive_buffer : string;
@@ -146,6 +148,7 @@ let register_session manager ~id ~configured_remote_host ~transport ~transport_f
     let session = {
       id; manager; transport; transport_factory; operation_lock = Mutex.create ();
       state_lock = Mutex.create (); closed = false; phase = Fresh;
+      initialized_event = false; pending_start = None;
       next_request_seq = 1; last_adapter_seq = 0; receive_buffer = "";
       retained_events = []; retained_event_bytes = 0; stopped = false;
       terminated = false; state_event_generation = 0;
@@ -274,11 +277,18 @@ let stdio_send child ~timeout_seconds ~cancelled text =
   let timeout_seconds = valid_timeout timeout_seconds in
   if String.length text > max_stdio_write_bytes then
     fail "DAP stdio request exceeds its write limit";
-  with_lock child.write_lock (fun () ->
-    let deadline = Unix.gettimeofday () +. timeout_seconds in
+  let deadline = Unix.gettimeofday () +. timeout_seconds in
+  let rec acquire () =
+    check_stdio_cancelled cancelled;
+    if stdio_is_closed child then fail "DAP stdio adapter is closed";
+    if Unix.gettimeofday () >= deadline then fail "DAP stdio write timed out";
+    if not (Mutex.try_lock child.write_lock) then (Thread.delay 0.01; acquire ()) in
+  acquire ();
+  Fun.protect ~finally:(fun () -> Mutex.unlock child.write_lock) (fun () ->
     let rec write offset =
       check_stdio_cancelled cancelled;
       if stdio_is_closed child then fail "DAP stdio adapter is closed";
+      if Unix.gettimeofday () >= deadline then fail "DAP stdio write timed out";
       if offset = String.length text then ()
       else
         let count = min 16_384 (String.length text - offset) in
@@ -598,6 +608,7 @@ let process_event session seq fields json body_size =
   session.retained_events <- json :: session.retained_events;
   session.retained_event_bytes <- session.retained_event_bytes + body_size;
   (match event with
+   | "initialized" -> session.initialized_event <- true
    | ("stopped" | "continued") when session.terminated ->
        fail "DAP adapter reported execution after debuggee termination"
    | "stopped" ->
@@ -627,8 +638,10 @@ let decode_response session expected_seq expected_command body =
           (int_field "DAP response request_seq" (member "request_seq" json)) in
       let command = valid_token "DAP response command" 128
           (string_field "DAP response command" (member "command" json)) in
-      if request_seq <> expected_seq then fail "unsolicited or late DAP response";
-      if command <> expected_command then fail "DAP response command does not match its request";
+      let deferred_start = session.pending_start = Some (request_seq, command) in
+      if request_seq <> expected_seq && not deferred_start then fail "unsolicited or late DAP response";
+      if request_seq = expected_seq && command <> expected_command then
+        fail "DAP response command does not match its request";
       let success = bool_field "DAP response success" (member "success" json) in
       let message = match List.assoc_opt "message" fields with
         | None | Some `Null -> None
@@ -639,7 +652,12 @@ let decode_response session expected_seq expected_command body =
         | Some (`Assoc _ as value) -> value
         | Some _ -> fail "DAP response body must be an object" in
       session.last_adapter_seq <- seq;
-      `Response { success; message; body = response_body }
+      if request_seq <> expected_seq then (
+        session.pending_start <- None;
+        if not success then
+          fail (Option.value message ~default:("DAP " ^ command ^ " request failed"));
+        `Deferred_start)
+      else `Response { success; message; body = response_body }
   | "request" -> fail "unexpected adapter-initiated DAP request"
   | _ -> fail "invalid DAP message type"
 
@@ -671,12 +689,31 @@ let drain_buffered_events session =
     | None -> ()
     | Some body ->
         (match decode_response session (-1) "" body with
-         | `Event -> loop ()
+         | `Event | `Deferred_start -> loop ()
          | `Response _ -> fail "unsolicited or late DAP response")
   in
   loop ()
 
-let send_and_wait ?(timeout_seconds = default_request_seconds) ?(cancel = fun () -> false)
+(* Drain already available asynchronous state before testing operation
+   preconditions. Do not wait for a new stopped event or create a transport. *)
+let poll_events session ~deadline ~cancel =
+  match session.transport with
+  | None -> ()
+  | Some transport ->
+      let deadline = min deadline (Unix.gettimeofday () +. 0.05) in
+      let rec poll () =
+        poll_cancel session cancel;
+        drain_buffered_events session;
+        let remaining = deadline -. Unix.gettimeofday () in
+        if remaining > 0. then
+          match receive_chunk transport session (min 0.001 remaining)
+              (fun () -> cancel_requested session cancel) with
+          | None -> ()
+          | Some () -> poll () in
+      poll ()
+
+
+let send_and_wait ?(timeout_seconds = default_request_seconds) ?deadline ?(cancel = fun () -> false)
     session ~command ~arguments =
   let timeout_seconds = valid_timeout timeout_seconds in
   check_transport_trust session;
@@ -689,30 +726,45 @@ let send_and_wait ?(timeout_seconds = default_request_seconds) ?(cancel = fun ()
   ] |> Yojson.Basic.to_string in
   if String.length payload > max_frame_bytes then fail "DAP request exceeds the frame limit";
   let frame = Printf.sprintf "Content-Length: %d\r\n\r\n%s" (String.length payload) payload in
-  let deadline = Unix.gettimeofday () +. timeout_seconds in
+  let deadline = Option.value deadline ~default:(Unix.gettimeofday () +. timeout_seconds) in
   let cancelled () = cancel_requested session cancel in
   let remaining = deadline -. Unix.gettimeofday () in
   if remaining <= 0. then fail "DAP request timed out";
   let transport = ensure_transport session ~timeout_seconds:remaining ~cancelled in
+  let remaining = deadline -. Unix.gettimeofday () in
+  if remaining <= 0. then fail "DAP request timed out";
   session.next_request_seq <- sequence + 1;
   transport.send ~timeout_seconds:remaining ~cancelled frame;
+  let response_received = ref None in
+  let starting = command = "launch" || command = "attach" in
   let rec wait () =
     poll_cancel session cancel;
     match take_frame session with
     | Some body ->
         (match decode_response session sequence command body with
-         | `Event -> wait ()
+         | `Event | `Deferred_start -> wait ()
          | `Response response ->
              drain_buffered_events session;
-             response)
+             if response.success && command = "configurationDone" && session.pending_start <> None then
+               (response_received := Some response; wait ())
+             else response)
     | None ->
-        let remaining = deadline -. Unix.gettimeofday () in
-        if remaining <= 0. then fail "DAP request timed out";
-        (match receive_chunk transport session remaining cancelled with
-         | None ->
-             poll_cancel session cancel;
-             fail "DAP request timed out"
-         | Some () -> wait ())
+        (match !response_received with
+         | Some response when session.pending_start = None -> response
+         | _ when starting && session.initialized_event ->
+             (* Adapters may withhold launch/attach response until configurationDone. *)
+             session.pending_start <- Some (sequence, command);
+             { success = true; message = None;
+               body = `Assoc ["status", `String "awaiting_configuration";
+                              "startup_pending", `Bool true] }
+         | _ ->
+             let remaining = deadline -. Unix.gettimeofday () in
+             if remaining <= 0. then fail "DAP request timed out";
+             (match receive_chunk transport session remaining cancelled with
+              | None ->
+                  poll_cancel session cancel;
+                  fail "DAP request timed out"
+              | Some () -> wait ()))
   in
   wait ()
 
@@ -727,14 +779,21 @@ let invoke ?(timeout_seconds = default_request_seconds) ?(cancel = fun () -> fal
     manager ~id ~command () =
   let timeout_seconds = valid_timeout timeout_seconds in
   let session = find_session manager id in
-  Mutex.lock session.operation_lock;
+  let deadline = Unix.gettimeofday () +. timeout_seconds in
+  let rec acquire () =
+    poll_cancel session cancel;
+    if Unix.gettimeofday () >= deadline then fail "DAP request timed out";
+    if not (Mutex.try_lock session.operation_lock) then (Thread.delay 0.01; acquire ()) in
+  acquire ();
   Fun.protect ~finally:(fun () -> Mutex.unlock session.operation_lock) (fun () ->
     ensure_open session;
+    (try poll_events session ~deadline ~cancel
+     with exn -> remove_session session; raise exn);
     precondition session;
     poll_cancel session cancel;
     Option.iter (fun authorize -> authorize ()) authorize;
     let response =
-      try send_and_wait ~timeout_seconds ~cancel session ~command ~arguments
+      try send_and_wait ~timeout_seconds ~deadline ~cancel session ~command ~arguments
       with
       | Cancelled as exn -> remove_session session; raise exn
       | exn -> remove_session session; raise exn in
@@ -1083,6 +1142,8 @@ let take_events manager ~id =
   let session = find_session manager id in
   with_lock session.operation_lock (fun () ->
     ensure_open session;
+    (try poll_events session ~deadline:(Unix.gettimeofday () +. 0.05) ~cancel:(fun () -> false)
+     with exn -> remove_session session; raise exn);
     let events = List.rev session.retained_events in
     session.retained_events <- [];
     session.retained_event_bytes <- 0;

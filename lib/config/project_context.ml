@@ -143,7 +143,10 @@ let load ?path ?(scoped_only = false) ~root () : result =
   | Some root ->
     let safe_relative ~base candidate =
       let candidate = normalize candidate in
-      if String.contains candidate '\000' then Error "Instruction path contains a NUL byte"
+      let safe_base = try (Unix.lstat base).Unix.st_kind = Unix.S_DIR
+        with Unix.Unix_error _ | Sys_error _ -> false in
+      if not safe_base then Error "Instruction directory must be real, not a symlink"
+      else if String.contains candidate '\000' then Error "Instruction path contains a NUL byte"
       else if not (within ~base candidate) then Error "Path escapes its instruction boundary"
       else
         let relative = if candidate = base then [] else
@@ -253,7 +256,9 @@ let load ?path ?(scoped_only = false) ~root () : result =
          (match canonical dir with
           | None -> if present dir then
               diag dir "unsafe_config" "User config directory is not accessible"
-          | Some dir -> add ~base:dir ~kind:User (Filename.concat dir "pave/AGENTS.md")));
+          | Some dir ->
+              let base = Filename.concat dir "pave" in
+              add ~base ~kind:User (Filename.concat base "AGENTS.md")));
       let boundary = match home with
         | Some home when within ~base:home root -> home
         | _ -> "/" in
@@ -294,7 +299,16 @@ let load ?path ?(scoped_only = false) ~root () : result =
       if depth > 8 then diag dir "rule_depth" "Rule directory exceeds nesting limit"
       else
         let entries =
-          try Array.to_list (Sys.readdir dir) |> List.sort String.compare
+          try
+            let handle = Unix.opendir dir in
+            Fun.protect ~finally:(fun () -> Unix.closedir handle) (fun () ->
+              let rec collect count acc =
+                if count > 256 - !rule_entries then List.sort String.compare acc
+                else match Unix.readdir handle with
+                  | "." | ".." -> collect count acc
+                  | entry -> collect (count + 1) (entry :: acc)
+                  | exception End_of_file -> List.sort String.compare acc in
+              collect 0 [])
           with Sys_error _ | Unix.Unix_error _ ->
             diag dir "read_error" "Cannot list rule directory"; [] in
         List.iter (fun entry ->

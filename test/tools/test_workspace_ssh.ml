@@ -141,6 +141,13 @@ let () =
       let raw_uri = remote_read_uri ~owner ~network_approved:true session
           "ssh://builder@build.example.test/main.ml:raw" () in
       expect "raw URI selector" (raw_uri = "one\ntwo\nthree\n");
+      let tail = remote_read_uri ~owner ~network_approved:true session
+        "ssh://builder@build.example.test/main.ml:-1" () in
+      expect "tail selects the last real line, not the trailing newline" (tail = "three");
+      Hashtbl.replace mock.files "/srv/work/blank-lines" "first\n\n";
+      let blank_tail = remote_read_uri ~owner ~network_approved:true session
+        "ssh://builder@build.example.test/blank-lines:-2" () in
+      expect "tail preserves actual blank lines" (blank_tail = "first\n");
 
       Hashtbl.replace mock.symlinks "/srv/work/outside" "/etc/passwd";
       rejects "symlink traversal" (fun () ->
@@ -159,6 +166,14 @@ let () =
       Hashtbl.replace mock.files "/srv/work/exact" (String.make Ssh.max_read_bytes 'x');
       let exact = remote_read ~owner ~network_approved:true session ~path:"exact" () in
       expect "maximum read is allowed" (String.length exact = Ssh.max_read_bytes);
+      rejects "repeated selectors cannot amplify returned output beyond its bound" (fun () ->
+        remote_read_uri ~owner ~network_approved:true session
+          "ssh://builder@build.example.test/exact:1,1" ());
+      Hashtbl.replace mock.files "/srv/work/many-lines" (String.make Ssh.max_read_bytes '\n');
+      let many_lines = remote_read_uri ~owner ~network_approved:true session
+        "ssh://builder@build.example.test/many-lines:1-65536" () in
+      expect "maximum line count is selected without recursive stack growth"
+        (String.length many_lines = Ssh.max_read_bytes - 1);
 
       let before_denial = event_count mock in
       rejects "write approval is required" (fun () ->
@@ -282,6 +297,36 @@ let () =
         (not (List.exists (fun request ->
           request.Ssh.program = "/usr/bin/sftp" && starts_with request.Ssh.stdin "get ")
           !(cancel_during_mock.events)));
+
+      let verification_cancel = ref false and cancel_on_verify = ref false in
+      let verification_requests = ref [] in
+      let verification_mock = create_mock "/srv/work" in
+      let verification_runner request =
+        if request.Ssh.program = "/usr/bin/ssh-keygen" then (
+          verification_requests := request :: !verification_requests;
+          if !cancel_on_verify then verification_cancel := true;
+          if Option.fold ~none:false ~some:(fun check -> check ()) request.cancel then
+            result ~status:Process.Cancelled ()
+          else result ())
+        else mock_runner verification_mock request in
+      let verification runner _endpoint =
+        ignore (runner { Ssh.program = "/usr/bin/ssh-keygen"; arguments = [];
+          stdin = ""; timeout_seconds = 20; output_limit = 4096; cancel = None });
+        "SHA256:trustedkey" in
+      let verification_session = Ssh.open_session ~runner:verification_runner
+          ~verify_known_host:verification ~cancel:(fun () -> !verification_cancel)
+          ~timeout_seconds:3 ~owner ~endpoint ~host_trusted:true ~network_approved:true () in
+      expect "host-key verification inherits caller deadline and cancellation"
+        (List.for_all (fun request -> request.Ssh.timeout_seconds = 3 &&
+          Option.is_some request.cancel) !verification_requests);
+      cancel_on_verify := true;
+      let before_verification_cancel = event_count verification_mock in
+      expect_error_text "in-flight host-key verification cancellation" "SSH operation cancelled"
+        (fun () -> remote_read ~cancel:(fun () -> !verification_cancel)
+          ~owner ~network_approved:true verification_session ~path:"main.ml" ());
+      expect "cancelled host-key verifier cannot begin the network read"
+        (event_count verification_mock = before_verification_cancel);
+      Ssh.close_session ~owner verification_session;
 
       Ssh.close_session ~owner session;
       rejects "closed session" (fun () ->

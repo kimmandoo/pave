@@ -46,7 +46,7 @@ let command action (session : Workspace_mobile_run.session) =
       "adb -s " ^ quote session.device ^ " shell dumpsys activity lastanr"
   | ("logs" | "crashes"), Workspace_mobile_run.Ios ->
       let predicate = if action = "crashes" then
-        "process == \"ReportCrash\" OR eventMessage CONTAINS[c] \"" ^ session.app_id ^ "\""
+        "process == \"ReportCrash\" AND eventMessage CONTAINS[c] \"" ^ session.app_id ^ "\""
         else "process == \"" ^ session.app_id ^ "\" OR eventMessage CONTAINS[c] \"" ^ session.app_id ^ "\"" in
       "xcrun simctl spawn " ^ quote session.device ^ " log show --last 30m --style compact --predicate " ^ quote predicate
   | "anr", Workspace_mobile_run.Ios ->
@@ -108,20 +108,34 @@ let contains text needle =
     else find (index + 1) in
   find 0
 
-let process_exit_crashes output =
+let process_exit_crashes ~app_id output =
   let selected = ref [] and current = ref None in
+  let crash_identity line =
+    let line = String.trim line in
+    if not (String.starts_with ~prefix:"process=" line) then false
+    else
+      match String.index_opt line ' ' with
+      | None -> false
+      | Some ending ->
+          let process = String.sub line 8 (ending - 8) in
+          let reason = String.sub line (ending + 1)
+            (String.length line - ending - 1) in
+          (process = app_id || String.starts_with ~prefix:(app_id ^ ":") process) &&
+          (String.starts_with ~prefix:"reason=4 (" reason ||
+           String.starts_with ~prefix:"reason=5 (" reason) in
   let finish () = match !current with
     | None -> ()
     | Some lines ->
-        let block = String.concat "\n" (List.rev lines) in
-        if contains block "reason=4 (" || contains block "reason=5 (" then
-          selected := block :: !selected;
+        if List.length (List.filter crash_identity lines) = 1 then
+          selected := String.concat "\n" (List.rev lines) :: !selected;
         current := None in
   String.split_on_char '\n' (clean_output output)
   |> List.iter (fun line ->
-       if String.starts_with ~prefix:"        ApplicationExitInfo #" line then (
+       if String.starts_with ~prefix:"ApplicationExitInfo #" (String.trim line) then (
          finish ();
          current := Some [line])
+       else if String.starts_with ~prefix:"Historical Process Exit " (String.trim line) then
+         finish ()
        else match !current with
          | None -> ()
          | Some lines -> current := Some (line :: lines));
@@ -133,7 +147,7 @@ let result ~action (session : Workspace_mobile_run.session) ~output ~truncated =
   let report = match session.platform, action with
     | Workspace_mobile_run.Android, "crashes" ->
         let selected = selected_android_report action session.app_id output in
-        if selected <> "" then selected else process_exit_crashes output
+        if selected <> "" then selected else process_exit_crashes ~app_id:session.app_id output
     | Workspace_mobile_run.Android, "anr" ->
         selected_android_report action session.app_id output
     | _, _ -> clean_output output in

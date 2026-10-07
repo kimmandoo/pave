@@ -12,6 +12,13 @@ let delta turn_id text =
   Tui.Agent_event (Pave.Turn_runner.Text_delta { turn_id; text })
 
 let () =
+  let write_payload = String.make 1_048_576 'x' in
+  let write_event = Tui.Agent_event (Pave.Turn_runner.Tool_event {
+    turn_id = 0; event = Pave.Agent.Tool_started {
+      call_id = "large-write"; name = "write_file"; target = Some "large.txt";
+      write_content = Some write_payload } }) in
+  expect "validated write payloads consume the UI backlog byte allowance"
+    (Tui.ui_event_size write_event > String.length write_payload);
   let blocked_label = "Observe app — unavailable" in
   let blocked_reason =
     "requires a running selected app; current app state is selected." in
@@ -178,10 +185,15 @@ let () =
       (first <> second && contains first "openai" && contains second "ollama" &&
        Tui.measure_text first <= width && Tui.measure_text second <= width))
     [16; 22; 34];
-  expect "a compound shell command cannot offer an ineffective permanent grant"
+  expect "only literal single commands can offer an effective permanent grant"
     (not (Tui.persistent_command_grant "echo first && echo second") &&
      not (Tui.persistent_command_grant "echo first | cat") &&
-     Tui.persistent_command_grant "printf '%s' 'a && b'");
+     not (Tui.persistent_command_grant "cat *.txt") &&
+     not (Tui.persistent_command_grant "echo $HOME") &&
+     not (Tui.persistent_command_grant "echo first > output.txt") &&
+     not (Tui.persistent_command_grant "echo first &") &&
+     Tui.persistent_command_grant "printf '%s' 'a && b'" &&
+     Tui.persistent_command_grant "printf '%s' '$HOME *.txt > output.txt &'");
   let mouse_event button =
     (`Mouse (`Press (`Scroll button), (0, 0), []) : Notty.Unescape.event) in
   expect "mouse-wheel up scrolls toward earlier transcript rows"

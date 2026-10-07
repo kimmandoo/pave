@@ -385,6 +385,8 @@ let parse_response json =
   let content = match List.rev !texts with
     | [] -> None
     | texts -> Some (String.concat "" texts) in
+  if tool_calls = [] && (content = None || content = Some "") then
+    invalid "empty assistant response";
   { role = "assistant"; content; tool_calls; tool_call_id = None; tool_result_content = None; provider_state = None; attachments = [] }
 let native_thinking_block block =
   match member "type" block with

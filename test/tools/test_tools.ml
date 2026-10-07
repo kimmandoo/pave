@@ -380,6 +380,82 @@ let () =
       let request = Pave.Tools.approval_request ?context ~root ~name ~args decision in
       assert (request.impact <> "");
       request in
+    List.iter (fun name ->
+      assert (Pave.Tools.requires_explicit_approval ~name ~args:(`Assoc []));
+      let decision = Pave.Tools.approval_decision
+        ~command_patterns:[] ~name ~args:(`Assoc []) in
+      assert (Pave.Approval.resolve ~mode:Pave.Approval.Auto_all
+        ~decision ~user_policy:None = Pave.Approval.Allowed))
+      ["start_process"; "start_shell"; "process_stdin";
+       "process_close_stdin"; "process_kill"];
+    List.iter (fun (name, fields) ->
+      assert (try
+        ignore (execute_text ~cancel:(fun () -> true)
+          ~root ~name ~args:(`Assoc fields) ());
+        false
+      with Pave.Tools.Cancelled -> true))
+      ["list_files", []; "glob", ["pattern", `String "*.swift"];
+       "search", ["pattern", `String "old"];
+       "grep", ["pattern", `String "old"];
+       "read_file", ["path", `String "App.swift"]];
+    let visual_args count = `Assoc [
+      "action", `String "save"; "session_id", `String "mobile-1";
+      "name", `String "baseline"; "os", `String "fixture";
+      "locale", `String "en"; "theme", `String "light";
+      "dynamic_regions", `List (List.init count (fun _ -> `Assoc [
+        "x", `Int 0; "y", `Int 0; "width", `Int 1; "height", `Int 1]))] in
+    Pave.Tools.validate_arguments ~name:"mobile_visual" ~args:(visual_args 1024);
+    assert (try
+      Pave.Tools.validate_arguments ~name:"mobile_visual" ~args:(visual_args 1025);
+      false
+    with Pave.Tools.Tool_error _ -> true);
+    let browser_manager = tool_context.browser_manager in
+    let owned_browser = Pave.Workspace_browser.pending_session browser_manager
+      ~id:"denied-owned" in
+    owned_browser.pending <- false;
+    Hashtbl.add browser_manager.sessions "denied-owned" owned_browser;
+    let denied_args = `Assoc ["action", `String "evaluate";
+      "id", `String "denied-owned"] in
+    assert (Pave.Tools.cleanup_denied_call ~context:tool_context
+      ~name:"external-browser" ~args:denied_args () = Ok ());
+    assert (not owned_browser.closed);
+    assert (Pave.Tools.cleanup_denied_call ~context:tool_context
+      ~name:"browser" ~args:(`Assoc ["action", `String "evaluate";
+        "id", `String "../denied-owned"]) () <> Ok ());
+    assert (not owned_browser.closed);
+    assert (Pave.Tools.cleanup_denied_call ~context:tool_context
+      ~name:"browser" ~args:denied_args () = Ok ());
+    assert (owned_browser.closed &&
+      not (Hashtbl.mem browser_manager.sessions "denied-owned"));
+    let provider : Pave.Provider.config = {
+      endpoint = ""; api_key = ""; model = "";
+      api = Pave.Provider.Openai_completions } in
+    let unrelated_browser = Pave.Workspace_browser.pending_session browser_manager
+      ~id:"unrelated" in
+    unrelated_browser.pending <- false;
+    Hashtbl.add browser_manager.sessions "unrelated" unrelated_browser;
+    List.iter (fun policy_denial ->
+      let browser = Pave.Workspace_browser.pending_session browser_manager
+        ~id:"denied-owned" in
+      browser.pending <- false;
+      Hashtbl.add browser_manager.sessions "denied-owned" browser;
+      let agent = Pave.Agent.create ~provider ~root ~system:"denial fixture"
+        ~workspace_context:tool_context ~approval_mode:Pave.Approval.Auto_all
+        ~tool_approval:(if policy_denial then ["browser", Pave.Approval.Deny] else [])
+        ~approve_tool:(fun _ -> false) ~on_event:(fun _ -> ()) () in
+      ignore (Pave.Agent.call_tool agent ~name:"browser" ~args:(`Assoc [
+        "action", `String "evaluate"; "id", `String "denied-owned";
+        "expression", `String "0"]));
+      assert (browser.closed && not unrelated_browser.closed))
+      [true; false];
+    Pave.Workspace_browser.close_session browser_manager ~id:"unrelated";
+    Pave.Tools.scanning (fun () ->
+      let cancelled = ref false in
+      let waiter = Thread.create (fun () ->
+        try ignore (Pave.Tools.scanning ~cancel:(fun () -> true) (fun () -> ()))
+        with Pave.Tools.Cancelled -> cancelled := true) () in
+      Thread.join waiter;
+      assert !cancelled);
     let portal_publish_request = approval_case "publish_web"
       ["action", `String "publish"; "port", `Int 3000;
        "name", `String "my-preview"] Pave.Approval.Exec in
@@ -478,6 +554,13 @@ let () =
       (lsp_start_request.impact :: lsp_start_request.details) in
     assert (contains lsp_start_preview "/usr/bin/example-lsp" &&
       contains lsp_start_preview "--stdio" && contains lsp_start_preview "unsandboxed");
+    assert (try
+      ignore (execute_text ~cancel:(fun () -> true)
+        ~root ~context:tool_context ~approved:true ~name:"lsp_start"
+        ~args:(`Assoc ["program", `String "/usr/bin/example-lsp";
+          "arguments", `List [`String "--stdio"]]) ());
+      false
+    with Pave.Tools.Cancelled -> true);
     Pave.Workspace_lsp.start tool_context.lsp_manager
       ~owner:"tools-test-session" ~root ~program:"/usr/bin/example-lsp"
       ~args:["--stdio"] ~execution_approved:true;
@@ -973,6 +1056,13 @@ let () =
        "glob", `String "**/Keep.swift"] in
     assert (contains filtered "src/nested/Keep.swift");
     assert (not (contains filtered "src/Match.swift"));
+    List.iter (fun name ->
+      let scoped = tool_json root name [
+        "pattern", `String "needle"; "path", `String "./src/";
+        "glob", `String "nested/Keep.swift"] in
+      assert (contains scoped "src/nested/Keep.swift" &&
+        not (contains scoped "src/Match.swift")))
+      ["search"; "grep"];
     assert (contains (tool_json root "grep"
       ["pattern", `String "NEEDLE-[0-9]+"; "case_sensitive", `Bool false])
       "src/Match.swift");
@@ -1732,6 +1822,15 @@ esac
       assert (Pave.Tools.is_shell_tool "android_devices" &&
         Pave.Tools.requires_explicit_approval ~name:"android_devices"
           ~args:(`Assoc ["action", `String "avds"]));
+      List.iter (fun state ->
+        let devices = Pave.Workspace_android_devices.adb_devices
+          ("List of devices attached\nemulator-5554\t" ^ state ^ "\n") in
+        assert (not (Pave.Tools.mobile_device_android_stopped
+          "emulator-5554" devices));
+        assert (Pave.Tools.mobile_device_android_stopped "emulator-5556" devices))
+        ["device"; "offline"; "unauthorized"];
+      assert (Pave.Tools.mobile_device_android_stopped "emulator-5554"
+        (Pave.Workspace_android_devices.adb_devices "List of devices attached\n"));
       let device_inventory = Pave.Workspace_mobile_device_lifecycle.create_inventory
         ~session_id:"device-session-registry" ~inventory_id:"device-inventory-registry"
         ~configured_avds:["Pixel_8_API_35"] ~android_devices:[] ~avd_bindings:[]
@@ -1809,6 +1908,41 @@ esac
         not (contains devices "private-serial") &&
         not (contains devices "private-offline") &&
         not (contains devices "Ready emulators: emulator-5556"));
+      (* An explicitly aborted, still-running launcher completes as Cancelled;
+         that is successful reaping, not a reason to retain stale ownership. *)
+      let lifecycle_cache : Pave.Tools.mobile_device_inventory_cache = {
+        device_root = root; device_platform = Pave.Workspace_mobile_run.Android;
+        device_subroot = "focus/gradle"; device_scheme = ""; device_inventory
+      } in
+      Hashtbl.add tool_context.mobile_device_inventories
+        "device-inventory-registry" lifecycle_cache;
+      let abort_target = Pave.Workspace_mobile_device_lifecycle.Android_avd {
+        name = "Pixel_8_API_35"; port = 5554 } in
+      let pending = match Pave.Workspace_mobile_device_lifecycle.boot_command
+          ~inventory:device_inventory
+          ~approval:(Pave.Tools.mobile_device_approval device_inventory
+            Pave.Workspace_mobile_device_lifecycle.Boot abort_target)
+          ~target:abort_target ~ownership_id:"abort-fixture" with
+        | Pave.Workspace_mobile_device_lifecycle.Start { pending; _ } -> pending
+        | _ -> failwith "empty fixture inventory must need a boot" in
+      Pave.Workspace_process.start_shell process_manager ~id:"abort-launcher"
+        ~command:"read ignored" ();
+      let booting = Option.get (Pave.Workspace_mobile_device_lifecycle.settle_launch
+        pending (`Started "abort-launcher")) in
+      Pave.Tools.mobile_device_store_target_state tool_context.mobile_device_booting
+        tool_context lifecycle_cache abort_target booting;
+      create "focus/devices.txt" "List of devices attached\n";
+      let aborted = execute_text ~root ~context:tool_context ~approved:true
+        ~name:"mobile_device_lifecycle" ~args:(device_args "abort_boot" 5554) () in
+      assert (Yojson.Basic.Util.member "status" (Yojson.Basic.from_string aborted)
+        = `String "aborted");
+      assert (Pave.Workspace_process.job_status process_manager ~id:"abort-launcher"
+        = Pave.Workspace_process.Completed Pave.Workspace_process.Cancelled);
+      assert (Pave.Tools.mobile_device_lookup_target_state
+        tool_context.mobile_device_booting tool_context lifecycle_cache abort_target = None);
+      Hashtbl.remove tool_context.mobile_device_inventories "device-inventory-registry";
+      create "focus/devices.txt"
+        "List of devices attached\nemulator-5554\tdevice\nemulator-5556\toffline\nemulator-5558\tunauthorized\nprivate-serial\tdevice\nprivate-offline\toffline\n\n";
       (* Restore the source after the deliberate Gradle compilation failure;
          later instrumentation cases start from a passing fixture. *)
       create "focus/gradle/app/src/Main.kt" "fun main() = 1\n";

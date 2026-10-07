@@ -32,7 +32,65 @@ let expect_error label fragment fn =
 
 let getenv values name = List.assoc_opt name values
 
+let test_stdin_descriptor_ownership () =
+  let calls = ref 0 and reserved = ref None and borrowed = ref None in
+  Fun.protect ~finally:(fun () ->
+    List.iter (Option.iter (fun fd -> try Unix.close fd with Unix.Unix_error _ -> ()))
+      [!reserved; !borrowed])
+    (fun () ->
+      let cancel () =
+        incr calls;
+        if !calls = 1 then
+          reserved := Some (Unix.openfile "/dev/null" [Unix.O_RDONLY] 0);
+        if !calls = 2 then
+          borrowed := Some (Unix.openfile "/dev/null" [Unix.O_RDONLY] 0);
+        false in
+      let result = Services.run_native ~cancel ~timeout_seconds:1. ~output_limit:0
+        ~program:"/bin/sh" ~arguments:["-c"; "sleep 0.05"] ~stdin:"" in
+      expect "helper completes after closing its empty stdin" (result.termination = Process.Exited 0);
+      match !borrowed with
+      | None -> fail "descriptor reuse callback was not reached"
+      | Some fd ->
+          expect "helper cleanup preserves a descriptor reused after stdin EOF"
+            (try ignore (Unix.fstat fd); true with Unix.Unix_error _ -> false))
+
+let test_exceptional_helper_cleanup () =
+  let calls = ref 0 in
+  let started = Unix.gettimeofday () in
+  let raised =
+    try
+      ignore (Services.run_native
+        ~cancel:(fun () -> incr calls; if !calls = 2 then failwith "callback failure"; false)
+        ~timeout_seconds:20. ~output_limit:0 ~program:"/bin/sh"
+        ~arguments:["-c"; "exec sleep 10"] ~stdin:"");
+      false
+    with Failure message when message = "callback failure" -> true in
+  expect "callback exceptions propagate after helper cleanup" raised;
+  expect "exceptional cleanup does not wait for a live helper"
+    (Unix.gettimeofday () -. started < 2.)
+
+let test_cancelled_helper_descendants () =
+  let ready = Filename.temp_file "pave-native-ready-" "" in
+  let survived = Filename.temp_file "pave-native-survived-" "" in
+  Unix.unlink ready; Unix.unlink survived;
+  Fun.protect ~finally:(fun () ->
+    List.iter (fun path -> try Unix.unlink path with Unix.Unix_error _ -> ()) [ready; survived])
+    (fun () ->
+      let result = Services.run_native ~cancel:(fun () -> Sys.file_exists ready)
+        ~timeout_seconds:2. ~output_limit:0 ~program:"/bin/sh"
+        ~arguments:["-c";
+          "(/bin/sleep 0.3; printf survived > \"$2\") & printf ready > \"$1\"; wait";
+          "fixture"; ready; survived] ~stdin:"" in
+      expect "cancellation returns the cancelled helper outcome"
+        (result.termination = Process.Cancelled);
+      Thread.delay 0.4;
+      expect "cancelled helper descendants cannot finish their effect"
+        (not (Sys.file_exists survived)))
+
 let () =
+  test_stdin_descriptor_ownership ();
+  test_exceptional_helper_cleanup ();
+  test_cancelled_helper_descendants ();
   let previous_auth = Sys.getenv_opt "OPENAI_API_KEY" in
   let auth_sentinel = "pave-native-helper-auth-secret" in
   Unix.putenv "OPENAI_API_KEY" auth_sentinel;

@@ -168,6 +168,16 @@ let () =
     expect "direct read returns actual approved content"
       (contains result "actual direct content");
     let history = Pave.Agent.messages agent in
+    expect "direct lifecycle has explicit local provenance, not native model state"
+      (List.length (List.filter Pave.Protocol.is_direct_tool_message history) = 3);
+    let replay = Pave.Protocol.replay_messages history in
+    expect "direct history replays as user operations without unsigned tool turns"
+      (List.for_all (fun (message : Pave.Protocol.message) ->
+        message.role = "user" && message.tool_calls = [] &&
+        message.tool_call_id = None) replay);
+    ignore (Pave.Gemini_wire.request ~model:"gemini-model" replay []);
+    ignore (Pave.Codex_wire.request ~model:"codex-model" replay []);
+    ignore (Pave.Anthropic_wire.request ~model:"anthropic-model" ~max_tokens:16 replay []);
     (try ignore (Pave.Agent.call_tool agent ~name:"read_file" ~args:(`Assoc []));
        failwith "invalid direct arguments accepted"
      with Pave.Tools.Tool_error _ -> ());

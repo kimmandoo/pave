@@ -141,6 +141,13 @@ let with_lock lock fn =
   Mutex.lock lock;
   Fun.protect ~finally:(fun () -> Mutex.unlock lock) fn
 
+let with_request_lock ~deadline ~cancel manager fn =
+  let rec acquire () =
+    check_write_budget deadline cancel;
+    if not (Mutex.try_lock manager.request_lock) then (Thread.delay 0.01; acquire ()) in
+  acquire ();
+  Fun.protect ~finally:(fun () -> Mutex.unlock manager.request_lock) fn
+
 let json = Yojson.Basic.to_string
 let assoc = function `Assoc fields -> fields | _ -> fail "expected a JSON object"
 let member name value = try List.assoc name (assoc value) with Not_found -> `Null
@@ -346,22 +353,26 @@ let dispatch manager message =
       if not has_id && method_ = "textDocument/publishDiagnostics" then (
         let params = member "params" message in
         let uri = required_string "uri" params in
-        let document = document_for_uri manager uri in
         let version = member "version" params in
         let expected_version = match version with
           | `Int n when n >= 0 -> Some n
           | `Null -> None
           | _ -> fail "invalid LSP diagnostic document version" in
-        let text, opened_version = with_lock manager.lock (fun () ->
-          document.text, document.version) in
-        let diagnostics = validate_diagnostics text (member "diagnostics" params) in
-        let current = match expected_version with
-          | Some version -> version = opened_version
-          | None -> true in
-        if current then
-          with_lock manager.lock (fun () ->
-            if document.version = opened_version then
-              document.diagnostics <- diagnostics))
+        let opened = with_lock manager.lock (fun () ->
+          Option.map (fun document -> document, document.text, document.version)
+            (Hashtbl.find_opt manager.documents uri)) in
+        match opened with
+        | None -> () (* Servers may diagnose workspace files that are not open. *)
+        | Some (document, text, opened_version) ->
+            let current = match expected_version with
+              | Some version -> version = opened_version
+              | None -> true in
+            if current then (
+              (* A stale range belongs to the old text, not the current snapshot. *)
+              let diagnostics = validate_diagnostics text (member "diagnostics" params) in
+              with_lock manager.lock (fun () ->
+                if document.version = opened_version then
+                  document.diagnostics <- diagnostics)))
   | Some _ -> fail "LSP method must be a string"
   | None ->
       if List.mem_assoc "method" fields then fail "invalid LSP method";
@@ -550,7 +561,7 @@ let validate_identity owner program arguments =
       fail "LSP server arguments exceed the input limit";
     total + String.length argument) 0 arguments)
 
-let ensure_identity manager owner root program arguments =
+let ensure_identity ~deadline ~cancel manager owner root program arguments =
   let canonical_root =
     try Workspace_path.root_path root with Workspace_path.Error message -> fail message in
   let wanted = { owner; root = canonical_root; program; arguments } in
@@ -570,12 +581,13 @@ let ensure_identity manager owner root program arguments =
   | None, _, _, true -> fail "LSP manager is closed"
   | None, _, _, false ->
       validate_identity owner program arguments;
+      check_write_budget deadline cancel;
       let io = manager.launch ~program ~arguments ~cwd:canonical_root
           ~environment:(safe_server_environment ()) in
       manager.io <- Some io;
       manager.reader <- Some (Thread.create (fun () -> reader_loop manager io) ());
       (try
-         let result = request manager "initialize" (`Assoc [
+         let result = request ~deadline ~cancel manager "initialize" (`Assoc [
            "processId", `Int (Unix.getpid ());
            "rootUri", `String (file_uri canonical_root);
            "capabilities", `Assoc ["workspace", `Assoc ["applyEdit", `Bool false;
@@ -588,26 +600,29 @@ let ensure_identity manager owner root program arguments =
          ]) in
          let initialized = response_result result in
          let capabilities = verify_capabilities initialized in
-         notification manager "initialized" (`Assoc []);
+         notification ~deadline ~cancel manager "initialized" (`Assoc []);
          with_lock manager.lock (fun () ->
            manager.capabilities <- capabilities;
            manager.identity <- Some wanted)
        with exn ->
          (try io.close () with _ -> ());
          (try io.terminate () with _ -> ());
-         with_lock manager.lock (fun () -> manager.closed <- true);
          manager.io <- None;
          (match manager.reader with Some thread ->
            if Thread.id thread <> Thread.id (Thread.self ()) then (try Thread.join thread with _ -> ())
            | None -> ());
          manager.reader <- None;
+         with_lock manager.lock (fun () ->
+           manager.failure <- None;
+           manager.capabilities <- `Null);
          raise exn)
 
-let start manager ~owner ~root ~program ~args ~execution_approved =
+let start ?(cancel = fun () -> false) manager ~owner ~root ~program ~args ~execution_approved =
   if not execution_approved then fail "LSP server execution requires explicit approval";
-  with_lock manager.request_lock (fun () ->
+  let deadline = Unix.gettimeofday () +. 30. in
+  with_request_lock ~deadline ~cancel manager (fun () ->
     if manager.closed then fail "LSP manager is closed";
-    ensure_identity manager owner root program args)
+    ensure_identity ~deadline ~cancel manager owner root program args)
 
 let require_identity manager owner root program arguments =
   let canonical_root =
@@ -626,7 +641,7 @@ let require_identity manager owner root program arguments =
        | None, false -> identity)
   | None, _, _, _ -> fail "LSP server has not been started"
 
-let current_document ?cancel manager root relative language_id =
+let current_document ?deadline ?cancel manager root relative language_id =
   let absolute = try Workspace_path.regular_path root relative with Workspace_path.Error message -> fail message in
   let snapshot = try Workspace_edit.read_snapshot ~root ~path:relative with Workspace_edit.Error message -> fail message in
   let uri = file_uri absolute in
@@ -639,7 +654,8 @@ let current_document ?cancel manager root relative language_id =
           if document.version = max_int then fail "LSP document version limit reached";
           document.version <- document.version + 1;
           document.text <- snapshot.contents; document.sha256 <- snapshot.sha256;
-          notification ?cancel manager "textDocument/didChange" (`Assoc [
+          document.diagnostics <- [];
+          notification ?deadline ?cancel manager "textDocument/didChange" (`Assoc [
             "textDocument", `Assoc ["uri", `String uri; "version", `Int document.version];
             "contentChanges", `List [`Assoc ["text", `String snapshot.contents]]]));
         document
@@ -648,7 +664,7 @@ let current_document ?cancel manager root relative language_id =
         let document = { uri; language_id; version = 1; text = snapshot.contents;
                          sha256 = snapshot.sha256; diagnostics = [] } in
         Hashtbl.add manager.documents uri document;
-        notification ?cancel manager "textDocument/didOpen" (`Assoc [
+        notification ?deadline ?cancel manager "textDocument/didOpen" (`Assoc [
           "textDocument", `Assoc ["uri", `String uri; "languageId", `String language_id;
             "version", `Int document.version; "text", `String document.text]]);
         document)
@@ -973,6 +989,7 @@ let rec execute manager ~owner ~root ~program ~args ?(cancel = fun () -> false)
   if String.length (json arguments) > max_message_bytes then fail "LSP arguments exceed the input limit";
   let action = required_string "action" arguments in
   validate_action action;
+  let deadline = Unix.gettimeofday () +. 30. in
   let close_on_exit = ref false in
   Fun.protect
     ~finally:(fun () -> if !close_on_exit then close_manager manager)
@@ -991,7 +1008,7 @@ let rec execute manager ~owner ~root ~program ~args ?(cancel = fun () -> false)
           | None -> fail "LSP server has no active request");
         cancel_request manager id;
         `Assoc ["cancelled", `Int id]
-      ) else with_lock manager.request_lock (fun () ->
+      ) else with_request_lock ~deadline ~cancel manager (fun () ->
         if manager.closed then fail "LSP manager is closed";
         let started = with_lock manager.lock (fun () -> manager.identity) in
         match action, started with
@@ -1006,11 +1023,11 @@ let rec execute manager ~owner ~root ~program ~args ?(cancel = fun () -> false)
               fail "LSP manager cannot be reused with a different owner, workspace, or server configuration";
             close_on_exit := true;
             ignore (require_identity manager owner root program args);
-            did_close_documents ~cancel manager;
-            let response = request ~cancel manager "shutdown" `Null in
+            did_close_documents ~deadline ~cancel manager;
+            let response = request ~deadline ~cancel manager "shutdown" `Null in
             ignore (response_result response);
             with_lock manager.lock (fun () -> manager.shutdown_sent <- true);
-            notification manager "exit" `Null;
+            notification ~deadline ~cancel manager "exit" `Null;
             `Assoc ["shutdown", `Bool true]
         | "apply_preview", Some _ ->
             let identity = require_identity manager owner root program args in
@@ -1027,7 +1044,7 @@ let rec execute manager ~owner ~root ~program ~args ?(cancel = fun () -> false)
       let relative = required_string "path" arguments in
       let language_id = required_string "language_id" arguments in
       if String.length language_id > 128 then fail "LSP language_id exceeds the limit";
-      let document = current_document ~cancel manager root relative language_id in
+      let document = current_document ~deadline ~cancel manager root relative language_id in
       if action = "diagnostics" then (
         let diagnostics = with_lock manager.lock (fun () -> `List document.diagnostics) in
         let output = `Assoc ["uri", `String document.uri; "version", `Int document.version;
@@ -1046,24 +1063,24 @@ let rec execute manager ~owner ~root ~program ~args ?(cancel = fun () -> false)
           (int_value "character" (member "character" position)));
         let response = match action with
           | "definition" -> check_provider manager "definitionProvider";
-              request ~cancel manager "textDocument/definition" (text_document_params document position)
+              request ~deadline ~cancel manager "textDocument/definition" (text_document_params document position)
           | "references" -> check_provider manager "referencesProvider";
               let params = assoc (text_document_params document position) @
                 ["context", `Assoc ["includeDeclaration", `Bool true]] in
-              request ~cancel manager "textDocument/references" (`Assoc params)
+              request ~deadline ~cancel manager "textDocument/references" (`Assoc params)
           | "hover" -> check_provider manager "hoverProvider";
-              request ~cancel manager "textDocument/hover" (text_document_params document position)
+              request ~deadline ~cancel manager "textDocument/hover" (text_document_params document position)
           | "rename" ->
               check_provider manager "renameProvider";
               let new_name = required_string "new_name" arguments in
-              request ~cancel manager "textDocument/rename"
+              request ~deadline ~cancel manager "textDocument/rename"
                 (`Assoc (assoc (text_document_params document position) @ ["newName", `String new_name]))
           | "code_actions" ->
               check_provider manager "codeActionProvider";
               let range = match member "range" arguments with `Null ->
                 `Assoc ["start", position; "end", position] | range -> range in
               ignore (range_offsets document.text range);
-              request ~cancel manager "textDocument/codeAction" (`Assoc [
+              request ~deadline ~cancel manager "textDocument/codeAction" (`Assoc [
                 "textDocument", `Assoc ["uri", `String document.uri]; "range", range;
                 "context", `Assoc ["diagnostics", `List document.diagnostics]])
           | _ -> assert false in

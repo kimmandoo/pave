@@ -45,6 +45,10 @@ let () =
      contains launch_report "\"sample_count\":1" &&
      contains launch_report "\"complete\":true" &&
      contains launch_report "force-stop then one am start -W launch invocation");
+  expect "duplicate launch timing samples rejected"
+    (fails (fun () -> ignore (Performance.parse_android_launch android ~condition:"cold"
+      ~output:"PAVE_PRECONDITION_PID=stopped\nStatus: ok\nTotalTime: 123\nTotalTime: 999\nPAVE_SELECTED_PID=42\n"
+      ~truncated:false ~exit_code:0)));
   let revalidate = Performance.android_revalidate_pid_command android ~pid:42 in
   let expected_remote = Printf.sprintf
     "pid=$(pidof -s %s); test \"$pid\" = 42 || { echo selected-app-pid-changed >&2; exit 4; }; printf 'PAVE_SELECTED_PID=%%s\\n' \"$pid\""
@@ -96,6 +100,12 @@ let () =
   expect "empty frame window rejected" (fails (fun () -> ignore (Performance.parse_android ~action:"frames" android ~pid:42 ~condition:"warm" ~output:"PAVE_SELECTED_PID=42\n** Graphics info for pid 42 [com.example.fixture] **\nFlags,IntendedVsync,Vsync,FrameCompleted\n" ~truncated:false ~exit_code:0)));
   expect "mixed frame PID window rejected" (fails (fun () -> ignore (Performance.parse_android ~action:"frames" android ~pid:42 ~condition:"warm" ~output:(frames_output ^ "\n** Graphics info for pid 43 [com.example.fixture] **\n") ~truncated:false ~exit_code:0)));
   expect "truncated frame sample rejected" (fails (fun () -> ignore (Performance.parse_android ~action:"frames" android ~pid:42 ~condition:"warm" ~output:(frames_output ^ "0,30000000,30000000\n") ~truncated:false ~exit_code:0)));
+  let excessive_frames = "PAVE_SELECTED_PID=42\n** Graphics info for pid 42 [com.example.fixture] **\nFlags,IntendedVsync,Vsync,FrameCompleted\n" ^
+    String.concat "" (List.init (Performance.max_frames + 1) (fun _ -> "0,1,1,2\n")) in
+  expect "frame sample ceiling enforced below byte ceiling"
+    (String.length excessive_frames < Performance.max_output_bytes &&
+     fails (fun () -> ignore (Performance.parse_android ~action:"frames" android
+       ~pid:42 ~condition:"warm" ~output:excessive_frames ~truncated:false ~exit_code:0)));
   let ios = session ~platform:Run.Ios () in
   expect "template list command uses xctrace" (Performance.ios_templates_command = "xcrun xctrace list templates");
   let templates = Performance.ios_templates "Available Instruments templates:\n    Time Profiler\n    Allocations\n" ~truncated:false in

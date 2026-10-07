@@ -92,6 +92,23 @@ let () =
     let shadowed = Context.load ~root:workspace () in
     assert (List.mem "shadowed" (codes shadowed));
     assert (paths shadowed = [child workspace "AGENTS.md"; shared]));
+  fixture (fun ~top:_ ~config ~project:_ ~workspace ->
+    let outside = child (Filename.dirname config) "outside.md" in
+    write outside "OUTSIDE_USER_INSTRUCTION_DIRECTORY";
+    write (child config "inside.md") "INSIDE_USER_INSTRUCTION_DIRECTORY";
+    write (child config "AGENTS.md") "@../outside.md\n@inside.md";
+    let context = Context.load ~root:workspace () in
+    assert (List.mem "unsafe_import" (codes context));
+    assert (not (contains context.text "OUTSIDE_USER_INSTRUCTION_DIRECTORY"));
+    assert (contains context.text "INSIDE_USER_INSTRUCTION_DIRECTORY"));
+  fixture (fun ~top:_ ~config ~project:_ ~workspace ->
+    write (child config "AGENTS.md") "SYMLINKED_USER_INSTRUCTIONS";
+    let moved = child (Filename.dirname config) "real-pave" in
+    Unix.rename config moved;
+    Unix.symlink moved config;
+    let context = Context.load ~root:workspace () in
+    assert (List.mem "unsafe_path" (codes context));
+    assert (not (contains context.text "SYMLINKED_USER_INSTRUCTIONS")));
   fixture (fun ~top ~config:_ ~project:_ ~workspace ->
     let outside = child top "outside.md" in
     write outside "ESCAPED_CONTENT";
@@ -164,4 +181,15 @@ let () =
     let bounded = Context.load ~root:workspace () in
     assert (List.mem "import_depth" (codes bounded));
     assert (not (contains bounded.text "TOO_DEEP")));
+  fixture (fun ~top:_ ~config:_ ~project:_ ~workspace ->
+    directory (child workspace ".pave");
+    let rules = child (child workspace ".pave") "rules" in
+    directory rules;
+    for index = 0 to 256 do
+      write (child rules (Printf.sprintf "%03d.txt" index)) "inert"
+    done;
+    let scoped = Context.resolve_scoped ~root:workspace ~path:"src/app.ml" () in
+    assert (not scoped.safe && scoped.text = "");
+    assert (List.exists (fun (diagnostic : Context.diagnostic) ->
+      diagnostic.code = "rule_limit") scoped.diagnostics));
   print_endline "project context: ok"

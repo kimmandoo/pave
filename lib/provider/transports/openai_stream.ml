@@ -237,6 +237,8 @@ let finish t =
      | Some ("stop" | "end"), _ :: _ ->
          invalid "text finish_reason with tool calls"
      | _ -> ());
+    if calls = [] && Buffer.length t.content = 0 then
+      invalid "empty assistant response";
     { Protocol.role = "assistant"; content = (if t.content_seen then Some (Buffer.contents t.content) else None);
     tool_calls = calls; tool_call_id = None; tool_result_content = None; provider_state = None; attachments = [] }
   with Protocol.Invalid_response _ as error ->

@@ -26,7 +26,8 @@ let png width height =
     add32 (String.length content);
     Buffer.add_string buffer kind;
     Buffer.add_string buffer content;
-    add32 0 in
+    add32 (Int32.to_int (Pave.Workspace_mobile_visual.crc32 (kind ^ content)
+      0 (4 + String.length content))) in
   let dimension value = String.init 4 (fun index ->
     Char.chr ((value lsr (24 - index * 8)) land 255)) in
   chunk "IHDR" (dimension width ^ dimension height ^ "\008\006\000\000\000");
@@ -43,6 +44,16 @@ let () =
   rejects "non-PNG bytes" (fun () -> Observe.validate_png "not an image");
   rejects "zero PNG width" (fun () -> Observe.validate_png (png 0 3));
   rejects "oversized PNG dimensions" (fun () -> Observe.validate_png (png 16_385 1));
+  let valid = png 2 3 in
+  List.iter (fun offset ->
+    let damaged = Bytes.of_string valid in
+    Bytes.set damaged offset (Char.chr (Char.code (Bytes.get damaged offset) lxor 1));
+    rejects "PNG checksum corruption" (fun () ->
+      Observe.validate_png (Bytes.unsafe_to_string damaged)))
+    [16; 29; 41; String.length valid - 1];
+  let duplicate_header = String.sub valid 0 33 ^ String.sub valid 8 25 ^
+    String.sub valid 33 (String.length valid - 33) in
+  rejects "duplicate PNG header" (fun () -> Observe.validate_png duplicate_header);
   let xml = "<?xml version='1.0'?><hierarchy rotation='0'><node class='android.widget.FrameLayout' package='dev.example' text='' bounds='[0,0][100,100]' enabled='true'><node class=\"android.widget.Button\" package=\"dev.example\" text=\"Go &amp; now&#10;green\" resource-id=\"dev.example:id/go\" content-desc=\"Continue\" bounds=\"[2,3][40,20]\" clickable=\"true\" enabled=\"true\" selected=\"false\" /></node></hierarchy>" in
   let nodes = Observe.parse_accessibility xml in
   expect "accessibility parent and depth"
@@ -62,6 +73,8 @@ let () =
   rejects "unclosed node" (fun () -> Observe.parse_accessibility "<hierarchy><node class='Broken'>");
   rejects "empty tree" (fun () -> Observe.parse_accessibility "<hierarchy/>");
   rejects "unsupported entity" (fun () -> Observe.parse_accessibility "<hierarchy><node text='&boom;' /></hierarchy>");
+  rejects "ambiguous duplicate XML attributes" (fun () ->
+    Observe.parse_accessibility "<hierarchy><node text='failed' text='passed' /></hierarchy>");
   let node = `Assoc [
     "index", `Int 0; "parent", `Null; "depth", `Int 0;
     "role", `String "Application"; "type", `String "XCUIApplication";

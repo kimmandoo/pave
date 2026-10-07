@@ -25,6 +25,19 @@ let image_result id blocks = Protocol.tool_result_blocks id blocks
 let () =
   let args = `Assoc [ "path", `String "alpha.txt" ] in
   let use = call "call_A" "read_file" args in
+  List.iter (fun parse ->
+    List.iter (fun outputs ->
+      invalid (fun () -> parse (completed outputs))) [
+        [];
+        [message []];
+        [message [text ""]];
+        [item "reasoning" ["summary", `List []]]
+      ];
+    assert ((parse (completed [
+      message [text ""]; function_call "call_A" "read_file" "{}"])).Protocol.tool_calls =
+      [call "call_A" "read_file" (`Assoc [])]))
+    [Openai_responses_wire.parse_completion;
+     Codex_wire.parse_completion ~model:"gpt-test"];
   let schema = `Assoc [ "type", `String "object";
     "properties", `Assoc [ "path", `Assoc [ "type", `String "string" ] ] ] in
   let tool = `Assoc [ "type", `String "function";

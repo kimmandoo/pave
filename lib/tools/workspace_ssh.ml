@@ -305,18 +305,35 @@ let target endpoint = endpoint.user ^ "@" ^ endpoint.host
 
 let sftp_arguments endpoint =
   host_options endpoint @ ["-q"; "-b"; "-"; target endpoint]
+let verification_runner ?cancel ?timeout_seconds runner request =
+  let timeout_seconds = match timeout_seconds with
+    | None -> request.timeout_seconds
+    | Some limit -> min limit request.timeout_seconds in
+  let cancelled () =
+    Option.fold ~none:false ~some:(fun check -> check ()) cancel ||
+    Option.fold ~none:false ~some:(fun check -> check ()) request.cancel in
+  if cancelled () then fail "SSH operation cancelled";
+  let result = runner { request with timeout_seconds; cancel = Some cancelled } in
+  (match result.Workspace_process.termination with
+   | Workspace_process.Cancelled -> fail "SSH operation cancelled"
+   | Workspace_process.Timed_out -> fail "SSH operation timed out"
+   | _ -> ());
+  result
 
-let verify_session ?cancel session =
+
+let verify_session ?cancel ?timeout_seconds session =
   if session.closed then fail "SSH session is closed";
   (match cancel with Some cancelled when cancelled () -> fail "SSH operation cancelled" | _ -> ());
-  let current = try session.verify_known_host session.runner session.endpoint
+  let current = try session.verify_known_host
+      (verification_runner ?cancel ?timeout_seconds session.runner) session.endpoint
     |> validate_fingerprint with
+    | Error ("SSH operation cancelled" | "SSH operation timed out") as exn -> raise exn
     | _ -> fail "SSH host key is not trusted" in
   if current <> session.fingerprint then
     fail "SSH host key changed since this owner-bound session was opened"
 
 let sftp_call ?cancel ?(timeout_seconds = default_timeout_seconds) session script =
-  verify_session ?cancel session;
+  verify_session ?cancel ~timeout_seconds session;
   let result = run_request session.runner ?cancel ~timeout_seconds
       ~program:"/usr/bin/sftp" ~arguments:(sftp_arguments session.endpoint)
       ~stdin:(script ^ "\n") ~output_limit:max_output_bytes () in
@@ -369,7 +386,9 @@ let open_session ?(runner = default_runner) ?(verify_known_host = default_known_
   check_timeout timeout_seconds;
   (match cancel with Some cancelled when cancelled () -> fail "SSH operation cancelled" | _ -> ());
   let endpoint = normalize_endpoint endpoint in
-  let fingerprint = try verify_known_host runner endpoint |> validate_fingerprint with
+  let fingerprint = try verify_known_host
+      (verification_runner ?cancel ~timeout_seconds runner) endpoint |> validate_fingerprint with
+    | Error ("SSH operation cancelled" | "SSH operation timed out") as exn -> raise exn
     | _ -> fail "SSH host is unknown or its pinned key is unavailable" in
   let provisional = { owner; endpoint; fingerprint;
                       runner; verify_known_host; closed = false } in
@@ -522,7 +541,7 @@ let run_command ?cancel ?(timeout_seconds = default_timeout_seconds) ~owner
   let arguments = List.map (validate_command_part "Remote argument" 4_096) arguments in
   if List.fold_left (fun size argument -> size + String.length argument) (String.length program) arguments > 32_768 then
     fail "remote command arguments exceed their size limit";
-  verify_session ?cancel session;
+  verify_session ?cancel ~timeout_seconds session;
   let command = "cd " ^ shell_quote session.endpoint.remote_root ^ " && exec " ^
     String.concat " " (List.map shell_quote (program :: arguments)) in
   if String.length command > max_output_bytes then fail "remote command is too long";
@@ -587,19 +606,31 @@ let parse_uri endpoint uri =
   let path = check_relative_path file in
   (path, selector)
 
+let content_lines contents =
+  let lines = Array.of_list (String.split_on_char '\n' contents) in
+  let count = Array.length lines in
+  let count =
+    if count > 0 && lines.(count - 1) = "" then count - 1 else count in
+  lines, count
+
+let select_line_ranges contents lines count ranges =
+  let output = Buffer.create (min (String.length contents) max_output_bytes) in
+  let selected = ref false in
+  List.iter (fun (first, last) ->
+    for index = max 1 first to min last count do
+      let line = lines.(index - 1) in
+      let separator = if !selected then 1 else 0 in
+      if String.length line + separator > max_output_bytes - Buffer.length output then
+        fail "SSH selected output exceeded its bound";
+      if !selected then Buffer.add_char output '\n';
+      Buffer.add_string output line;
+      selected := true
+    done) ranges;
+  Buffer.contents output
+
 let select_lines contents ranges =
-  let lines = String.split_on_char '\n' contents in
-  let count = List.length lines in
-  let selected = List.concat_map (fun (first, last) ->
-    let first = min first (count + 1) in
-    let last = min last count in
-    if first > last then [] else
-      let rec at index = function
-        | [] -> []
-        | line :: rest -> if index >= first && index <= last then line :: at (index + 1) rest
-          else at (index + 1) rest in
-      at 1 lines) ranges in
-  String.concat "\n" selected
+  let lines, count = content_lines contents in
+  select_line_ranges contents lines count ranges
 
 let apply_selector contents = function
   | Raw -> contents
@@ -608,9 +639,8 @@ let apply_selector contents = function
       select_lines contents ranges
   | Tail count ->
       if String.contains contents '\000' then fail "SSH file is binary; use :raw for bounded bytes";
-      let lines = String.split_on_char '\n' contents in
-      let skip = max 0 (List.length lines - count) in
-      String.concat "\n" (List.filteri (fun index _ -> index >= skip) lines)
+      let lines, line_count = content_lines contents in
+      select_line_ranges contents lines line_count [max 1 (line_count - count + 1), line_count]
 
 let read_uri ?cancel ?timeout_seconds ~owner ~read_approved ~network_approved session uri () =
   check_owner session owner;

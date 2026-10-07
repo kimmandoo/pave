@@ -207,6 +207,8 @@ let parse_response (json : Yojson.Basic.t) =
   let content = match List.rev !texts with
     | [] -> None
     | chunks -> Some (String.concat "" chunks) in
+  if calls = [] && (content = None || content = Some "") then
+    invalid "empty assistant response";
   { role = "assistant"; content; tool_calls = calls;
     tool_call_id = None; tool_result_content = None; provider_state = None;
     attachments = [] }
@@ -247,6 +249,7 @@ type converse_stream = {
   mutable message_started : bool;
   mutable message_stopped : string option;
   mutable metadata_seen : bool;
+  mutable text_seen : bool;
   mutable active_block : stream_block option;
   mutable block_indices : int list;
   mutable tool_ids : string list;
@@ -258,6 +261,7 @@ let create_converse_stream ?on_tool_arguments () = {
   message_started = false;
   message_stopped = None;
   metadata_seen = false;
+  text_seen = false;
   active_block = None;
   block_indices = [];
   tool_ids = [];
@@ -373,6 +377,7 @@ let decode_converse_event stream frame =
                 stream.active_block <- Some (Text_block index)
             | Some (Text_block active) when active = index -> ()
             | _ -> invalid "mismatched ConverseStream text block");
+           if text <> "" then stream.text_seen <- true;
            [Text_delta text]
        | `Assoc ["toolUse", `Assoc ["input", `String fragment]] ->
            (match stream.active_block with
@@ -439,7 +444,9 @@ let finish_converse_stream stream =
   (try Aws_event_stream.finish stream.frames with
    | Aws_event_stream.Invalid_message detail -> invalid ("invalid AWS EventStream: " ^ detail));
   if not stream.message_started || stream.message_stopped = None || stream.active_block <> None then
-    invalid "incomplete Bedrock ConverseStream response"
+    invalid "incomplete Bedrock ConverseStream response";
+  if not stream.text_seen && stream.tool_ids = [] then
+    invalid "empty assistant response"
 
 (* Control-plane listings do not establish account/model-access permission to
    invoke any returned foundation model or inference profile. *)

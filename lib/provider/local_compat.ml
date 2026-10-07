@@ -90,6 +90,27 @@ let default_http ?cancel ~url ~headers () =
               Error (Invalid_response "listing exceeds size limit")
             else Ok (code, really_input_string input length)))
 
+let parse_listing_json body =
+  let rec unique_fields = function
+    | `Assoc fields ->
+        let seen = Hashtbl.create (List.length fields) in
+        List.for_all (fun (name, value) ->
+          if Hashtbl.mem seen name then false
+          else (Hashtbl.add seen name (); unique_fields value)) fields
+    | `List values -> List.for_all unique_fields values
+    | _ -> true in
+  try
+    let json = Yojson.Basic.from_string body in
+    if not (unique_fields json) then Error "duplicate model listing field"
+    else if (match json with
+      | `Assoc fields ->
+          (match List.assoc_opt "error" fields with
+           | None | Some `Null -> false
+           | Some _ -> true)
+      | _ -> false) then Error "provider returned a model listing error"
+    else Ok json
+  with Yojson.Json_error _ -> Error "malformed or truncated JSON"
+
 let discover ?http ?cancel ~provider ~endpoint ?key () =
   if engine provider = None then Error Invalid_endpoint else
   let url = try Ok (listing_url ~endpoint)
@@ -117,10 +138,9 @@ let discover ?http ?cancel ~provider ~endpoint ?key () =
                 if String.length body > max_response_bytes then
                   Error (Invalid_response "listing exceeds size limit")
                 else
-                  let json = try Some (Yojson.Basic.from_string body)
-                    with Yojson.Json_error _ -> None in
-                  (match json with
-                  | Some (`Assoc fields) ->
+                  (match parse_listing_json body with
+                  | Error detail -> Error (Invalid_response detail)
+                  | Ok (`Assoc fields) ->
                       (match List.assoc_opt "data" fields with
                       | Some (`List rows) ->
                           let seen = Hashtbl.create (List.length rows) in
@@ -142,7 +162,7 @@ let discover ?http ?cancel ~provider ~endpoint ?key () =
                             Error (Invalid_response "duplicate model ID")
                           else Ok (List.rev !models)
                       | _ -> Error (Invalid_response "missing data array"))
-                  | _ -> Error (Invalid_response "malformed model listing"))
+                  | Ok _ -> Error (Invalid_response "malformed model listing"))
           with
           | Provider.Cancelled -> raise Provider.Cancelled
           | Provider.Provider_error _ | Unix.Unix_error _ | Sys_error _ ->

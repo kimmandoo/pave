@@ -72,6 +72,11 @@ let validate_png png =
     if chunk_length < 0 || chunk_length > length - offset - 12 then
       fail "PNG screenshot contains a truncated chunk";
     let kind = String.sub png (offset + 4) 4 in
+    if Int32.of_int (uint32_be png (offset + 8 + chunk_length)) <>
+       Workspace_mobile_visual.crc32 png (offset + 4) (chunk_length + 4) then
+      fail "PNG screenshot contains a chunk checksum mismatch";
+    if kind = "IHDR" && index <> 0 then
+      fail "PNG screenshot contains a duplicate IHDR chunk";
     if index = 0 && (kind <> "IHDR" || chunk_length <> 13) then
       fail "PNG screenshot has no valid first IHDR chunk";
     if kind = "IEND" then (
@@ -203,6 +208,8 @@ let parse_attributes tag =
       do incr name_end done;
       if !name_end = index then fail "invalid accessibility node attribute";
       let name = String.sub tag index (!name_end - index) in
+      if List.mem_assoc name attributes then
+        fail "duplicate accessibility node attribute";
       let equals = skip !name_end in
       if equals >= length || tag.[equals] <> '=' then
         fail "invalid accessibility node attribute";

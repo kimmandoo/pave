@@ -32,7 +32,49 @@ let response output error truncated =
     "truncated", `Bool truncated;
   ])
 
+let test_cancelled_waiter_and_result_protocol () =
+  let entered = Atomic.make false and release = Atomic.make false in
+  let starts = ref 0 and closes = ref 0 and exchanges = ref 0 in
+  let malformed = ref false in
+  let launcher _language = {
+    Eval.start = (fun () -> incr starts);
+    exchange = (fun ~request:_ ~timeout_seconds:_ ~cancel:_ ~tool_bridge:_ ->
+      incr exchanges;
+      Atomic.set entered true;
+      while not (Atomic.get release) do Thread.delay 0.01 done;
+      if !malformed then
+        {|{"type":"result","output":"first","output":"second","error":null,"truncated":false}|}
+      else response "ok" None false);
+    close = (fun () -> incr closes);
+  } in
+  let kernel = Eval.create ~launcher ~owner:"workspace-eval-lock-protocol" Eval.Python in
+  let worker = Thread.create (fun () -> ignore (Eval.evaluate kernel "held")) () in
+  Fun.protect ~finally:(fun () ->
+    Atomic.set release true; Thread.join worker; Eval.close kernel) (fun () ->
+    let deadline = Unix.gettimeofday () +. 2. in
+    while not (Atomic.get entered) && Unix.gettimeofday () < deadline do Thread.delay 0.01 done;
+    assert (Atomic.get entered);
+    let began = Unix.gettimeofday () in
+    expect_error ~contains_text:"cancelled" (fun () ->
+      Eval.evaluate ~cancel:(fun () -> true) kernel "must not exchange");
+    assert (Unix.gettimeofday () -. began < 1.);
+    expect_error ~contains_text:"timed out" (fun () ->
+      Eval.evaluate ~timeout_seconds:1 kernel "must not exchange");
+    assert (!exchanges = 1 && !closes = 0);
+    Atomic.set release true;
+    Thread.join worker;
+    malformed := true;
+    expect_error ~contains_text:"duplicate result field" (fun () -> Eval.evaluate kernel "bad result");
+    assert (!closes = 1);
+    expect_error ~contains_text:"cancelled" (fun () ->
+      Eval.evaluate ~cancel:(fun () -> true) kernel "must not restart");
+    assert (!starts = 1);
+    malformed := false;
+    assert (output (Eval.evaluate kernel "fresh transport") = "ok");
+    assert (!starts = 2))
+
 let () =
+  test_cancelled_waiter_and_result_protocol ();
   with_kernel "workspace-eval-state" Eval.Python (fun python ->
     let same = Eval.create ~owner:"workspace-eval-state" Eval.Python in
     assert (same == python);

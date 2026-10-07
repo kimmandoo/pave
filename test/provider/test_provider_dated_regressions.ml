@@ -139,11 +139,14 @@ let anthropic_signature () =
       "type", `String "thinking"; "thinking", `String "initial thought";
       "signature", `String "initial signature"]] ^
     anthropic_event "content_block_stop" ["index", `Int 0] ^
+    anthropic_event "content_block_start" ["index", `Int 1; "content_block", `Assoc [
+      "type", `String "text"; "text", `String "answer"]] ^
+    anthropic_event "content_block_stop" ["index", `Int 1] ^
     anthropic_event "message_delta" ["delta", `Assoc ["stop_reason", `String "end_turn"]] ^
     anthropic_event "message_stop" []);
   let reply = Anthropic_stream.finish parser in
   match Anthropic_wire.replay_native_content ~provider:"anthropic" ~model:"claude-test" reply with
-  | Some (`List [block]) -> assert (field "signature" block = `String "initial signature")
+  | Some (`List [block; _]) -> assert (field "signature" block = `String "initial signature")
   | _ -> failwith "native thinking was not retained"
 
 let anthropic_bound () =
@@ -419,6 +422,131 @@ let with_native_fixture f =
       List.iter (fun (name, value) -> Unix.putenv name value) entries;
       f ~request ~response)
 
+let vertex_error_redaction () =
+  let names = ["GOOGLE_CLOUD_ACCESS_TOKEN"; "GOOGLE_CLOUD_PROJECT";
+    "GOOGLE_VERTEX_LOCATION"] in
+  let previous = List.map (fun name -> name, Sys.getenv_opt name) names in
+  let secret = "private-vertex-access-token" in
+  Fun.protect ~finally:(fun () ->
+    List.iter (fun (name, value) ->
+      Unix.putenv name (Option.value ~default:"" value)) previous) (fun () ->
+    Unix.putenv "GOOGLE_CLOUD_ACCESS_TOKEN" secret;
+    Unix.putenv "GOOGLE_CLOUD_PROJECT" "research-123";
+    Unix.putenv "GOOGLE_VERTEX_LOCATION" "global";
+    with_native_fixture (fun ~request:_ ~response ->
+      List.iter (fun (api, model, streaming, wire) ->
+        write_file response wire;
+        let configuration : Provider.config = {
+          api; endpoint = ""; model; api_key = "" } in
+        match Provider.complete ~authentication:Provider.Cloud_identity
+          ?on_text:(if streaming then Some (fun _ -> ()) else None)
+          configuration [Protocol.user "request"] [] with
+        | exception Provider.Provider_error reason ->
+            let rec contains offset =
+              offset + String.length secret <= String.length reason &&
+              (String.sub reason offset (String.length secret) = secret ||
+               contains (offset + 1)) in
+            assert (not (contains 0));
+            assert (String.contains reason '[')
+        | _ -> failwith "Vertex provider error was accepted") [
+          Provider.Vertex_generate, "gemini-2.5-flash", true,
+            event (Yojson.Basic.to_string (`Assoc [
+              "error", `Assoc ["message", `String secret]]));
+          Provider.Vertex_anthropic, "claude-sonnet-4-5", true,
+            anthropic_event "error" ["error", `Assoc [
+              "type", `String "api_error"; "message", `String secret]];
+          Provider.Vertex_anthropic, "claude-sonnet-4-5", false,
+            Yojson.Basic.to_string (`Assoc [
+              "type", `String "message"; "role", `String "assistant";
+              "stop_reason", `String secret; "content", `List [
+                `Assoc ["type", `String "text"; "text", `String "answer"]]])
+        ]))
+
+let direct_tool_native_replay () =
+  with_native_fixture (fun ~request ~response ->
+    let configuration : Provider.config = {
+      api = Provider.Gemini_direct;
+      endpoint = "https://generativelanguage.googleapis.com/v1beta/models";
+      model = "gemini-2.5-flash"; api_key = "fixture-key" } in
+    write_file response (Yojson.Basic.to_string (`Assoc [
+      "candidates", `List [`Assoc [
+        "content", `Assoc ["role", `String "model"; "parts", `List [
+          `Assoc ["text", `String "continued"]]];
+        "finishReason", `String "STOP"]]]));
+    let transcript = [
+      Protocol.user "/lookup {}"; Protocol.direct_tool_message call;
+      Protocol.tool_result call.id "local inspection result";
+      Protocol.user "Continue from that inspection"] in
+    assert ((Provider.complete configuration transcript []).content = Some "continued");
+    let captured = Yojson.Basic.from_string (read_file request) in
+    (match field "contents" captured with
+     | `List contents ->
+         assert (List.length contents = 3);
+         List.iter (fun content ->
+           assert (field "role" content = `String "user");
+           match field "parts" content with
+           | `List parts ->
+               assert (List.for_all (fun part ->
+                 field "functionCall" part = `Null &&
+                 field "functionResponse" part = `Null) parts)
+           | _ -> failwith "missing direct operation context") contents
+     | _ -> failwith "missing native transcript");
+    let resolved = ref false in
+    let result = Protocol.tool_result_blocks call.id [
+      Protocol.Image { mime_type = "image/png"; data = "AQID" }] in
+    (match Provider.complete
+      ~resolve_credential:(fun () ->
+        resolved := true;
+        { Provider.access = "must-not-resolve"; account_id = None; residency = None })
+      { api = Provider.Vertex_anthropic; endpoint = "";
+        model = "claude-sonnet-4-5"; api_key = "" }
+      [Protocol.direct_tool_message call; result; Protocol.user "Continue"] [] with
+     | exception Provider.Provider_error _ -> ()
+     | _ -> failwith "unsupported direct operation media was accepted");
+    assert (not !resolved))
+
+let empty_reply_usage () =
+  with_native_fixture (fun ~request:_ ~response ->
+    List.iter (fun (api, wire, streaming) ->
+      write_file response wire;
+      let reported = ref false in
+      let configuration : Provider.config = {
+        api; endpoint = "https://fixture.example/v1/completion";
+        model = "fixture-model"; api_key = "fixture-key" } in
+      (match Provider.complete ~on_usage:(fun _ -> reported := true)
+        ?on_text:(if streaming then Some (fun _ -> ()) else None)
+        configuration [Protocol.user "request"] [] with
+       | exception Provider.Provider_error _ -> ()
+       | _ -> failwith "empty reply was accepted");
+      assert (not !reported)) [
+      Provider.Openai_completions,
+        {|{"choices":[{"message":{"role":"assistant","content":""},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":1}}|},
+        false;
+      Provider.Openai_completions,
+        event (Yojson.Basic.to_string (`Assoc [
+          "choices", `List [`Assoc ["delta", `Assoc [];
+            "finish_reason", `String "stop"]];
+          "usage", `Assoc ["prompt_tokens", `Int 2; "completion_tokens", `Int 1]]))
+          ^ event "[DONE]",
+        true;
+      Provider.Anthropic_messages,
+        {|{"type":"message","role":"assistant","content":[],"stop_reason":"end_turn","usage":{"input_tokens":2,"output_tokens":1}}|},
+        false;
+      Provider.Anthropic_messages,
+        anthropic_start ^
+        anthropic_event "message_delta" [
+          "delta", `Assoc ["stop_reason", `String "end_turn"];
+          "usage", `Assoc ["output_tokens", `Int 1]] ^
+        anthropic_event "message_stop" [],
+        true;
+      Provider.Openai_responses,
+        {|{"status":"completed","output":[],"usage":{"input_tokens":2,"output_tokens":1}}|},
+        false;
+      Provider.Openai_responses,
+        event {|{"type":"response.completed","response":{"status":"completed","output":[],"usage":{"input_tokens":2,"output_tokens":1}}}|},
+        true
+    ])
+
 let custom_native_replay () =
   with_native_fixture (fun ~request ~response ->
     let configuration : Provider.config = { api = Provider.Anthropic_messages;
@@ -561,6 +689,9 @@ let cases = [
   "vertex-native-replay", vertex_native_replay; "custom-native-replay", custom_native_replay;
   "custom-native-stream", custom_native_stream;
   "copilot-tool-vision", copilot_tool_vision;
+  "vertex-error-redaction", vertex_error_redaction;
+  "direct-tool-native-replay", direct_tool_native_replay;
+  "empty-reply-usage", empty_reply_usage;
   "curl-fd-ownership", curl_fd_ownership]
 
 let () =

@@ -72,7 +72,7 @@ let fake_close endpoint =
   Mutex.unlock endpoint.lock
 
 let fake_connection endpoint =
-  { Browser.send = (fun text -> fake_send endpoint text);
+  { Browser.send = (fun ~cancel text -> Browser.check_cancel cancel; fake_send endpoint text);
     receive = (fun ~cancel -> fake_receive endpoint ~cancel);
     close = (fun () -> fake_close endpoint);
     next_id = 1; io_lock = Mutex.create ();
@@ -448,6 +448,193 @@ let test_context_destroyed () =
   expect "destroyed context forgotten" (Hashtbl.length connection.contexts = 0);
   expect "reverse index forgotten" (Hashtbl.length connection.context_frames = 0)
 
+let expect_cancelled label action =
+  match action () with
+  | _ -> fail (label ^ " was accepted")
+  | exception Browser.Cancelled -> ()
+
+let wait_until label predicate =
+  let deadline = Unix.gettimeofday () +. 2. in
+  let rec loop () =
+    if predicate () then ()
+    else if Unix.gettimeofday () >= deadline then fail label
+    else (Thread.delay 0.005; loop ()) in
+  loop ()
+
+let test_ws_length_validation () =
+  List.iter (fun length ->
+    let client, server = Unix.socketpair Unix.PF_UNIX Unix.SOCK_STREAM 0 in
+    Fun.protect ~finally:(fun () -> Unix.close client; Unix.close server) (fun () ->
+      let header = Bytes.create 10 in
+      Bytes.set header 0 '\x81'; Bytes.set header 1 '\x7f';
+      Bytes.set_int64_be header 2 length;
+      Browser.write_all server (Bytes.unsafe_to_string header);
+      let transport = { Browser.fd = client; write_lock = Mutex.create (); closed = false } in
+      expect_error "unrepresentable frame length rejected before allocation"
+        (fun () -> Browser.read_ws_message ~limit:1024 transport)))
+    [Int64.min_int; Int64.max_int; Int64.shift_left 1L 62]
+
+let test_cancelled_catalog_cleanup () =
+  let armed = ref false and cancelled = ref false in
+  let endpoint, server, manager, _, connect =
+    fake_manager ~handler:(fun ~expression ~context_id:_ ->
+      if !armed && expression = Browser.web_tools_hook then cancelled := true;
+      if has_sub "snapshot()" expression then
+        `Value "{\"nativeAvailable\":false,\"origin\":\"https://example.com\",\"tools\":[]}"
+      else `Undefined) in
+  let profile = Filename.temp_dir "pave-browser-test-" "" in
+  let spawn ~cancel:_ = { Browser.pid = 0; profile } in
+  Fun.protect ~finally:(fun () -> Browser.close_manager manager; Thread.join server) (fun () ->
+    let id = Browser.open_session ~spawn ~connect manager ~id:"cancel" in
+    armed := true;
+    expect_cancelled "catalog cancellation is not swallowed"
+      (fun () -> Browser.list_tools ~cancel:(fun () -> !cancelled) manager ~id);
+    expect "cancel closes the endpoint" endpoint.closed;
+    expect "cancel removes the profile" (not (Sys.file_exists profile));
+    expect_error "cancel releases the session" (fun () -> Browser.lookup manager ~id))
+
+let test_cancelled_bootstrap_cleanup () =
+  let cancelled = ref false in
+  let endpoint, server, manager, _, base_connect =
+    fake_manager ~handler:(fun ~expression:_ ~context_id:_ -> `Undefined) in
+  let profile = Filename.temp_dir "pave-browser-test-" "" in
+  let spawn ~cancel:_ = { Browser.pid = 0; profile } in
+  let connect ~cancel ~profile =
+    let connection = base_connect ~cancel ~profile in
+    { connection with Browser.send = (fun ~cancel text ->
+        Browser.check_cancel cancel;
+        if json_member "method" (Yojson.Basic.from_string text) = `String "Page.getFrameTree"
+        then cancelled := true;
+        fake_send endpoint text) } in
+  Fun.protect ~finally:(fun () -> Browser.close_manager manager; Thread.join server) (fun () ->
+    expect_cancelled "bridge bootstrap cancellation prevents publication"
+      (fun () -> Browser.open_session ~spawn ~connect ~cancel:(fun () -> !cancelled)
+        manager ~id:"bootstrap");
+    expect "bootstrap cancel closes transport" endpoint.closed;
+    expect "bootstrap cancel removes profile" (not (Sys.file_exists profile));
+    expect "bootstrap cancel releases reservation" (Hashtbl.length manager.sessions = 0))
+
+let test_operation_deadline_and_close () =
+  let armed = ref false in
+  let endpoint, server, manager, spawn, base_connect =
+    fake_manager ~handler:(fun ~expression:_ ~context_id:_ -> `Undefined) in
+  let connect ~cancel ~profile =
+    let connection = base_connect ~cancel ~profile in
+    { connection with Browser.receive = (fun ~cancel ->
+        if not !armed then connection.receive ~cancel
+        else (
+          let rec wait () = Browser.check_cancel cancel; Thread.delay 0.005; wait () in
+          wait ())) } in
+  Fun.protect ~finally:(fun () -> Browser.close_manager manager; Thread.join server) (fun () ->
+    let id = Browser.open_session ~spawn ~connect manager ~id:"deadline" in
+    armed := true;
+    let started = Unix.gettimeofday () in
+    expect_error "deadline interrupts an unanswered command"
+      (fun () -> Browser.evaluate manager ~id ~expression:"1" ~timeout_seconds:0.05);
+    expect "deadline includes receive wait" (Unix.gettimeofday () -. started < 1.);
+    expect "deadline closes transport" endpoint.closed;
+    expect_error "deadline releases session" (fun () -> Browser.lookup manager ~id));
+  let armed = ref false and waiting = ref false in
+  let endpoint, server, manager, spawn, base_connect =
+    fake_manager ~handler:(fun ~expression:_ ~context_id:_ -> `Undefined) in
+  let connect ~cancel ~profile =
+    let connection = base_connect ~cancel ~profile in
+    { connection with Browser.receive = (fun ~cancel ->
+        if not !armed then connection.receive ~cancel
+        else (
+          waiting := true;
+          let rec wait () = Browser.check_cancel cancel; Thread.delay 0.005; wait () in
+          wait ())) } in
+  Fun.protect ~finally:(fun () -> Browser.close_manager manager; Thread.join server) (fun () ->
+    let id = Browser.open_session ~spawn ~connect manager ~id:"closing" in
+    armed := true;
+    let outcome = ref None in
+    let worker = Thread.create (fun () ->
+      outcome := Some (try ignore (Browser.evaluate manager ~id ~expression:"1"
+        ~timeout_seconds:120.); false with Browser.Error _ | Browser.Cancelled -> true)) () in
+    wait_until "operation enters receive wait" (fun () -> !waiting);
+    let started = Unix.gettimeofday () in
+    Browser.close_session manager ~id;
+    Thread.join worker;
+    expect "close interrupts active receive" (!outcome = Some true && endpoint.closed);
+    expect "close does not wait for operation timeout" (Unix.gettimeofday () -. started < 1.))
+
+let test_lifetime_cleanup () =
+  List.iter (fun total_lifetime ->
+    let manager = Browser.create_manager ~owner:"lifetime-test" in
+    let endpoint = new_fake_endpoint () in
+    let profile = Filename.temp_dir "pave-browser-test-" "" in
+    let now = Unix.gettimeofday () in
+    let session = { (Browser.pending_session manager ~id:"expired") with
+      Browser.pending = false; connection = Some (fake_connection endpoint);
+      child = Some { Browser.pid = 0; profile };
+      created_at = (if total_lifetime then now -. Browser.max_session_seconds -. 1. else now);
+      last_used_at = (if total_lifetime then now else now -. Browser.max_linger_seconds -. 1.) } in
+    Hashtbl.add manager.sessions session.id session;
+    Fun.protect ~finally:(fun () -> Browser.close_manager manager) (fun () ->
+      Browser.start_lifetime_watch session;
+      wait_until "expiry deletes profile without another operation"
+        (fun () -> not (Sys.file_exists profile));
+      Option.iter Thread.join session.lifetime_watch;
+      expect "expiry closes endpoint and releases capacity"
+        (endpoint.closed && Hashtbl.length manager.sessions = 0))) [false; true]
+
+let test_bounded_metadata_and_current_availability () =
+  let snapshot = ref "{\"nativeAvailable\":true,\"origin\":\"https://example.com\",\"tools\":[]}" in
+  let observation = ref "{}" in
+  let _, server, manager, spawn, connect =
+    fake_manager ~handler:(fun ~expression ~context_id:_ ->
+      if has_sub "snapshot()" expression then `Value !snapshot
+      else if has_sub "JSON.stringify" expression then `Value !observation
+      else `Undefined) in
+  Fun.protect ~finally:(fun () -> Browser.close_manager manager; Thread.join server) (fun () ->
+    let id = Browser.open_session ~spawn ~connect manager ~id:"metadata" in
+    expect "native context initially available"
+      (json_member "status" (Browser.list_tools manager ~id) = `String "ready");
+    snapshot := "{\"nativeAvailable\":false,\"origin\":\"https://example.com\",\"tools\":[]}";
+    expect "native availability does not survive a page context change"
+      (json_member "status" (Browser.list_tools manager ~id) = `String "unavailable");
+    observation := Yojson.Basic.to_string (`Assoc ["title",
+      `String (String.make (Browser.max_result_bytes + 1) 'x')]);
+    expect_error "oversized observation is bounded" (fun () -> Browser.observe manager ~id);
+    snapshot := Yojson.Basic.to_string (`Assoc [
+      "nativeAvailable", `Bool false; "origin", `String "https://example.com";
+      "tools", `List [`Assoc ["name", `String "huge"; "inputSchema",
+        `Assoc ["description", `String (String.make (Browser.max_result_bytes + 1) 'x')]]]]);
+    expect_error "exact-name schemas are bounded"
+      (fun () -> Browser.list_tools manager ~id ~name:"huge"))
+
+let test_cancelled_write_and_lock () =
+  let client, server = Unix.socketpair Unix.PF_UNIX Unix.SOCK_STREAM 0 in
+  Fun.protect ~finally:(fun () -> Unix.close client; Unix.close server) (fun () ->
+    let started = Unix.gettimeofday () in
+    expect_cancelled "a full socket writer observes cancellation"
+      (fun () -> Browser.write_all ~cancel:(fun () -> Unix.gettimeofday () -. started >= 0.05)
+        client (String.make (2 * 1024 * 1024) 'x'));
+    expect "socket write cancellation is prompt" (Unix.gettimeofday () -. started < 1.));
+  let lock = Mutex.create () in
+  Mutex.lock lock;
+  Fun.protect ~finally:(fun () -> Mutex.unlock lock) (fun () ->
+    expect_cancelled "lock acquisition observes cancellation"
+      (fun () -> Browser.with_cancellable_lock (fun () -> true) lock (fun () -> ())))
+
+let test_failed_start_preserves_replacement () =
+  let manager = Browser.create_manager ~owner:"replacement-test" in
+  let profile = Filename.temp_dir "pave-browser-test-" "" in
+  let replacement = Browser.pending_session manager ~id:"reused" in
+  let spawn ~cancel:_ =
+    Browser.close_session manager ~id:"reused";
+    Hashtbl.add manager.sessions "reused" replacement;
+    { Browser.pid = 0; profile } in
+  let connect ~cancel:_ ~profile:_ = fail "closed startup must not connect" in
+  Fun.protect ~finally:(fun () -> Browser.close_manager manager) (fun () ->
+    expect_error "closed startup fails" (fun () ->
+      Browser.open_session ~spawn ~connect manager ~id:"reused");
+    expect "failed startup cannot remove a newer reservation"
+      (match Hashtbl.find_opt manager.sessions "reused" with
+       | Some current -> current == replacement | None -> false);
+    expect "failed startup removes only its own profile" (not (Sys.file_exists profile)))
+
 let () =
   test_url_validation ();
   test_frame_encoding ();
@@ -458,5 +645,13 @@ let () =
   test_failed_open_cleans_slot ();
   test_manager_close ();
   test_context_destroyed ();
+  test_ws_length_validation ();
+  test_cancelled_catalog_cleanup ();
+  test_cancelled_bootstrap_cleanup ();
+  test_operation_deadline_and_close ();
+  test_lifetime_cleanup ();
+  test_bounded_metadata_and_current_availability ();
+  test_cancelled_write_and_lock ();
+  test_failed_start_preserves_replacement ();
   test_long_silent_response ();
   print_endline "test_workspace_browser: ok"

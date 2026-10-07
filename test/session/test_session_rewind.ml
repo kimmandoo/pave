@@ -110,6 +110,8 @@ let () =
       "web_search"; "web_fetch"; "clipboard_write";
       "publish_web"; "xcode_preflight"; "mobile_check"; "mobile_session";
       "mobile_scenario"; "mobile_verify"; "mobile_visual"; "android_devices";
+      "mobile_control"; "mobile_environment"; "mobile_dev_server";
+      "mobile_app_lifecycle"; "mobile_performance"; "mobile_device_lifecycle";
       "write_file"; "edit_file"; "apply_edits"; "ast_edit"
     ] in
     List.iter (fun tool_name ->
@@ -143,6 +145,10 @@ let () =
     assert (List.exists (fun (rewind_entry : Pave.Session_rewind.rewind_effect) ->
       rewind_entry.id = irreversible.id &&
       rewind_entry.status = Pave.Session_rewind.Non_reversible) recovered);
+    List.iter (fun tool_name ->
+      assert (List.exists (fun (entry : Pave.Session_rewind.rewind_effect) ->
+        entry.tool_name = tool_name && entry.status = Pave.Session_rewind.Non_reversible)
+        recovered)) non_reversible_tools;
 
     let fork = Pave.Session_store.fork ~root reopened in
     let fork_manager = Pave.Session_rewind.create ~root ~session:fork in

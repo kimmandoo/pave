@@ -179,7 +179,8 @@ let shell_expansion_safe command =
           (match character with
            | '\'' | '"' -> quote := Some character
            | '\\' -> escaped := true
-           | '$' | '`' | '<' | '>' | '*' | '?' | '[' | ']' | '~' | '{' | '}' ->
+           | '$' | '`' | '<' | '>' | '*' | '?' | '[' | ']' | '~' | '{' | '}'
+           | ';' | '&' | '|' | '(' | ')' | '\n' | '\r' ->
                safe := false
            | _ -> ())) command;
   !safe && !quote = None && not !escaped
@@ -192,7 +193,7 @@ let command_rule_matches command segments rule =
        | [_] when rule.exact ->
            (* Segment parsing is only the compound-command guard. Compare the
               original spelling, retaining quotes and escaped whitespace. *)
-           pattern = normalize command
+           shell_expansion_safe command && pattern = normalize command
        | [segment] ->
            shell_expansion_safe command && glob_matches pattern segment
        | _ -> false)

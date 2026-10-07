@@ -308,7 +308,8 @@ let () =
         "pave hub --session FILE [--port N] [--token TOKEN]";
       if !session_path = "" then failwith "pave hub requires --session FILE";
       let root = Unix.realpath "." in
-      let session = Pave.Session_store.open_existing ~root !session_path in
+      ignore (Pave.Session_store.preview ~root !session_path);
+      let session = Pave.Session.load_journal !session_path in
       let token = match !hub_token with
         | "" -> (match Sys.getenv_opt "PAVE_CSRF_TOKEN" with
             | Some value when value <> "" -> value
@@ -1993,7 +1994,8 @@ let () =
                       | None -> "" in
                     let signed_prefix = List.exists
                       (fun (message : Pave.Protocol.message) ->
-                        Option.is_some message.provider_state) prefix in
+                        Option.is_some message.provider_state &&
+                        not (Pave.Protocol.is_direct_tool_message message)) prefix in
                     let provider, authentication, resolve_credential,
                         resolve_credential_cancel = resolve_provider () in
                     worker_event "Context over budget; checking compaction route and capabilities.";
@@ -2160,7 +2162,7 @@ let () =
         else if List.mem name Pave.Tools.session_tool_names then
           enabled && Option.is_some !journal
         else enabled in
-    let external_tool_definitions () =
+    let external_tool_definitions ?(include_disabled = false) () =
       let external_tools = Option.fold ~none:[] ~some:Pave.Local_tools.definitions
         local_tools in
       let external_tools = external_tools @ List.map
@@ -2172,7 +2174,7 @@ let () =
             "parameters", schema]]) !mcp_tools in
       List.filter (fun definition ->
         match Pave.Protocol.member "name" (Pave.Protocol.member "function" definition) with
-        | `String name -> tool_available name
+        | `String name -> include_disabled || tool_available name
         | _ -> false) external_tools in
     let make_agent ?(tools_only = false) () =
       let provider, authentication, resolve_credential,
@@ -2206,7 +2208,8 @@ let () =
         | Some session -> ignore (Pave.Session.append session message)
         | None -> ());
         mark_user_message message;
-        if message.role = "assistant" then
+        if not tools_only && message.role = "assistant" &&
+           not (Pave.Protocol.is_direct_tool_message message) then
           Option.iter remember_model used_identity in
       let session_guidance =
         (match !journal with
@@ -2650,7 +2653,8 @@ let () =
               ~provider:!active_descriptor.id ~route:!active_route.name
               ~wire:!active_route.wire ~model:!active_model prefix in
             let signed_prefix = List.exists (fun (message : Pave.Protocol.message) ->
-              Option.is_some message.provider_state) prefix in
+              Option.is_some message.provider_state &&
+              not (Pave.Protocol.is_direct_tool_message message)) prefix in
             let provider, authentication, resolve_credential,
                 resolve_credential_cancel = resolve_provider () in
             let secret_mask = current_secret_mask () in
@@ -2718,7 +2722,8 @@ let () =
                         ^ "Do not claim tools ran unless their results confirm it.");
                       tool_calls = []; tool_call_id = None; tool_result_content = None;
                       provider_state = None; attachments = [] } in
-                    let source = List.map Pave.Context_compaction.summary_projection prefix in
+                    let source = Pave.Protocol.replay_messages prefix
+                      |> List.map Pave.Context_compaction.summary_projection in
                     let transcript = Yojson.Basic.to_string (`List
                       (List.map Pave.Protocol.message_to_json source)) in
                     let reply = Pave.Provider.complete ~authentication
@@ -3087,8 +3092,17 @@ let () =
         notify ("Error: unknown tool " ^ name)
       else if name = "task" && enabled && Option.is_none !journal then
         notify "Error: child-agent delegation requires a private saved session"
-      else if enabled && name = "run_command" && not !allow_shell then
+      else if enabled && Pave.Tools.is_shell_tool name && not !allow_shell then
         notify "Error: shell tools remain unavailable without --allow-shell"
+      else if enabled && name = "task" && not !enable_subagents then
+        notify "Error: child-agent delegation remains unavailable without --enable-subagents"
+      else if enabled && name = "memory" && not !enable_memory then
+        notify "Error: memory remains unavailable without --enable-memory"
+      else if enabled && name = "repository_security_scan" && not !enable_security_scan then
+        notify "Error: repository scanning remains unavailable without --enable-security-scan"
+      else if enabled && List.mem name Pave.Tools.session_tool_names &&
+              Option.is_none !journal then
+        notify "Error: this tool requires a private saved session; use /new"
       else (
         let disabled = (if enabled then
           List.filter ((<>) name) !disabled_tools
@@ -3099,8 +3113,11 @@ let () =
          | None -> ());
         disabled_tools := disabled;
         rebuild_agent ();
-        notify (Printf.sprintf "Tool %s %s on this branch."
-          name (if enabled then "enabled" else "disabled"))) in
+        notify (Printf.sprintf "Tool %s %s on this branch.%s"
+          name (if enabled then "enabled" else "disabled")
+          (if enabled && not (tool_available name) then
+             " Unavailable under the current model or plugin policy."
+           else ""))) in
     let attach_image path =
       let item = Pave.Session_attachment.load ~root path in
       let attachments = !pending_attachments @ [item] in
@@ -4050,6 +4067,7 @@ let () =
                | None -> send text)
          | _ when busy && (match command with
              | Pave.Interaction.Prompt _ | Pave.Interaction.Jobs
+             | Pave.Interaction.Tools _ | Pave.Interaction.Tool_call { args = None; _ }
              | Pave.Interaction.Mobile | Pave.Interaction.Wait _
              | Pave.Interaction.Cancel_job _ | Pave.Interaction.Artifact _ -> false
              | _ -> true) ->
@@ -4671,17 +4689,10 @@ let () =
               | _ -> run ~cancel:(fun () -> false)
             with exn -> report_error exn)
         | Pave.Interaction.Tools selected ->
-          let current = get_agent () in
           let definitions = Pave.Tools.available_for ~allow_shell:!allow_shell
-            ~enabled:current.tool_available in
-          let definitions = if current.tool_available "task" &&
-              Option.is_some current.delegate_task then
-            definitions @ [Pave.Agent.task_definition] else definitions in
-          let definitions = definitions @ List.filter (fun json ->
-            match Pave.Protocol.member "name"
-              (Pave.Protocol.member "function" json) with
-            | `String name -> current.tool_available name
-            | _ -> false) current.external_tools in
+            ~enabled:tool_available in
+          let definitions = definitions @ external_tool_definitions () @
+            (if tool_available "task" then [Pave.Agent.task_definition] else []) in
           let entries definitions = List.filter_map (fun json ->
             let function_json = Pave.Protocol.member "function" json in
             match Pave.Protocol.member "name" function_json,
@@ -4690,10 +4701,10 @@ let () =
             | _ -> None) definitions in
           let enabled = entries definitions in
           let all_definitions = Pave.Tools.available ~allow_shell:true in
-          let all_definitions = if Option.is_some !journal &&
-              Option.is_some current.delegate_task then
+          let all_definitions = if !enable_subagents && Option.is_some !journal then
             all_definitions @ [Pave.Agent.task_definition] else all_definitions in
-          let all_definitions = all_definitions @ current.external_tools in
+          let all_definitions = all_definitions @
+            external_tool_definitions ~include_disabled:true () in
           let all_entries = entries all_definitions in
           let is_enabled name = List.mem_assoc name enabled in
           let lines = match selected with
@@ -4711,7 +4722,7 @@ let () =
                  | Some description ->
                      ["Tool: " ^ name;
                       (if is_enabled name then "Enabled on this branch"
-                       else if name = "run_command" && not !allow_shell then
+                       else if Pave.Tools.is_shell_tool name && not !allow_shell then
                          "Unavailable; restart with --allow-shell"
                        else "Disabled on this branch");
                       description] @
@@ -4850,7 +4861,8 @@ let () =
                 let prefix, _ = latest_user_split context_messages in
                 let signed_prefix = List.exists
                   (fun (message : Pave.Protocol.message) ->
-                    Option.is_some message.provider_state) prefix in
+                    Option.is_some message.provider_state &&
+                    not (Pave.Protocol.is_direct_tool_message message)) prefix in
                 let budget_state = match Pave.Context_budget.status
                     ~window_tokens ~reserve_tokens:reserve estimate with
                   | Pave.Context_budget.Over_budget ->

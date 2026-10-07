@@ -54,6 +54,16 @@ let request_body client step =
   close_out_noerr oc
 
 let () =
+  let call : Pave.Protocol.tool_call = {
+    id = "local-summary"; name = "read_file"; arguments = `Assoc [] } in
+  let local_history = [Pave.Protocol.user "/read_file";
+    Pave.Protocol.direct_tool_message call;
+    Pave.Protocol.tool_result call.id "local output"] in
+  let group = Pave.Context_compaction.make_group local_history in
+  assert (List.for_all (fun (message : Pave.Protocol.message) ->
+    message.role = "user" && message.tool_calls = [] &&
+    message.tool_call_id = None && message.provider_state = None) group.messages);
+  assert ((List.nth local_history 1).provider_state <> None);
   let socket = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
   Unix.bind socket (Unix.ADDR_INET (Unix.inet_addr_loopback, 0));
   Unix.listen socket 4;

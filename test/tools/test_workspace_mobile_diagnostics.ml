@@ -62,6 +62,31 @@ let () =
        expect "actual crash reason retained" (contains evidence "reason=4 (CRASH)");
        expect "non-crash process exit omitted" (not (contains evidence "reason=10"))
    | _ -> failwith "process-exit result is not an object");
+  let exit_evidence output =
+    Yojson.Basic.Util.(Diagnostics.result ~action:"crashes" android
+      ~output ~truncated:false |> Yojson.Basic.from_string |> member "evidence" |> to_string) in
+  let mixed_exits = String.concat "\n" [
+    "ApplicationExitInfo #0:";
+    " process=com.other.app reason=4 (APP CRASH(EXCEPTION))";
+    " description=foreign crash";
+    "ApplicationExitInfo #1:";
+    " process=com.example.fixture.evil reason=5 (APP CRASH(NATIVE))";
+    " description=prefix collision";
+    "ApplicationExitInfo #2:";
+    " process=com.example.fixture reason=10 (USER REQUESTED)";
+    " description=reason=4 (not a structured crash reason)";
+    "ApplicationExitInfo #3:";
+    " process=com.example.fixture:worker reason=5 (APP CRASH(NATIVE))";
+    " description=selected native crash"] in
+  let mixed = exit_evidence mixed_exits in
+  expect "foreign process-exit crash omitted" (not (contains mixed "foreign crash"));
+  expect "process-exit package-prefix collision omitted" (not (contains mixed "prefix collision"));
+  expect "description text cannot promote a normal exit to a crash"
+    (not (contains mixed "not a structured crash reason"));
+  expect "selected package-scoped subprocess crash retained"
+    (contains mixed "selected native crash");
+  expect "missing selected process identity yields no crash evidence"
+    (exit_evidence "ApplicationExitInfo #0:\n reason=4 (CRASH)\n" = "");
   let anr_text = String.concat "\n" [
     "ANR in com.other.app (pid 1)"; "foreign ANR";
     "ANR in com.example.fixture (pid 2)"; "Input dispatching timed out";
@@ -86,7 +111,8 @@ let () =
   expect "iOS log command scopes the simulator process"
     (contains (Diagnostics.command "logs" ios) "process == \"com.example.fixture\"");
   expect "iOS crash command scopes report evidence"
-    (contains (Diagnostics.command "crashes" ios) "process == \"ReportCrash\"");
+    (contains (Diagnostics.command "crashes" ios)
+      "process == \"ReportCrash\" AND eventMessage CONTAINS[c] \"com.example.fixture\"");
   (try ignore (Diagnostics.command "anr" ios); failwith "iOS ANR unexpectedly accepted"
    with Diagnostics.Error _ -> ());
   let root = Filename.temp_file "pave-mobile-symbols-" "" in

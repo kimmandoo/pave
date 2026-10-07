@@ -252,6 +252,11 @@ let result_rows provider json =
   let object_required label = match json with
     | `Assoc _ -> ()
     | _ -> fail ("malformed search response: expected a JSON object" ^ label) in
+  (* Error envelopes never become successful partial answers, regardless of
+     whether the provider also included otherwise well-formed result rows. *)
+  (match field "error" json with
+   | None | Some `Null | Some (`List []) -> ()
+   | Some _ -> fail (provider_label provider ^ " reported a search failure"));
   match provider with
   | Brave ->
       object_required "";
@@ -296,9 +301,6 @@ let result_rows provider json =
         clean_text (first_string ["description"; "content"] row)) rows
   | Kagi ->
       object_required "";
-      (match field "error" json with
-       | None | Some `Null | Some (`List []) -> ()
-       | Some _ -> fail "Kagi reported a search failure");
       (match required "data" json with
        | `Assoc _ as data ->
            (match field "search" data with
@@ -578,6 +580,16 @@ let plan ?(env = Sys.getenv_opt) ?find_browser ?(page = 0) () =
   let explicit, order = match env priority_variable with
     | Some value when String.trim value <> "" -> true, parse_priority value
     | _ -> false, all_providers in
+  (* Filter incompatible engines before looking up credentials or probing a
+     browser; an excluded Ecosia configuration cannot disable Brave paging. *)
+  let order = if page = 0 then order else
+    match List.filter supports_paging order with
+    | [] ->
+        let names = List.map provider_label order in
+        fail (String.concat ", " names ^
+          (if List.length names = 1 then " does" else " do") ^
+          " not support paged requests; only Brave Search pages results")
+    | paged -> paged in
   let candidates = List.filter_map (fun engine ->
     match credential_name engine, credential engine with
     | None, _ when requires_browser engine ->
@@ -598,14 +610,6 @@ let plan ?(env = Sys.getenv_opt) ?find_browser ?(page = 0) () =
           " or install a Chromium-family browser (" ^ browser_variable ^ ")"
       | variables, false ->
           "no configured search provider has a credential; set " ^ variables));
-  let candidates = if page = 0 then candidates else
-    match List.filter (fun candidate -> supports_paging candidate.engine) candidates with
-    | [] ->
-        let names = List.map (fun candidate -> provider_label candidate.engine) candidates in
-        fail (String.concat ", " names ^
-          (if List.length names = 1 then " does" else " do") ^
-          " not support paged requests; only Brave Search pages results")
-    | paged -> paged in
   explicit, candidates
 
 (* Lets callers refuse an unconfigured search before asking for approval. *)

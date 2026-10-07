@@ -395,10 +395,10 @@ let read_store path =
       | _ -> fail "Unsupported OAuth credential version"
 
 (* The lock file is never renamed; replacing the data inode cannot invalidate
-   a lock. Nested calls on this domain reuse it, keeping refresh read/write
-   transactions serialized. Mutex additionally serializes domains, since lockf
-   locks belong to the process rather than the individual descriptor. *)
-let domain_paths = Domain.DLS.new_key (fun () -> ref [])
+   a lock. Only the owning systhread may reuse a nested lock: Domain.DLS is
+   shared by systhreads on one domain. Mutex additionally serializes threads
+   and domains, since lockf locks belong to the process. *)
+let active_lock = Atomic.make None
 let process_mutex = Mutex.create ()
 let lock_wait_timeout_seconds = 35.
 
@@ -434,10 +434,13 @@ let with_lock ?(cancel = fun () -> false) ?deadline ~path f =
   if Filename.is_relative path || Filename.basename path = "."
      || Filename.basename path = ".." then
     fail "OAuth credential path must name a file under an absolute directory";
-  let active = Domain.DLS.get domain_paths in
-  if !active <> [] && not (List.mem path !active) then
+  let owner = Thread.id (Thread.self ()) in
+  let held = Atomic.get active_lock in
+  if (match held with
+      | Some (thread, locked_path) -> thread = owner && locked_path <> path
+      | None -> false) then
     fail "Nested OAuth credential locks must use the same path";
-  if List.mem path !active then f () else (
+  if held = Some (owner, path) then f () else (
     ignore (acquire_process_mutex ?deadline cancel);
     Fun.protect ~finally:(fun () -> Mutex.unlock process_mutex) (fun () ->
       check_wait ?deadline cancel;
@@ -468,8 +471,8 @@ let with_lock ?(cancel = fun () -> false) ?deadline ~path f =
                 | Some stat -> stat.Unix.st_dev <> locked.Unix.st_dev
                             || stat.Unix.st_ino <> locked.Unix.st_ino) then
               fail "OAuth credential lock changed during access";
-            active := path :: !active;
-            Fun.protect ~finally:(fun () -> active := List.tl !active) f)))))
+            Atomic.set active_lock (Some (owner, path));
+            Fun.protect ~finally:(fun () -> Atomic.set active_lock None) f)))))
 
 
 let accounts ~path ~provider =

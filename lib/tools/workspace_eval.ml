@@ -779,6 +779,15 @@ let ensure_transport kernel =
   | None -> start_transport kernel
 
 let parse_response json =
+  (match json with
+   | `Assoc fields ->
+       let seen = Hashtbl.create 4 in
+       List.iter (fun (name, _) ->
+         if not (List.mem name ["type"; "output"; "error"; "truncated"]) ||
+            Hashtbl.mem seen name then
+           fail "workspace kernel returned an invalid or duplicate result field";
+         Hashtbl.add seen name ()) fields
+   | _ -> fail "workspace kernel returned an invalid result frame");
   let field name = match json with
     | `Assoc fields -> List.assoc_opt name fields
     | _ -> None in
@@ -800,7 +809,13 @@ let evaluate ?timeout_seconds ?(cancel = fun () -> false) ?tool_bridge kernel so
   let timeout_seconds = check_timeout timeout_seconds in
   if String.length source > max_source_bytes then
     fail (Printf.sprintf "evaluation source exceeds the %d-byte limit" max_source_bytes);
-  with_lock kernel.lock (fun () ->
+  let deadline = Unix.gettimeofday () +. float_of_int timeout_seconds in
+  let rec acquire () =
+    check_evaluation_live ~deadline ~cancel;
+    if not (Mutex.try_lock kernel.lock) then (Thread.delay 0.01; acquire ()) in
+  acquire ();
+  Fun.protect ~finally:(fun () -> Mutex.unlock kernel.lock) (fun () ->
+    check_evaluation_live ~deadline ~cancel;
     ensure_transport kernel;
     let current = Option.get kernel.transport in
     let request = Yojson.Basic.to_string (`Assoc [
@@ -809,7 +824,14 @@ let evaluate ?timeout_seconds ?(cancel = fun () -> false) ?tool_bridge kernel so
     ]) in
     let succeeded = ref false in
     Fun.protect ~finally:(fun () -> if not !succeeded then discard_transport kernel) (fun () ->
-      let response = current.exchange ~request ~timeout_seconds ~cancel ~tool_bridge in
+      check_evaluation_live ~deadline ~cancel;
+      let remaining = max 1 (int_of_float (ceil (deadline -. Unix.gettimeofday ()))) in
+      let cancelled () = cancel () || Unix.gettimeofday () >= deadline in
+      let response =
+        try current.exchange ~request ~timeout_seconds:remaining ~cancel:cancelled ~tool_bridge
+        with Error _ when not (cancel ()) && Unix.gettimeofday () >= deadline ->
+          fail "workspace evaluation timed out" in
+      check_evaluation_live ~deadline ~cancel;
       let result =
         try parse_response (Yojson.Basic.from_string response)
         with Yojson.Json_error _ -> fail "workspace kernel returned malformed protocol data" in

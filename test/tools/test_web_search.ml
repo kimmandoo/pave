@@ -80,6 +80,19 @@ let () =
           List.assoc_opt "Authorization" request.headers = None)
    | None -> fail "Brave request was sent");
 
+  let page_without_browser = search ~http:brave_http ~page:2 ~query:"query"
+      ~env:(environment ["BRAVE_SEARCH_API_KEY", "brave-secret";
+                        "PAVE_BROWSER", "invalid-relative-browser"])
+      ~find_browser:(fun () -> fail "paged requests must not probe excluded Ecosia") () in
+  expect "automatic nonzero paging ignores excluded browser configuration"
+    (page_without_browser.provider = "brave" && page_without_browser.page = 2);
+  let explicit_page = search ~http:brave_http ~page:1 ~query:"query"
+      ~env:(environment ["PAVE_WEB_SEARCH_PROVIDER_PRIORITY", "ecosia,brave";
+                        "BRAVE_SEARCH_API_KEY", "brave-secret"])
+      ~find_browser:(fun () -> fail "explicit paging must exclude Ecosia before probing") () in
+  expect "explicit paging filters incompatible engines before discovery"
+    (explicit_page.provider = "brave" && explicit_page.page = 1);
+
   let called = ref false in
   expect_error "all configured credentials missing" "BRAVE_SEARCH_API_KEY"
     (fun () -> search ~http:(fun _ -> called := true; Ok (200, brave_response))
@@ -300,7 +313,15 @@ let () =
     "kagi", "KAGI_API_KEY", "{\"error\":[{\"message\":\"secret-echo\\u001b[31m\"}]," ^
       "\"data\":{\"search\":[{\"title\":\"Partial\",\"url\":\"https://example.org/\",\"snippet\":\"partial\"}]}}";
     "firecrawl", "FIRECRAWL_API_KEY",
-      "{\"success\":false,\"error\":\"secret-echo\\u001b[31m\"}"
+      "{\"success\":false,\"error\":\"secret-echo\\u001b[31m\"}";
+    "exa", "EXA_API_KEY",
+      "{\"error\":\"secret-echo\\u001b[31m\",\"results\":[{\"title\":\"Partial\",\"url\":\"https://example.org/\",\"text\":\"partial\"}]}";
+    "tavily", "TAVILY_API_KEY",
+      "{\"error\":\"secret-echo\\u001b[31m\",\"results\":[{\"title\":\"Partial\",\"url\":\"https://example.org/\",\"content\":\"partial\"}]}";
+    "jina", "JINA_API_KEY",
+      "{\"code\":200,\"error\":\"secret-echo\\u001b[31m\",\"data\":[{\"title\":\"Partial\",\"url\":\"https://example.org/\",\"description\":\"partial\"}]}";
+    "firecrawl", "FIRECRAWL_API_KEY",
+      "{\"success\":true,\"error\":\"secret-echo\\u001b[31m\",\"data\":{\"web\":[{\"title\":\"Partial\",\"url\":\"https://example.org/\",\"description\":\"partial\"}]}}"
   ] in
   List.iter (fun (name, variable, payload) ->
     let result = search
@@ -315,6 +336,20 @@ let () =
        | [provider, reason] -> provider = name &&
            not (contains reason "secret-echo") && not (String.contains reason '\027')
        | _ -> false)) failed_payloads;
+
+  let brave_error = search
+      ~http:(fun request -> match request.search with
+        | Some Web_search.Brave -> Ok (200,
+            "{\"error\":{\"detail\":\"secret-echo\\u001b[31m\"},\"web\":{\"results\":[{\"title\":\"Partial\",\"url\":\"https://example.org/\",\"description\":\"partial\"}]}}")
+        | _ -> Ok (200, tavily_response))
+      ~env:(environment ["PAVE_WEB_SEARCH_PROVIDER_PRIORITY", "brave,tavily";
+        "BRAVE_SEARCH_API_KEY", "brave-secret"; "TAVILY_API_KEY", "tavily-secret"])
+      ~query:"query" () in
+  expect "Brave partial error envelope falls through without reflecting payloads"
+    (brave_error.provider = "tavily" && match brave_error.failed with
+     | ["brave", reason] -> not (contains reason "secret-echo") &&
+         not (String.contains reason '\027')
+     | _ -> false);
 
   expect_error "malformed JSON response" "malformed search response JSON"
     (fun () -> search ~http:(fun _ -> Ok (200, "{"))

@@ -141,6 +141,13 @@ let () =
     { Protocol.id = "call-second"; name = "write";
       arguments = `Assoc [ "value", `Int 42 ] } ]);
   invalid (fun () -> stream (event (chunk (text "partial"))));
+  List.iter (fun delta ->
+    let empty = Openai_stream.create ~on_text:(fun _ -> ()) () in
+    Openai_stream.feed empty
+      (event (chunk ~finish:(`String "stop") delta) ^ usage_only ^ done_event);
+    invalid (fun () -> Openai_stream.finish empty);
+    assert (Openai_stream.usage empty = None))
+    [`Assoc []; text ""];
   assert ((stream (event (chunk ~finish:(`String "stop") (text "complete"))
     ^ done_event)).content = Some "complete");
   invalid (fun () -> stream

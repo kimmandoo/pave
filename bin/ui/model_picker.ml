@@ -10,8 +10,9 @@ let saved_account_label (account : Pave.Oauth_store.account) =
   match account.credential.account_id with
   | Some id -> "Account ID: " ^ Printf.sprintf "%S" id
   | None -> "Local sign-in ID: " ^ Printf.sprintf "%S" account.selection_id
-let credential ?registry ?route_name ?account_id
+let credential ?registry ?route_name ?account_id ?cancel
     (descriptor : Pave.Provider_catalog.descriptor) =
+  Pave.Provider.check_cancel cancel;
   let registry = Option.value ~default:Pave.Provider_catalog.builtin_registry registry in
   let route_name = Option.value ~default:descriptor.default_route route_name in
   match Pave.Provider_catalog.custom_route registry ~provider:descriptor.id
@@ -55,7 +56,7 @@ let credential ?registry ?route_name ?account_id
                    match authentication, resolve with
                    | Pave.Provider.OAuth, Some resolve ->
                        let (credential : Pave.Provider.credentials) =
-                         resolve ?cancel:(Some (fun () -> false)) () in
+                         resolve ?cancel () in
                        Some (Pave.Model_discovery.OAuth {
                          service; access = credential.access;
                          account_id = credential.account_id;
@@ -77,7 +78,7 @@ let credential ?registry ?route_name ?account_id
                      Some (Pave.Model_discovery.Api_key key)
                    else Option.map (fun resolve ->
                      let (credential : Pave.Provider.credentials) =
-                       resolve ?cancel:(Some (fun () -> false)) () in
+                       resolve ?cancel () in
                      Pave.Model_discovery.Account_api_key {
                        key = credential.access;
                        account_id = Some account.selection_id }) resolve)) in
@@ -338,7 +339,7 @@ let discovery_request ?registry ?http
     Pave.Model_discovery_coordinator.request =
   let registry = Option.value ~default:Pave.Provider_catalog.builtin_registry registry in
   { scope; run = (fun cancel ->
-      let access = credential ~registry ?account_id:scope.account_id
+      let access = credential ~registry ?account_id:scope.account_id ~cancel
         ~route_name:scope.route descriptor in
       let resolved_account = credential_account_id ~registry
         ~provider:descriptor.id ~route:scope.route access in

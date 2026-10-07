@@ -505,6 +505,16 @@ let execute_tool_calls ?cancel ~visible t calls =
             let execute = match !prepared with
               | Some execute -> execute
               | None -> assert false in
+            let external_tool = List.exists (fun definition ->
+              Protocol.member "name" (Protocol.member "function" definition) =
+                `String call.name) t.external_tools in
+            let cleanup_denied () =
+              if call.name = "browser" && not external_tool then
+                match Tools.cleanup_denied_call ?context:t.workspace_context
+                    ~name:call.name ~args:call.arguments () with
+                | Ok () -> ()
+                | Error reason -> t.on_event
+                    ("Browser action denied; owned-session cleanup failed: " ^ reason) in
             tool_started_at.(index) <- Unix.gettimeofday ();
             Fun.protect ~finally:(fun () ->
               tool_ended_at.(index) <- Unix.gettimeofday ()) (fun () ->
@@ -519,6 +529,7 @@ let execute_tool_calls ?cancel ~visible t calls =
               let shell = call.name = "run_command" || call.name = "start_shell" in
               match resolution with
               | Approval.Denied reason ->
+                  cleanup_denied ();
                   Error ("Error: " ^ reason)
               | (Approval.Allowed | Approval.Requires_prompt _) as resolved ->
                   let reason = match resolved with
@@ -526,9 +537,6 @@ let execute_tool_calls ?cancel ~visible t calls =
                     | Approval.Allowed -> decision.reason
                     | Approval.Denied _ -> assert false in
                   let delegate = call.name = "task" in
-                  let external_tool = List.exists (fun definition ->
-                    Protocol.member "name" (Protocol.member "function" definition) =
-                      `String call.name) t.external_tools in
                   let explicit_prompt = external_tool || Tools.requires_explicit_approval
                     ~name:call.name ~args:call.arguments in
                   (* Command grants authorize ordinary shell execution only,
@@ -604,10 +612,11 @@ let execute_tool_calls ?cancel ~visible t calls =
                            | `String command -> t.approve_command command
                            | _ -> false)
                       | None -> false in
-                  if not approved then
+                  if not approved then (
+                    cleanup_denied ();
                     Error (if shell then
                       "Error: command not approved"
-                      else "Error: tool approval denied")
+                      else "Error: tool approval denied"))
                   else (
                     if external_tool || Tools.non_reversible_tool
                       ~name:call.name ~args:call.arguments then (
@@ -776,8 +785,7 @@ let call_tool ?cancel t ~name ~args =
           t.scoped_pending
     else t.scoped_pending in
   append t (Protocol.user ("/" ^ name ^ " " ^ Yojson.Basic.to_string args));
-  append t { (Protocol.user "") with role = "assistant"; content = None;
-    tool_calls = [call] };
+  append t (Protocol.direct_tool_message call);
   execute_tool_calls ?cancel ~visible t [call];
   match t.history_rev with
   | result :: _ when result.Protocol.tool_call_id = Some id ->
@@ -923,16 +931,13 @@ let run ?(max_turns = 20) ?cancel ?(attachments = []) t text =
     Provider.check_cancel cancel;
     match reply.tool_calls with
     | [] ->
-        (* An empty assistant turn is rejected when history is replayed
-           (Anthropic, Responses, Chat Completions), so it is not retained. *)
-        if Option.value ~default:"" reply.content = "" then
-          t.on_event "The model finished without a reply."
-        else append t reply;
         (match reply.content with
-         | Some text -> (match t.secret_mask with
-             | Some mask -> Secret_mask.redact mask text
-             | None -> text)
-         | None -> "")
+         | Some text when text <> "" ->
+             append t reply;
+             (match t.secret_mask with
+              | Some mask -> Secret_mask.redact mask text
+              | None -> text)
+         | _ -> raise (Protocol.Invalid_response "empty assistant response"))
     | calls ->
         append t reply;
         execute_tool_calls ?cancel ~visible t calls;

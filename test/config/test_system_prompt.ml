@@ -103,4 +103,7 @@ let () =
       ~template_file:strict_file ());
     invalid (fun () -> Prompt.load ~root ~mobile:"SAFETY" ~project:"AGENTS"
       ~append_text:"bad\000append" ()));
+  invalid (fun () -> Prompt.render_template
+    ~root:(String.make 4096 'r')
+    (String.concat "" (List.init 65 (fun _ -> "{{root}}"))));
   print_endline "system prompt: ok"

@@ -18,6 +18,54 @@ let empty : Plugin_registry.capabilities =
   { skills = []; commands = []; tools = [] }
 
 let () =
+  let result = `Assoc ["ok", `Bool true] in
+  let response = Yojson.Basic.to_string (`Assoc [
+    "jsonrpc", `String "2.0"; "id", `Int 1; "result", result]) in
+  List.iter (fun newline ->
+    let line = "data: " ^ response ^ newline in
+    check "MCP SSE accepts every standard line ending"
+      (Mcp_http.sse_response 1 (line ^ newline) = Some result);
+    check "MCP SSE does not accept an unfinished event"
+      (Mcp_http.sse_response 1 line = None))
+    ["\n"; "\r"; "\r\n"];
+  check "MCP SSE accepts its initial UTF-8 BOM"
+    (Mcp_http.sse_response 1 ("\239\187\191data: " ^ response ^ "\r\r") =
+      Some result);
+  check "CR is a line boundary rather than discarded data"
+    (Mcp_http.sse_response 1 ("da\rta: " ^ response ^ "\n\n") = None);
+  let notification = {|{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}|} in
+  check "MCP SSE preserves notification ordering and multiline data"
+    (Mcp_http.sse_response 1 ("data: " ^ notification ^ "\r\n\r\n" ^
+       "data: {\"jsonrpc\":\"2.0\",\rdata: \"id\":1,\"result\":{\"ok\":true}}\r\r") =
+      Some result);
+  let schema = `Assoc [
+    "type", `String "object";
+    "properties", `Assoc ["text", `Assoc [
+      "type", `String "string"; "maxLength", `Int 1]];
+    "required", `List [`String "text"]; "additionalProperties", `Bool false] in
+  List.iter (fun text ->
+    Mcp_client.validate_arguments ~schema (`Assoc ["text", `String text]))
+    ["한"; "😀"; ""];
+  List.iter (fun text ->
+    check "MCP string bounds count Unicode scalars and reject malformed text"
+      (match Mcp_client.validate_arguments ~schema (`Assoc ["text", `String text]) with
+       | exception Mcp_client.Error _ -> true | _ -> false))
+    ["한글"; "e\204\129"; "\255"];
+  let transport = Mcp_http.create "https://example.test/mcp" in
+  Mutex.lock transport.lock;
+  Fun.protect ~finally:(fun () -> Mutex.unlock transport.lock) (fun () ->
+    check "MCP HTTP cancellation covers lock acquisition"
+      (match Mcp_http.request transport ~method_:"initialize" ~params:(`Assoc [])
+        ~timeout_seconds:1. ~cancelled:(fun () -> true) with
+       | exception Mcp_http.Cancelled -> true | _ -> false);
+    check "MCP HTTP deadline covers lock acquisition"
+      (match Mcp_http.request transport ~method_:"initialize" ~params:(`Assoc [])
+        ~timeout_seconds:0.01 ~cancelled:(fun () -> false) with
+       | exception Mcp_http.Error _ -> true | _ -> false);
+    check "cancelled and expired waiters never allocate request IDs"
+      (transport.next_id = 1))
+
+let () =
   let base = Filename.temp_file "pave-extensions-" "" in
   Unix.unlink base;
   Unix.mkdir base 0o700;
@@ -73,3 +121,66 @@ let () =
       (match Mcp_config.load ~root ~owner:"test-session" with
        | exception Mcp_config.Error _ -> true | _ -> false);
     print_endline "private plugin lifecycle and MCP config boundaries: ok")
+
+let http_response_fixture ~extra_bytes callback =
+  let socket = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
+  Unix.bind socket (Unix.ADDR_INET (Unix.inet_addr_loopback, 0));
+  Unix.listen socket 1;
+  let port = match Unix.getsockname socket with
+    | Unix.ADDR_INET (_, port) -> port | _ -> assert false in
+  let child = Unix.fork () in
+  if child = 0 then (
+    let code = try
+      let peer, _ = Unix.accept socket in
+      Unix.close socket;
+      let input = Unix.in_channel_of_descr peer in
+      ignore (input_line input);
+      let rec request_headers length =
+        let line = input_line input in
+        if line = "\r" || line = "" then length
+        else
+          let length = match String.index_opt line ':' with
+            | Some colon when String.lowercase_ascii (String.sub line 0 colon) =
+                "content-length" ->
+                int_of_string (String.trim (String.sub line (colon + 1)
+                  (String.length line - colon - 1)))
+            | _ -> length in
+          request_headers length in
+      let length = request_headers 0 in
+      ignore (really_input_string input length);
+      let body = {|{"jsonrpc":"2.0","id":1,"result":{"ok":true}}|} in
+      let output = Unix.out_channel_of_descr peer in
+      output_string output (Printf.sprintf
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s"
+        (String.length body + extra_bytes) body);
+      flush output;
+      Unix.shutdown peer Unix.SHUTDOWN_SEND;
+      close_out_noerr output;
+      close_in_noerr input;
+      0
+    with _ -> 1 in
+    Unix._exit code)
+  else (
+    Unix.close socket;
+    Fun.protect ~finally:(fun () ->
+      (try Unix.kill child Sys.sigkill with Unix.Unix_error _ -> ());
+      let rec reap () = try ignore (Unix.waitpid [] child) with
+        | Unix.Unix_error (Unix.EINTR, _, _) -> reap ()
+        | Unix.Unix_error (Unix.ECHILD, _, _) -> () in
+      reap ()) (fun () ->
+      let transport = Mcp_http.create ~allow_loopback_http:true
+        (Printf.sprintf "http://127.0.0.1:%d/mcp" port) in
+      callback transport))
+
+let () =
+  http_response_fixture ~extra_bytes:0 (fun transport ->
+    check "MCP HTTP accepts a complete successful JSON transfer"
+      (Mcp_http.request transport ~method_:"initialize" ~params:(`Assoc [])
+         ~timeout_seconds:2. ~cancelled:(fun () -> false) =
+       `Assoc ["ok", `Bool true]));
+  http_response_fixture ~extra_bytes:20 (fun transport ->
+    check "MCP HTTP rejects valid JSON received through a truncated transfer"
+      (match Mcp_http.request transport ~method_:"initialize" ~params:(`Assoc [])
+        ~timeout_seconds:2. ~cancelled:(fun () -> false) with
+       | exception Mcp_http.Error _ -> not transport.initialized
+       | _ -> false))

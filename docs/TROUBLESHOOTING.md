@@ -1,5 +1,47 @@
 # Troubleshooting
 
+### [2026-10-07] Local tools were mistaken for signed provider turns and empty replies succeeded
+
+- **Context / Symptom:** A direct local call followed by Gemini inference failed with `Gemini tool turns require native thought signatures`. Empty Chat/Responses/Anthropic replies could settle usage or report success; an actual local-engine CLI returned exit 0 for an empty SSE answer.
+- **Root Cause:** Direct operations were stored as unsigned synthetic assistant calls without local provenance. Response validation deferred empty-answer rejection until after provider settlement, and the Agent retained a benign empty-success branch.
+- **Solution:** Recorded explicit local-origin provenance and projected exact adjacent local results into attributed untrusted user text/media before completion and native compaction admission. Kept original durable lifecycle rows, preserved genuine signatures, excluded local operations from last-used-model/native-state classification, and rejected empty standalone replies before usage settlement.
+- **Prevention / Reference:** A compiled API smoke performed a real file read, continued through a Gemini wire fixture and reopened the journal without unsigned function replay. The actual CLI changed from exit 0 to exit 1 on the same framed empty response. Native media, orphan-state and empty-usage regressions cover the boundaries; no live vendor inference was inferred.
+
+### [2026-10-07] OAuth nesting ownership leaked across systhreads
+
+- **Context / Symptom:** A contender entered the OAuth credential-store critical section while another thread held its lock. Refresh/read-modify-write operations could race even within one OCaml domain.
+- **Root Cause:** `Domain.DLS` nesting state is shared by systhreads on that domain, so it was not a thread-ownership token.
+- **Solution:** Bound lock reentry to the actual atomic owner-thread/path identity; retained cross-process file locking and cancellation/deadline limits.
+- **Prevention / Reference:** The runtime smoke admitted same-thread reentry, refused a competing thread before its deadline and completed 160 serialized updates from four threads. The credential-store suite also checks competing writes. Use actual owner identity, not domain-local storage, for systhread-reentrant locks.
+
+### [2026-10-07] Tool inspection, command grants and bounded scans diverged from admission
+
+- **Context / Symptom:** `/tools` required unrelated provider credentials, busy turns blocked argument help, and disabled local tools became “Unknown tool.” Memory/security/shell toggles claimed unavailable tools were enabled. Actual `yolo` PTYs wrote and closed managed stdin without consent. Scoped `./src/` search missed `nested/*.swift`; a single file over 1 MiB aborted the whole credential scan.
+- **Root Cause:** Inspection constructed an authenticated agent and used only filtered external schemas. Startup gates and literal-shell safety were not applied consistently; process mutation names were absent from mandatory approval classification. Search globs matched workspace prefixes, and the security scan promoted an individual size ceiling to a whole-scan failure.
+- **Solution:** Inspected local schemas without credentials, allowed read-only help while busy, retained disabled external details and disclosed startup/session/model/plugin constraints. Required separate input/close/kill consent and literal-safe exact grants. Matched globs relative to the selected scope, propagated cancellation/budgets and skipped oversized scan files with explicit incomplete evidence.
+- **Prevention / Reference:** Actual color/`NO_COLOR` PTYs paged schemas, preserved the recent model, blocked busy execution, retained denied process input/state and exposed scoped matches. Expanding exact commands offered one-call approval without permanent consent; quoted literal grants remained usable. Oversized scans returned bounded JSON with `truncated: true`, not a complete-scan claim.
+
+### [2026-10-07] Saved Hub inspection mutated journals and saturated shutdown could deadlock
+
+- **Context / Symptom:** Starting `pave hub --session` on an unresolved 429-byte fixture appended recovery data and grew it to 1,054 bytes. Read-only POST refusal reported HTTP 500. A full 4,096-notice runner timed out while closing, and remote cancellation could be dropped at that ceiling.
+- **Root Cause:** Saved Hub startup used the mutating recovery loader. Expected admission refusals shared the internal-failure status. Shutdown joined a producer that was blocked waiting for queue space; remote cancellation used best-effort delivery.
+- **Solution:** Validated admission with preview and loaded the saved journal without migration/recovery. Returned HTTP 409 for refused admission, retaining HTTP 202 for acceptance and HTTP 500 for unexpected exceptions. Drained terminal outcomes until the producer finished, admitted exact-turn cancellation losslessly and accounted actual typed payload bytes.
+- **Prevention / Reference:** Real Hub GET plus refused prompt/cancel POST left the original SHA-256 and unresolved cursor unchanged and returned 409 without stopping service. Saturated shutdown, remote cancellation, payload accounting, attachment order, recovery order and concurrent job delivery have behavior regressions.
+
+### [2026-10-07] Cancelled LSP initialization permanently disabled the private manager
+
+- **Context / Symptom:** The original tool dispatch ignored startup cancellation. After cancellation propagation was repaired, an actual PTY reclaimed a delayed server promptly but the next approved start and definition request both failed with `LSP manager is closed`.
+- **Root Cause:** Initialization failure reused the permanent manager-disposal flag, conflating one failed connection with final session teardown. Its reader also retained that failed connection's error.
+- **Solution:** Closed/terminated and joined the failed owned connection, cleared its error/capabilities and left an uninitialized manager eligible for a new explicit start. Explicit manager disposal remains final; no automatic retry was added.
+- **Prevention / Reference:** The delayed helper was cancelled/reaped within the 0.81-second observation window, then the same private context separately approved real clangd startup, resolved a C definition and shut down. The regression rejects an unapproved restart before admitting the fresh reviewed server. Deferred DAP launch additionally passed an actual TUI fixture with denied then separately approved configuration and correlated replies.
+
+### [2026-10-07] Persisted mobile and external protocol evidence lacked exact boundaries
+
+- **Context / Symptom:** A rebuilt APK at the same path could retain scenario eligibility; Android locale syntax/output and crash ownership, SwiftPM multi-digit test counts and observation/performance validation had source-confirmed mismatches. Browser/catalog, MCP and helper cancellation/framing could turn partial data into success or leave owned resources alive.
+- **Root Cause:** Several identities and parsers relied on paths, substring evidence or byte counts rather than exact build/project ownership, complete framing and the advertised JSON Schema semantics.
+- **Solution:** Bound scenario v2 to canonical project and checked artifact bytes; refused unverifiable v1 replay with re-save guidance. Corrected locale/device/crash/test-count evidence, PNG/XML admission and performance ceilings. Applied complete successful transport framing, cancellation-aware lock/write/read budgets, fresh/stale diagnostic rules, Unicode-scalar external string limits and owned resource cleanup.
+- **Prevention / Reference:** Mobile, browser, search, LSP/DAP/eval/SSH/native-service and extension regressions run in the full suite. Re-save v1 scenarios against the current approved app; interrupted SFTP writes may leave partial remote files because they are not atomic replacements. Fixture results do not establish real SDK/device, public relay, remote SSH or browser-service acceptance.
+
 ### [2026-10-07] Tool registration, slash discovery and Portal readiness diverged
 
 - **Context / Symptom:** `publish_web` and mobile tool names could not be invoked as slash commands. Android lifecycle `target_name`/`port` were required by dispatch but rejected by the advertised schema. Initial actual TUI smoke also revealed argument help clipped into one footer line and direct local calls blocked by unrelated provider endpoint resolution.

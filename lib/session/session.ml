@@ -156,8 +156,17 @@ let entry_json entry =
        if inline <> [] then
          ["attachments", `List (List.map Protocol.attachment_to_json inline)]
        else []) @
-      (if references <> [] then
-        ["attachmentRefs", `List (List.map reference_json references)] else [])) in
+      (if references = [] then [] else
+        let inline_count = List.length message.attachments - List.length references in
+        let next_inline = ref 0 and next_reference = ref inline_count in
+        let order = List.map (fun (attachment : Protocol.attachment) ->
+          let next = if String.length attachment.data <= 65536 then next_inline
+            else next_reference in
+          let index = !next in
+          incr next;
+          `Int index) message.attachments in
+        ["attachmentOrder", `List order;
+         "attachmentRefs", `List (List.map reference_json references)])) in
   match entry.kind with
   | Message message -> serialize_message message []
   | Message_artifact (message, references) ->
@@ -833,6 +842,7 @@ let retry_candidate t =
     | { kind = Job_delivery _; _ } :: rest
     | { kind = Title _; _ } :: rest
     | { kind = Label _; _ } :: rest
+    | { kind = Stage _; _ } :: rest
     | { kind = Pin _; _ } :: rest -> find rest
     | { kind = Reset_boundary; _ } :: _ -> None
     | _ -> None in
@@ -932,20 +942,22 @@ let unresolved_tool_calls entries =
     | Mode_change _ | Title _ | Label _ | Pin _ | Usage _ | Branch
     | Workflow_goal _ | Interruption_rule _
     | Job_started _ | Job_delivery _ | Session_exit _ | Stage _ -> ()) entries;
-  List.rev !pending
+  !pending
 
 let missing_results entries = unresolved_tool_calls entries
 
+let append_entry_unlocked t kind =
+  let entry = { id = fresh_id (); parent_id = t.leaf; timestamp = timestamp ();
+                step = t.next_step; kind } in
+  append_line t (entry_json entry);
+  t.next_step <- t.next_step + 1;
+  t.records_rev <- entry :: t.records_rev;
+  Hashtbl.add t.by_id entry.id entry;
+  t.leaf <- Some entry.id;
+  entry
+
 let append_entry t kind =
-  Mutex.protect t.guard (fun () ->
-    let entry = { id = fresh_id (); parent_id = t.leaf; timestamp = timestamp ();
-                  step = t.next_step; kind } in
-    append_line t (entry_json entry);
-    t.next_step <- t.next_step + 1;
-    t.records_rev <- entry :: t.records_rev;
-    Hashtbl.add t.by_id entry.id entry;
-    t.leaf <- Some entry.id;
-    entry)
+  Mutex.protect t.guard (fun () -> append_entry_unlocked t kind)
 
 
 let recovery_result (call : pending_tool_call) =
@@ -1066,12 +1078,13 @@ let append_job_started t ~job_id ~label ~job_kind =
   if not (valid_hex_id job_id && valid_text_field 256 label &&
           valid_text_field 128 job_kind) then invalid "invalid job start";
   let owner = session_id t in
-  if List.exists (fun entry -> match entry.kind with
-    | Job_started start -> start.owner = owner && start.job_id = job_id
-    | _ -> false) (entries t) then None
-  else (
-    ignore (append_entry t (Job_started { owner; job_id; label; job_kind }));
-    Some job_id)
+  Mutex.protect t.guard (fun () ->
+    if List.exists (fun entry -> match entry.kind with
+      | Job_started start -> start.owner = owner && start.job_id = job_id
+      | _ -> false) t.records_rev then None
+    else (
+      ignore (append_entry_unlocked t (Job_started { owner; job_id; label; job_kind }));
+      Some job_id))
 
 let append_job_delivery t delivery =
   let { owner; job_id; label; summary; artifact; _ } = delivery in
@@ -1086,13 +1099,13 @@ let append_job_delivery t delivery =
       invalid "invalid or unauthorized job artifact";
     try ignore (Session_artifact.read t.artifacts ~owner:artifact_owner ~id)
     with Session_artifact.Error message -> invalid message) artifact;
-  match List.find_opt (fun entry -> match entry.kind with
-    | Job_delivery existing -> existing.owner = owner && existing.job_id = job_id
-    | _ -> false) (entries t) with
-  | Some _ -> None
-  | None ->
-      ignore (append_entry t (Job_delivery delivery));
-      Some job_id
+  Mutex.protect t.guard (fun () ->
+    if List.exists (fun entry -> match entry.kind with
+      | Job_delivery existing -> existing.owner = owner && existing.job_id = job_id
+      | _ -> false) t.records_rev then None
+    else (
+      ignore (append_entry_unlocked t (Job_delivery delivery));
+      Some job_id))
 
 
 let record_tool_event t ~call_id ~name ?elapsed_ms state =
@@ -1312,7 +1325,7 @@ let load_journal path =
           then invalid "invalid artifact owner authorization";
           parsed
       | _ -> invalid "invalid artifact owner authorization" in
-    let materialize entry = match entry.kind with
+    let materialize json entry = match entry.kind with
       | Message_artifact (message, references) when references <> [] ->
           let attachments = List.map (fun (reference : attachment_reference) ->
             if not (List.mem reference.owner authorized) then
@@ -1330,10 +1343,22 @@ let load_journal path =
                 invalid "attachment reference size mismatch";
               { Protocol.name = reference.name; mime_type = reference.mime_type; data }
             with Session_artifact.Error message -> invalid message) references in
-          (try Protocol.validate_attachments (message.attachments @ attachments)
+          let attachments = message.attachments @ attachments in
+          let attachments = match Protocol.member "attachmentOrder" json with
+            | `Null -> attachments
+            | `List order when List.length order = List.length attachments ->
+                let items = Array.of_list attachments in
+                let seen = Array.make (Array.length items) false in
+                List.map (function
+                  | `Int index when index >= 0 && index < Array.length items &&
+                      not seen.(index) ->
+                      seen.(index) <- true;
+                      items.(index)
+                  | _ -> invalid "invalid attachment order") order
+            | _ -> invalid "invalid attachment order" in
+          (try Protocol.validate_attachments attachments
            with Protocol.Invalid_response _ -> invalid "invalid referenced attachments");
-          { entry with kind = Message_artifact ({ message with attachments =
-              message.attachments @ attachments }, references) }
+          { entry with kind = Message_artifact ({ message with attachments }, references) }
       | Job_delivery { artifact = Some (owner, id); _ } ->
           if not (List.mem owner authorized) then invalid "unauthorized job artifact";
           (try ignore (Session_artifact.read artifacts ~owner ~id)
@@ -1346,7 +1371,8 @@ let load_journal path =
     let leaf = ref None in
     let next_step = ref 1 in
     (try while true do
-      let entry = materialize (parse_entry ~step:!next_step (read_json ())) in
+      let json = read_json () in
+      let entry = materialize json (parse_entry ~step:!next_step json) in
       incr next_step;
       if Hashtbl.mem seen_ids entry.id then invalid "duplicate entry ID";
       Hashtbl.add seen_ids entry.id ();

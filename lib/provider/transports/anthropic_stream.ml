@@ -263,6 +263,8 @@ let finish t =
      | Some ("refusal" | "sensitive" as reason) -> invalid reason
      | Some reason -> invalid ("unsupported stop_reason: " ^ reason)
      | None -> assert false);
+    if calls = [] && Buffer.length text = 0 then
+      invalid "empty assistant response";
     let provider_state =
       let blocks = List.rev !state_blocks in
       if t.model <> "" &&

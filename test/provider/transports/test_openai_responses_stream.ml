@@ -40,6 +40,16 @@ let () =
     "call_id", `String "call_1"; "name", `String "read_file";
     "arguments", `String "" ] in
   let final_call = call "fc_1" "call_1" "read_file" {|{"path":"a.txt"}|} in
+  List.iter (fun outputs ->
+    let empty = Openai_responses_stream.create ~on_text:(fun _ -> ()) () in
+    (match Openai_responses_stream.feed empty
+      (event "response.completed" ["response", `Assoc [
+        "status", `String "completed"; "output", `List outputs;
+        "usage", `Assoc ["input_tokens", `Int 2; "output_tokens", `Int 1]]]) with
+     | exception Protocol.Invalid_response _ -> ()
+     | _ -> failwith "empty Responses stream was accepted");
+    assert (Openai_responses_stream.usage empty = None))
+    [[]; [message "empty" ""]];
   let wire = ": heartbeat\r\n\r\n"
     ^ added 0 initial_message
     ^ indexed "response.output_text.delta" 0 "msg_1" [

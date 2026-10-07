@@ -84,7 +84,8 @@ let no_tests output =
   let contains fragment =
     let rec find i =
       i + String.length fragment <= String.length output &&
-      (String.sub output i (String.length fragment) = fragment ||
+      ((String.sub output i (String.length fragment) = fragment &&
+        (i = 0 || match output.[i - 1] with '0'..'9' -> false | _ -> true)) ||
        find (i + 1)) in
     find 0 in
   List.exists contains ["Executed 0 tests"; "0 tests passed";

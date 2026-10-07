@@ -268,6 +268,9 @@ let parse_completion json =
     | `String "reasoning" -> ()
     | `String _ -> () (* server tool calls and future item kinds *)
     | _ -> invalid "malformed output item") outputs;
-  { role = "assistant"; content = (match List.rev !texts with
-      | [] -> None | texts -> Some (String.concat "" texts));
+  let content = match List.rev !texts with
+    | [] -> None | texts -> Some (String.concat "" texts) in
+  if !calls = [] && (content = None || content = Some "") then
+    invalid "empty assistant response";
+  { role = "assistant"; content;
     tool_calls = List.rev !calls; tool_call_id = None; tool_result_content = None; provider_state = None; attachments = [] }

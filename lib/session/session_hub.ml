@@ -68,7 +68,7 @@ let reason status =
   match status with
   | 200 -> "OK" | 202 -> "Accepted" | 400 -> "Bad Request"
   | 403 -> "Forbidden" | 404 -> "Not Found" | 405 -> "Method Not Allowed"
-  | 408 -> "Request Timeout" | 411 -> "Length Required"
+  | 408 -> "Request Timeout" | 409 -> "Conflict" | 411 -> "Length Required"
   | 413 -> "Content Too Large" | 431 -> "Request Header Fields Too Large"
   | 500 -> "Internal Server Error" | 501 -> "Not Implemented"
   | 503 -> "Service Unavailable" | _ -> "Error"
@@ -265,7 +265,7 @@ let parse_text_field body =
 let submit_result ~deadline client callbacks submission =
   match callbacks.submit submission with
   | Ok () -> write_response ~deadline client 202 (`Assoc [ "queued", `Bool true ])
-  | Error message -> write_response ~deadline client 500 (json_error message)
+  | Error message -> write_response ~deadline client 409 (json_error message)
 
 let route ~deadline t client request =
   let write_response = write_response ~deadline in
@@ -352,7 +352,7 @@ let serve_client t client =
          let a client drip bytes forever and pin a handler slot. *)
       let deadline = Unix.gettimeofday () +. request_deadline in
       let safe_write status json =
-        try write_response client status json with _ -> () in
+        try write_response ~deadline client status json with _ -> () in
       try
         let request = read_request ~deadline client in
         if Unix.gettimeofday () > deadline then

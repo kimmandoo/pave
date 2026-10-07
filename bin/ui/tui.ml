@@ -208,10 +208,7 @@ let ui_event_size = function
   | Agent_event (Pave.Turn_runner.Transcript_message { text; _ })
   | Background_message text -> String.length text
   | Agent_event (Pave.Turn_runner.Tool_event { event; _ }) ->
-      (match event with
-       | Pave.Agent.Tool_settled { result; _ }
-       | Pave.Agent.Tool_aborted { result; _ } -> String.length result
-       | _ -> 64)
+      Pave.Turn_runner.tool_event_bytes event + 64
   | Shutdown | Terminal_event _ -> 0
   | User_prompt { text; attachments } ->
       List.fold_left (fun bytes (item : Pave.Protocol.attachment) ->
@@ -3270,7 +3267,7 @@ let allow_once_option = "y", "Allow once", "Runs this call only · later calls a
 
 let persistent_command_grant command =
   match Pave.Approval.shell_segments command with
-  | Some [_] -> true
+  | Some [_] -> Pave.Approval.shell_expansion_safe command
   | _ -> false
 
 let confirm_command ?(always = true) t command =

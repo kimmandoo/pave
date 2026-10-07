@@ -34,6 +34,12 @@ let () =
         "Test Suite 'Selected tests' passed. Executed 0 tests, with 0 failures.\n");
       assert (not (Pave.Workspace_swiftpm_focus.no_tests
         "Test Suite 'Selected tests' passed. Executed 1 test, with 0 failures.\n"));
+      assert (Pave.Workspace_swiftpm_focus.no_tests
+        "✔ Test run with 0 tests passed after 0.001 seconds.\n");
+      List.iter (fun count ->
+        assert (not (Pave.Workspace_swiftpm_focus.no_tests
+          (Printf.sprintf "✔ Test run with %d tests passed after 0.001 seconds.\n" count))))
+        [1; 10; 20; 100; 200];
       Unix.symlink root (Filename.concat root "linked");
       assert (try ignore (Pave.Workspace_swiftpm_focus.command
         ~root ~subroot:"linked" ~action:"discover" ~target:""); false

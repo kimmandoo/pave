@@ -163,14 +163,16 @@ let after_prefix prefix line =
 
 let launch_metrics output =
   let names = ["ThisTime"; "TotalTime"; "WaitTime"] in
+  let lines = String.split_on_char '\n' output in
   let metrics = List.filter_map (fun name ->
-    match List.find_map (after_prefix (name ^ ":")) (String.split_on_char '\n' output) with
-    | None -> None
-    | Some value ->
+    match List.filter_map (after_prefix (name ^ ":")) lines with
+    | [] -> None
+    | [value] ->
         let length = String.length value in
         let amount = if length >= 2 && String.sub value (length - 2) 2 = "ms"
           then String.trim (String.sub value 0 (length - 2)) else value in
-        Some { name; value = parse_float name amount; unit = "ms" }) names in
+        Some { name; value = parse_float name amount; unit = "ms" }
+    | _ -> fail ("launch output contains duplicate " ^ name ^ " samples")) names in
   if not (List.exists (fun metric -> metric.name = "TotalTime") metrics) then
     fail "launch output is missing TotalTime";
   metrics
@@ -229,6 +231,7 @@ let frame_metrics output =
     line <> "" && String.contains line ',' &&
     not (String.starts_with ~prefix:"---" line)) in
   if rows = [] then fail "gfxinfo output contains no frame samples";
+  if List.length rows > max_frames then fail "gfxinfo output exceeds its frame sample limit";
   let samples = List.map (fun row ->
     let fields = csv_fields row in
     if List.length fields <> List.length columns then fail "malformed or truncated gfxinfo frame sample";

@@ -101,7 +101,9 @@ let scan ?(cancel = fun () -> false) ?(file_limit = max_files)
           match stat.Unix.st_kind with
           | Unix.S_DIR when not (path_excluded rel) -> walk rel
           | Unix.S_REG when not (path_excluded rel) ->
-              if !files >= file_limit then truncated := true else (
+              if stat.Unix.st_size > max_file_bytes || !files >= file_limit then
+                truncated := true
+              else (
                 incr files;
                 let contents = read_file path in
                 let digest = sha256 contents in

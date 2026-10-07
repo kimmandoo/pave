@@ -51,10 +51,40 @@ let () =
     Env.preview app ~build_hash ~setting:(Env.Theme Env.Dark) ~before_output:"night");
   rejects "invalid locale value" (fun () ->
     Env.preview app ~build_hash ~setting:(Env.Locale "en;bad")
-      ~before_output:"Locales for app dev.example: []");
+      ~before_output:"Locales for dev.example for user 0 are []\n");
   rejects "unsupported iOS" (fun () ->
     Env.preview (session ~platform:Run.Ios ()) ~build_hash
       ~setting:(Env.Theme Env.Dark) ~before_output:"Night mode: no");
+  expect "newline-terminated theme state accepted"
+    ((Env.preview app ~build_hash ~setting:(Env.Theme Env.Dark)
+      ~before_output:"Night mode: no\r\n").before = Env.Theme_value Env.Light);
+  expect "newline-terminated orientation state accepted"
+    ((Env.preview app ~build_hash ~setting:(Env.Orientation Env.Landscape)
+      ~before_output:"1\r\n2\r\n").before = Env.Orientation_value (true, 2));
+  let locale = Env.preview app ~build_hash ~setting:(Env.Locale "fr-FR")
+    ~before_output:"Locales for dev.example for user 0 are [en-US,de-DE]\n" in
+  expect "locale list retained for exact restoration"
+    (locale.before = Env.Locale_value "en-US,de-DE");
+  expect "locale package precedes options"
+    (locale.observe_command = Env.adb app
+      ("cmd locale get-app-locales " ^ Filename.quote app.app_id ^ " --user current"));
+  expect "locale mutation package precedes options"
+    (locale.change_command = Env.adb app
+      ("cmd locale set-app-locales " ^ Filename.quote app.app_id ^
+       " --user current --locales " ^ Filename.quote "fr-FR"));
+  expect "empty app locale list is an observed value"
+    ((Env.preview app ~build_hash ~setting:(Env.Locale "en")
+      ~before_output:"Locales for dev.example for user 0 are []\n").before = Env.Locale_value "");
+  List.iter (fun output ->
+    rejects "missing, foreign or malformed locale observation" (fun () ->
+      Env.preview app ~build_hash ~setting:(Env.Locale "en") ~before_output:output))
+    [""; "\n"; "Locales for dev.other for user 0 are [en]\n";
+     "Locales for dev.example for user current are [en]";
+     "Locales for dev.example for user 0 are [en,,de]";
+     "Night mode: no\nunexpected"];
+  rejects "non-running app environment preview" (fun () ->
+    Env.preview { app with state = Run.Stopped } ~build_hash
+      ~setting:(Env.Theme Env.Dark) ~before_output:"Night mode: no\n");
   cancelled := true;
   let before_cancel = List.length !changes in
   rejects "cancellation before transition" (fun () ->

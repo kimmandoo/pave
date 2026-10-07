@@ -53,6 +53,9 @@ let poll ?get ?(now = Unix.gettimeofday) ?(sleep = fun seconds ->
     let status, body = match get ~url ~headers:["Accept", "application/json"] with
       | Ok response -> response
       | Error _ -> fail "Kilo device approval request failed" in
+    let current = now () in
+    if not (Float.is_finite current) || current >= auth.expires_at then
+      fail "Kilo device authorization expired";
     if status = 202 then (
       sleep (min 5. (auth.expires_at -. current)); await (remaining - 1))
     else if status = 403 then fail "Kilo device authorization denied"

@@ -72,6 +72,13 @@ let browser_variable = Web_search.browser_variable
 
 let check_cancel cancel = if (try cancel () with _ -> true) then raise Cancelled
 
+let with_cancellable_lock cancel lock action =
+  let rec acquire () =
+    check_cancel cancel;
+    if not (Mutex.try_lock lock) then (Thread.delay 0.01; acquire ()) in
+  acquire ();
+  Fun.protect ~finally:(fun () -> Mutex.unlock lock) action
+
 let bounded_text label maximum text =
   if String.length text > maximum || String.contains text '\000' then
     fail (label ^ " exceeds its limit or contains a NUL byte");
@@ -150,17 +157,28 @@ let read_exact ?(idle = 5.) cancel fd buffer offset remaining =
         match Unix.read fd buffer offset remaining with
         | 0 -> fail "browser connection closed unexpectedly"
         | count -> loop (offset + count) (remaining - count)
+        | exception Unix.Unix_error ((Unix.EINTR | Unix.EAGAIN | Unix.EWOULDBLOCK), _, _) ->
+            loop offset remaining
     end in
   loop offset remaining
 
-let write_all fd text =
+let write_all ?(cancel = fun () -> false) fd text =
+  Unix.set_nonblock fd;
+  let deadline = Unix.gettimeofday () +. 5. in
   let rec loop offset =
-    if offset < String.length text then
-      match Unix.write_substring fd text offset (String.length text - offset) with
-      | 0 -> fail "browser connection closed during write"
-      | count -> loop (offset + count)
-      | exception Unix.Unix_error (Unix.EINTR, _, _) -> loop offset
-  in
+    if offset < String.length text then begin
+      check_cancel cancel;
+      if Unix.gettimeofday () >= deadline then
+        fail "browser connection timed out writing data";
+      let _, writable, _ = Unix.select [] [fd] [] 0.05 in
+      if writable = [] then loop offset
+      else
+        match Unix.write_substring fd text offset (String.length text - offset) with
+        | 0 -> fail "browser connection closed during write"
+        | count -> loop (offset + count)
+        | exception Unix.Unix_error ((Unix.EINTR | Unix.EAGAIN | Unix.EWOULDBLOCK), _, _) ->
+            loop offset
+    end in
   loop 0
 
 let read_http_headers cancel fd =
@@ -196,13 +214,14 @@ let connect_ws ?(cancel = fun () -> false) ~port ~path () =
    with Unix.Unix_error _ ->
      close_socket fd;
      fail "browser debugging endpoint is not accepting connections");
+  Unix.set_nonblock fd;
   let key = base64_encode (random_bytes 16) in
   let request =
     "GET " ^ path ^ " HTTP/1.1\r\nHost: 127.0.0.1:" ^ string_of_int port ^
     "\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: " ^ key ^
     "\r\nSec-WebSocket-Version: 13\r\n\r\n" in
   (try
-     write_all fd request;
+     write_all ~cancel fd request;
      let headers = read_http_headers cancel fd in
      let status = match String.index_opt headers ' ' with
        | Some space when String.length headers >= space + 4 ->
@@ -264,7 +283,10 @@ let read_ws_message ?(cancel = fun () -> false) ~limit transport =
       else
         let ext = Bytes.create 8 in
         read_exact cancel transport.fd ext 0 8;
-        Int64.to_int (Bytes.get_int64_be ext 0) in
+        let length = Bytes.get_int64_be ext 0 in
+        if length < 0L || length > Int64.of_int max_ws_message_bytes then
+          fail "browser sent an oversized message";
+        Int64.to_int length in
     if length > max_ws_message_bytes then fail "browser sent an oversized message";
     let mask =
       if masked then begin
@@ -288,8 +310,8 @@ let read_ws_message ?(cancel = fun () -> false) ~limit transport =
     match opcode with
     | 0x8 -> `Closed
     | 0x9 ->
-        with_lock transport.write_lock (fun () ->
-          write_all transport.fd (encode_client_frame ~opcode:0xA body));
+        with_cancellable_lock cancel transport.write_lock (fun () ->
+          write_all ~cancel transport.fd (encode_client_frame ~opcode:0xA body));
         collect ()
     | 0xA -> collect ()
     | (0x0 | 0x1 | 0x2) ->
@@ -299,16 +321,17 @@ let read_ws_message ?(cancel = fun () -> false) ~limit transport =
     | _ -> collect () in
   collect ()
 
-let ws_send transport payload =
+let ws_send ?(cancel = fun () -> false) transport payload =
   if transport.closed then fail "browser debugging connection is closed";
-  with_lock transport.write_lock (fun () ->
-    write_all transport.fd (encode_client_frame ~opcode:0x1 payload))
+  with_cancellable_lock cancel transport.write_lock (fun () ->
+    write_all ~cancel transport.fd (encode_client_frame ~opcode:0x1 payload))
 
 let ws_close transport =
   if not transport.closed then (
     transport.closed <- true;
-    (try write_all transport.fd (encode_client_frame ~opcode:0x8 "")
-     with _ -> ());
+    (* Closing the owned transport must not wait for a blocked writer or
+       send a close frame into an unresponsive peer. *)
+    (try Unix.shutdown transport.fd Unix.SHUTDOWN_ALL with Unix.Unix_error _ -> ());
     close_socket transport.fd)
 
 (* ------------------------------------------------------------------ *)
@@ -318,7 +341,7 @@ let ws_close transport =
    endpoint. [receive] returns the next raw CDP message text; [close] is
    idempotent. Injected by tests to run an in-process fake endpoint. *)
 type connection = {
-  send : string -> unit;
+  send : cancel:(unit -> bool) -> string -> unit;
   receive : cancel:(unit -> bool) -> string;
   close : unit -> unit;
   mutable next_id : int;
@@ -330,7 +353,7 @@ type connection = {
 }
 
 let ws_connection transport =
-  { send = (fun payload -> ws_send transport payload);
+  { send = (fun ~cancel payload -> ws_send ~cancel transport payload);
     receive = (fun ~cancel ->
       match read_ws_message ~cancel ~limit:max_ws_message_bytes transport with
       | `Closed -> fail "browser closed the debugging connection"
@@ -410,7 +433,9 @@ let drain_connection ?(quiet = 0.12) connection =
     loop ())
 
 let send_cdp ?(cancel = fun () -> false) ?session_id connection ~method_ ~params () =
-  with_lock connection.io_lock (fun () ->
+  let deadline = Unix.gettimeofday () +. max_operation_seconds in
+  let bounded_cancel () = cancel () || Unix.gettimeofday () >= deadline in
+  try with_cancellable_lock bounded_cancel connection.io_lock (fun () ->
     let id = connection.next_id in
     connection.next_id <- id + 1;
     let fields =
@@ -420,13 +445,12 @@ let send_cdp ?(cancel = fun () -> false) ?session_id connection ~method_ ~params
       (match session_id with
        | Some session -> ["sessionId", `String session]
        | None -> []) in
-    connection.send (Yojson.Basic.to_string (`Assoc fields));
-    let deadline = Unix.gettimeofday () +. max_operation_seconds in
+    connection.send ~cancel:bounded_cancel (Yojson.Basic.to_string (`Assoc fields));
     let rec wait () =
-      check_cancel cancel;
+      check_cancel bounded_cancel;
       if Unix.gettimeofday () > deadline then
         fail "browser did not answer a command in time";
-      let message = connection.receive ~cancel in
+      let message = connection.receive ~cancel:bounded_cancel in
       (match (try Yojson.Basic.from_string message with _ -> `Null) with
        | `Assoc _ as json when member "id" json = `Int id ->
            (match member "error" json with
@@ -438,6 +462,8 @@ let send_cdp ?(cancel = fun () -> false) ?session_id connection ~method_ ~params
        | `Assoc _ as json -> note_context_event connection json; wait ()
        | _ -> wait ()) in
     wait ())
+  with Cancelled when not (try cancel () with _ -> true) ->
+    fail "browser did not answer a command in time"
 
 (* ------------------------------------------------------------------ *)
 (* Browser process lifecycle                                          *)
@@ -476,7 +502,7 @@ let terminate_child child =
 (* Spawns one pinned executable with a minimal environment, /dev/null stdio
    and its own process group; returns after the exec marker, like other
    session-owned children. *)
-let spawn_browser ~program ~arguments =
+let spawn_browser ?(cancel = fun () -> false) ~program ~arguments () =
   let environment =
     [| "PATH=/usr/bin:/bin"; "LANG=C";
        "HOME=" ^ Filename.get_temp_dir_name () |] in
@@ -509,6 +535,7 @@ let spawn_browser ~program ~arguments =
       (try
          let deadline = Unix.gettimeofday () +. max_ready_seconds in
          let rec wait_exec () =
+           check_cancel cancel;
            let remaining = deadline -. Unix.gettimeofday () in
            if remaining <= 0. then fail "browser startup timed out";
            let readable, _, _ = Unix.select [status_read] [] [] (min 0.1 remaining) in
@@ -548,6 +575,7 @@ and session = {
   operation_lock : Mutex.t;
   mutable closed : bool;
   mutable pending : bool;
+  mutable lifetime_watch : Thread.t option;
   (* Page-declared tool catalog per frame ("frameId\000name" -> untrusted
      rendered record) plus the observed transition log. *)
   mutable native_available : bool;
@@ -740,17 +768,69 @@ let web_tools_hook = {js|
 })();
 |js}
 
-let session_operation ?(cancel = fun () -> false) session action =
-  with_lock session.operation_lock (fun () ->
-    if session.closed then fail "browser session is closed";
-    if Unix.gettimeofday () -. session.created_at > max_session_seconds then
-      fail "browser session exceeded its lifetime bound; close it and open a new session";
-    if Unix.gettimeofday () -. session.last_used_at > max_linger_seconds then
-      fail "browser session expired from inactivity; close it and open a new session";
-    check_cancel cancel;
-    let result = action () in
+let close_session ?expected manager ~id =
+  let id = valid_token "browser session id" 128 id in
+  let session = with_lock manager.lock (fun () ->
+    match Hashtbl.find_opt manager.sessions id with
+    | None -> None
+    | Some session ->
+        if Option.fold ~none:false ~some:(fun expected -> expected != session) expected then
+          None
+        else (
+          Hashtbl.remove manager.sessions id;
+          session.closed <- true;
+          Some session)) in
+  match session with
+  | None -> ()
+  | Some session ->
+      (* Break an in-flight socket wait before acquiring its operation lock. *)
+      Option.iter cdp_close session.connection;
+      with_lock session.operation_lock (fun () ->
+        session.connection <- None;
+        Option.iter terminate_child session.child);
+      Option.iter (fun thread ->
+        if Thread.id thread <> Thread.id (Thread.self ()) then Thread.join thread)
+        session.lifetime_watch
+
+let session_operation ?(cancel = fun () -> false)
+    ?(timeout_seconds = default_operation_seconds) session action =
+  let deadline = Unix.gettimeofday () +. timeout_seconds in
+  let expiry_reason () =
+    let now = Unix.gettimeofday () in
+    if now -. session.created_at >= max_session_seconds then
+      Some "browser session exceeded its lifetime bound"
+    else if now -. session.last_used_at >= max_linger_seconds then
+      Some "browser session expired from inactivity"
+    else if now >= deadline then Some "browser operation exceeded its deadline"
+    else None in
+  let bounded_cancel () =
+    cancel () || session.closed || Option.is_some (expiry_reason ()) in
+  try with_cancellable_lock bounded_cancel session.operation_lock (fun () ->
+    check_cancel bounded_cancel;
+    let result = action bounded_cancel in
+    check_cancel bounded_cancel;
     session.last_used_at <- Unix.gettimeofday ();
     result)
+  with exn ->
+    if session.closed || Option.is_some (expiry_reason ()) ||
+       (try cancel () with _ -> true) || exn = Cancelled then (
+      close_session ~expected:session session.manager ~id:session.id;
+      if (try cancel () with _ -> true) then raise Cancelled;
+      match expiry_reason () with
+      | Some message -> fail (message ^ "; open a new session")
+      | None when session.closed -> fail "browser session is closed"
+      | None -> raise exn)
+    else raise exn
+
+let start_lifetime_watch session =
+  let rec watch () =
+    if not session.closed then (
+      let now = Unix.gettimeofday () in
+      if now -. session.created_at >= max_session_seconds ||
+         now -. session.last_used_at >= max_linger_seconds then
+        close_session ~expected:session session.manager ~id:session.id
+      else (Thread.delay 0.25; watch ())) in
+  session.lifetime_watch <- Some (Thread.create watch ())
 
 let require_connection session =
   match session.connection, session.cdp_session_id with
@@ -828,6 +908,7 @@ let pending_session manager ~id =
     child = None; created_at = Unix.gettimeofday ();
     last_used_at = Unix.gettimeofday ();
     operation_lock = Mutex.create (); closed = false; pending = true;
+    lifetime_watch = None;
     native_available = false; root_frame = ""; catalog = Hashtbl.create 8;
     catalog_events = []; event_sequence = 0; dropped_before = 0 }
 
@@ -869,7 +950,7 @@ let install_bridge ?(cancel = fun () -> false) session =
       (match (try
           Some (send_cdp ~cancel ~session_id:cdp_session connection
             ~method_:"Page.getFrameTree" ~params:(`Assoc []) ())
-        with Error _ | Cancelled -> None) with
+        with Error _ -> None) with
        | None -> ()
        | Some tree ->
            let ids = frame_ids tree in
@@ -892,9 +973,9 @@ let open_session ?(env = Sys.getenv_opt) ?(cancel = fun () -> false)
     | Some spawn -> spawn
     | None ->
         let program = detect_browser ~env () in
-        fun ~cancel:_ ->
+        fun ~cancel ->
           let profile = Filename.temp_dir "pave-browser-" "" in
-          match spawn_browser ~program ~arguments:(browser_arguments ~profile) with
+          match spawn_browser ~cancel ~program ~arguments:(browser_arguments ~profile) () with
           | pid -> { pid; profile }
           | exception exn ->
               (try remove_tree profile with _ -> ());
@@ -906,12 +987,19 @@ let open_session ?(env = Sys.getenv_opt) ?(cancel = fun () -> false)
           let port, ws_path = read_active_port cancel ~profile in
           ws_connection (connect_ws ~cancel ~port ~path:ws_path ()) in
   check_cancel cancel;
+  let reservation = pending_session manager ~id in
+  let owned_slot = ref reservation in
   with_lock manager.lock (fun () ->
     if manager.manager_closed then fail "browser manager is closed";
     if Hashtbl.mem manager.sessions id then fail "browser session id is already in use";
     if Hashtbl.length manager.sessions >= max_sessions then
       fail "browser session limit reached";
-    Hashtbl.replace manager.sessions id (pending_session manager ~id));
+    Hashtbl.replace manager.sessions id reservation);
+  let user_cancel = cancel in
+  let deadline = Unix.gettimeofday () +. max_ready_seconds in
+  let cancel () =
+    user_cancel () || reservation.closed || manager.manager_closed ||
+    Unix.gettimeofday () >= deadline in
   (try
      let child = spawn ~cancel in
      (try
@@ -952,13 +1040,16 @@ let open_session ?(env = Sys.getenv_opt) ?(cancel = fun () -> false)
            (* The preload only covers future documents; install the bridge
               into frames that already exist too. *)
            install_bridge ~cancel session;
+           check_cancel cancel;
            with_lock manager.lock (fun () ->
              match Hashtbl.find_opt manager.sessions id with
-             | Some placeholder when placeholder.pending ->
-                 Hashtbl.replace manager.sessions id session
+             | Some placeholder when placeholder == reservation ->
+                 Hashtbl.replace manager.sessions id session;
+                 owned_slot := session
              | _ ->
                  (* The placeholder was closed meanwhile: drop everything. *)
                  raise (Error "browser session was closed during startup"));
+           start_lifetime_watch session;
            id
          with exn ->
            cdp_close connection;
@@ -967,7 +1058,14 @@ let open_session ?(env = Sys.getenv_opt) ?(cancel = fun () -> false)
         terminate_child child;
         raise exn)
    with exn ->
-     with_lock manager.lock (fun () -> Hashtbl.remove manager.sessions id);
+     with_lock manager.lock (fun () ->
+       match Hashtbl.find_opt manager.sessions id with
+       | Some current when current == !owned_slot -> Hashtbl.remove manager.sessions id
+       | _ -> ());
+     if (try user_cancel () with _ -> true) then raise Cancelled;
+     if Unix.gettimeofday () >= deadline then fail "browser startup exceeded its deadline";
+     if reservation.closed || manager.manager_closed then
+       fail "browser session was closed during startup";
      raise exn)
 
 let lookup manager ~id =
@@ -977,21 +1075,6 @@ let lookup manager ~id =
     | Some session when not session.closed && not session.pending -> session
     | Some _ | None -> fail "browser session is closed or unknown")
 
-let close_session manager ~id =
-  let id = valid_token "browser session id" 128 id in
-  let session = with_lock manager.lock (fun () ->
-    match Hashtbl.find_opt manager.sessions id with
-    | None -> None
-    | Some session ->
-        Hashtbl.remove manager.sessions id;
-        Some session) in
-  match session with
-  | None -> ()
-  | Some session ->
-      with_lock session.operation_lock (fun () -> session.closed <- true);
-      Option.iter cdp_close session.connection;
-      session.connection <- None;
-      Option.iter terminate_child session.child
 
 let close_manager manager =
   let ids = with_lock manager.lock (fun () ->
@@ -1033,7 +1116,7 @@ let navigate ?(cancel = fun () -> false) manager ~id ~url ~timeout_seconds =
   let url = validate_navigation_url url in
   let timeout_seconds = valid_timeout "navigation timeout" timeout_seconds in
   let session = lookup manager ~id in
-  session_operation ~cancel session (fun () ->
+  session_operation ~cancel ~timeout_seconds session (fun cancel ->
     let connection, cdp_session = require_connection session in
     let answer =
       send_cdp ~cancel ~session_id:cdp_session connection
@@ -1073,7 +1156,7 @@ let evaluate ?(cancel = fun () -> false) manager ~id ~expression ~timeout_second
   if String.trim expression = "" then fail "page expression must not be empty";
   let timeout_seconds = valid_timeout "evaluation timeout" timeout_seconds in
   let session = lookup manager ~id in
-  session_operation ~cancel session (fun () ->
+  session_operation ~cancel ~timeout_seconds session (fun cancel ->
     let answer = evaluate_raw ~cancel session ~expression ~timeout_seconds in
     (* Oversized results are truncated, not failed: the page already computed
        them and refusing mid-result would abort otherwise valid work. *)
@@ -1089,7 +1172,7 @@ let evaluate ?(cancel = fun () -> false) manager ~id ~expression ~timeout_second
 
 let observe ?(cancel = fun () -> false) manager ~id =
   let session = lookup manager ~id in
-  session_operation ~cancel session (fun () ->
+  session_operation ~cancel session (fun cancel ->
     let answer =
       evaluate_raw ~cancel session ~timeout_seconds:10.
         ~expression:
@@ -1099,6 +1182,8 @@ let observe ?(cancel = fun () -> false) manager ~id =
     | `Assoc fields ->
         (match field "value" fields with
          | `String text ->
+             if String.length text > max_result_bytes then
+               fail "page observation exceeds its size limit";
              (match (try Yojson.Basic.from_string text with _ -> `Null) with
               | `Assoc fields -> `Assoc (("session", `String id) :: fields)
               | _ -> fail "page observation returned malformed state")
@@ -1107,7 +1192,7 @@ let observe ?(cancel = fun () -> false) manager ~id =
 
 let screenshot ?(cancel = fun () -> false) manager ~id =
   let session = lookup manager ~id in
-  session_operation ~cancel session (fun () ->
+  session_operation ~cancel session (fun cancel ->
     let connection, cdp_session = require_connection session in
     let answer =
       send_cdp ~cancel ~session_id:cdp_session connection
@@ -1189,16 +1274,18 @@ let refresh_catalog ?(cancel = fun () -> false) session =
    | root :: _ -> session.root_frame <- root
    | [] -> ());
   let next = Hashtbl.create 8 in
+  let catalog_bytes = ref 0 in
+  session.native_available <- false;
   List.iter (fun frame_id ->
     let is_root = session.root_frame = frame_id in
     ignore (try
         evaluate_in_frame ~cancel session ~cdp_session ~frame_id
           ~is_root ~expression:web_tools_hook ~timeout_seconds:5.
-      with Error _ | Cancelled -> `Skipped);
+      with Error _ -> `Skipped);
     match (try
         evaluate_in_frame ~cancel session ~cdp_session ~frame_id ~is_root
           ~expression:bridge_snapshot_expression ~timeout_seconds:5.
-      with Error _ | Cancelled -> `Skipped) with
+      with Error _ -> `Skipped) with
     | `Skipped -> ()
     | `Done answer ->
         (match member "result" answer with
@@ -1216,9 +1303,15 @@ let refresh_catalog ?(cancel = fun () -> false) session =
                         | `List tools ->
                             List.iter (fun tool ->
                               let entry = catalog_entry ~frame_id ~origin tool in
-                              Hashtbl.replace next
-                                (catalog_key frame_id (member_string "name" entry))
-                                entry) tools
+                              let bytes = String.length (Yojson.Basic.to_string entry) in
+                              let key = catalog_key frame_id (member_string "name" entry) in
+                              let previous_bytes = match Hashtbl.find_opt next key with
+                                | Some previous -> String.length (Yojson.Basic.to_string previous)
+                                | None -> 0 in
+                              catalog_bytes := !catalog_bytes - previous_bytes + bytes;
+                              if !catalog_bytes > max_result_bytes then
+                                fail "page tool catalog exceeds its size limit";
+                              Hashtbl.replace next key entry) tools
                         | _ -> ())
                    | _ -> ())
               | _ -> ())
@@ -1259,7 +1352,7 @@ let catalog_entries session ?name ?frame () =
    descriptions. *)
 let list_tools ?(cancel = fun () -> false) ?name ?frame manager ~id =
   let session = lookup manager ~id in
-  session_operation ~cancel session (fun () ->
+  session_operation ~cancel session (fun cancel ->
     refresh_catalog ~cancel session;
     let entries = catalog_entries session ?name ?frame () in
     let status = catalog_status session in
@@ -1355,7 +1448,7 @@ let call_tool ?(cancel = fun () -> false) ?frame manager ~id ~name ~arguments
     fail "page tool arguments exceed their size limit";
   let timeout_seconds = valid_timeout "page tool timeout" timeout_seconds in
   let session = lookup manager ~id in
-  session_operation ~cancel session (fun () ->
+  session_operation ~cancel ~timeout_seconds session (fun cancel ->
     refresh_catalog ~cancel session;
     let matches = catalog_entries session ~name ?frame () in
     match matches with
@@ -1420,7 +1513,7 @@ let call_tool ?(cancel = fun () -> false) ?frame manager ~id ~name ~arguments
 
 let tool_events ?(cancel = fun () -> false) ?since ?clear manager ~id =
   let session = lookup manager ~id in
-  session_operation ~cancel session (fun () ->
+  session_operation ~cancel session (fun cancel ->
     refresh_catalog ~cancel session;
     let since = match since with Some value -> value | None -> 0 in
     let kept = List.filter (fun event ->

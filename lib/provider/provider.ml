@@ -712,6 +712,9 @@ let complete ?(authentication = Api_key) ?resolve_credential
   let on_text = match on_text, on_tool_arguments with
     | None, Some _ -> Some (fun _ -> ())
     | _ -> on_text in
+  let messages = try Protocol.sanitize_messages (Protocol.replay_messages messages) with
+    | Protocol.Invalid_response reason ->
+        raise (Provider_error ("invalid transcript: " ^ reason)) in
 
   let has_attachments = ref false in
   List.iter (fun (message : Protocol.message) ->
@@ -732,9 +735,6 @@ let complete ?(authentication = Api_key) ?resolve_credential
      config.api <> Gemini_direct && config.api <> Vertex_generate then
     raise (Provider_error
       "audio/video attachments require a Gemini generateContent route");
-  let messages = try Protocol.sanitize_messages messages with
-    | Protocol.Invalid_response reason ->
-        raise (Provider_error ("invalid transcript: " ^ reason)) in
   let config = if config.api = Local_chat then
     { config with endpoint = local_endpoint config.endpoint } else config in
   if authentication = Cloud_identity &&
@@ -1229,7 +1229,7 @@ let complete ?(authentication = Api_key) ?resolve_credential
         ~max_tokens:output_tokens messages tools) in
       let json = post_json ?cancel ~endpoint:config.endpoint
         ~headers ~secret:access.token body in
-      let reply = parse (fun () ->
+      let reply = parse_with_secret access.token (fun () ->
         Duo.parse_completion ~route ~model:config.model json) in
       (match on_usage with
        | None -> ()
@@ -1580,7 +1580,7 @@ let complete ?(authentication = Api_key) ?resolve_credential
         ?thinking messages tools) in
       let emit = Option.value ~default:(fun _ -> ()) on_text in
       let stream = Gemini_stream.create ?on_tool_arguments ~model:config.model ~on_text:emit () in
-      parse (fun () ->
+      parse_with_secret access (fun () ->
         post_stream ~max_request_bytes:gemini_max_request_bytes ?cancel
           ~endpoint ~headers:["Authorization: Bearer " ^ access] ~secret:access
           body ~on_chunk:(Gemini_stream.feed stream)
@@ -1617,7 +1617,7 @@ let complete ?(authentication = Api_key) ?resolve_credential
         let emit = Option.value ~default:(fun _ -> ()) on_text in
         let stream = Vertex_anthropic_wire.create_stream ?on_tool_arguments
           ~model:config.model ~on_text:emit () in
-        parse (fun () ->
+        parse_with_secret access (fun () ->
           post_stream ?cancel ~endpoint ~headers ~secret:access body
             ~on_chunk:(Vertex_anthropic_wire.feed_stream stream)
             ~is_done:(fun () -> Anthropic_stream.is_done stream)
@@ -1633,7 +1633,7 @@ let complete ?(authentication = Api_key) ?resolve_credential
           reply))
       else
         let json = post_json ?cancel ~endpoint ~headers ~secret:access body in
-        let reply = parse (fun () ->
+        let reply = parse_with_secret access (fun () ->
           Vertex_anthropic_wire.parse_completion ~model:config.model json) in
         (match on_usage with
          | None -> ()
@@ -1739,6 +1739,9 @@ let compact_anthropic_messages ?(authentication = Api_key) ?resolve_credential
       "native compaction requires the official Anthropic Messages endpoint");
   if config.model = "" then raise (Provider_error "empty Anthropic model");
   reject_controls "model" config.model;
+  let messages = try Protocol.sanitize_messages (Protocol.replay_messages messages) with
+    | Protocol.Invalid_response reason ->
+        raise (Provider_error ("invalid transcript: " ^ reason)) in
   let credential = match resolve_credential_cancel, resolve_credential with
     | Some resolve, _ -> resolve ~cancel:(fun () -> match cancel with
         | Some cancelled -> cancelled () | None -> false) ()
@@ -1747,9 +1750,6 @@ let compact_anthropic_messages ?(authentication = Api_key) ?resolve_credential
   let api_key = credential.access in
   reject_controls "API key" api_key;
   if api_key = "" then raise (Provider_error "missing Anthropic API key");
-  let messages = try Protocol.sanitize_messages messages with
-    | Protocol.Invalid_response reason ->
-        raise (Provider_error ("invalid transcript: " ^ reason)) in
   check_cancel cancel;
   let body = Anthropic_wire.compaction_request ~allow_prompt_caching:true
     ~model:config.model
@@ -1778,7 +1778,7 @@ let compact_openai_responses ?(authentication = Api_key) ?resolve_credential
     raise (Provider_error "native compaction requires the OpenAI Responses API-key route");
   if config.model = "" then raise (Provider_error "empty Responses model");
   reject_controls "model" config.model;
-  let messages = try Protocol.sanitize_messages messages with
+  let messages = try Protocol.sanitize_messages (Protocol.replay_messages messages) with
     | Protocol.Invalid_response reason ->
         raise (Provider_error ("invalid transcript: " ^ reason)) in
   let endpoint =

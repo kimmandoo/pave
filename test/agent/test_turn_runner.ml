@@ -5,11 +5,18 @@ let shutdown_cases () =
       (try
          let ready = Atomic.make false in
          let events = ref [] and prompts = ref 0 and runner_ref = ref None in
+         let settled = ref 0 in
          let run ~cancel (_ : Pave.Turn_runner.submission) =
            let runner = Option.get !runner_ref in
            Pave.Turn_runner.tool runner (Pave.Agent.Tool_started {
              call_id = "shutdown-call"; name = "run_command"; target = None;
              write_content = None });
+           if mode = "full-backlog" then
+             for index = 1 to Pave.Turn_runner.max_notice_events - 1 do
+               Pave.Turn_runner.tool runner (Pave.Agent.Tool_settled {
+                 call_id = string_of_int index; name = "read_file"; result = "ok";
+                 is_error = false; elapsed_ms = None })
+             done;
            Atomic.set ready true;
            Fun.protect ~finally:(fun () ->
              Pave.Turn_runner.tool runner (Pave.Agent.Tool_aborted {
@@ -17,7 +24,7 @@ let shutdown_cases () =
                result = "Error: cancelled before execution";
                side_effects_may_have_occurred = false; elapsed_ms = None })) (fun () ->
              (match mode with
-              | "running" ->
+              | "running" | "full-backlog" ->
                   while not (cancel ()) do Thread.delay 0.001 done
               | "shell-approval" ->
                   ignore (Pave.Turn_runner.approve runner "printf approved")
@@ -38,6 +45,8 @@ let shutdown_cases () =
                  event = Pave.Agent.Tool_aborted { call_id; _ }; _ } ->
                  assert (call_id = "shutdown-call");
                  events := "aborted" :: !events
+             | Pave.Turn_runner.Tool_event {
+                 event = Pave.Agent.Tool_settled _; _ } -> incr settled
              | Pave.Turn_runner.Turn_cancelled _ ->
                  events := "cancelled" :: !events
              | _ -> failwith "unexpected shutdown event")
@@ -54,6 +63,8 @@ let shutdown_cases () =
          assert (not (Pave.Turn_runner.busy runner));
          assert (!prompts = 0);
          assert (List.rev !events = ["started"; "aborted"; "cancelled"]);
+         assert (!settled = (if mode = "full-backlog" then
+           Pave.Turn_runner.max_notice_events - 1 else 0));
          exit 0
        with exn ->
          prerr_endline (mode ^ ": " ^ Printexc.to_string exn);
@@ -69,7 +80,7 @@ let shutdown_cases () =
           failwith (mode ^ ": shutdown did not cancel and release its worker")
       | _, Unix.WEXITED 0 -> ()
       | _ -> failwith (mode ^ ": shutdown failed") in
-    wait ()) ["running"; "shell-approval"; "tool-approval"]
+    wait ()) ["running"; "shell-approval"; "tool-approval"; "full-backlog"]
 
 let queue_management_cases () =
   let module Runner = Pave.Turn_runner in
@@ -296,6 +307,89 @@ let bounded_stream_backpressure_case () =
     );
     assert (!completed = 1))
 
+let typed_payload_backpressure_case () =
+  let module Runner = Pave.Turn_runner in
+  let runner_ref = ref None in
+  let payload = String.make 1_048_576 'x' in
+  let produced = Atomic.make 0 and third_attempt = Atomic.make false in
+  let received = ref 0 in
+  let runner = Runner.create ~run:(fun ~cancel:_ _ ->
+    let runner = Option.get !runner_ref in
+    for index = 1 to 4 do
+      if index = 3 then Atomic.set third_attempt true;
+      Runner.tool runner (Pave.Agent.Tool_started {
+        call_id = string_of_int index; name = "write_file"; target = Some "large.txt";
+        write_content = Some payload });
+      Atomic.set produced index
+    done)
+    ~on_event:(function
+      | Runner.Tool_event { event = Pave.Agent.Tool_started { write_content; _ }; _ } ->
+          assert (write_content = Some payload); incr received
+      | Runner.Turn_failed { error; _ } -> raise error
+      | _ -> ())
+    ~on_approve:(fun _ -> false) ~on_queued:(fun _ -> ()) () in
+  runner_ref := Some runner;
+  Fun.protect ~finally:(fun () -> Runner.close runner) (fun () ->
+    Runner.submit runner "bounded previews";
+    let deadline = Unix.gettimeofday () +. 3. in
+    while not (Atomic.get third_attempt) do
+      assert (Unix.gettimeofday () < deadline);
+      Thread.delay 0.001
+    done;
+    assert (Atomic.get produced = 2);
+    while Runner.busy runner do
+      assert (Unix.gettimeofday () < deadline);
+      Runner.drain runner;
+      Thread.delay 0.001
+    done;
+    assert (!received = 4 && Atomic.get produced = 4))
+
+let saturated_remote_cancel_case () =
+  let module Runner = Pave.Turn_runner in
+  let runner_ref = ref None and full = Atomic.make false in
+  let cancelled = ref 0 and received = ref 0 in
+  let runner = Runner.create ~run:(fun ~cancel _ ->
+    let runner = Option.get !runner_ref in
+    for index = 1 to Runner.max_notice_events do
+      Runner.tool runner (Pave.Agent.Tool_settled {
+        call_id = string_of_int index; name = "read_file"; result = "ok";
+        is_error = false; elapsed_ms = None })
+    done;
+    Atomic.set full true;
+    while not (cancel ()) do Thread.delay 0.001 done;
+    raise Pave.Provider.Cancelled)
+    ~on_event:(function
+      | Runner.Tool_event { event = Pave.Agent.Tool_settled _; _ } -> incr received
+      | Runner.Turn_cancelled _ -> incr cancelled
+      | Runner.Turn_failed { error; _ } -> raise error
+      | _ -> ())
+    ~on_approve:(fun _ -> false) ~on_queued:(fun _ -> ()) () in
+  runner_ref := Some runner;
+  Fun.protect ~finally:(fun () -> Runner.close runner) (fun () ->
+    Runner.submit runner "saturated";
+    let deadline = Unix.gettimeofday () +. 3. in
+    while not (Atomic.get full) do
+      assert (Unix.gettimeofday () < deadline);
+      Thread.delay 0.001
+    done;
+    let cancelling = Atomic.make false in
+    let canceller = Thread.create (fun () ->
+      Atomic.set cancelling true;
+      Runner.cancel runner) () in
+    while not (Atomic.get cancelling) do
+      assert (Unix.gettimeofday () < deadline);
+      Thread.delay 0.001
+    done;
+    (* Let the foreign caller encounter the full queue before making room. *)
+    Thread.delay 0.01;
+    while Runner.busy runner do
+      assert (Unix.gettimeofday () < deadline);
+      Runner.drain runner;
+      Thread.delay 0.001
+    done;
+    Thread.join canceller;
+    assert (!cancelled = 1 && !received = Runner.max_notice_events))
+
 let remote_submission_case () =
   let module Runner = Pave.Turn_runner in
   let events = ref [] and cancelled = ref 0 in
@@ -502,6 +596,8 @@ let () =
   queue_management_cases ();
   queue_admission_limits ();
   bounded_stream_backpressure_case ();
+  typed_payload_backpressure_case ();
+  saturated_remote_cancel_case ();
   remote_submission_case ();
   remote_cancel_boundary_case ();
   approval_stop_cases ();

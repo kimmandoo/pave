@@ -85,6 +85,26 @@ let () =
   assert (not (Pave.Anthropic_stream.is_finished delayed_stop));
   Pave.Anthropic_stream.feed delayed_stop stop;
   assert ((Pave.Anthropic_stream.finish delayed_stop).content = Some "Hi there");
+  List.iter (fun content ->
+    let empty = Pave.Anthropic_stream.create ~on_text:(fun _ -> ()) () in
+    Pave.Anthropic_stream.feed empty
+      (start_metered ^ content ^ finish_metered ^ stop);
+    (match Pave.Anthropic_stream.finish empty with
+     | exception Pave.Protocol.Invalid_response _ -> ()
+     | _ -> failwith "empty Anthropic stream was accepted");
+    assert (Pave.Anthropic_stream.usage empty = None)) [
+      "";
+      event "content_block_start"
+        {|{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}|}
+        ^ text_stop;
+      event "content_block_start"
+        {|{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"private","signature":"signed"}}|}
+        ^ text_stop
+    ];
+  let tools_only = Pave.Anthropic_stream.create ~on_text:(fun _ -> ()) () in
+  Pave.Anthropic_stream.feed tools_only
+    (start ^ tool_start ^ tool_delta ^ tool_stop ^ ending "tool_use" ^ stop);
+  assert (List.length (Pave.Anthropic_stream.finish tools_only).tool_calls = 1);
   invalid (start ^ text_start ^ text_delta ^ text_stop);
   invalid (start ^ text_start ^ text_delta ^ text_stop ^ ending "end_turn");
   invalid (start ^ tool_start ^ tool_delta ^ tool_stop ^ ending "tool_use");

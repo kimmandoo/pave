@@ -1,4 +1,4 @@
-let response_empty = {|{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":""}}]}|}
+let response_empty = {|{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":""}}],"usage":{"prompt_tokens":11,"completion_tokens":3}}|}
 let response_final = {|{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"done"}}]}|}
 
 let serve client step =
@@ -58,11 +58,14 @@ let () =
         endpoint = Printf.sprintf "http://127.0.0.1:%d/v1/chat/completions" port;
         api_key = "test-key"; model = "fixture";
         api = Pave.Provider.Openai_completions } in
-      let events = ref [] in
+      let usage = ref 0 and tools = ref 0 in
       let agent = Pave.Agent.create ~provider ~root ~system:"fixture"
-        ~on_event:(fun text -> events := text :: !events) () in
-      assert (Pave.Agent.run agent "first" = "");
-      assert (List.mem "The model finished without a reply." !events);
+        ~on_usage:(fun _ -> incr usage)
+        ~on_tool_event:(fun _ -> incr tools) ~on_event:ignore () in
+      (match Pave.Agent.run agent "first" with
+       | exception Pave.Provider.Provider_error _ -> ()
+       | _ -> failwith "empty completion was accepted as success");
+      assert (!usage = 0 && !tools = 0);
       assert (List.for_all (fun (message : Pave.Protocol.message) ->
         message.role <> "assistant") (Pave.Agent.messages agent));
       (* Anthropic and Responses serialization reject an empty assistant turn;

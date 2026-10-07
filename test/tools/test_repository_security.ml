@@ -94,6 +94,18 @@ let () =
          `String "Repository scan coverage is incomplete because a scan bound was reached.");
     let finding_limited = Security.scan ~root ~finding_limit:0 () in
     expect "finding cap is reported" (finding_limited.findings = [] && finding_limited.truncated);
+    write (Filename.concat root "oversized.txt")
+      (String.make (Security.max_file_bytes + 1) 'x');
+    let oversized = Security.scan ~root () in
+    expect "oversized files leave bounded scan evidence available but incomplete"
+      (oversized.truncated && oversized.files_scanned = 3 &&
+       List.length oversized.findings = 3);
+    let oversized_json = Yojson.Basic.from_string (Security.sarif ~root oversized) in
+    let oversized_run = List.hd (Yojson.Basic.Util.to_list
+      (Yojson.Basic.Util.member "runs" oversized_json)) in
+    expect "oversized-file incomplete coverage reaches SARIF"
+      (Yojson.Basic.Util.member "truncated"
+        (Yojson.Basic.Util.member "properties" oversized_run) = `Bool true);
     let cancelled = try ignore (Security.scan ~root ~cancel:(fun () -> true) ()); false
       with Security.Error _ -> true in
     expect "pre-cancelled scan aborts" cancelled;

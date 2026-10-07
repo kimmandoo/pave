@@ -1,6 +1,17 @@
 # Changelog
 ## 2026-10-07
 
+- fix(tui): made tool inspection credential-free and available during active turns, retained disabled external schemas for inspection, and disclosed startup, session and model/plugin admission limits instead of claiming unavailable tools were enabled.
+- fix(agent): preserved durable local-tool provenance and projected direct results as attributed untrusted user data for native replay and compaction without forged signatures or last-used-model changes; rejected empty assistant success.
+- fix(auth): serialized OAuth store operations by actual owner thread, enforced device authorization expiry after polling, and masked resolved Vertex and GitLab gateway tokens in parser failures.
+- fix(provider): rejected empty buffered/streamed replies before usage settlement, malformed encoded tool arguments, duplicate listing fields and error-bearing partial model catalogs.
+- fix(approval): required individual consent for managed process input/close/kill, restricted exact command grants to literal shell-safe commands, and cleaned up only the owned browser session after denied effects.
+- fix(tools): propagated cancellation through scan, pagination, LSP startup and kernel/protocol lock waits; corrected scoped search globs, enforced schema array ceilings and retained incomplete security-scan evidence when oversized files were skipped.
+- fix(mobile): corrected Android locale command/output handling, exact device shutdown evidence, crash ownership filters, PNG/XML admission, SwiftPM test counts and performance bounds; bound scenario v2 to canonical project and exact build bytes and refused unverifiable v1 replay.
+- fix(browser): preserved cancellation and catalog failures, bounded CDP framing and metadata, disposed expired/failed owned sessions, and excluded incompatible search providers before credential/browser discovery.
+- fix(protocol): supported deferred DAP startup through separately approved configuration, bounded LSP/DAP/eval/SSH request and write budgets, restored separately approved LSP startup after failed initialization, discarded stale diagnostics, and reaped native helper process groups on failed operations.
+- fix(session): kept saved Hub inspection read-only and reported refused admission as HTTP 409 instead of server failure; preserved attachment and recovered tool-result order, allowed safe retries across stage telemetry, serialized job delivery, and drained saturated shutdown/remote-cancel queues without deadlock or dropped outcomes.
+- fix(extensions): bounded project imports and template expansion, applied Unicode-scalar external string limits, and enforced complete successful MCP framing/transfers under cancellable request budgets.
 - feat(tools): exposed enabled built-in, local and connected MCP tool schemas as searchable direct slash calls; reused validation, approvals, cancellation, transcript events and guarded rewind without requesting model inference.
 - fix(tui): displayed complete argument schemas in scrollable transcript rows, preserved existing command syntax and filtered disabled tools from help and inline hints.
 - fix(mobile): registered Android lifecycle target/port arguments, aligned shell and private-session admission, classified session inspection as read-only and recorded control/environment effects as non-reversible.

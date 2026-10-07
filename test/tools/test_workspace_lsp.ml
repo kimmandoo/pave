@@ -299,7 +299,91 @@ let test_stalled_native_writes () =
             (Unix.gettimeofday () -. closing))))
     [true; false]
 
+let test_stale_and_unopened_diagnostics () =
+  with_root (fun root file ->
+    let fake = create_fake_server ~file_uri:(uri file) ~fragment:4096 in
+    let manager = Workspace_lsp.create_manager
+      ~launcher:(fun ~program:_ ~arguments:_ ~cwd:_ ~environment:_ -> fake_io fake) () in
+    Fun.protect ~finally:(fun () -> Workspace_lsp.close_manager manager) (fun () ->
+      start manager ~owner:"diagnostic-versions" ~root ();
+      let before = List.length (messages fake) in
+      Mutex.lock manager.request_lock;
+      Fun.protect ~finally:(fun () -> Mutex.unlock manager.request_lock) (fun () ->
+        let began = Unix.gettimeofday () in
+        expect_error (fun () -> execute manager ~owner:"diagnostic-versions" ~root
+          ~cancel:(fun () -> true) (arguments []));
+        expect (Unix.gettimeofday () -. began < 1. &&
+          List.length (messages fake) = before)
+          "cancelled queued requests release promptly without sending a frame");
+      ignore (execute manager ~owner:"diagnostic-versions" ~root (arguments []));
+      write file "";
+      ignore (execute manager ~owner:"diagnostic-versions" ~root
+        (arguments ~action:"diagnostics" []));
+      let diagnostic uri version = `Assoc ["jsonrpc", `String "2.0";
+        "method", `String "textDocument/publishDiagnostics";
+        "params", `Assoc ["uri", `String uri; "version", `Int version;
+          "diagnostics", `List [`Assoc [
+            "range", `Assoc ["start", `Assoc ["line", `Int 0; "character", `Int 0];
+              "end", `Assoc ["line", `Int 0; "character", `Int 3]];
+            "message", `String "old document diagnostic"]]]] in
+      Workspace_lsp.dispatch manager (diagnostic (uri file) 1);
+      Workspace_lsp.dispatch manager
+        (diagnostic (uri (Filename.concat root "not-open.ml")) 1);
+      let diagnostics = execute manager ~owner:"diagnostic-versions" ~root
+        (arguments ~action:"diagnostics" []) in
+      expect (member "diagnostics" diagnostics = `List [])
+        "stale and unopened diagnostics do not contaminate the current snapshot";
+      ignore (execute manager ~owner:"diagnostic-versions" ~root
+        (arguments ~action:"references" []));
+      expect_error (fun () -> Workspace_lsp.dispatch manager (diagnostic (uri file) 2))))
+
+let test_startup_cancellation () =
+  with_root (fun root file ->
+    let fake = create_fake_server ~file_uri:(uri file) ~fragment:4096 in
+    let restarted = create_fake_server ~file_uri:(uri file) ~fragment:4096 in
+    let initialize_sent = Atomic.make false and cancelled = Atomic.make false in
+    let launches = ref 0 in
+    let manager = Workspace_lsp.create_manager
+      ~launcher:(fun ~program:_ ~arguments:_ ~cwd:_ ~environment:_ ->
+        incr launches;
+        if !launches = 1 then (
+          let io = fake_io fake in
+          { io with write = (fun ~deadline:_ ~cancel:_ wire ->
+            if method_name (decode_frame wire) = Some "initialize" then
+              Atomic.set initialize_sent true) })
+        else fake_io restarted) () in
+    Fun.protect ~finally:(fun () -> Workspace_lsp.close_manager manager) (fun () ->
+      expect_error (fun () -> Workspace_lsp.start ~cancel:(fun () -> true) manager
+        ~owner:"startup-cancel" ~root ~program:"fake-lsp" ~args:[] ~execution_approved:true);
+      expect (!launches = 0) "pre-cancelled startup launches no process";
+      let failed = Atomic.make false in
+      let worker = Thread.create (fun () ->
+        (try Workspace_lsp.start ~cancel:(fun () -> Atomic.get cancelled) manager
+          ~owner:"startup-cancel" ~root ~program:"fake-lsp" ~args:[] ~execution_approved:true
+         with Workspace_lsp.Error _ -> Atomic.set failed true)) () in
+      Fun.protect ~finally:(fun () ->
+        Atomic.set cancelled true; Thread.join worker) (fun () ->
+        let deadline = Unix.gettimeofday () +. 2. in
+        while not (Atomic.get initialize_sent) && Unix.gettimeofday () < deadline do
+          Thread.delay 0.01
+        done;
+        expect (Atomic.get initialize_sent) "startup initialize frame was sent";
+        Atomic.set cancelled true;
+        let deadline = Unix.gettimeofday () +. 2. in
+        while not (Atomic.get failed) && Unix.gettimeofday () < deadline do Thread.delay 0.01 done;
+        expect (Atomic.get failed && fake.closed && fake.terminated)
+          "cancelled initialization closes and terminates the owned server");
+      expect_error (fun () -> start manager ~owner:"startup-cancel" ~root
+        ~execution_approved:false ());
+      expect (!launches = 1) "cancelled startup does not grant restart consent";
+      start manager ~owner:"startup-cancel" ~root ();
+      let location = execute manager ~owner:"startup-cancel" ~root (arguments []) in
+      expect (member "uri" location = `String (uri file))
+        "a separately approved restart restores usable workspace definitions"))
+
 let () =
+  test_stale_and_unopened_diagnostics ();
+  test_startup_cancellation ();
   with_root (fun root file ->
     Unix.mkdir (Filename.concat root "other") 0o700;
     let second_file = Filename.concat root "other/second.ml" in

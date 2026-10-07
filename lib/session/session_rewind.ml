@@ -59,6 +59,8 @@ let non_reversible_tool_name = function
   | "web_search" | "web_fetch" | "clipboard_write"
   | "publish_web" | "xcode_preflight" | "mobile_check" | "mobile_session"
   | "mobile_scenario" | "mobile_verify" | "mobile_visual" | "android_devices"
+  | "mobile_control" | "mobile_environment" | "mobile_dev_server"
+  | "mobile_app_lifecycle" | "mobile_performance" | "mobile_device_lifecycle"
   | "write_file" | "edit_file" | "apply_edits" | "ast_edit" -> true
   | _ -> false
 

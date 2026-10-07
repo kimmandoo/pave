@@ -105,6 +105,14 @@ let auth = [ "x-pave-csrf-token", token ]
 let json_member json key =
   Yojson.Basic.Util.(json |> member key)
 
+let rec remove path =
+  match Unix.lstat path with
+  | { Unix.st_kind = Unix.S_DIR; _ } ->
+      Array.iter (fun name -> remove (Filename.concat path name)) (Sys.readdir path);
+      Unix.rmdir path
+  | _ -> Unix.unlink path
+  | exception Unix.Unix_error (Unix.ENOENT, _, _) -> ()
+
 let () =
   let entries = ref [
       `Assoc [ "step", `Int 1; "kind", `String "user" ];
@@ -197,7 +205,7 @@ let () =
       fail_next := true;
       let status, body = request ~meth:"POST" ~port "/api/prompt"
           ~headers:auth ~body:{|{"text":"again"}|} in
-      check (status >= 400 && status < 600) "submit error must be 4xx/5xx";
+      check (status = 409) "queue refusal must report admission conflict";
       check (contains body "error") "submit error body must carry error";
       check (contains body "queue-full") "submit error propagates message";
 
@@ -329,5 +337,61 @@ let () =
             finished -. deadline < Hub.io_timeout /. 2.
         | _ -> false)
         "slow drip must reach the shared absolute deadline, not the later idle timeout"));
+  let reader, writer = Unix.socketpair Unix.PF_UNIX Unix.SOCK_STREAM 0 in
+  Fun.protect ~finally:(fun () -> Unix.close reader; Unix.close writer) (fun () ->
+    Unix.set_nonblock writer;
+    (match Hub.write_response ~deadline:(Unix.gettimeofday () -. 1.) writer
+      408 (Hub.json_error "timeout") with
+     | exception Hub.Http_error (408, _) -> ()
+     | _ -> fail "an expired connection budget must not send an error response");
+    let ready, _, _ = Unix.select [reader] [] [] 0. in
+    check (ready = []) "an expired error response wrote bytes");
+
+  let previous_state = Sys.getenv_opt "XDG_STATE_HOME" in
+  let base = Filename.temp_file "pave-hub-readonly-" "" in
+  Sys.remove base;
+  Unix.mkdir base 0o700;
+  Fun.protect ~finally:(fun () ->
+    Unix.putenv "XDG_STATE_HOME" (Option.value ~default:"" previous_state);
+    remove base) (fun () ->
+    let root = Filename.concat base "workspace"
+    and state = Filename.concat base "state" in
+    Unix.mkdir root 0o700;
+    Unix.mkdir state 0o700;
+    Unix.putenv "XDG_STATE_HOME" state;
+    let journal = Pave.Session_store.create ~root in
+    ignore (Pave.Session.append journal (Pave.Protocol.user "Unfinished turn"));
+    let call : Pave.Protocol.tool_call = {
+      id = "unfinished-call"; name = "read_file"; arguments = `Assoc [] } in
+    ignore (Pave.Session.append journal { role = "assistant"; content = None;
+      tool_calls = [call]; tool_call_id = None; tool_result_content = None;
+      provider_state = None; attachments = [] });
+    ignore (Pave.Session.record_tool_started journal ~call_id:call.id ~name:call.name);
+    let contents () =
+      let channel = open_in_bin journal.path in
+      Fun.protect ~finally:(fun () -> close_in_noerr channel) (fun () ->
+        really_input_string channel (in_channel_length channel)) in
+    let before = contents () in
+    ignore (Pave.Session_store.preview ~root journal.path);
+    let saved = Pave.Session.load_journal journal.path in
+    let hub = Hub.create ~port:0 ~token
+      ~session_id:(Pave.Session.session_id saved)
+      ~read_title:(fun () -> Option.value ~default:"" (Pave.Session.title saved))
+      ~read_entries:(fun () ->
+        List.map Pave.Session.entry_json (Pave.Session.entries saved))
+      ~read_pending:(fun () -> 0)
+      ~submit:(fun _ -> Error "read-only hub") () in
+    Fun.protect ~finally:(fun () -> Hub.close hub) (fun () ->
+      let port = Hub.port hub in
+      let status, body = request ~port "/api/entries" ~headers:auth in
+      check (status = 200) "saved journal entries status";
+      check (json_member (Yojson.Basic.from_string body) "next" = `Int 3)
+        "read-only hub must not append recovery results";
+      let status, _ = request ~meth:"POST" ~port "/api/prompt"
+        ~headers:auth ~body:{|{"text":"must not run"}|} in
+      check (status = 409) "read-only hub must refuse prompt admission without a server failure";
+      check (List.length (Pave.Session.pending_tool_calls saved) = 1)
+        "read-only serving must leave unfinished tool calls untouched";
+      check (contents () = before) "read-only serving mutated the saved journal"));
 
   print_endline "test_session_hub: ok"

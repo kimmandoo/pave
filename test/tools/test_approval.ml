@@ -48,7 +48,10 @@ let () =
     ["git status \"$(touch marker)\"";
      "git status `touch marker`";
      "git status --short > marker";
-     "git status *.log"];
+     "git status *.log";
+     "git status --short &";
+     "git status --short;";
+     "git status --short\n"];
   let broad_allow = [{ A.match_text = "*git*"; policy = A.Allow;
                        exact = false }] in
   let brace_expansion = A.command_decision broad_allow "{rm,git} marker" in
@@ -68,12 +71,18 @@ let () =
      compound_allow.tier = A.Exec);
   let prompt_rule = [{ A.match_text = "rm *"; policy = A.Prompt;
                        exact = false }] in
-  (* Exact rules (persisted w/Always grants) match the literal normalized
-     command; `*` inside them is data, not a wildcard. *)
-  let exact_rule = [{ A.match_text = "ls *.log"; policy = A.Allow;
+  (* Exact rules match the literal normalized spelling, but do not authorize
+     shell expansion, redirection or background/compound syntax. *)
+  List.iter (fun command ->
+    let rule = [{ A.match_text = command; policy = A.Allow; exact = true }] in
+    expect ("exact allow requires a literal command: " ^ command)
+      ((A.command_decision rule command).policy <> Some A.Allow))
+    ["ls *.log"; "echo $HOME"; "echo \"$(touch marker)\"";
+     "echo safe > marker"; "echo safe &"; "echo safe;"; "echo safe\n"];
+  let exact_rule = [{ A.match_text = "ls '*.log'"; policy = A.Allow;
                       exact = true }] in
-  expect "exact allow matches the literal command"
-    ((A.command_decision exact_rule "ls *.log").policy = Some A.Allow);
+  expect "exact allow matches quoted literal metacharacters"
+    ((A.command_decision exact_rule "ls '*.log'").policy = Some A.Allow);
   expect "exact allow does not widen with *"
     ((A.command_decision exact_rule "ls keep.log").policy <> Some A.Allow);
   let quoted = "printf '%s' 'a  b'" in

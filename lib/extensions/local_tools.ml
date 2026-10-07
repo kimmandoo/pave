@@ -96,6 +96,10 @@ let identifier value =
     bad "invalid identifier"
 let within ~root path =
   path = root || String.starts_with ~prefix:(root ^ "/") path
+let string_length text =
+  Uutf.String.fold_utf_8 (fun count _ -> function
+    | `Uchar _ -> count + 1
+    | `Malformed _ -> bad "string must contain valid UTF-8") 0 text
 
 (* Reject unsupported schema keywords rather than advertise constraints that
    the local validator cannot enforce. This intentionally accepts a small,
@@ -166,7 +170,8 @@ let validate_schema schema =
                let maximum = integer (required fields "maxLength") in
                let minimum = match List.assoc_opt "minLength" fields with
                  | None -> 0 | Some value -> integer value in
-               if String.length text < minimum || String.length text > maximum then
+               let length = string_length text in
+               if length < minimum || length > maximum then
                  bad "enum exceeds string bound"
            | "integer", `Int number ->
                if number < integer (required fields "minimum") ||
@@ -214,7 +219,8 @@ let validate_input schema input =
         let max_length = integer (required fields "maxLength") in
         let min_length = match List.assoc_opt "minLength" fields with
           | None -> 0 | Some v -> integer v in
-        if String.length text < min_length || String.length text > max_length then
+        let length = string_length text in
+        if length < min_length || length > max_length then
           bad "string argument is outside its bounds"
     | "integer", `Int number ->
         if number < integer (required fields "minimum") ||

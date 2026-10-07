@@ -768,6 +768,9 @@ let () =
    | exception Invalid_argument _ -> ()
    | _ -> failwith "untrusted endpoint accepted");
   expect_invalid (fun () -> Wire.parse_response (answer "max_tokens" [`Assoc ["text", `String "partial"]]));
+  List.iter (fun blocks ->
+    expect_invalid (fun () -> Wire.parse_response (answer "end_turn" blocks)))
+    [[]; [`Assoc ["text", `String ""]]];
   expect_invalid (fun () -> Wire.parse_response (answer "end_turn" [
     `Assoc ["reasoningContent", `Assoc ["reasoningText", `Assoc [
       "text", `String "unpreserved"; "signature", `String "signed"]]]]));
@@ -851,6 +854,13 @@ let () =
      bedrock_event "messageStop" (`Assoc ["stopReason", `String "end_turn"])];
     [bedrock_event "messageStart" (`Assoc ["role", `String "assistant"]);
      bedrock_event "messageStop" (`Assoc ["stopReason", `String "tool_use"])]
+    ; [bedrock_event "messageStart" (`Assoc ["role", `String "assistant"]);
+       bedrock_event "messageStop" (`Assoc ["stopReason", `String "end_turn"])]
+    ; [bedrock_event "messageStart" (`Assoc ["role", `String "assistant"]);
+       bedrock_event "contentBlockDelta" (`Assoc ["contentBlockIndex", `Int 0;
+         "delta", `Assoc ["text", `String ""]]);
+       event_block_stop 0;
+       bedrock_event "messageStop" (`Assoc ["stopReason", `String "end_turn"])]
   ];
   fixture ();
   converse_stream_fixture ();

@@ -71,7 +71,8 @@ let () =
     assert (!calls = 1)) [
       {|{"data":[{"id":"first"}],"data":[{"id":"second"}]}|};
       {|{"data":[{"id":"first","id":"second"}]}|};
-      {|{"data":[{"id":"first","metadata":{"tools":true,"tools":false}}]}|}
+      {|{"data":[{"id":"first","metadata":{"tools":true,"tools":false}}]}|};
+      {|{"error":{"message":"private-openai failure"},"data":[{"id":"partial"}]}|};
     ];
 
   let generations = ref 0 in
@@ -131,6 +132,15 @@ let () =
     {|{"data":[{"id":"same"},{"id":"same"}]}|})) in
   expect_error is_invalid_response (discover ~http ~provider:"llama.cpp"
     ~credential:(Api_key "local-private") ());
+  List.iter (fun body ->
+    let http, _ = fixed_http local_url local_headers (Ok (200, body)) in
+    expect_error is_invalid_response (discover ~http ~provider:"llama.cpp"
+      ~credential:(Api_key "local-private") ())) [
+      {|{"data":[{"id":"first","id":"second"}]}|};
+      {|{"data":[{"id":"first"}],"data":[{"id":"second"}]}|};
+      {|{"data":[{"id":"first","metadata":{"tools":true,"tools":false}}]}|};
+      {|{"error":{"message":"local-private failure"},"data":[{"id":"partial"}]}|}
+    ];
   let unused ~url:_ ~headers:_ = failwith "unsafe local credential sent" in
   expect_error wrong_credential (discover ~http:unused ~provider:"llama.cpp"
     ~credential:(Api_key "bad\nheader") ());

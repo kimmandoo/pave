@@ -11,6 +11,9 @@ type identity = {
   device : string;
   app_id : string;
   app_path : string;
+  root : string;
+  subroot : string;
+  build_hash : string;
   scheme : string option;
   variant : string option;
 }
@@ -75,25 +78,30 @@ let step_of_json json =
   if expected = "" then fail "scenario assertion value cannot be empty";
   { action; assertion_field; expected }
 
-let identity_of_session (session : Workspace_mobile_run.session) = {
-  platform = Workspace_mobile_run.platform_name session.platform;
-  device = session.device;
-  app_id = session.app_id;
-  app_path = session.app_path;
-  scheme = session.scheme;
-  variant = session.variant;
-}
+let identity_of_session (session : Workspace_mobile_run.session) =
+  let build_hash =
+    try (Workspace_mobile_report.build_identity session.root session).build_hash
+    with Workspace_mobile_report.Error message -> fail message in
+  { platform = Workspace_mobile_run.platform_name session.platform;
+    device = session.device; app_id = session.app_id; app_path = session.app_path;
+    root = session.root; subroot = session.subroot; build_hash;
+    scheme = session.scheme; variant = session.variant }
 
 let same_identity left right =
   left.platform = right.platform && left.device = right.device &&
   left.app_id = right.app_id && left.app_path = right.app_path &&
-  left.scheme = right.scheme && left.variant = right.variant
+  left.scheme = right.scheme && left.variant = right.variant &&
+  left.root = right.root && left.subroot = right.subroot &&
+  left.build_hash = right.build_hash
 
 let identity_json identity = `Assoc [
   "platform", `String identity.platform;
   "device", `String identity.device;
   "app_id", `String identity.app_id;
   "app_path", `String identity.app_path;
+  "root", `String identity.root;
+  "subroot", `String identity.subroot;
+  "build_hash", `String identity.build_hash;
   "scheme", (match identity.scheme with None -> `Null | Some value -> `String value);
   "variant", (match identity.variant with None -> `Null | Some value -> `String value);
 ]
@@ -127,7 +135,7 @@ let phase_json = function
   | Complete -> `Assoc ["status", `String "complete"]
 
 let to_json record = `Assoc [
-  "version", `Int 1;
+  "version", `Int 2;
   "name", `String record.name;
   "identity", identity_json record.identity;
   "steps", `List (List.map step_json record.steps);
@@ -141,6 +149,9 @@ let identity_of_json json = {
   device = string "scenario device" 256 (field "device" json);
   app_id = string "scenario app_id" 256 (field "app_id" json);
   app_path = string "scenario app_path" 4096 (field "app_path" json);
+  root = string "scenario root" 4096 (field "root" json);
+  subroot = string "scenario subroot" 4096 (field "subroot" json);
+  build_hash = string "scenario build_hash" 64 (field "build_hash" json);
   scheme = option_string_json "scheme" json;
   variant = option_string_json "variant" json;
 }
@@ -160,7 +171,7 @@ let from_json name text =
   if String.length text > max_record_bytes then fail "mobile scenario record exceeds its size limit";
   let json = try Yojson.Basic.from_string text
     with Yojson.Json_error _ -> fail "mobile scenario record is malformed JSON" in
-  let version = integer "scenario version" 1 1 (field "version" json) in
+  let version = integer "scenario version (re-save legacy records with exact build identity)" 2 2 (field "version" json) in
   ignore version;
   let stored_name = string "scenario name" 48 (field "name" json) in
   if stored_name <> name then fail "mobile scenario record name does not match its path";
@@ -266,6 +277,8 @@ let save ~root ~name ~session steps =
     fail "mobile scenario save requires a running app session";
   if session.platform <> Workspace_mobile_run.Android then
     fail "mobile scenarios currently require an Android session";
+  let root = try Workspace_path.root_path root with Workspace_path.Error message -> fail message in
+  if session.root <> root then fail "mobile scenario session belongs to another workspace";
   if List.length steps < 1 || List.length steps > max_steps then
     fail (Printf.sprintf "mobile scenarios require 1..%d steps" max_steps);
   List.iter (fun step ->

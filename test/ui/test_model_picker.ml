@@ -31,6 +31,9 @@ let listing ?(source = Catalog.Pinned_account_listing) ?(fresh = true)
 
 let () =
   let routed = descriptor "abliteration" in
+  (match Model_picker.credential ~cancel:(fun () -> true) routed with
+   | exception Pave.Provider.Cancelled -> ()
+   | _ -> failwith "cancelled picker resolved credentials");
   let chat = scope ~account_id:"team-a" "abliteration" "chat" in
   let responses = scope ~account_id:"team-a" "abliteration" "responses" in
   let chat_listing = listing ~provider:"abliteration" ~route:"chat"

@@ -21,6 +21,17 @@ let () =
   let open Pave.Protocol in
   let first = call "use-1" "read_file" (`Assoc [ "path", `String "alpha" ]) in
   let second = call "use-2" "read_file" (`Assoc [ "path", `String "beta" ]) in
+  List.iter (fun blocks ->
+    expect_invalid (fun () -> Pave.Anthropic_wire.parse_response
+      (response "end_turn" blocks))) [
+      [];
+      [block "text" ["text", `String ""]];
+      [block "thinking" ["thinking", `String "private"; "signature", `String "signed"]]
+    ];
+  assert ((Pave.Anthropic_wire.parse_response (response "tool_use" [
+    block "text" ["text", `String ""];
+    block "tool_use" ["id", `String first.id; "name", `String first.name;
+      "input", first.arguments]])).tool_calls = [first]);
   let schema = `Assoc [ "type", `String "object";
                         "properties", `Assoc [ "path", `Assoc [ "type", `String "string" ] ];
                         "required", `List [ `String "path" ] ] in
