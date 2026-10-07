@@ -2,10 +2,10 @@
 
 ### [2026-10-07] Native CI exposed an incomplete source snapshot and a reserved identifier
 
-- **Context / Symptom:** CI #243 and Release #91 failed before packaging. OCaml 5.3/5.5 reported a syntax error at `fun effect ->` and `Unbound value Pave.Turn_runner.tool_event_bytes`; interaction provenance and saturated shutdown regressions also failed.
-- **Root Cause:** OCaml 5.3 introduced `effect` as a reserved keyword. Local OCaml 5.2 accepted the new callback parameter. The explicit candidate staging list also omitted the already-audited `lib/ui/interaction.ml` and `lib/ui/turn_runner.ml`, although local verification had exercised their working-tree changes.
-- **Solution:** Renamed the callback parameter and included both owned source files in the next candidate. Kept failed `v0.1.88` immutable and required a new version to pass native gates before publication.
-- **Prevention / Reference:** Retrieved the public diagnostic archive through nightly.link and verified its bytes against GitHub's artifact SHA-256 before reading it. Local tests verify the working tree, not the staged snapshot; source owners' complete changed-path lists must be included. CI's OCaml 5.3/5.5 and all four no-compression native builds remain mandatory.
+- **Context / Symptom:** CI #243/Release #91 and CI #244/Release #92 failed before packaging. OCaml 5.3/5.5 reported syntax errors at `fun effect ->` and a typed `fun bytes (effect : ...)` binding. The first candidate also reported `Unbound value Pave.Turn_runner.tool_event_bytes` and failed interaction provenance/saturated shutdown regressions.
+- **Root Cause:** OCaml 5.3 introduced `effect` as a reserved keyword. Local OCaml 5.2 accepted both new callback parameters; the first keyword scan missed the typed multi-parameter lambda. The explicit first-candidate staging list omitted the already-audited `lib/ui/interaction.ml` and `lib/ui/turn_runner.ml`, although local verification had exercised their working-tree changes.
+- **Solution:** Renamed both callback parameters, scanned every remaining keyword occurrence and included both owned source files. Kept failed tags immutable and required an isolated local OCaml 5.5.1 no-compression full build/suite before creating another candidate, followed by every public native gate.
+- **Prevention / Reference:** Retrieved public diagnostics through nightly.link and verified their bytes against GitHub's artifact SHA-256 before reading. Local tests verify the working tree, not the staged snapshot; include owners' complete changed-path lists and use the native compiler contract locally. CI's OCaml 5.3/5.5 and all four no-compression native builds remain mandatory.
 
 ### [2026-10-07] Local tools were mistaken for signed provider turns and empty replies succeeded
 

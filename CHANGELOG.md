@@ -1,7 +1,7 @@
 # Changelog
 ## 2026-10-07
 
-- fix(distribution): included the audited interaction and runner source changes in the release snapshot and made the direct-tool approval regression compatible with OCaml 5.3 and newer.
+- fix(distribution): included the audited interaction and runner source changes in the release snapshot and made direct-tool approval and typed payload accounting compatible with OCaml 5.3 and newer.
 - fix(tui): made tool inspection credential-free and available during active turns, retained disabled external schemas for inspection, and disclosed startup, session and model/plugin admission limits instead of claiming unavailable tools were enabled.
 - fix(agent): preserved durable local-tool provenance and projected direct results as attributed untrusted user data for native replay and compaction without forged signatures or last-used-model changes; rejected empty assistant success.
 - fix(auth): serialized OAuth store operations by actual owner thread, enforced device authorization expiry after polling, and masked resolved Vertex and GitLab gateway tokens in parser failures.

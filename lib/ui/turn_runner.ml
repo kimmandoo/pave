@@ -220,8 +220,8 @@ let approval_bytes (request : Approval.request) =
     optional_string_bytes request.reason +
     List.fold_left (fun bytes detail -> bytes + String.length detail) 0 request.details in
   bytes + Option.fold ~none:0 ~some:(fun (review : Approval.sensitive_review) ->
-    List.fold_left (fun bytes (effect : Approval.sensitive_effect) ->
-      bytes + String.length effect.effect_path + String.length effect.effect_summary)
+    List.fold_left (fun bytes (sensitive_effect : Approval.sensitive_effect) ->
+      bytes + String.length sensitive_effect.effect_path + String.length sensitive_effect.effect_summary)
       0 review.effects +
     List.fold_left (fun bytes path -> bytes + String.length path) 0 review.unresolved +
     List.fold_left (fun bytes (target : Approval.sensitive_target) ->
