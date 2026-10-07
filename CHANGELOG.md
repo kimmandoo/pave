@@ -1,6 +1,7 @@
 # Changelog
 ## 2026-10-07
 
+- fix(mobile): completed MX01 readiness cancellation and shared deadline handling, preserved boot ownership on observation timeout, and restored target-free read-only lifecycle status through the shared approval path.
 - fix(distribution): included the audited interaction and runner source changes in the release snapshot and made direct-tool approval and typed payload accounting compatible with OCaml 5.3 and newer.
 - fix(tui): made tool inspection credential-free and available during active turns, retained disabled external schemas for inspection, and disclosed startup, session and model/plugin admission limits instead of claiming unavailable tools were enabled.
 - fix(agent): preserved durable local-tool provenance and projected direct results as attributed untrusted user data for native replay and compaction without forged signatures or last-used-model changes; rejected empty assistant success.

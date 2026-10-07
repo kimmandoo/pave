@@ -4402,21 +4402,24 @@ let mobile_device_readiness_tool ~approved ?cancel ?on_progress ~context ~root a
       let timeout = optional_int "readiness_timeout_seconds" 60
           ~minimum:1 ~maximum:300 args in
       let deadline = Unix.gettimeofday () +. float timeout in
+      let cancelled = match cancel with Some check -> check | None -> (fun () -> false) in
+      let interrupted () = cancelled () || Unix.gettimeofday () >= deadline in
       let inventory = cache.device_inventory in
       let approval = mobile_device_approval inventory
           Workspace_mobile_device_lifecycle.Readiness target in
       let rec wait () =
-        (match cancel with Some cancelled when cancelled () -> raise Cancelled | _ -> ());
+        if cancelled () then raise Cancelled;
+        if Unix.gettimeofday () >= deadline then None else
         let current, ready =
           match cache.device_platform with
           | Workspace_mobile_run.Android ->
               let current, devices_output, avd_name_output =
-                mobile_device_android_live_inventory ?cancel ?on_progress ~root cache target in
+                mobile_device_android_live_inventory ~cancel:interrupted ?on_progress ~root cache target in
               mobile_device_replace_inventory context current;
               (match avd_name_output with
                | None -> current, Workspace_mobile_device_lifecycle.Waiting
                | Some avd_name_output ->
-                   let boot_status_output = mobile_device_run ?cancel ?on_progress
+                   let boot_status_output = mobile_device_run ~cancel:interrupted ?on_progress
                        ~root ~timeout_seconds:5
                        (Workspace_mobile_device_lifecycle.readiness_command
                          ~booting ~approval) in
@@ -4426,7 +4429,7 @@ let mobile_device_readiness_tool ~approved ?cancel ?on_progress ~context ~root a
                      with Workspace_mobile_device_lifecycle.Error message -> fail message in
                    current, ready)
           | Workspace_mobile_run.Ios ->
-              let current, _, devices_json = mobile_device_current_ios ?cancel ?on_progress
+              let current, _, devices_json = mobile_device_current_ios ~cancel:interrupted ?on_progress
                   ~context ~root cache in
               mobile_device_replace_inventory context current;
               let ready = try Workspace_mobile_device_lifecycle.ios_readiness
@@ -4439,8 +4442,18 @@ let mobile_device_readiness_tool ~approved ?cancel ?on_progress ~context ~root a
             Some managed
         | Workspace_mobile_device_lifecycle.Waiting ->
             if Unix.gettimeofday () >= deadline then None
-            else (Thread.delay 0.5; wait ()) in
-      let result = wait () in
+            else (Thread.delay (min 0.5 (max 0. (deadline -. Unix.gettimeofday ()))); wait ()) in
+      let result =
+        try wait () with Cancelled ->
+          if cancelled () then (
+            (* Reap only this retained boot's launcher. Device identity stays
+               pending until separately approved abort confirms it stopped. *)
+            (try Workspace_process.kill_job context.process_manager ~id:launcher_id
+             with Workspace_process.Error message ->
+               fail ("cancelled readiness launcher could not be reaped: " ^ message));
+            raise Cancelled)
+          else if Unix.gettimeofday () >= deadline then None
+          else raise Cancelled in
       match result with
       | None ->
           Yojson.Basic.to_string (`Assoc [
@@ -4646,6 +4659,14 @@ let mobile_device_lifecycle_preview ~context ~root args =
            "Xcode bundle/scheme: " ^ bundle ^ " · " ^ scheme;
            "Exact command: " ^ command;
            "Physical devices, runtime downloads and erasure are unsupported."]))
+  else if action = "status" then
+    let cache = mobile_device_execution_cache context ~root args in
+    let inventory = cache.device_inventory in
+    ("Inspects cached lifecycle ownership for this private session; no device command is run.",
+     ["Device session/inventory: " ^
+        Workspace_mobile_device_lifecycle.inventory_session_id inventory ^ " · " ^
+        Workspace_mobile_device_lifecycle.inventory_id inventory;
+      "Cached records are not a fresh readiness or device-state observation."])
   else
     let cache = mobile_device_execution_cache context ~root args in
     let inventory = cache.device_inventory in
@@ -4720,7 +4741,7 @@ let mobile_device_lifecycle_preview ~context ~root args =
                       (Workspace_mobile_device_lifecycle.target_serial target);
                     "Boot-complete readiness command", command]
                | Workspace_mobile_run.Ios -> ["Simulator readiness command", command] in
-             ("Checks readiness only for this session-owned boot; it does not boot, install or shut down a device.",
+             ("Checks readiness only for this session-owned boot. Timeout preserves the boot; cancellation reaps its owned launcher and may stop its emulator.",
               binding @ command_details platform_commands root @
               [Printf.sprintf "Readiness deadline: %d seconds."
                 (optional_int "readiness_timeout_seconds" 60 ~minimum:1 ~maximum:300 args)]))
@@ -6572,7 +6593,7 @@ let definitions = [
     ["action", enum_string_field "AVD configuration or ADB transport listing" ["avds"; "devices"];
      "subroot", string_field "Exact workspace-relative Gradle settings directory"]
     ["action"; "subroot"];
-  schema "mobile_device_lifecycle" "Inventory one selected session's existing configured AVDs or compatible iOS simulators, then separately approve owned boot, readiness, shutdown or boot cancellation. Every effect binds the exact device session, inventory and target. Physical devices, runtime/image downloads and erasure are unsupported; pre-existing devices are never shut down."
+  schema "mobile_device_lifecycle" "Inventory one selected session's existing configured AVDs or compatible iOS simulators, then separately approve owned boot, readiness, shutdown or boot cancellation. Status inspects only cached ownership using device_session_id and inventory_id, with no target or device command. Readiness uses one deadline for all probes; timeout preserves the boot, while cancellation reaps only its owned launcher. Every effect binds the exact device session, inventory and target. Physical devices, runtime/image downloads and erasure are unsupported; pre-existing devices are never shut down."
     ["action", enum_string_field "Device lifecycle operation" [
        "inventory"; "status"; "boot"; "readiness"; "shutdown"; "abort_boot"];
      "platform", enum_string_field "Selected target platform" ["android"; "ios"];
@@ -6583,7 +6604,7 @@ let definitions = [
      "target_name", bounded_string_field "Exact configured Android AVD name from this inventory; required for Android device effects" 128;
      "port", integer_field "Exact Android emulator console port (even, 5554..5682); required for Android device effects" 5554 5682;
      "simulator_id", bounded_string_field "Exact compatible iOS Simulator UUID" 36;
-     "readiness_timeout_seconds", integer_field "Readiness deadline (default 60 seconds)" 1 300]
+     "readiness_timeout_seconds", integer_field "Complete readiness probe deadline; timeout preserves the owned boot (default 60 seconds)" 1 300]
     ["action"];
   schema "mobile_session" "Select an app and optionally bind an iOS accessibility session to the exact Owned Simulator lifecycle record, then separately build, install, launch or stop. Unbound iOS sessions retain existing behavior but Native XCTest accessibility remains unavailable. Every device/build effect has exact interactive approval; no physical device is selectable."
     ["action", enum_string_field "Session action" ["list"; "select"; "status"; "build"; "install"; "launch"; "stop"];

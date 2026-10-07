@@ -1,5 +1,12 @@
 # Troubleshooting
 
+### [2026-10-07] MX01 readiness leaked owned launchers and lifecycle status failed admission
+
+- **Context / Symptom:** The native regression failed with `cancelled readiness left its owned launcher running`. Readiness used a short outer timeout but each ADB/simctl command could consume its own longer budget. Actual `/mobile_device_lifecycle action=status` failed with `unsupported mobile device lifecycle action` after an approved boot cancellation.
+- **Root Cause:** Readiness propagated cancellation only into its probe process, not the retained boot launcher. The polling deadline was checked only between commands. The execution dispatcher supported status but its shared approval preview still required a device target and handled only effect actions.
+- **Solution:** Shared one readiness deadline with every child probe, reaped only the pending boot's launcher on caller cancellation, retained ownership for separately approved stopped-state confirmation, and preserved the launcher on ordinary observation timeout. Added a cached, target-free read-only status preview before effect-target resolution.
+- **Prevention / Reference:** Native tests cover exact owned cancellation, an unrelated live process, timeout-preserved ownership and target-free status. An actual CLI/PTY returned waiting within a 1.90-second observation including approval, retained the launcher on timeout, reaped it after Ctrl+C, then separately approved abort and observed cleared pending state. The real host reported Android inventory exit 127 with no choices; ADB-only Linux and Windows SDK metadata are not real supported AVD/Simulator acceptance. No SDK/image or device was installed/booted.
+
 ### [2026-10-07] Native CI exposed an incomplete source snapshot and a reserved identifier
 
 - **Context / Symptom:** CI #243/Release #91 and CI #244/Release #92 failed before packaging. OCaml 5.3/5.5 reported syntax errors at `fun effect ->` and a typed `fun bytes (effect : ...)` binding. The first candidate also reported `Unbound value Pave.Turn_runner.tool_event_bytes` and failed interaction provenance/saturated shutdown regressions.

@@ -1940,6 +1940,76 @@ esac
         = Pave.Workspace_process.Completed Pave.Workspace_process.Cancelled);
       assert (Pave.Tools.mobile_device_lookup_target_state
         tool_context.mobile_device_booting tool_context lifecycle_cache abort_target = None);
+      (* Cancelling a readiness probe must reap only its owned launcher.
+         A bounded observation timeout must leave that launcher available. *)
+      let probe_marker = Filename.concat root "focus/readiness-probe-started" in
+      files := probe_marker :: !files;
+      create "focus/bin/adb"
+        ("#!/bin/sh\n[ \"$*\" = 'devices' ] || exit 64\n: > " ^
+         Filename.quote probe_marker ^ "\nwhile true; do sleep 1; done\n");
+      let start_pending id =
+        Pave.Workspace_process.start_shell process_manager ~id ~command:"read ignored" ();
+        let booting = Option.get (Pave.Workspace_mobile_device_lifecycle.settle_launch
+            pending (`Started id)) in
+        Pave.Tools.mobile_device_store_target_state tool_context.mobile_device_booting
+          tool_context lifecycle_cache abort_target booting in
+      let cleanup_probe () =
+        List.iter (fun id ->
+          try Pave.Workspace_process.kill_job process_manager ~id
+          with Pave.Workspace_process.Error _ -> ())
+          ["readiness-cancel-launcher"; "unrelated-lifecycle-launcher";
+           "readiness-timeout-launcher"];
+        Pave.Tools.mobile_device_remove_target_state tool_context.mobile_device_booting
+          tool_context lifecycle_cache abort_target;
+        create "focus/bin/adb"
+          ("#!/bin/sh\n[ \"$*\" = 'devices' ] || exit 64\ncat " ^
+           Filename.quote (Filename.concat root "focus/devices.txt") ^ "\n") in
+      Fun.protect ~finally:cleanup_probe (fun () ->
+        start_pending "readiness-cancel-launcher";
+        Pave.Workspace_process.start_shell process_manager
+          ~id:"unrelated-lifecycle-launcher" ~command:"read ignored" ();
+        let cancelled =
+          try
+            ignore (execute_text ~root ~context:tool_context ~approved:true
+              ~cancel:(fun () -> Sys.file_exists probe_marker)
+              ~name:"mobile_device_lifecycle" ~args:(device_args "readiness" 5554) ());
+            false
+          with Pave.Tools.Cancelled -> true in
+        assert (cancelled && Sys.file_exists probe_marker);
+        if Pave.Workspace_process.job_status process_manager
+            ~id:"readiness-cancel-launcher" <>
+            Pave.Workspace_process.Completed Pave.Workspace_process.Cancelled then
+          failwith "cancelled readiness left its owned launcher running";
+        assert (Pave.Workspace_process.job_status process_manager
+          ~id:"unrelated-lifecycle-launcher" = Pave.Workspace_process.Running);
+        let status_args = `Assoc [
+          "action", `String "status";
+          "device_session_id", `String "device-session-registry";
+          "inventory_id", `String "device-inventory-registry"] in
+        let request = Pave.Tools.approval_request ~root ~context:tool_context
+            ~name:"mobile_device_lifecycle" ~args:status_args
+            (Pave.Tools.approval_decision ~command_patterns:[]
+              ~name:"mobile_device_lifecycle" ~args:status_args) in
+        assert (request.tier = Pave.Approval.Read);
+        let status = execute_text ~root ~context:tool_context ~approved:false
+            ~name:"mobile_device_lifecycle" ~args:status_args () |> Yojson.Basic.from_string in
+        (match Yojson.Basic.Util.member "booting" status with
+         | `List [`Assoc fields] ->
+             assert (List.assoc "target_id" fields = `String "android:Pixel_8_API_35@5554");
+             assert (List.assoc "state" fields = `String "booting")
+         | _ -> failwith "read-only status lost the exact pending lifecycle target");
+        start_pending "readiness-timeout-launcher";
+        let started = Unix.gettimeofday () in
+        let fields = match device_args "readiness" 5554 with
+          | `Assoc fields -> `Assoc (("readiness_timeout_seconds", `Int 1) :: fields)
+          | _ -> assert false in
+        let waiting = execute_text ~root ~context:tool_context ~approved:true
+            ~name:"mobile_device_lifecycle" ~args:fields () in
+        assert (Unix.gettimeofday () -. started < 3.);
+        assert (Yojson.Basic.Util.member "status" (Yojson.Basic.from_string waiting)
+          = `String "waiting");
+        assert (Pave.Workspace_process.job_status process_manager
+          ~id:"readiness-timeout-launcher" = Pave.Workspace_process.Running));
       Hashtbl.remove tool_context.mobile_device_inventories "device-inventory-registry";
       create "focus/devices.txt"
         "List of devices attached\nemulator-5554\tdevice\nemulator-5556\toffline\nemulator-5558\tunauthorized\nprivate-serial\tdevice\nprivate-offline\toffline\n\n";
