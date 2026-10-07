@@ -1,6 +1,8 @@
 # Changelog
 ## 2026-10-07
 
+- fix(process): refused pre-cancelled command effects, included native/PTY launcher startup in cancellation and timeout budgets, and prevented failed startup from closing unrelated reused descriptors.
+- fix(distribution): added the exact macOS ARM64 native compiler variant to branch CI and preserved evaluator request, elapsed-time and backtrace diagnostics without increasing timeouts or retrying failed tests.
 - fix(mobile): completed MX01 readiness cancellation and shared deadline handling, preserved boot ownership on observation timeout, and restored target-free read-only lifecycle status through the shared approval path.
 - fix(distribution): included the audited interaction and runner source changes in the release snapshot and made direct-tool approval and typed payload accounting compatible with OCaml 5.3 and newer.
 - fix(tui): made tool inspection credential-free and available during active turns, retained disabled external schemas for inspection, and disclosed startup, session and model/plugin admission limits instead of claiming unavailable tools were enabled.

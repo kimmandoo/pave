@@ -11,6 +11,8 @@ exception Error of string
 
 type termination = Exited of int | Signaled of int | Timed_out | Cancelled
 
+exception Start_interrupted of termination
+
 type process_status = Running | Completed of termination
 
 type result = {
@@ -302,11 +304,43 @@ let environment_with_overrides ?inherit_environment overrides =
   validate_environment ?inherit_environment overrides
 
 let close_fd fd = try Unix.close fd with Unix.Unix_error _ -> ()
+
+let close_tracked closed slot fd =
+  if not closed.(slot) then (
+    closed.(slot) <- true;
+    close_fd fd)
+
 let signal_group pid signal =
   try Unix.kill (-pid) signal
   with Unix.Unix_error ((Unix.ESRCH | Unix.EPERM), _, _) -> ()
 
-let spawn_pty ~program ~arguments ~cwd ~environment =
+let check_start ?cancel ?deadline () =
+  (match cancel with
+   | Some cancelled when cancelled () -> raise (Start_interrupted Cancelled)
+   | _ -> ());
+  match deadline with
+  | Some expires when Unix.gettimeofday () >= expires ->
+      raise (Start_interrupted Timed_out)
+  | _ -> ()
+
+let await_spawn_session ?cancel ?deadline ready_read =
+  let startup_deadline = Unix.gettimeofday () +. 5.0 in
+  let rec await () =
+    check_start ?cancel ?deadline ();
+    let remaining = startup_deadline -. Unix.gettimeofday () in
+    if remaining <= 0. then fail "process launcher did not establish a session";
+    let readable, _, _ = Unix.select [ready_read] [] [] (min 0.05 remaining) in
+    if readable = [] then await ()
+    else
+      let marker = Bytes.create 1 in
+      match Unix.read ready_read marker 0 1 with
+      | 1 when Bytes.get marker 0 = Char.chr 0 -> check_start ?cancel ?deadline ()
+      | 1 -> fail "process launcher returned an invalid session marker"
+      | _ -> fail "process launcher exited before establishing a session" in
+  await ()
+
+let spawn_pty ?cancel ?deadline ~program ~arguments ~cwd ~environment () =
+  check_start ?cancel ?deadline ();
   let python = python_launcher () in
   let stdin_read, stdin_write = Unix.pipe ~cloexec:true () in
   let stdout_read, stdout_write =
@@ -323,37 +357,27 @@ let spawn_pty ~program ~arguments ~cwd ~environment =
   let helper_args =
     Array.of_list (python :: "-c" :: launcher_code :: "pty" :: cwd :: program :: arguments)
   in
+  (* Track the stdin, stdout and readiness pipe pairs. Closed descriptor
+     numbers may already belong to another thread when startup fails. *)
+  let closed = Array.make 6 false in
   let cleanup () =
-    close_fd stdin_read; close_fd stdin_write;
-    close_fd stdout_read; close_fd stdout_write;
-    close_fd ready_read; close_fd ready_write
+    close_tracked closed 0 stdin_read; close_tracked closed 1 stdin_write;
+    close_tracked closed 2 stdout_read; close_tracked closed 3 stdout_write;
+    close_tracked closed 4 ready_read; close_tracked closed 5 ready_write
   in
   let child = ref None in
   try
     let pid = Unix.create_process_env python helper_args environment
         stdin_read ready_write stdout_write in
     child := Some pid;
-    close_fd stdin_read;
-    close_fd ready_write;
-    close_fd stdout_write;
+    close_tracked closed 0 stdin_read;
+    close_tracked closed 5 ready_write;
+    close_tracked closed 3 stdout_write;
     Unix.set_nonblock stdin_write;
     Unix.set_nonblock stdout_read;
     Unix.set_nonblock ready_read;
-    let deadline = Unix.gettimeofday () +. 5.0 in
-    let rec await_session () =
-      let remaining = deadline -. Unix.gettimeofday () in
-      if remaining <= 0. then fail "process launcher did not establish a session";
-      let readable, _, _ = Unix.select [ready_read] [] [] (min 0.1 remaining) in
-      if readable = [] then await_session ()
-      else
-        let marker = Bytes.create 1 in
-        match Unix.read ready_read marker 0 1 with
-        | 1 when Bytes.get marker 0 = Char.chr 0 -> ()
-        | 1 -> fail "process launcher returned an invalid session marker"
-        | _ -> fail "process launcher exited before establishing a session"
-    in
-    await_session ();
-    close_fd ready_read;
+    await_spawn_session ?cancel ?deadline ready_read;
+    close_tracked closed 4 ready_read;
     (pid, stdin_write, stdout_read)
   with exn ->
     (match !child with
@@ -393,7 +417,8 @@ let exec_search program arguments environment =
     in
     try_directories (String.split_on_char ':' path)
 
-let spawn_native ~program ~arguments ~cwd ~environment ~merge_stderr =
+let spawn_native ?cancel ?deadline ~program ~arguments ~cwd ~environment ~merge_stderr () =
+  check_start ?cancel ?deadline ();
   let stdin_read, stdin_write = Unix.pipe ~cloexec:true () in
   let stdout_read, stdout_write =
     try Unix.pipe ~cloexec:true ()
@@ -406,10 +431,11 @@ let spawn_native ~program ~arguments ~cwd ~environment ~merge_stderr =
       close_fd stdout_read; close_fd stdout_write;
       raise exn
   in
+  let closed = Array.make 6 false in
   let cleanup () =
-    close_fd stdin_read; close_fd stdin_write;
-    close_fd stdout_read; close_fd stdout_write;
-    close_fd ready_read; close_fd ready_write
+    close_tracked closed 0 stdin_read; close_tracked closed 1 stdin_write;
+    close_tracked closed 2 stdout_read; close_tracked closed 3 stdout_write;
+    close_tracked closed 4 ready_read; close_tracked closed 5 ready_write
   in
   try
     match Unix.fork () with
@@ -432,42 +458,28 @@ let spawn_native ~program ~arguments ~cwd ~environment ~merge_stderr =
             with _ -> ());
            Unix._exit 127)
     | pid ->
-        close_fd stdin_read;
-        close_fd stdout_write;
-        close_fd ready_write;
+        close_tracked closed 0 stdin_read;
+        close_tracked closed 3 stdout_write;
+        close_tracked closed 5 ready_write;
         Unix.set_nonblock stdin_write;
         Unix.set_nonblock stdout_read;
         Unix.set_nonblock ready_read;
-        let deadline = Unix.gettimeofday () +. 5.0 in
-        let rec await_session () =
-          let remaining = deadline -. Unix.gettimeofday () in
-          if remaining <= 0. then fail "process launcher did not establish a session";
-          let readable, _, _ = Unix.select [ready_read] [] [] (min 0.1 remaining) in
-          if readable = [] then await_session ()
-          else
-            let marker = Bytes.create 1 in
-            match Unix.read ready_read marker 0 1 with
-            | 1 when Bytes.get marker 0 = Char.chr 0 -> ()
-            | 1 -> fail "process launcher returned an invalid session marker"
-            | _ -> fail "process launcher exited before establishing a session"
-        in
         (try
-           await_session ();
-           close_fd ready_read;
+           await_spawn_session ?cancel ?deadline ready_read;
+           close_tracked closed 4 ready_read;
            (pid, stdin_write, stdout_read)
          with exn ->
            signal_group pid Sys.sigkill;
            (try Unix.kill pid Sys.sigkill with Unix.Unix_error _ -> ());
            (try ignore (Unix.waitpid [] pid) with Unix.Unix_error _ -> ());
-           cleanup ();
            raise exn)
   with exn ->
     cleanup ();
     raise exn
 
-let spawn ~program ~arguments ~cwd ~environment ~pty_mode =
-  if pty_mode then spawn_pty ~program ~arguments ~cwd ~environment
-  else spawn_native ~program ~arguments ~cwd ~environment ~merge_stderr:true
+let spawn ?cancel ?deadline ~program ~arguments ~cwd ~environment ~pty_mode () =
+  if pty_mode then spawn_pty ?cancel ?deadline ~program ~arguments ~cwd ~environment ()
+  else spawn_native ?cancel ?deadline ~program ~arguments ~cwd ~environment ~merge_stderr:true ()
 
 let process_description program arguments =
   let rendered = Filename.quote_command program arguments in
@@ -766,7 +778,7 @@ let release_finished manager ~id =
     | Some _ -> false)
 
 let start_internal manager ~id ?(cwd = None) ?(environment = [])
-    ?(inherit_environment = true) ?timeout_seconds
+    ?(inherit_environment = true) ?timeout_seconds ?cancel
     ?(output_limit = default_output_limit) ?(pty_mode = false)
     ~program ~arguments () =
   validate_id id;
@@ -776,25 +788,27 @@ let start_internal manager ~id ?(cwd = None) ?(environment = [])
   let cwd = validate_cwd cwd in
   let environment = environment_with_overrides ~inherit_environment environment in
   let command = process_description program arguments in
+  check_start ?cancel ();
   with_lock manager.lock (fun () ->
     if manager.closed then fail "process manager is closed";
     if Hashtbl.mem manager.jobs id then fail "process job id is already in use";
     let live = Hashtbl.fold (fun _ job count -> if not job.worker_done then count + 1 else count) manager.jobs 0 in
     if live >= manager.max_jobs then fail "process manager live-job limit reached";
     prune_records_locked manager;
+    let created_at = Unix.gettimeofday () in
+    let deadline = Option.map (fun seconds -> created_at +. float seconds) timeout_seconds in
     let pid, stdin_fd, stdout_fd =
-      try spawn ~program ~arguments ~cwd ~environment ~pty_mode
+      try spawn ?cancel ?deadline ~program ~arguments ~cwd ~environment ~pty_mode ()
       with Unix.Unix_error (error, _, _) ->
         fail ("could not start process: " ^ Unix.error_message error)
     in
-    let created_at = Unix.gettimeofday () in
     let job = {
       owner = manager; id; command; pid; created_at; output_limit;
       output = ""; output_start = 0; bytes_received = 0; truncated = false;
       status = Running; requested_termination = None; stdin_fd = Some stdin_fd;
       stdout_fd = Some stdout_fd; worker_done = false; exit_notified = false;
       worker = None; ready = false;
-      deadline = Option.map (fun seconds -> created_at +. float seconds) timeout_seconds;
+      deadline;
       input_lock = Mutex.create ();
     } in
     Hashtbl.add manager.jobs id job;
@@ -810,9 +824,12 @@ let start_internal manager ~id ?(cwd = None) ?(environment = [])
 
 let start manager ~id ?cwd ?environment ?inherit_environment ?timeout_seconds
     ?output_limit ?pty ~program ~arguments () =
-  start_internal manager ~id ?cwd ?environment ?inherit_environment
-    ?timeout_seconds ?output_limit
-    ~pty_mode:(Option.value pty ~default:false) ~program ~arguments ()
+  try
+    start_internal manager ~id ?cwd ?environment ?inherit_environment
+      ?timeout_seconds ?output_limit
+      ~pty_mode:(Option.value pty ~default:false) ~program ~arguments ()
+  with Start_interrupted Timed_out -> fail "process startup timed out"
+     | Start_interrupted _ -> fail "process startup interrupted"
 
 let start_shell manager ~id ?cwd ?environment ?inherit_environment
     ?timeout_seconds ?output_limit ?pty ~command () =
@@ -966,9 +983,11 @@ let run ?cancel ?on_progress ?timeout_seconds ?(output_limit = default_output_li
   if String.length stdin > max_stdin_bytes then fail "stdin data exceeds its size limit";
   validate_limit "output_limit" max_output_limit output_limit;
   let timeout_seconds = Option.value timeout_seconds ~default:default_run_timeout_seconds in
+  try
+  check_start ?cancel ();
   let manager = create_manager ~max_jobs:1 ~retained_output_bytes:output_limit () in
   Fun.protect ~finally:(fun () -> close_manager manager) (fun () ->
-    start_internal manager ~id:"run" ?cwd ?environment ?inherit_environment
+    start_internal manager ~id:"run" ?cwd ?environment ?inherit_environment ?cancel
       ~timeout_seconds ~output_limit ~pty_mode:pty ~program ~arguments ();
     let job = with_lock manager.lock (fun () -> lookup manager "run") in
     let cancel_requested = ref false in
@@ -993,6 +1012,8 @@ let run ?cancel ?on_progress ?timeout_seconds ?(output_limit = default_output_li
     in
     wait ();
     result_of_job manager ~id:"run")
+  with Start_interrupted termination ->
+    { termination; output = ""; bytes_received = 0; truncated = false }
 
 let run_shell ?cancel ?on_progress ?timeout_seconds ?output_limit ?cwd
     ?environment ?inherit_environment ?stdin ?pty ~command () =

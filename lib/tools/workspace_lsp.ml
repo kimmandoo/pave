@@ -86,7 +86,7 @@ and default_launcher ~program ~arguments ~cwd ~environment =
      Stderr must stay separate from the JSON-RPC stream. *)
   let pid, parent_in, parent_out =
     try Workspace_process.spawn_native ~program ~arguments ~cwd ~environment
-          ~merge_stderr:false
+          ~merge_stderr:false ()
     with Workspace_process.Error message -> fail message in
   Unix.clear_nonblock parent_out;
   let closed = ref false and close_lock = Mutex.create () in

@@ -58,6 +58,52 @@ let expect_error f =
   | exception Process.Error _ -> ()
 
 let () =
+  let cancelled_marker = Filename.temp_file "pave-cancelled-start-" ".marker" in
+  Sys.remove cancelled_marker;
+  Fun.protect ~finally:(fun () ->
+    if Sys.file_exists cancelled_marker then Sys.remove cancelled_marker) (fun () ->
+    List.iter (fun pty ->
+      let progress_called = ref false in
+      let result = Process.run ~pty ~cancel:(fun () -> true)
+          ~on_progress:(fun _ ->
+            progress_called := true;
+            let deadline = Unix.gettimeofday () +. 1. in
+            while not (Sys.file_exists cancelled_marker) &&
+                  Unix.gettimeofday () < deadline do Thread.delay 0.01 done)
+          ~program:"/usr/bin/touch" ~arguments:[cancelled_marker] () in
+      if Sys.file_exists cancelled_marker || !progress_called then
+        failwith "pre-cancelled process invoked its command or progress callback";
+      assert (result.termination = Process.Cancelled))
+      [false; true]);
+
+  let fd_marker = Filename.temp_file "pave-startup-fd-" ".marker" in
+  Fun.protect ~finally:(fun () -> Sys.remove fd_marker) (fun () ->
+    List.iter (fun pty_mode ->
+      let checks = ref 0 and unrelated = ref [] in
+      Fun.protect ~finally:(fun () ->
+        List.iter (fun fd -> try Unix.close fd with Unix.Unix_error _ -> ())
+          !unrelated) (fun () ->
+        let cancel () =
+          incr checks;
+          if !checks = 1 then false
+          else (
+            unrelated := List.init 8 (fun _ -> Unix.openfile fd_marker [Unix.O_RDONLY] 0);
+            true) in
+        (match Process.spawn ~cancel ~program:"/bin/sleep" ~arguments:["30"]
+            ~cwd:"" ~environment:(Unix.environment ()) ~pty_mode () with
+         | pid, input_fd, output_fd ->
+             Unix.kill pid Sys.sigkill;
+             ignore (Unix.waitpid [] pid);
+             Unix.close input_fd; Unix.close output_fd;
+             failwith "cancelled startup returned a live process"
+         | exception Process.Start_interrupted Process.Cancelled -> ());
+        List.iter (fun fd ->
+          try ignore (Unix.fstat fd)
+          with Unix.Unix_error (Unix.EBADF, _, _) ->
+            failwith "startup cleanup closed an unrelated reused descriptor")
+          !unrelated))
+      [false; true]);
+
   let merged = Process.run_shell
       ~command:"printf out; printf err >&2" () in
   assert (merged.termination = Process.Exited 0);

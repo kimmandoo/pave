@@ -40,6 +40,8 @@ jobs:
         run: opam install . --deps-only --with-test -y
       - name: Run tests
         shell: bash
+        env:
+          OCAMLRUNPARAM: b
         run: |
           set -o pipefail
           opam exec -- dune runtest --force -j 1 2>&1 | tee test-results.log

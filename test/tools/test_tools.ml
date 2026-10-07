@@ -890,12 +890,18 @@ let () =
       Pave.Approval.Exec in
     assert (contains (String.concat "\n" eval_request.details) "print(1)");
     let eval_code code =
-      execute_text ~root ~name:"workspace_eval" ~context:tool_context
+      let started = Unix.gettimeofday () in
+      let response = execute_text ~root ~name:"workspace_eval" ~context:tool_context
         ~approved:true ~args:(`Assoc [
           "language", `String "python";
           "code", `String code;
           "timeout_seconds", `Int 10
-        ]) () |> Yojson.Basic.from_string in
+        ]) () in
+      try Yojson.Basic.from_string response
+      with Yojson.Json_error _ ->
+        failwith (Printf.sprintf
+          "workspace evaluator request %S failed after %.3fs: %s"
+          code (Unix.gettimeofday () -. started) response) in
     let eval_output result =
       assert (Yojson.Basic.Util.member "error" result = `Null);
       Yojson.Basic.Util.member "output" result |> Yojson.Basic.Util.to_string in

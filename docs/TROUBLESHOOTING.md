@@ -1,5 +1,19 @@
 # Troubleshooting
 
+### [2026-10-07] Process startup escaped cancellation budgets and closed reused descriptors
+
+- **Context / Symptom:** A controlled native regression failed with `pre-cancelled process invoked its command or progress callback`. A second regression cancelled startup after allocating unrelated files into released descriptor slots and failed with `startup cleanup closed an unrelated reused descriptor`. A full suite also exposed the readiness probe's three-second timing boundary.
+- **Root Cause:** Synchronous cancellation was checked only after spawn; the five-second session handshake had no caller cancellation/deadline, and the job timeout started afterward. Startup cleanup closed child-side descriptors already released by the parent; native startup also invoked cleanup twice on handshake failure.
+- **Solution:** Checked cancellation before allocating/spawning, threaded it and the absolute command deadline through native/PTY startup, and started that deadline before spawn. Tracked the six pipe ends so each closes once, removed duplicate native cleanup, and preserved the public managed-start error boundary. Updated the direct LSP native-spawn caller for the explicit unit argument.
+- **Prevention / Reference:** Both native and PTY regressions verify no pre-cancelled command/progress effects and unrelated descriptor preservation. Process/tools suites passed in 21.53 s; actual CLI readiness returned waiting in 1.90 s, preserved its launcher on timeout and reaped only it after Ctrl+C. These repairs are not proof of the separate macOS evaluator timeout's original cause.
+
+### [2026-10-07] Native evaluator failure lost request diagnostics
+
+- **Context / Symptom:** Immutable v0.1.91 Release #94 failed only the darwin-arm64 test gate with `Yojson__Common.Json_error` wrapping `Error: workspace evaluation timed out`; the other three native targets and all four ordinary CI jobs passed. No release was published.
+- **Root Cause:** The tools integration helper parsed every tool response as JSON, masking the failing request and elapsed time when execution returned an error. Branch CI did not include the release's exact macOS ARM64 no-compression compiler variant. The original timeout's runtime cause remains unconfirmed; successful later runs do not establish its cause.
+- **Solution:** Preserved the request and elapsed time on invalid response, enabled test backtraces, and added the exact native compiler variant to branch CI. Kept v0.1.91 immutable. Did not increase production/test timeouts, add retries or remove the failing integration coverage.
+- **Prevention / Reference:** Require the native-variant branch gate and every new candidate's four native release gates. Use request-specific diagnostics if the timeout recurs; do not classify an unexplained timeout as a repaired runtime defect.
+
 ### [2026-10-07] MX01 readiness leaked owned launchers and lifecycle status failed admission
 
 - **Context / Symptom:** The native regression failed with `cancelled readiness left its owned launcher running`. Readiness used a short outer timeout but each ADB/simctl command could consume its own longer budget. Actual `/mobile_device_lifecycle action=status` failed with `unsupported mobile device lifecycle action` after an approved boot cancellation.
