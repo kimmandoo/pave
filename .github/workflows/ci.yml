@@ -45,7 +45,7 @@ jobs:
           opam exec -- dune runtest --force -j 1 2>&1 | tee test-results.log
       - name: Preserve failing test diagnostics
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: test-diagnostics-${{ matrix.os }}-${{ matrix.ocaml }}
           path: test-results.log
